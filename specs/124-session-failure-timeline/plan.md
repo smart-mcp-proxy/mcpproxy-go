@@ -17,7 +17,7 @@ Every recorded attempt gets a work-session id that is resolved from the request,
 - **Dependencies**: none new.
 - **Testing**: `go test -race`, `scripts/test-api-e2e.sh`, vitest (`frontend/tests/unit/`), the Playwright sweep (`scripts/run-web-smoke.sh`).
 - **Editions**: both. Server-edition specifics are limited to the owning user on summaries and on per-user credential events.
-- **Performance goal**: the write path adds at most two extra key writes per row inside the existing transaction; list and timeline reads never scan the activity bucket.
+- **Performance goal**: the write path adds at most three extra key writes per row inside the existing transaction; list and timeline reads never scan the activity bucket.
 
 ## Research: answers to the spec's open questions
 
@@ -76,14 +76,15 @@ One pure function in `internal/storage`, `attemptRole(record)`, returns whether 
 
 The first task of PR-1 is a table test that feeds every emitter's row shape through `attemptRole`, so the rule is pinned to what the code writes, not to this description.
 
-To apply "same request id" without a scan, the summary keeps the request ids of its last 64 attempts with their outcome. A late `policy_decision` for an older request is counted as its own failure; this is accepted and stated in the docs.
+To apply "same request id" exactly and without a scan, a fourth bucket holds one entry per attempt (D3, `work_session_attempts`). A row with a request id looks its attempt up there: absent means a new attempt; present means the same attempt, and a row that turns it from success to failure updates the entry and the summary once. A row with no request id is its own attempt and gets no entry. Entries are removed with the rows of their session.
 
 ### D3. Storage
 
-Three new buckets. All writes happen in the transaction that writes the activity row.
+Four new buckets. All writes happen in the transaction that writes the activity row.
 
 - **`work_sessions`**: key = work-session id; value = JSON summary (Data Model).
 - **`work_session_rows`**: key = `<work-session id>\0<activity key>`; value = one flag byte (attempt, failure, policy block, bodies removed) followed by the server name. Serves the timeline page, failure navigation, reach filtering without loading rows, and whole-session removal.
+- **`work_session_attempts`**: key = `<work-session id>\0<request id>`; value = one outcome byte (success, failure, policy block) and the server name. Makes attempt counting exact (D2).
 - **`upstream_events_by_server`**: key = `<server>\0<activity key>`; value = owner user id or empty. Serves the timeline join.
 
 `Manager.SaveActivity` (`internal/storage/activity.go:55`) is the single entry point: when the record has a work-session id it also writes the index entry and updates the summary. The asynchronous loop and the synchronous `RecordToolCallRejected` both go through it, so neither can skip the summary.
@@ -91,6 +92,8 @@ Three new buckets. All writes happen in the transaction that writes the activity
 `ActivityRecord` gains `BodiesRemoved bool` and `RunName string`, both `omitempty`.
 
 **Backfill (FR-014, FR-018).** A marker in the existing metadata bucket records completion. On start, a goroutine joined in `Runtime.Close` walks the activity bucket in batches of 1,000 keys per transaction. For each row with a work-session id and no index entry it writes the index entry and applies the row to the summary. The index-entry check makes the pass idempotent and safe against rows written while it runs. A session whose rows show more than one credential identity is marked ownerless and is visible to administrators only.
+
+**Repair (FR-013).** Separately from the one-time backfill, every start walks the distinct work-session ids of the index bucket (one seek per session, keys only). An id with index entries and no summary gets a summary rebuilt from its indexed rows and marked `rebuilt`. An existing summary is never lowered.
 
 Rejected: deriving summaries on read. A list of 1,000 sessions would scan the whole log (SC-006).
 Rejected: a separate failures bucket. The flag byte in the index is enough, since navigation walks index keys only; the benchmark in the test plan decides whether that holds at 50,000 rows.
@@ -100,16 +103,16 @@ Rejected: a separate failures bucket. The flag byte in the index is enough, sinc
 `runRetentionCleanup` keeps its three steps, each made session-aware. Every step writes in batches of at most 1,000 rows per transaction (FR-038).
 
 1. **Session window.** Summaries whose last activity is older than `session_retention_days` are deleted with their index entries. Their rows stay (FR-036).
-2. **Age cap.** As today, oldest first. A deleted row that has an index entry takes the entry with it, and its session's summary gets `truncated_start` and has its stored counts reduced (FR-039).
+2. **Age cap.** As today, oldest first. A deleted row that has an index entry takes the entry and its attempt entry with it, and its session's summary gets `truncated_start`. Only the stored counters (`stored_failures`, `stored_blocks`) are reduced; lifetime counts and first and last failure facts are never lowered (FR-013, FR-039). The same rule applies to steps 3c and 3d.
 3. **Size and count caps**, one ordered pass from the oldest key:
    - **3a. Bodies.** While over the size budget, rewrite the row without `Arguments` and `Response` and set `BodiesRemoved`. A metadata key remembers how far this has gone, so later passes do not re-read stripped rows.
    - **3b. Rows outside the window.** In the same pass, delete rows that have no work-session id or whose summary is gone or older than the window.
    - **3c. Whole sessions.** If still over, take summaries inside the window by oldest last activity and delete each whole through its index prefix: rows, index entries, summary. Record the shortfall.
    - **3d. Last session.** If one session is all that is left and it is still over, trim it from its oldest end and set `truncated_start`.
 
-The byte budget counts the activity bucket and the three new buckets (FR-034). The count cap counts activity rows only, as today.
+The byte budget counts the activity bucket and the four new buckets (FR-034). The count cap counts activity rows only, as today.
 
-**Shortfall (FR-035).** A metadata record holds the time it was last observed, the cause (`age_cap`, `record_cap`, `size_cap`) and the start of the oldest complete session. A pass that removes nothing inside the window clears it.
+**Shortfall (FR-035).** A metadata record holds the time it was last observed, the cause (`age_cap`, `record_cap`, `size_cap`) and the start of the oldest complete session. It also holds the time of the last removal inside the window. The record is cleared only when that time is older than the retention window, which is when complete history covers the window again. A quiet pass alone does not clear it.
 
 **Defaults.** `activity_max_records` default becomes 400,000. Installs whose config file already holds an explicit `100000` keep it, and the doctor warning is their signal. `session_retention_days` is new, default 7, resolved through an `Effective*` reader like the other bounds (`internal/config/effective_bounds.go`).
 
@@ -119,15 +122,19 @@ Rejected: making the size cap soft for sessions inside the window. It breaks the
 
 A new activity type `upstream_event`, written by `ActivityService` so it stays on the single writer.
 
-| Kind | Source |
-|---|---|
-| `connection_lost` | `supervisorEventForwarder`, `server.disconnected` or a state change out of Ready |
-| `process_exited` | the same event, when the diagnostic code is in the `MCPX_STDIO_EXIT*` family |
-| `oauth_refresh_failed` | `oauth.refresh_failed` |
-| `login_required` | a state change whose diagnostic code is `MCPX_OAUTH_LOGIN_REQUIRED` or the re-auth code |
-| `connection_restored` | `server.connected`, only after a recorded loss |
+The supervisor's bus event cannot carry this today: the adapter emits only a level, a title, a message and a `connected` flag derived from the title (`internal/runtime/supervisor/actor_pool.go:62-79`), and `supervisorEventForwarder` passes on the server name alone (`internal/runtime/lifecycle.go:2955-2982`). The supervisor itself does know the diagnostic code and the edge: `classifyAndAttach` (`supervisor.go:45`) sets `status.Diagnostic`, and `shouldNotifyErrorCode` / `notifyErrorCode` (`supervisor.go:1098`, `:1164`) already fire once per changed code.
 
-No new process monitoring is added. `process_exited` is a classification of an existing disconnect, not a new detector.
+So the plan adds one typed supervisor event, emitted where that edge is computed and when a server returns to Ready after a recorded loss. It carries the server name, the previous and the new connection state and the `MCPX_*` code. `supervisorEventForwarder` forwards it as a new runtime bus event, and `ActivityService` turns it into a row. The title-derived events are left as they are.
+
+| Kind | Rule on the typed event |
+|---|---|
+| `connection_lost` | state leaves Ready, any code not listed below |
+| `process_exited` | state leaves Ready with a code in the `MCPX_STDIO_EXIT*` family |
+| `login_required` | code is `MCPX_OAUTH_LOGIN_REQUIRED` or the re-auth code |
+| `connection_restored` | state returns to Ready after a recorded loss |
+| `oauth_refresh_failed` | the existing `oauth.refresh_failed` bus event |
+
+No new process monitoring is added. `process_exited` is a classification of an existing disconnect, not a new detector. Step 7 of PR-1 starts with a test that kills a stdio fixture, refuses a connection and expires an OAuth login, and records which code and states arrive; the table above is corrected from that test before the rows are built.
 
 The row carries server, kind, time, the `MCPX_*` code and `diagnostics.Get(code).UserMessage`. The raw error string is not copied (FR-021). In the server edition, events about a user's upstream credential carry that user id for access control.
 
@@ -148,7 +155,7 @@ New routes, registered as `scopeFiltered` in `getRouteScopes`. `/api/v1/sessions
 - Admin: the summary as stored.
 - Scoped caller: not owner (name and prefix, or user id) gives not found. Otherwise the per-server partitions are filtered through `scopeAllowedServers`, and start, end, last activity, status, counts and failure facts are recomputed from what is left. Connection count, profile and the truncated-start marker are omitted. No partition left gives not found.
 
-The timeline applies the same reach to index entries by their stored server name before any row is loaded, then loads rows for the page only and passes each through the existing `Owns` check and `redactForeignIdentity`. Failure index and total come from the stored per-server failure counts in reach.
+The timeline applies the same reach to index entries by their stored server name before any row is loaded, then loads rows for the page only and passes each through a row-ownership predicate and `redactForeignIdentity`. The predicate is new, because the existing one cannot serve user principals: `activityIdentityOwner` gives a non-agent caller an owner with no prefix, and `Owns` rejects an empty prefix (`internal/httpapi/scope_attribution.go:72-85`, `internal/storage/activity_models.go:326-335`). For an agent token it is the existing name-and-prefix rule. For a server-edition user it is the row's stored `UserID`. The same predicate decides summary ownership. Failure index and total come from the stored per-server failure counts in reach.
 
 The list loads all summaries, projects, filters, sorts and pages in memory, as `GetRecentSessionsFiltered` does for connections. At 1,000 sessions this is one bucket read.
 
@@ -188,7 +195,6 @@ Both use new `cliclient` methods, the shared formatter and `argsOrHelpJSON`. Wit
 | `truncated_start_at` | set when rows were trimmed |
 | `rebuilt` | set when rebuilt from rows (FR-013) |
 | `servers` | map of server name to partition |
-| `recent_requests` | last 64 request ids with outcome (D2) |
 
 **Partition** (per server; the empty name holds MCPProxy's own tools): lifetime `attempts`, `failures`, `blocks`; stored `stored_failures`, `stored_blocks`; `first_activity_at`, `last_activity_at`, `first_failure_at`, `last_failure_at`; last failure `error_class`, `error_code`, `tool`, `reason` (at most 200 characters, built from error class, code and the catalogue message, never from bodies).
 
@@ -230,7 +236,7 @@ Each PR is merged before the next is opened.
 
 | Principle | Status |
 |---|---|
-| I. Performance at scale | Reads use the index, never the log. The write path adds two key writes in the existing transaction; a benchmark guards it. |
+| I. Performance at scale | Reads use the index, never the log. The write path adds up to three key writes in the existing transaction; a benchmark guards it. |
 | II. Actor-based concurrency | Summary, index and event rows are written by the existing single writer. The tracker keeps its existing mutex; nothing new is shared. |
 | III. Configuration-driven | One new setting and one changed default, both in the config file; no tray state. |
 | IV. Security by default | New doors are scoped and refuse by default; upstream event text is allow-listed; the run name is a label only. |
@@ -241,7 +247,7 @@ No violations to justify.
 
 ## Risks
 
-- **Write amplification.** Three writes per row instead of one. Mitigation: one transaction, small values, benchmark before and after.
+- **Write amplification.** Up to four writes per row instead of one. Mitigation: one transaction, small values, benchmark before and after.
 - **Summary size.** A session touching many servers carries many partitions. Bounded by the number of configured servers.
 - **Dropped bus events.** A row dropped by the bus is also missing from the summary. The two stay consistent, which is the property FR-013 asks for; the loss itself is existing behaviour.
 - **Sessions do not survive a restart.** A long agent run across a core restart shows as two sessions. Persisting the tracker is out of scope.
