@@ -898,6 +898,9 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	// the activity record must carry the same id, and mintCorrelationIDAt
 	// bumps a sequence on every call, so minting twice would never match.
 	requestID := mintCorrelationIDAt(startTime, serverName, toolName)
+	// Spec 124 D2: every row of this child's attempt carries this id,
+	// including a limiter rejection written below the dispatch layer.
+	ctx = reqcontext.WithAttemptID(ctx, requestID)
 
 	// Spec 093 FR-012: a call issued by a sandboxed script is an INTERNAL origin,
 	// whatever surface asked for the code_execution around it. Without this the

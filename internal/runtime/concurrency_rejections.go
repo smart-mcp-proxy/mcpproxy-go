@@ -61,7 +61,7 @@ func (r *Runtime) installRejectionObserver() {
 			rej.Server,
 			rej.Tool,
 			activitySourceFromContext(ctx),
-			reqcontext.GetRequestID(ctx),
+			attemptRequestID(ctx),
 			string(rej.Reason),
 			string(rej.Scope),
 			rej.Message,
@@ -71,6 +71,18 @@ func (r *Runtime) installRejectionObserver() {
 			attr,
 		)
 	})
+}
+
+// attemptRequestID is the id of the tool-call attempt being admitted: the one
+// its dispatch path minted and stamps on the attempt's other rows. The
+// transport request id is the fallback for a caller that minted none; several
+// attempts of one HTTP request share it, so it is not used when an attempt id
+// exists (Spec 124 D2).
+func attemptRequestID(ctx context.Context) string {
+	if id := reqcontext.AttemptID(ctx); id != "" {
+		return id
+	}
+	return reqcontext.GetRequestID(ctx)
 }
 
 // ConcurrencyStats reports the live occupancy of the global aggregate limiter

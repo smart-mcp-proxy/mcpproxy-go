@@ -121,7 +121,41 @@ func (p *MCPProxyServer) activityAttribution(ctx context.Context, sessionID stri
 	if attr.RunName == "" {
 		attr.RunName = p.requestRunName(ctx, principalFromContext(ctx))
 	}
+	attr.PolicyRefusal = isPolicyRefusal(ctx)
 	return attr
+}
+
+type attemptMarkKey int
+
+const (
+	companionDecisionKey attemptMarkKey = iota
+	policyRefusalKey
+)
+
+// withCompanionDecision marks a blocking policy decision that is emitted next
+// to a tool_call row of the same attempt (Spec 124 D2). The tool_call row is
+// the counted row; the decision explains it and must not be counted again.
+// Sites that block and return WITHOUT a tool_call row do not use this.
+func withCompanionDecision(ctx context.Context) context.Context {
+	return context.WithValue(ctx, companionDecisionKey, true)
+}
+
+func isCompanionDecision(ctx context.Context) bool {
+	v, _ := ctx.Value(companionDecisionKey).(bool)
+	return v
+}
+
+// withPolicyRefusal marks an internal tool call that MCPProxy itself refused
+// (read-only mode, management disabled, an agent token on a write operation),
+// so its row is classified proxy_policy and counted as a policy block, not as
+// an ordinary failure (Spec 124 FR-016).
+func withPolicyRefusal(ctx context.Context) context.Context {
+	return context.WithValue(ctx, policyRefusalKey, true)
+}
+
+func isPolicyRefusal(ctx context.Context) bool {
+	v, _ := ctx.Value(policyRefusalKey).(bool)
+	return v
 }
 
 // requestClientInfo returns the client name and version a modern (2026-07-28)

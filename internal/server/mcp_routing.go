@@ -501,6 +501,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		if requestID == "" {
 			requestID = mintActivityRequestID(serverName, toolName)
 		}
+		ctx = reqcontext.WithAttemptID(ctx, requestID)
 
 		// Get arguments from the request (pure; read here so the audit
 		// attempt below can hash them before the first gate).
@@ -742,7 +743,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 				}
 				auditNoteErrorClass(ctx, audit.ErrorClassUpstreamUnavailable)
 				p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", "error", errMsg, durationMs, enrichedArgs, "", false, "", nil, directContentTrust, "", 0, 0, "", nil, "")
-				p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
+				p.emitActivityCompanionDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
 				return mcp.NewToolResultError(errMsg), nil
 			}
 			// Emit error activity

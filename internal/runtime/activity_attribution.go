@@ -47,6 +47,14 @@ type ActivityAttribution struct {
 	UserID string
 	// RunName is the validated X-MCPProxy-Run label of the request.
 	RunName string
+
+	// Companion marks a blocking policy decision emitted next to a tool_call
+	// row of the same attempt (Spec 124 D2); it is not counted again.
+	Companion bool
+	// PolicyRefusal marks a call MCPProxy itself refused whose row has no
+	// error class of its own (builtin management refusals). The row is
+	// classified proxy_policy.
+	PolicyRefusal bool
 }
 
 // IsZero reports whether no field is set.
@@ -75,6 +83,12 @@ func (a ActivityAttribution) payload() map[string]any {
 	set("_work_session_id", a.WorkSessionID)
 	set("_user_id", a.UserID)
 	set("run_name", a.RunName)
+	if a.Companion {
+		out["_companion"] = true
+	}
+	if a.PolicyRefusal {
+		out["_policy_refusal"] = true
+	}
 	return out
 }
 
@@ -96,6 +110,8 @@ func attributionFromPayload(payload map[string]any) ActivityAttribution {
 		WorkSessionID: getStringPayload(m, "_work_session_id"),
 		UserID:        getStringPayload(m, "_user_id"),
 		RunName:       getStringPayload(m, "run_name"),
+		Companion:     m["_companion"] == true,
+		PolicyRefusal: m["_policy_refusal"] == true,
 	}
 }
 
@@ -121,6 +137,10 @@ func applyAttribution(rec *storage.ActivityRecord, a ActivityAttribution) {
 		rec.UserID = a.UserID
 	}
 	rec.RunName = a.RunName
+	rec.Companion = a.Companion && rec.Type == storage.ActivityTypePolicyDecision
+	if a.PolicyRefusal && rec.ErrorClass == "" && rec.Status != storage.ActivityStatusSuccess {
+		rec.ErrorClass = storage.ErrorClassProxyPolicy
+	}
 	if rec.ClientName == "" {
 		if name, ok := rec.Metadata["client_name"].(string); ok {
 			rec.ClientName = name

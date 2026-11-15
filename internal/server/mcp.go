@@ -1191,6 +1191,18 @@ func (p *MCPProxyServer) emitActivityPolicyDecision(ctx context.Context, serverN
 	p.emitActivityPolicyDecisionWithBlockReason(ctx, serverName, toolName, sessionID, requestID, decision, reason, reasonKey, "")
 }
 
+// emitActivityCompanionDecision is emitActivityPolicyDecision for a blocking
+// decision that is emitted NEXT TO a tool_call row of the same attempt: the
+// generation-change and review-not-recorded refusals, and an output
+// sanitisation block, which every caller closes with a completion row. The
+// tool_call row is the attempt's counted row; this decision explains it and is
+// marked so the work-session summary does not count the attempt twice
+// (Spec 124 D2). A site that blocks and returns WITHOUT a tool_call row uses
+// emitActivityPolicyDecision, whose row is then the counted one.
+func (p *MCPProxyServer) emitActivityCompanionDecision(ctx context.Context, serverName, toolName, sessionID, requestID, decision, reason, reasonKey string) {
+	p.emitActivityPolicyDecisionWithBlockReason(withCompanionDecision(ctx), serverName, toolName, sessionID, requestID, decision, reason, reasonKey, "")
+}
+
 func (p *MCPProxyServer) emitActivityPolicyDecisionWithBlockReason(ctx context.Context, serverName, toolName, sessionID, requestID, decision, reason, reasonKey, blockReason string) {
 	if decision == "blocked" {
 		if isPostDispatchBlockKey(reasonKey) {
@@ -1200,7 +1212,9 @@ func (p *MCPProxyServer) emitActivityPolicyDecisionWithBlockReason(ctx context.C
 		}
 	}
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityPolicyDecisionAttributed(serverName, toolName, sessionID, requestID, decision, reason, blockReason, p.activityAttribution(ctx, sessionID))
+		attr := p.activityAttribution(ctx, sessionID)
+		attr.Companion = isCompanionDecision(ctx)
+		p.mainServer.runtime.EmitActivityPolicyDecisionAttributed(serverName, toolName, sessionID, requestID, decision, reason, blockReason, attr)
 	}
 	// Issue #969 (Phase 0): availability baseline. Only outright blocks count —
 	// a warning or a redaction still delivered the call.
@@ -3073,6 +3087,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// actualToolName may still be empty for a malformed tool name; the
 	// timestamp alone keeps the id unique.
 	requestID := mintActivityRequestID(serverName, actualToolName)
+	ctx = reqcontext.WithAttemptID(ctx, requestID)
 
 	// Get optional args parameter - handle both new JSON string format and
 	// legacy object format. Parsed HERE, above the first gate, because the
@@ -3776,7 +3791,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			}
 			auditNoteErrorClass(ctx, audit.ErrorClassUpstreamUnavailable)
 			p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, duration.Milliseconds(), activityArgs, "", false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
-			p.emitActivityPolicyDecision(ctx, serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
+			p.emitActivityCompanionDecision(ctx, serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 
@@ -4104,6 +4119,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Generate requestID for activity tracking
 	requestID := mintActivityRequestID(serverName, actualToolName)
+	ctx = reqcontext.WithAttemptID(ctx, requestID)
 
 	// Spec 028: Inject auth identity into activity metadata (separate copy for logging only)
 	activityArgs := injectAuthMetadata(ctx, args)
@@ -4661,13 +4677,13 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	// Security checks
 	if p.config.ReadOnlyMode {
 		if operation != operationList {
-			p.emitActivityInternalToolCall(ctx, "upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Operation not allowed in read-only mode", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+			p.emitActivityInternalToolCall(withPolicyRefusal(ctx), "upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Operation not allowed in read-only mode", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 			return mcp.NewToolResultError("Operation not allowed in read-only mode"), nil
 		}
 	}
 
 	if p.config.DisableManagement {
-		p.emitActivityInternalToolCall(ctx, "upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Server management is disabled for security", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall(withPolicyRefusal(ctx), "upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Server management is disabled for security", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError("Server management is disabled for security"), nil
 	}
 
@@ -4678,12 +4694,12 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 		// must honor the same AllowServerAdd gate — otherwise the "Let agents add
 		// servers" setting is bypassable by registry reference (MCP-800 finding 1).
 		if !p.config.AllowServerAdd {
-			p.emitActivityInternalToolCall(ctx, "upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Adding servers is not allowed", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+			p.emitActivityInternalToolCall(withPolicyRefusal(ctx), "upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Adding servers is not allowed", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 			return mcp.NewToolResultError("Adding servers is not allowed"), nil
 		}
 	case operationRemove:
 		if !p.config.AllowServerRemove {
-			p.emitActivityInternalToolCall(ctx, "upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Removing servers is not allowed", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+			p.emitActivityInternalToolCall(withPolicyRefusal(ctx), "upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Removing servers is not allowed", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 			return mcp.NewToolResultError("Removing servers is not allowed"), nil
 		}
 	}
@@ -4697,7 +4713,7 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	authCtx := auth.ScopedView(requestAuth, profileResolution.anonymousConfinementActive() && (requestAuth == nil || requestAuth.Anonymous))
 	if !auth.AuthorizeServerOp(authCtx, operation) {
 		errMsg := fmt.Sprintf("Agent tokens cannot perform '%s' operations on upstream servers", operation)
-		p.emitActivityInternalToolCall(ctx, "upstream_servers", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall(withPolicyRefusal(ctx), "upstream_servers", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
