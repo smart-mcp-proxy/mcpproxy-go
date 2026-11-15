@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -469,6 +470,10 @@ func outputDiagnosticsWithProfileChecks(diag map[string]interface{}, info map[st
 			// no key is configured and nothing is sealed).
 			displayOAuthTokenStorage(diag)
 
+			// Spec 124 FR-035: silent unless the caps cannot hold the
+			// work-session retention window.
+			displayActivityRetention(diag)
+
 			// Host-environment hint (snap-docker, issue #457). Surfaced even
 			// when no per-server diagnostics fired because the upstreams may
 			// still be in retry — the hint preempts the next failure.
@@ -641,6 +646,7 @@ func outputDiagnosticsWithProfileChecks(diag map[string]interface{}, info map[st
 
 		// Spec 123 FR-030: stored OAuth token protection.
 		displayOAuthTokenStorage(diag)
+		displayActivityRetention(diag)
 
 		// 5. Tools Pending Quarantine Approval
 		displayQuarantineStats(quarantineStats)
@@ -864,4 +870,58 @@ func pluralSuffix(count int) string {
 		return ""
 	}
 	return "s"
+}
+
+// displayActivityRetention prints the activity retention section of doctor
+// (Spec 124 FR-035). It is silent when the daemon did not report the section
+// (an older daemon, or a scoped caller) and when the caps hold the whole
+// work-session retention window.
+func displayActivityRetention(diag map[string]interface{}) {
+	rep, ok := activityRetentionReport(diag)
+	if !ok || !rep.Shortfall {
+		return
+	}
+	for _, line := range activityRetentionLines(rep) {
+		fmt.Println(line)
+	}
+	fmt.Println()
+}
+
+func activityRetentionReport(diag map[string]interface{}) (contracts.ActivityRetentionReport, bool) {
+	var rep contracts.ActivityRetentionReport
+	raw, ok := diag["activity_retention"]
+	if !ok || raw == nil {
+		return rep, false
+	}
+	b, err := json.Marshal(raw)
+	if err != nil || json.Unmarshal(b, &rep) != nil {
+		return rep, false
+	}
+	return rep, true
+}
+
+// activityRetentionLines renders a shortfall for a terminal.
+func activityRetentionLines(rep contracts.ActivityRetentionReport) []string {
+	causes := map[string]string{
+		"age_cap":    "the age cap is shorter than the window",
+		"record_cap": "the record cap was reached",
+		"size_cap":   "the size cap was reached",
+	}
+	cause := causes[rep.Cause]
+	if cause == "" {
+		cause = rep.Cause
+	}
+	lines := []string{
+		"🗂  Activity Retention",
+		"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+		fmt.Sprintf("  ⚠️  Work sessions are meant to be kept whole for %d days, but %s.", rep.WindowDays, cause),
+		"     A session inside the window lost rows; its counts are still exact.",
+	}
+	if rep.OldestCompleteSessionAt != nil {
+		lines = append(lines, "     Complete history starts at "+rep.OldestCompleteSessionAt.Local().Format("2006-01-02 15:04")+".")
+	}
+	if len(rep.Raise) > 0 {
+		lines = append(lines, "     To keep the whole window, raise: "+strings.Join(rep.Raise, ", ")+".")
+	}
+	return lines
 }

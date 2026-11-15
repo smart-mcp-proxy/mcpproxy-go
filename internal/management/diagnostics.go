@@ -307,6 +307,20 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 		}
 	}
 
+	// Spec 124 FR-035: the activity retention section, and one runtime warning
+	// when the caps cannot hold the work-session window. Administrators only:
+	// which sessions lost rows is not a scoped caller's to learn.
+	if src, ok := s.runtime.(ActivityRetentionOperations); ok && !auth.IsScopedCaller(ctx) {
+		if shortfall, window, err := src.ActivityRetentionState(); err != nil {
+			s.logger.Warnw("Failed to read activity retention state for diagnostics", "error", err)
+		} else {
+			diag.ActivityRetention = BuildActivityRetentionReport(shortfall, window)
+			if diag.ActivityRetention.Shortfall {
+				diag.RuntimeWarnings = append(diag.RuntimeWarnings, activityRetentionWarningLine(diag.ActivityRetention))
+			}
+		}
+	}
+
 	// Registered runtime-warning sources (Spec 107 T052): configuration
 	// findings such as an overridden require_mcp_auth or an unset public_url
 	// on a non-loopback listener, read from the live config at call time.

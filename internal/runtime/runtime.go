@@ -4248,6 +4248,15 @@ func (r *Runtime) ResolveWorkSession(id WorkSessionIdentity) string {
 	return r.workSessions.Resolve(id)
 }
 
+// ActivityRetentionState implements management.ActivityRetentionOperations
+// (Spec 124 FR-035).
+func (r *Runtime) ActivityRetentionState() (*storage.RetentionShortfall, time.Duration, error) {
+	if r.activityService == nil {
+		return nil, DefaultSessionWindow, nil
+	}
+	return r.activityService.RetentionShortfall()
+}
+
 // Work-session reads (Spec 124). Thin pass-throughs to storage.
 
 // ListWorkSessionSummaries returns every work-session summary.

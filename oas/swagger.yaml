@@ -1784,6 +1784,37 @@ components:
           description: 'Spec 082: one client, one project, across reconnects'
           type: string
       type: object
+    contracts.ActivityRetentionReport:
+      description: |-
+        ActivityRetention (Spec 124 FR-035) reports whether the activity caps
+        hold the whole work-session retention window. Administrators only.
+      properties:
+        cause:
+          description: Cause is age_cap, record_cap or size_cap.
+          type: string
+        observed_at:
+          description: ObservedAt is when the shortfall was last observed.
+          type: string
+        oldest_complete_session_at:
+          description: |-
+            OldestCompleteSessionAt is the start of the oldest session that still
+            has all of its rows: complete history reaches back to here.
+          type: string
+        raise:
+          description: Raise names the settings to raise for the cause.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        shortfall:
+          description: |-
+            Shortfall is true when a work session inside the window lost rows
+            because a cap was reached, and a full window has not passed since.
+          type: boolean
+        window_days:
+          description: WindowDays is the work-session retention window.
+          type: integer
+      type: object
     contracts.ActivitySource:
       description: 'How activity was triggered: "mcp", "cli", "api"'
       type: string
@@ -2092,6 +2123,8 @@ components:
       type: object
     contracts.Diagnostics:
       properties:
+        activity_retention:
+          $ref: '#/components/schemas/contracts.ActivityRetentionReport'
         deprecated_configs:
           description: Deprecated config fields found
           items:
