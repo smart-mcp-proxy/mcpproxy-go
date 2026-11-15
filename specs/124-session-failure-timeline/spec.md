@@ -58,8 +58,8 @@ Out of scope:
 - **Principal**: the credential the call was authenticated with: an agent token (by name), a client credential, the admin API key, or the local socket.
 - **Surface**: where a call entered: `mcp`, or for REST calls the value the caller already sends in the surface header (`cli`, `webui`, `tray`), or `rest` when none is sent.
 - **Run name**: an optional label a REST caller sends so that its calls group as one work session and can be found by name.
-- **Attempt**: one call as the operator counts it. It is a `tool_call` row, or a rejection row (`policy_decision`) for a call that was refused before dispatch, or an `internal_tool_call` row for one of MCPProxy's own tools (`retrieve_tools`, `describe_tool`, `code_execution`, and the admin tools). The `internal_tool_call` rows named `call_tool_*` mirror a dispatch that already has its own row with the same request id (`InternalCallToolPrefix`, `internal/storage/activity_models.go:112-119`) and are never counted.
-- **Failure**: an attempt whose status is not success. A **policy block** is a failure refused by MCPProxy itself (error class `proxy_policy`); it is counted apart from other failures.
+- **Attempt**: one call as the operator counts it. All activity rows that share one request id are one attempt: the `tool_call` row, its `call_tool_*` mirror (`InternalCallToolPrefix`, `internal/storage/activity_models.go:112-119`) and any `policy_decision` rows written for the same call, before or after dispatch. A call to one of MCPProxy's own tools (`retrieve_tools`, `describe_tool`, `code_execution`, the admin tools) is an attempt with its single `internal_tool_call` row. A row with no request id is its own attempt.
+- **Failure**: an attempt whose final outcome is not success: the call returned an error to the caller or was refused. A `policy_decision` row that only warns, or that records a decision which did not change the outcome, does not make the attempt a failure. A **policy block** is a failure refused by MCPProxy itself (error class `proxy_policy`); it is counted apart from other failures.
 - **Upstream event**: something that happened to an upstream server and was not a call: the connection was lost, the process exited, an OAuth token refresh failed, the server needs a new login, the connection came back.
 - **Session summary**: the durable per-work-session record defined in Key Entities.
 - **Retention window**: the age up to which sessions are kept, 7 days by default.
@@ -160,7 +160,7 @@ An agent token that may reach two servers reads the session list. It sees its ow
 - **A session with only blocked calls.** It is still a session; its policy-block count equals its attempt count.
 - **A legacy connection that resumes after its session ended.** A connection keeps the work-session id it was first given (`EnsurePersisted`, `internal/server/session_store.go:309-340`). When a row arrives for a session already marked ended, the session is active again and its end is cleared.
 - **Crash.** A session with no recorded end at start is given its last activity time as its end.
-- **Token regenerated or recreated under the same name.** The new secret has a new prefix. Sessions made with the old secret are not the new token's own and read as not found for it, as activity rows already do.
+- **Token regenerated or recreated under the same name.** The new secret has a new prefix and starts a new work session (FR-009). Sessions made with the old secret are not the new token's own and read as not found for it, as activity rows already do.
 - **Server removed from the configuration.** Its upstream event rows stay in the timeline of past sessions until those sessions leave the retention window.
 
 ## Requirements *(mandatory)*
@@ -177,6 +177,8 @@ An agent token that may reach two servers reads the session list. It sees its ow
 - **FR-008**: The run name MUST be combined with the principal when the session is derived, so that it can never override or replace the principal. It MUST NOT be forwarded to any upstream server. A principal may open at most 1,000 named sessions a day; beyond that, calls are grouped as if no name was sent. The documentation MUST say the name is stored and shown in clear and is not a place for secrets.
 - **FR-005**: Calls made inside `code_execution` MUST carry the work session of the call that started them.
 - **FR-006**: Work-session assignment for calls that already had one (MCP connections with a stable id) MUST NOT change.
+- **FR-009**: A work session MUST belong to exactly one credential. The principal used to derive it MUST include the credential's generation (the token prefix), so that a token regenerated or recreated under the same name starts a new work session even inside the idle window. This is the one deliberate change to FR-006: today the principal is the token name alone (`internal/server/workspace.go:155-167`).
+- **FR-019**: Every recorded attempt MUST refresh the idle clock of its work session. Today the clock moves only when a connection is first resolved (`EnsurePersisted`, `WorkSessionTracker.Resolve`), so a connection that stays busy for longer than the idle window can reconnect into a different work session.
 
 **Session summary**
 
@@ -192,8 +194,8 @@ An agent token that may reach two servers reads the session list. It sees its ow
 **Upstream events**
 
 - **FR-020**: The system MUST record an activity row when an upstream server's connection is lost, its process exits, its OAuth token refresh fails, it enters a state that needs a new login, and when its connection is restored.
-- **FR-021**: An upstream event row MUST carry only: the server name, the event kind, the time, the diagnostic error code when one exists (the `MCPX_*` catalogue), and the fixed reason text that belongs to that code or kind. It MUST NOT carry free text from the upstream, the identity provider or the operating system: no URLs, account names, file paths, response fragments, token values, headers or environment values. The raw error stays in the server log, where it is today.
-- **FR-025**: In the server edition, an event about one user's upstream credential MUST be visible only to that user and to administrators.
+- **FR-021**: An upstream event row MUST carry only: the server name, the event kind, the time, the diagnostic error code when one exists (the `MCPX_*` catalogue), and the fixed reason text that belongs to that code or kind. It MAY also carry, for access control only and never returned, the owning user of the credential the event is about. It MUST NOT carry free text from the upstream, the identity provider or the operating system: no URLs, account names, file paths, response fragments, token values, headers or environment values. The raw error stays in the server log, where it is today.
+- **FR-025**: In the server edition, an event about one user's upstream credential MUST be visible only to that user and to administrators. Such events MUST be collapsed (FR-022) per owner, never across owners, so that no row's count or times mix two users.
 - **FR-022**: Repeats of the same event kind for the same server within one minute MUST be stored as one row with a count and the first and last times. The number of event rows one server can add MUST be bounded per hour; at the bound, further events are merged into the server's latest row of that kind and nothing is dropped from the counts.
 - **FR-023**: A session timeline MUST include an upstream event when the session called that server and the event's time is within the session's span: from its first row to its recorded end, or to the present for a session that is still active.
 - **FR-024**: Upstream event rows MUST appear in the existing System view of the activity log and be filterable by type.
@@ -226,6 +228,8 @@ An agent token that may reach two servers reads the session list. It sees its ow
   - Server-edition user: their own sessions, with the same reach rule.
   - A session the caller may not see MUST answer exactly as an id that does not exist. A caller for whom a door cannot be scoped MUST be refused.
   - Filters by token, client or profile from a scoped caller follow the Spec 108 disclosure rule: a record the caller did not make reads as unattributed.
+- **FR-048**: For a scoped caller, every value a door returns or sorts and filters by MUST be derived only from the part of the session in the caller's reach: start, end, last activity, duration, status, attempt and failure counts, first and last failure, reason, and the synthetic start and end rows. A value that cannot be derived that way (connection count, latest profile, truncated-start marker) MUST be withheld. Activity on a server outside reach MUST NOT change anything the caller can observe.
+- **FR-049**: To make FR-048 possible without reading rows outside the requested page, the summary MUST keep its counts, first and last activity and first and last failure per server. For an administrator the session's facts are the lifetime facts of FR-013. For a scoped caller they are the sum over the servers in reach.
 - **FR-047**: The OpenAPI document and `docs/api/rest-api.md` MUST describe the new doors.
 
 **CLI**
@@ -262,12 +266,12 @@ An agent token that may reach two servers reads the session list. It sees its ow
 
 - **SC-001**: Starting from the session list, an operator reaches the first failed call of a given night's session, with the 20 rows before it, in at most two actions in the Web UI and two commands in the CLI.
 - **SC-002**: 100% of tool calls recorded after the upgrade belong to a work session, on every surface. Verified by a test that calls through MCP with a connection id, MCP without one, REST with each surface value, and `code_execution`.
-- **SC-003**: With the default settings and a load of 10,000 calls a day spread over 20 sessions a day, every session from the last 7 days is listed and complete.
+- **SC-003**: With the default settings and a load of 10,000 attempts a day spread over 20 sessions a day, every session from the last 7 days is listed and complete.
 - **SC-004**: When the caps cannot hold 7 days, the operator is told in `doctor` within one cleanup interval, and no session inside the window is ever missing rows from its middle.
 - **SC-005**: For a failure caused by an upstream connection loss or an OAuth refresh failure, the upstream event is in the same timeline, placed between the session's last attempt before the event and the failed attempt.
 - **SC-006**: The session list for 1,000 sessions and one timeline page of a 50,000-row session are each served without reading rows outside the page, shown by a benchmark whose cost does not grow with the size of the rest of the log.
 - **SC-007**: Under a simulated reconnect storm of one failed connection attempt per second for 24 hours (injected clock), one server adds at most 2,880 event rows and `config.db` stays within the existing size cap.
-- **SC-009**: At 25,000 calls a day with the default size cap, and rows that average at most 1 KB once their bodies are removed, the time, result, error class and order of every call from the last 7 days remain readable.
+- **SC-009**: At 25,000 attempts a day (about 50,000 stored rows a day) with the default caps, and rows that average at most 600 bytes once their bodies are removed, the time, result, error class and order of every call from the last 7 days remain readable.
 - **SC-008**: An agent token can read no session, count or upstream event outside its reach through any new door, verified by the REST authorization table used for existing doors.
 
 ## Assumptions
@@ -276,7 +280,7 @@ Decisions made by the designer, not by the maintainer. Each can be changed in re
 
 - **Run name header**: `X-MCPProxy-Run`. The surface header the clients already send is reused as is.
 - **Failures include policy blocks, counted apart.** A call blocked by quarantine or a profile is a failure of the session, shown with error class `proxy_policy`. "Failed only" includes them by default and one click excludes them, so that 74,000 quarantine blocks cannot bury a real failure.
-- **The record cap default rises from 100,000 to 250,000.** A week at the measured top rate is 175,000 rows. The 256 MB size cap is unchanged and stays the bound on disk.
+- **The record cap default rises from 100,000 to 400,000.** The cap counts stored rows, not attempts. A call through `call_tool_*` stores two rows (the call and its mirror), so a week at the measured top rate of 25,000 attempts a day is about 350,000 rows, plus upstream events. The 256 MB size cap is unchanged and stays the bound on disk.
 - **The run name is accepted on MCP over HTTP as well as REST**, since modern-revision MCP calls have no other way to tell two agents on one credential apart. Stdio clients cannot send it.
 - **Upstream events are stored once per server, not once per session.** The timeline joins them by server and time. This keeps the row count bounded when many sessions share a server.
 - **Session start and end are synthetic timeline rows** derived from the summary, not stored activity rows.
