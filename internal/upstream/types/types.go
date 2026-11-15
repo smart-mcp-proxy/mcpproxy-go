@@ -246,6 +246,11 @@ type StateManager struct {
 
 	// Callbacks for state transitions
 	onStateChange func(oldState, newState ConnectionState, info *ConnectionInfo)
+
+	// Ordered transition capture (Spec 124 D5). See transition.go.
+	transitionObserver TransitionObserver
+	transitions        []Transition
+	draining           bool
 }
 
 // NewStateManager creates a new state manager
@@ -341,6 +346,7 @@ func (sm *StateManager) TransitionTo(newState ConnectionState) {
 		TerminalCode:     sm.terminalCode,
 	}
 
+	sm.captureLocked(oldState)
 	callback := sm.onStateChange
 	sm.mu.Unlock()
 
@@ -382,6 +388,7 @@ func (sm *StateManager) SetError(err error) {
 		TerminalCode:     sm.terminalCode,
 	}
 
+	sm.captureLocked(oldState)
 	callback := sm.onStateChange
 
 	// Call the callback outside the lock to avoid deadlocks
@@ -432,6 +439,7 @@ func (sm *StateManager) SetTerminalError(err error, code string) {
 		TerminalCode:     sm.terminalCode,
 	}
 
+	sm.captureLocked(oldState)
 	callback := sm.onStateChange
 	sm.mu.Unlock()
 
@@ -505,6 +513,7 @@ func (sm *StateManager) SetPendingAuthProbe(err error, probe bool) {
 		PendingAuthProbe: sm.pendingAuthProbe,
 	}
 
+	sm.captureLocked(oldState)
 	callback := sm.onStateChange
 	sm.mu.Unlock()
 
@@ -694,6 +703,7 @@ func (sm *StateManager) Reset() {
 		TerminalCode:     sm.terminalCode,
 	}
 
+	sm.captureLocked(oldState)
 	callback := sm.onStateChange
 
 	// Call the callback outside the lock to avoid deadlocks
@@ -731,6 +741,7 @@ func (sm *StateManager) ResetForReconnect() {
 		TerminalCode:     sm.terminalCode,
 	}
 
+	sm.captureLocked(oldState)
 	callback := sm.onStateChange
 
 	if callback != nil {
@@ -765,6 +776,7 @@ func (sm *StateManager) SetOAuthError(err error) {
 		TerminalCode:     sm.terminalCode,
 	}
 
+	sm.captureLocked(oldState)
 	callback := sm.onStateChange
 	sm.mu.Unlock()
 

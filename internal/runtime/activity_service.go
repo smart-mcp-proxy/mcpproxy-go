@@ -107,7 +107,11 @@ type ActivityService struct {
 	maxSizeBytes int64 // total activity-log size cap in bytes (0 = disabled)
 	// sessionWindow is how long a work session is kept whole (Spec 124).
 	sessionWindow time.Duration
-	checkInterval time.Duration
+
+	// upstreamEvents collapses upstream events into a bounded number of rows
+	// (Spec 124 FR-022).
+	upstreamEvents *upstreamEventCollapser
+	checkInterval  time.Duration
 
 	// maxResponseSize bounds the response text persisted on a single activity
 	// record (activity_max_response_size). Applied to every record type on the
@@ -143,6 +147,7 @@ func NewActivityService(storage *storage.Manager, logger *zap.Logger) *ActivityS
 		maxResponseSize: DefaultActivityMaxResponseSize,
 		detector:        nil, // Detector is optional, set via SetDetector
 		usage:           newUsageStore(),
+		upstreamEvents:  newUpstreamEventCollapser(),
 	}
 	s.usagePersistIntervalNs.Store(int64(DefaultUsagePersistInterval))
 	return s

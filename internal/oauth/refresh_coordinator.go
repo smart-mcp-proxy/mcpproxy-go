@@ -155,6 +155,7 @@ type RefreshCoordinator struct {
 	mu     sync.Mutex
 	keys   map[flightKey]*refreshKeyState
 	hook   func(RefreshOutcome)
+	audit  func(RefreshAttemptFailure)
 	now    func() time.Time
 	logger *zap.Logger
 }
@@ -178,6 +179,32 @@ func DefaultRefreshCoordinator() *RefreshCoordinator { return defaultRefreshCoor
 func (c *RefreshCoordinator) SetCompletionHook(hook func(RefreshOutcome)) {
 	c.mu.Lock()
 	c.hook = hook
+	c.mu.Unlock()
+}
+
+// RefreshAttemptFailure is one token refresh that was sent and failed
+// (Spec 124 D5).
+type RefreshAttemptFailure struct {
+	ServerName string
+	Class      RefreshErrorClass
+	Trigger    RefreshTrigger
+	// At is when the failure was observed.
+	At time.Time
+}
+
+// SetAuditObserver installs the function called once for every refresh that
+// was actually sent and failed. nil removes it.
+//
+// It is separate from the completion hook, which reports only terminal
+// outcomes that still apply to the stored record. An activity log needs every
+// failed attempt, including a transient one that the next retry repairs, and
+// needs none of the returns that sent nothing: a fresh record, a latched
+// terminal error, a cooldown, a retired instance. Waiters on the same flight
+// and a caller that stopped waiting report nothing, because the observer is
+// called by the flight itself.
+func (c *RefreshCoordinator) SetAuditObserver(observer func(RefreshAttemptFailure)) {
+	c.mu.Lock()
+	c.audit = observer
 	c.mu.Unlock()
 }
 
@@ -425,6 +452,16 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 	}
 
 	cls, _ := ClassifyRefreshError(refreshErr)
+
+	// Spec 124 D5: a token request was sent and failed. Reported here, past
+	// the returns that sent nothing, and before supersession can turn this
+	// flight's failure into a successful return of a newer grant.
+	c.mu.Lock()
+	audit := c.audit
+	c.mu.Unlock()
+	if audit != nil {
+		audit(RefreshAttemptFailure{ServerName: req.ServerName, Class: cls, Trigger: req.Trigger, At: c.now()})
+	}
 
 	// FR-006a: a login or another writer superseded this flight's generation.
 	// Its failure has no side effects; a newer grant is handed out.

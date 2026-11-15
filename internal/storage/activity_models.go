@@ -342,6 +342,30 @@ type ActivityIdentityOwner struct {
 	TokenPrefix string
 }
 
+// ActivityEventViewer restricts OWNED upstream events (Spec 124 FR-025) to
+// their owner. A nil viewer on a filter means no restriction (an
+// administrator, or an internal reader).
+type ActivityEventViewer struct {
+	// UserID is the caller's own user id; empty for a caller that is no user
+	// (an agent token in the personal edition), who then sees no owned event.
+	UserID string
+}
+
+// MaySee reports whether the viewer may read the record. Every record that is
+// not an owned upstream event passes.
+func (v *ActivityEventViewer) MaySee(r *ActivityRecord) bool {
+	if v == nil || r == nil || !r.OwnedUpstreamEvent() {
+		return true
+	}
+	return v.UserID != "" && r.UserID == v.UserID
+}
+
+// OwnedUpstreamEvent reports whether the record is an upstream event about
+// one user's upstream credential.
+func (r *ActivityRecord) OwnedUpstreamEvent() bool {
+	return r.Type == ActivityTypeUpstreamEvent && r.UserID != ""
+}
+
 // Owns reports whether the record was made by this caller.
 func (o *ActivityIdentityOwner) Owns(r *ActivityRecord) bool {
 	if o == nil || o.TokenPrefix == "" {
@@ -456,6 +480,10 @@ type ActivityFilter struct {
 	// project, across reconnects. This is what the UI's "Session" filter means;
 	// SessionID above is the raw transport connection.
 	WorkSessionID string
+
+	// EventViewer limits owned upstream events to their owner (Spec 124
+	// FR-025). nil = no restriction.
+	EventViewer *ActivityEventViewer
 
 	// Sensitive data detection filters (Spec 026)
 	SensitiveData *bool  // Filter by sensitive data detection (nil=no filter, true=has detections, false=no detections)
@@ -595,6 +623,12 @@ func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 		return false
 	}
 	if f.UserID != "" && record.UserID != f.UserID {
+		return false
+	}
+	// Spec 124 FR-025: an upstream event about one user's credential is
+	// visible only to that user and to administrators. Part of the
+	// authorization block, so it applies before counting and paging.
+	if f.EventViewer != nil && !f.EventViewer.MaySee(record) {
 		return false
 	}
 

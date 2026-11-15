@@ -769,6 +769,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// in the MCP dispatch layer) so code_execution and activity replay are
 	// covered by construction.
 	rt.installRejectionObserver()
+	rt.installUpstreamEventObserver()
 
 	return rt, nil
 }

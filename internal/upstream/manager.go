@@ -200,6 +200,10 @@ type Manager struct {
 	// Tool discovery callback for notifications/tools/list_changed handling
 	toolDiscoveryCallback func(ctx context.Context, serverName string) error
 
+	// transitionObserver receives every state change of every server's
+	// current instance, in the order it happened (Spec 124 D5).
+	transitionObserver ServerTransitionObserver
+
 	// Prompts-changed callback for notifications/prompts/list_changed handling (F13)
 	promptsChangedCallback func(serverName string)
 
@@ -488,6 +492,44 @@ func (m *Manager) SetToolDiscoveryCallback(callback func(ctx context.Context, se
 	}
 	m.logger.Debug("Tool discovery callback set on manager",
 		zap.Int("existing_clients", len(m.clients)))
+}
+
+// ServerTransitionObserver receives one state change of one upstream server.
+// Calls for the same server arrive one at a time, in the order the changes
+// happened; calls for different servers may be concurrent.
+type ServerTransitionObserver func(serverName string, t types.Transition)
+
+// SetTransitionObserver installs the observer on every existing client and on
+// every client created later. The runtime uses it to record connection loss
+// and recovery in the activity log with the time they actually happened.
+func (m *Manager) SetTransitionObserver(observer ServerTransitionObserver) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.transitionObserver = observer
+	for _, client := range m.clients {
+		if client != nil {
+			m.wireTransitionObserverLocked(client, client.GetConfig().Name)
+		}
+	}
+}
+
+// wireTransitionObserverLocked connects one client's state manager to the
+// manager's observer. Caller holds m.mu.
+func (m *Manager) wireTransitionObserverLocked(client *managed.Client, serverName string) {
+	observer := m.transitionObserver
+	if observer == nil {
+		client.StateManager.SetTransitionObserver(nil)
+		return
+	}
+	client.StateManager.SetTransitionObserver(func(t types.Transition) {
+		// A superseded instance's transitions (the Disconnect of an instance
+		// a commit replaced) are not events of the server that now runs
+		// under the same name.
+		if client.Unregistered() {
+			return
+		}
+		observer(serverName, t)
+	})
 }
 
 // SetPromptsChangedCallback sets the callback for triggering aggregated-prompt

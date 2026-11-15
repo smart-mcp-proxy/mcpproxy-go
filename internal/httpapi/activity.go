@@ -159,6 +159,9 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 // both live in the same Matches() call and the authorization term is evaluated
 // first.
 func applyActivityScope(ctx context.Context, filter *storage.ActivityFilter) {
+	// Spec 124 FR-025: every non-administrator reads owned upstream events
+	// through this predicate, whether or not its servers are restricted.
+	filter.EventViewer = activityEventViewer(ctx)
 	if allowed, scoped := scopeAllowedServers(ctx); scoped {
 		filter.AllowedServers = allowed
 		// Spec 108 FR-031: a scoped caller's profile/client/token filters
@@ -167,6 +170,19 @@ func applyActivityScope(ctx context.Context, filter *storage.ActivityFilter) {
 		// an oracle for that token's activity.
 		filter.IdentityOwner = activityIdentityOwner(ctx)
 	}
+}
+
+// activityEventViewer is the caller's view of owned upstream events (Spec 124
+// FR-025): nil for an administrator, who sees them all; otherwise the caller's
+// own user id, so a user sees the events about its own upstream credentials
+// and nobody else's. One predicate for the list, the summary, the export, the
+// detail and the session timeline.
+func activityEventViewer(ctx context.Context) *storage.ActivityEventViewer {
+	ac := auth.AuthContextFromContext(ctx)
+	if ac == nil || ac.IsAdmin() {
+		return nil
+	}
+	return &storage.ActivityEventViewer{UserID: ac.UserID}
 }
 
 // handleListActivity handles GET /api/v1/activity
@@ -300,7 +316,7 @@ func (s *Server) handleGetActivityDetail(w http.ResponseWriter, r *http.Request)
 	// oracle is status parity with an absent id, not "the body omits the server
 	// name": this route's 404 body carries no echo of the caller's input, so an
 	// absence assertion would pass vacuously.
-	if activity == nil || !canSeeServer(r.Context(), activity.ServerName) {
+	if activity == nil || !canSeeServer(r.Context(), activity.ServerName) || !activityEventViewer(r.Context()).MaySee(activity) {
 		s.writeError(w, r, http.StatusNotFound, "Activity not found")
 		return
 	}
