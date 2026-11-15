@@ -24,6 +24,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -106,8 +107,37 @@ func seedReplayableCallWithID(t *testing.T, proxy *MCPProxyServer, mainSrv *Serv
 	identity, err := sm.RegisterServerIdentity(serverCfg, "")
 	require.NoError(t, err)
 
+	// Replay now answers to the shared per-tool gate, which reads the
+	// persisted server record, the approval record and the live StateView
+	// stamp. Production has ONE upstream manager; the fixture's proxy has its
+	// own, so point it at the runtime's — the manager replay dispatches
+	// through — so the gate's connection epoch and the dispatch's agree.
+	proxy.upstreamManager = mainSrv.runtime.UpstreamManager()
+	if existing, getErr := proxy.storage.GetUpstreamServer(server); getErr == nil && existing != nil {
+		// Keep the fixture's trust mode, but replay dispatches to THIS url.
+		serverCfg = existing
+		serverCfg.URL = url
+	}
+	require.NoError(t, proxy.storage.SaveUpstreamServer(serverCfg))
 	require.NoError(t, mainSrv.runtime.UpstreamManager().AddServerConfig(server, serverCfg))
 	require.NoError(t, mainSrv.runtime.UpstreamManager().ConnectAll(context.Background()))
+	require.Eventually(t, func() bool {
+		c, ok := mainSrv.runtime.UpstreamManager().GetClient(server)
+		return ok && c != nil && c.IsConnected()
+	}, 10*time.Second, 20*time.Millisecond, "replay fixture upstream must connect")
+	var tools []stateview.ToolInfo
+	if status := mainSrv.runtime.Supervisor().StateView().Snapshot().Servers[server]; status != nil {
+		tools = status.Tools
+	}
+	if len(tools) == 0 {
+		tools = []stateview.ToolInfo{{Name: tool, Description: "Replay target", Annotations: annotations}}
+	}
+	if rec, recErr := proxy.storage.GetToolApproval(server, tool); recErr != nil || rec == nil {
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: server, ToolName: tool, Status: storage.ToolApprovalStatusApproved,
+		}))
+	}
+	stampDiscoveredOnLiveConnection(t, proxy, mainSrv.runtime, server, tools)
 
 	require.NoError(t, sm.RecordToolCall(&storage.ToolCallRecord{
 		ID:          callID,
@@ -285,11 +315,13 @@ func TestReplayToolCall_OperationFromAnnotations(t *testing.T) {
 	assert.Equal(t, "destructive", lines[1]["operation"], "tool_call line must report the recorded tool's actual tier")
 }
 
-// TestReplayToolCall_OperationUnknownWithoutAnnotations proves the missing-
-// annotations case defaults to "unknown" rather than tierForAnnotations'
-// found=false "destructive" default, which is an AUTHORIZATION fail-closed
-// and would misrepresent an unresolved tier as maximally risky on the audit
-// line (mirrors mcp.go's own choice for the live dispatch path).
+// TestReplayToolCall_OperationUnknownWithoutAnnotations pins the audit tier of
+// a record with NO annotations snapshot. Replay takes the tool's tier from the
+// shared gate's live identity (as handleCallToolVariant does), so a discovered
+// tool that carries no hints is classified by the same rule every other path
+// uses ("read"), not by the record's missing snapshot. The record-snapshot
+// "unknown" only survives for a pair the gate cannot resolve, and those are
+// refused before the audit line is read.
 func TestReplayToolCall_OperationUnknownWithoutAnnotations(t *testing.T) {
 	proxy, rt := createTestProxyWithRuntime(t, nil)
 	sink := &recordingAuditSink{}
@@ -311,7 +343,7 @@ func TestReplayToolCall_OperationUnknownWithoutAnnotations(t *testing.T) {
 
 	lines := sink.decoded(t)
 	require.Len(t, lines, 2)
-	assert.Equal(t, "unknown", lines[0]["operation"])
+	assert.Equal(t, "read", lines[0]["operation"])
 }
 
 // TestReplayToolCall_AuthzWrittenBeforeUpstreamDispatch is a round-3
