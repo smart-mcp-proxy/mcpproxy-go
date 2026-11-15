@@ -651,6 +651,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		// value (>= 0 is applied; -1 would mean "unchanged").
 		maxSizeBytes := int64(cfg.EffectiveActivityMaxSizeMB()) * 1024 * 1024
 		activityService.SetRetentionConfig(maxAge, cfg.EffectiveActivityMaxRecords(), checkInterval, maxSizeBytes)
+		activityService.SetSessionWindow(time.Duration(cfg.EffectiveSessionRetentionDays()) * 24 * time.Hour)
 		logger.Info("Activity retention config applied",
 			zap.Int("max_response_size", cfg.ActivityMaxResponseSize),
 			zap.Int("retention_days", cfg.EffectiveActivityRetentionDays()),

@@ -60,6 +60,11 @@ const (
 	// actor_kind, actor_name, surface, change, profile, previous_profile,
 	// client_id, token_name, diff.
 	ActivityTypeProfileChange ActivityType = "profile_change"
+	// ActivityTypeUpstreamEvent records a change in an upstream server's
+	// availability: connection lost or restored, process exited, OAuth refresh
+	// failed, login required (Spec 124 FR-020). It carries the server, the
+	// kind, the diagnostic code and its fixed message, never a raw error.
+	ActivityTypeUpstreamEvent ActivityType = "upstream_event"
 )
 
 // ValidActivityTypes is the list of all valid activity types for filtering (Spec 024)
@@ -78,6 +83,7 @@ var ValidActivityTypes = []string{
 	string(ActivityTypePreflight),
 	string(ActivityTypePromptGet),
 	string(ActivityTypeProfileChange),
+	string(ActivityTypeUpstreamEvent),
 }
 
 // Activity status vocabulary. Activity status is a CLOSED vocabulary: every

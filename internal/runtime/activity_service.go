@@ -102,9 +102,11 @@ type ActivityService struct {
 	stopped   bool
 
 	// Retention configuration
-	maxAge        time.Duration
-	maxRecords    int
-	maxSizeBytes  int64 // total activity-log size cap in bytes (0 = disabled)
+	maxAge       time.Duration
+	maxRecords   int
+	maxSizeBytes int64 // total activity-log size cap in bytes (0 = disabled)
+	// sessionWindow is how long a work session is kept whole (Spec 124).
+	sessionWindow time.Duration
 	checkInterval time.Duration
 
 	// maxResponseSize bounds the response text persisted on a single activity
@@ -238,6 +240,29 @@ func (s *ActivityService) SetRetentionConfig(maxAge time.Duration, maxRecords in
 	}
 }
 
+// DefaultSessionWindow is the work-session retention window when none is set.
+const DefaultSessionWindow = 7 * 24 * time.Hour
+
+// SetSessionWindow sets how long a work session is listed and kept whole
+// (Spec 124 FR-031). Values <= 0 are ignored.
+func (s *ActivityService) SetSessionWindow(d time.Duration) {
+	if d > 0 {
+		s.sessionWindow = d
+	}
+}
+
+// RetentionShortfall returns the current shortfall record and the settings
+// that produced it, for `mcpproxy doctor` (Spec 124 FR-035). The record is nil
+// when the caps hold the whole window.
+func (s *ActivityService) RetentionShortfall() (shortfall *storage.RetentionShortfall, window time.Duration, err error) {
+	window = s.sessionWindow
+	if window <= 0 {
+		window = DefaultSessionWindow
+	}
+	shortfall, err = s.storage.GetRetentionShortfall()
+	return shortfall, window, err
+}
+
 // SetMaxResponseSize sets the per-record response size cap in bytes.
 // Values <= 0 are ignored, leaving the current cap in place; truncateForStorage
 // falls back to storage.DefaultMaxResponseSize if it is ever unset.
@@ -337,6 +362,8 @@ func (s *ActivityService) Start(ctx context.Context, rt *Runtime) {
 
 // runRetentionLoop periodically cleans up old activity records.
 func (s *ActivityService) runRetentionLoop(ctx context.Context) {
+	s.prepareWorkSessions(ctx)
+
 	// Run initial cleanup
 	s.runRetentionCleanup()
 
@@ -371,47 +398,72 @@ func (s *ActivityService) reapWorkSessions() {
 	}
 }
 
+// prepareWorkSessions runs once at start, before the first cleanup, on the
+// retention goroutine so it never delays the core from serving (FR-014).
+//
+//   - Work-session ids do not survive a restart, so every summary still open
+//     gets its last activity as its end.
+//   - A summary that is missing while its index entries remain is rebuilt
+//     (FR-013).
+//   - Rows written before Spec 124 are indexed and summarised, once.
+func (s *ActivityService) prepareWorkSessions(ctx context.Context) {
+	if _, err := s.storage.CloseOpenWorkSessionsAtStart(); err != nil {
+		s.logger.Warn("Failed to close open work sessions at start", zap.Error(err))
+	}
+	if n, err := s.storage.RepairWorkSessionSummaries(); err != nil {
+		s.logger.Warn("Failed to repair work-session summaries", zap.Error(err))
+	} else if n > 0 {
+		s.logger.Info("Rebuilt missing work-session summaries", zap.Int("count", n))
+	}
+	if _, err := s.storage.BackfillWorkSessions(ctx.Done()); err != nil {
+		s.logger.Warn("Failed to build work-session summaries for existing rows", zap.Error(err))
+	}
+}
+
 // runRetentionCleanup performs the actual retention cleanup.
+//
+// Spec 124 D4: one session-aware pass replaces the three independent prunes.
+// The caps are the same; the pass decides what to remove so that a work
+// session inside the retention window stays whole for as long as they allow.
 func (s *ActivityService) runRetentionCleanup() {
+	window := s.sessionWindow
+	if window <= 0 {
+		window = DefaultSessionWindow
+	}
 	s.logger.Debug("Running activity retention cleanup",
 		zap.Duration("max_age", s.maxAge),
-		zap.Int("max_records", s.maxRecords))
+		zap.Int("max_records", s.maxRecords),
+		zap.Duration("session_window", window))
 
-	// Prune by age
-	if s.maxAge > 0 {
-		deleted, err := s.storage.PruneOldActivities(s.maxAge)
-		if err != nil {
-			s.logger.Error("Failed to prune old activities", zap.Error(err))
-		} else if deleted > 0 {
-			s.logger.Info("Pruned old activity records",
-				zap.Int("deleted", deleted),
-				zap.Duration("max_age", s.maxAge))
-		}
+	// A session is over once its idle window has closed (FR-015).
+	if _, err := s.storage.MarkWorkSessionsEnded(time.Now().UTC().Add(-DefaultWorkSessionIdleWindow)); err != nil {
+		s.logger.Warn("Failed to record ended work sessions", zap.Error(err))
 	}
 
-	// Prune by count
-	if s.maxRecords > 0 {
-		deleted, err := s.storage.PruneExcessActivities(s.maxRecords, 0.9)
-		if err != nil {
-			s.logger.Error("Failed to prune excess activities", zap.Error(err))
-		} else if deleted > 0 {
-			s.logger.Info("Pruned excess activity records",
-				zap.Int("deleted", deleted),
-				zap.Int("max_records", s.maxRecords))
-		}
+	res, err := s.storage.RunActivityRetention(storage.RetentionPolicy{
+		Now:           time.Now().UTC(),
+		MaxAge:        s.maxAge,
+		MaxRecords:    s.maxRecords,
+		MaxBytes:      s.maxSizeBytes,
+		SessionWindow: window,
+	})
+	if err != nil {
+		s.logger.Error("Activity retention cleanup failed", zap.Error(err))
+		return
 	}
-
-	// Prune by total size (runs after age+count; 0 disables). Bounds config.db
-	// growth from large per-record payloads that stay under the count/age caps.
-	if s.maxSizeBytes > 0 {
-		deleted, err := s.storage.PruneActivitiesToSize(s.maxSizeBytes)
-		if err != nil {
-			s.logger.Error("Failed to prune activities to size budget", zap.Error(err))
-		} else if deleted > 0 {
-			s.logger.Info("Pruned activity records to size budget",
-				zap.Int("deleted", deleted),
-				zap.Int64("max_size_mb", s.maxSizeBytes/(1024*1024)))
-		}
+	if res.RowsAged+res.BodiesStripped+res.RowsOutsideWindow+res.SessionsRemoved+res.RowsTrimmed+res.SummariesExpired > 0 {
+		s.logger.Info("Activity retention cleanup",
+			zap.Int("rows_aged", res.RowsAged),
+			zap.Int("bodies_removed", res.BodiesStripped),
+			zap.Int("rows_outside_window", res.RowsOutsideWindow),
+			zap.Int("sessions_removed", res.SessionsRemoved),
+			zap.Int("rows_trimmed", res.RowsTrimmed),
+			zap.Int("summaries_expired", res.SummariesExpired))
+	}
+	if res.ShortfallCause != "" {
+		s.logger.Warn("The activity caps cannot hold the whole work-session retention window; a session inside it lost rows. Run `mcpproxy doctor` for the settings to raise.",
+			zap.String("cause", res.ShortfallCause),
+			zap.Duration("session_window", window))
 	}
 }
 

@@ -159,6 +159,9 @@ func (b *BoltDB) initBuckets() error {
 			IntegrityBaselinesBucket,
 			OnboardingBucket,
 			SessionsBucket,
+			WorkSessionsBucket,
+			WorkSessionRowsBucket,
+			UpstreamEventsByServerBucket,
 		}
 
 		for _, bucket := range buckets {

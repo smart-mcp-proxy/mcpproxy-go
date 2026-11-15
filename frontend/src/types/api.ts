@@ -1011,6 +1011,8 @@ export type ActivityType =
   | 'prompt_get'
   /** Spec 108: a client binding, credential rotation or forget. */
   | 'profile_change'
+  /** Spec 124: an upstream server's connection was lost or restored, its process exited, its OAuth refresh failed or it needs a new login. */
+  | 'upstream_event'
 
 export type ActivitySource = 'mcp' | 'cli' | 'api'
 

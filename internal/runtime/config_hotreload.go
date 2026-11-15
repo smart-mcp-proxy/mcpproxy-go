@@ -606,7 +606,7 @@ var undiffedHotConfigFields = []string{
 	"RequireMCPAuth", "MCPRejectQueryAPIKey", "CheckServerRepo", "DockerRecovery",
 	"RegistriesLocked", "AllowPrivateRegistryFetch", "Features",
 	"ToolResponseSessionRiskWarning", "OAuthExpiryWarningHours",
-	"ActivityRetentionDays", "ActivityMaxRecords", "ActivityMaxSizeMB",
+	"ActivityRetentionDays", "ActivityMaxRecords", "ActivityMaxSizeMB", "SessionRetentionDays",
 	"ActivityMaxResponseSize", "ActivityCleanupIntervalMin",
 	"ToolCallMaxResponseSize", "ToolCallMaxRecordsPerServer",
 	"IntentDeclaration", "SensitiveDataDetection", "OutputValidation",

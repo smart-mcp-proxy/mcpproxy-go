@@ -12,7 +12,12 @@ const (
 	defaultMaxResultSizeChars   = 500000 // Claude Code's inline-response hard max
 	defaultActivityMaxSizeMB    = 256    // total activity-log size cap in MB
 	defaultActivityRetentionDay = 90     // days of activity history retained
-	defaultActivityMaxRecords   = 100000 // activity records retained
+	// defaultActivityMaxRecords was 100000 before Spec 124. A work session
+	// kept whole for a week needs more room: at 25,000 attempts a day (about
+	// 50,000 rows with their mirrors) the old cap held two days. The size cap
+	// still bounds the bytes.
+	defaultActivityMaxRecords   = 400000 // activity records retained
+	defaultSessionRetentionDays = 7      // days a work session is kept whole
 )
 
 // EffectiveMaxResultSizeChars resolves the `_meta.anthropic/maxResultSizeChars`
@@ -66,6 +71,17 @@ func (c *Config) EffectiveActivityRetentionDays() int {
 		return defaultActivityRetentionDay
 	}
 	return c.ActivityRetentionDays
+}
+
+// EffectiveSessionRetentionDays resolves the work-session retention window
+// (Spec 124 FR-031): how long a work session is listed and kept whole. Absent
+// or not positive means the built-in 7 days. It is independent of the
+// activity log's own age cap; a shorter age cap is reported as a shortfall.
+func (c *Config) EffectiveSessionRetentionDays() int {
+	if c == nil || c.SessionRetentionDays <= 0 {
+		return defaultSessionRetentionDays
+	}
+	return c.SessionRetentionDays
 }
 
 func (c *Config) EffectiveActivityMaxRecords() int {

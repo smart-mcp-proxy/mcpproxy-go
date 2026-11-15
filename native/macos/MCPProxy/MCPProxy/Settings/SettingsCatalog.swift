@@ -355,6 +355,7 @@ enum SettingsCatalog {
             fields: [
                 ConfigField(key: "activity_retention_days", label: "Keep records for (days)", help: "0 = keep until the record cap is hit.", control: .number, min: 0),
                 ConfigField(key: "activity_max_records", label: "Maximum records kept", control: .number, min: 0),
+                ConfigField(key: "session_retention_days", label: "Keep work sessions whole for (days)", help: "Sessions inside this window are listed and pruned whole. Takes effect after a restart.", control: .number, min: 1),
                 ConfigField(key: "activity_cleanup_interval_min", label: "Cleanup runs every (minutes)", control: .number, min: 1),
             ]
         ),

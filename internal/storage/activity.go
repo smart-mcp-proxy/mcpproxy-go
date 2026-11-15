@@ -83,7 +83,13 @@ func (m *Manager) SaveActivity(record *ActivityRecord) error {
 			return fmt.Errorf("failed to store activity record: %w", err)
 		}
 
-		return nil
+		// Spec 124: the row's index entry and its work-session summary are
+		// written in this same transaction, so the summary can never disagree
+		// with the rows after a crash, and no writer can skip it.
+		if err := indexActivityTx(tx, record, key, AttemptRoleOf(record)); err != nil {
+			return err
+		}
+		return indexUpstreamEventTx(tx, record, key)
 	})
 }
 

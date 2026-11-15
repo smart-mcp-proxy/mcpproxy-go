@@ -39,7 +39,8 @@ export const ACTIVITY_TYPE_LABELS: Record<string, string> = {
   'security_scan': 'Security Scan', // Spec 077
   'credential_broker': 'Credential Broker', // Spec 074, server edition only
   'prompt_get': 'Prompt Fetch',
-  'profile_change': 'Profile Change' // Spec 108: client binding / credential change
+  'profile_change': 'Profile Change', // Spec 108: client binding / credential change
+  'upstream_event': 'Upstream Event' // Spec 124: connection lost/restored, process exited, OAuth refresh failed, login required
 }
 
 const typeLabels = ACTIVITY_TYPE_LABELS
@@ -95,7 +96,8 @@ const typeIcons: Record<string, string> = {
   'security_scan': '🔎',
   'credential_broker': '🔑',
   'prompt_get': '💬',
-  'profile_change': '🪪'
+  'profile_change': '🪪',
+  'upstream_event': '🔌'
 }
 
 // Status labels
