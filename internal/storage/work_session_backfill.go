@@ -109,21 +109,30 @@ func (m *Manager) BackfillWorkSessions(stop <-chan struct{}) (int, error) {
 				indexed++
 				return indexActivityTx(tx, rec, key, role)
 			}
-			// settle writes every held decision the pass has read far enough
-			// past (or all of them at the end) as a counted, sole row.
-			settle := func(now time.Time, all bool) error {
+			// writes counts the rows this transaction has indexed. Both the
+			// rows read and the held decisions settled count against
+			// backfillBatch, so no transaction writes more than that (FR-038).
+			writes := 0
+			// settle writes held decisions the pass has read far enough past
+			// (or any of them at the end) as counted, sole rows, up to the
+			// transaction's budget. It reports whether some are still due.
+			settle := func(now time.Time, all bool) (bool, error) {
 				kept := pending[:0]
+				remaining := false
 				for _, p := range pending {
-					if all || now.Sub(p.rec.Timestamp) > companionWindow {
+					due := all || now.Sub(p.rec.Timestamp) > companionWindow
+					if due && writes < backfillBatch {
+						writes++
 						if err := index(p.key, p.rec, AttemptRoleOf(p.rec)); err != nil {
-							return err
+							return false, err
 						}
 						continue
 					}
+					remaining = remaining || due
 					kept = append(kept, p)
 				}
 				pending = kept
-				return nil
+				return remaining, nil
 			}
 
 			c := acts.Cursor()
@@ -134,18 +143,27 @@ func (m *Manager) BackfillWorkSessions(stop <-chan struct{}) (int, error) {
 				k, v = c.Seek(next)
 			}
 			read := 0
-			for ; k != nil && read < backfillBatch; k, v = c.Next() {
-				read++
+			for ; k != nil && read < backfillBatch && writes < backfillBatch; k, v = c.Next() {
 				rec := &ActivityRecord{}
 				if err := rec.UnmarshalBinary(v); err != nil || rec.WorkSessionID == "" {
+					read++
 					continue
 				}
 				key := append([]byte(nil), k...)
 				ts := rec.Timestamp
 
-				if err := settle(ts, false); err != nil {
+				// Decisions the pass has moved past are settled before this
+				// row is taken. If the budget ran out first, the row is left
+				// for the next transaction.
+				stillDue, err := settle(ts, false)
+				if err != nil {
 					return err
 				}
+				if stillDue {
+					break
+				}
+				read++
+				writes++
 				// Forget calls the pass has moved past.
 				live := calls[:0]
 				for _, cl := range calls {
@@ -201,8 +219,15 @@ func (m *Manager) BackfillWorkSessions(stop <-chan struct{}) (int, error) {
 			}
 
 			if k == nil {
-				if err := settle(time.Time{}, true); err != nil {
+				stillDue, err := settle(time.Time{}, true)
+				if err != nil {
 					return err
+				}
+				if stillDue {
+					// More held decisions than one transaction may write: the
+					// next one starts at the end of the log and settles on.
+					next = append([]byte(nil), 0xff)
+					return nil
 				}
 				meta, err := tx.CreateBucketIfNotExists([]byte(MetaBucket))
 				if err != nil {

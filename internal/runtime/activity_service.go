@@ -415,6 +415,13 @@ func (s *ActivityService) prepareWorkSessions(ctx context.Context) {
 	if _, err := s.storage.CloseOpenWorkSessionsAtStart(); err != nil {
 		s.logger.Warn("Failed to close open work sessions at start", zap.Error(err))
 	}
+	// A session removal that a crash interrupted is finished first, so that
+	// no half-removed session is repaired or shown.
+	if n, err := s.storage.ResumeSessionRemovals(); err != nil {
+		s.logger.Warn("Failed to finish interrupted work-session removals", zap.Error(err))
+	} else if n > 0 {
+		s.logger.Info("Finished interrupted work-session removals", zap.Int("count", n))
+	}
 	if n, err := s.storage.RepairWorkSessionSummaries(); err != nil {
 		s.logger.Warn("Failed to repair work-session summaries", zap.Error(err))
 	} else if n > 0 {

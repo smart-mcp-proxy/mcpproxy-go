@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"go.etcd.io/bbolt"
@@ -35,9 +36,12 @@ import (
 const (
 	retentionBatch = 1000
 
-	// bodiesStrippedThroughKey remembers how far body stripping has gone, so a
-	// later pass does not re-read rows it already stripped (MetaBucket).
-	bodiesStrippedThroughKey = "activity_bodies_stripped_through"
+	// scanChunk bounds the keys one read transaction of the measuring scan
+	// visits, so the scan never pins one snapshot for the whole log.
+	scanChunk = 10000
+	// maxRetentionCandidates bounds each candidate list the scan collects.
+	// A pass that needs more continues in the next pass.
+	maxRetentionCandidates = 50000
 	// retentionShortfallKey holds the RetentionShortfall record (MetaBucket).
 	retentionShortfallKey = "activity_retention_shortfall"
 )
@@ -100,32 +104,139 @@ func bucketBytes(b *bbolt.Bucket) (n int, size int64) {
 	return n, size
 }
 
-// measureLog sums the bytes that count against the size cap: the activity rows
-// and the three buckets this feature adds (FR-034).
-func (m *Manager) measureLog() (retentionState, error) {
-	var st retentionState
-	err := m.db.db.View(func(tx *bbolt.Tx) error {
-		n, size := bucketBytes(tx.Bucket([]byte(ActivityRecordsBucket)))
-		st.rows, st.bytes = n, size
+// logScan is the result of the one read of the activity log a pass makes
+// (FR-038): its size, and the rows a later step may act on, oldest first.
+// The candidates are nominations from a cheap look at the stored bytes; the
+// step that acts re-reads and re-checks each row.
+type logScan struct {
+	st retentionState
+	// strip: rows that still have argument or response bodies.
+	strip [][]byte
+	// outside: rows that belong to no session with a summary.
+	outside [][]byte
+	// newest is the key of the newest row, which is never removed.
+	newest []byte
+}
+
+var (
+	sniffWorkSession  = []byte(`"work_session_id":"`)
+	sniffArguments    = []byte(`"arguments":{`)
+	sniffResponse     = []byte(`"response":"`)
+	sniffBodiesGone   = []byte(`"bodies_removed":true`)
+	sniffAuthArgument = "_auth_"
+)
+
+// sniffedWorkSessionID reads the work-session id out of a stored row without
+// decoding it. JSON escapes a quote inside a string, so the unescaped pattern
+// is a real key; a nested map with the same key name can only make a row look
+// like it belongs to a session, and the acting step re-checks.
+func sniffedWorkSessionID(v []byte) string {
+	i := bytes.Index(v, sniffWorkSession)
+	if i < 0 {
+		return ""
+	}
+	rest := v[i+len(sniffWorkSession):]
+	j := bytes.IndexByte(rest, '"')
+	if j < 0 {
+		return ""
+	}
+	return string(rest[:j])
+}
+
+func sniffedHasBodies(v []byte) bool {
+	if bytes.Contains(v, sniffBodiesGone) {
+		return false
+	}
+	return bytes.Contains(v, sniffArguments) || bytes.Contains(v, sniffResponse)
+}
+
+// scanLog reads the activity log once, in bounded read transactions, and
+// measures the bytes that count against the size cap: the activity rows and
+// the three buckets this feature adds (FR-034).
+func (m *Manager) scanLog() (logScan, error) {
+	var scan logScan
+	live := map[string]bool{}
+	if err := m.db.db.View(func(tx *bbolt.Tx) error {
+		if b := tx.Bucket([]byte(WorkSessionsBucket)); b != nil {
+			_ = b.ForEach(func(k, _ []byte) error {
+				live[string(k)] = true
+				return nil
+			})
+		}
 		for _, name := range []string{WorkSessionsBucket, WorkSessionRowsBucket, UpstreamEventsByServerBucket} {
-			_, s := bucketBytes(tx.Bucket([]byte(name)))
-			st.bytes += s
+			_, size := bucketBytes(tx.Bucket([]byte(name)))
+			scan.st.bytes += size
 		}
 		return nil
-	})
-	return st, err
+	}); err != nil {
+		return scan, err
+	}
+
+	var resume []byte
+	for {
+		done := false
+		err := m.db.db.View(func(tx *bbolt.Tx) error {
+			acts := tx.Bucket([]byte(ActivityRecordsBucket))
+			if acts == nil {
+				done = true
+				return nil
+			}
+			c := acts.Cursor()
+			var k, v []byte
+			if resume == nil {
+				k, v = c.First()
+			} else {
+				k, v = c.Seek(resume)
+				if k != nil && bytes.Equal(k, resume) {
+					k, v = c.Next()
+				}
+			}
+			n := 0
+			for ; k != nil && n < scanChunk; k, v = c.Next() {
+				n++
+				scan.st.rows++
+				scan.st.bytes += int64(len(k) + len(v))
+				scan.newest = append(scan.newest[:0], k...)
+				if len(scan.strip) < maxRetentionCandidates && sniffedHasBodies(v) {
+					scan.strip = append(scan.strip, append([]byte(nil), k...))
+				}
+				if len(scan.outside) < maxRetentionCandidates {
+					if ws := sniffedWorkSessionID(v); ws == "" || !live[ws] {
+						scan.outside = append(scan.outside, append([]byte(nil), k...))
+					}
+				}
+			}
+			if k == nil {
+				done = true
+			} else {
+				resume = append(resume[:0], scan.newest...)
+			}
+			return nil
+		})
+		if err != nil || done {
+			return scan, err
+		}
+	}
 }
 
 // txSummaries caches the summaries one transaction touches and writes them
-// back once.
+// back once. It tracks how the stored size of each changed, so the running
+// byte count of the pass stays true to what is stored.
 type txSummaries struct {
+	tx      *bbolt.Tx
 	bucket  *bbolt.Bucket
 	cache   map[string]*WorkSessionSummary
+	stored  map[string]int // serialized size when loaded
+	trimmed map[string]bool
 	missing map[string]bool
 }
 
 func newTxSummaries(tx *bbolt.Tx) *txSummaries {
-	return &txSummaries{bucket: tx.Bucket([]byte(WorkSessionsBucket)), cache: map[string]*WorkSessionSummary{}, missing: map[string]bool{}}
+	return &txSummaries{
+		tx: tx, bucket: tx.Bucket([]byte(WorkSessionsBucket)),
+		cache: map[string]*WorkSessionSummary{}, stored: map[string]int{},
+		trimmed: map[string]bool{}, missing: map[string]bool{},
+	}
 }
 
 func (t *txSummaries) get(id string) *WorkSessionSummary {
@@ -135,22 +246,41 @@ func (t *txSummaries) get(id string) *WorkSessionSummary {
 	if s, ok := t.cache[id]; ok {
 		return s
 	}
-	s, err := loadSummary(t.bucket, id)
-	if err != nil || s == nil {
+	data := t.bucket.Get([]byte(id))
+	var s WorkSessionSummary
+	if data == nil || json.Unmarshal(data, &s) != nil {
 		t.missing[id] = true
 		return nil
 	}
-	t.cache[id] = s
-	return s
+	t.cache[id] = &s
+	t.stored[id] = len(data)
+	return &s
 }
 
-func (t *txSummaries) flush() error {
-	for _, s := range t.cache {
-		if err := storeSummary(t.bucket, s); err != nil {
-			return err
+// flush writes the touched summaries and returns the change in stored bytes.
+// A summary that lost rows gets its truncated-start time: the time of its
+// earliest row that is still stored (the time of the last row removed when
+// none is left).
+func (t *txSummaries) flush() (int64, error) {
+	var delta int64
+	rows := t.tx.Bucket([]byte(WorkSessionRowsBucket))
+	for id, s := range t.cache {
+		if t.trimmed[id] && rows != nil {
+			prefix := workSessionRowPrefix(id)
+			if k, _ := rows.Cursor().Seek(prefix); k != nil && bytes.HasPrefix(k, prefix) {
+				s.TruncatedStartAt = activityKeyTime(k[len(prefix):])
+			}
 		}
+		data, err := json.Marshal(s)
+		if err != nil {
+			return delta, err
+		}
+		if err := t.bucket.Put([]byte(id), data); err != nil {
+			return delta, err
+		}
+		delta += int64(len(data) - t.stored[id])
 	}
-	return nil
+	return delta, nil
 }
 
 // deleteRowTx removes one activity row with its index entries and lowers the
@@ -170,6 +300,7 @@ func deleteRowTx(tx *bbolt.Tx, sums *txSummaries, key, value []byte) (freed int6
 					flags, server := parseIndexValue(iv)
 					if s := sums.get(rec.WorkSessionID); s != nil {
 						s.forgetStoredRow(flags, server, activityKeyTime(key))
+						sums.trimmed[rec.WorkSessionID] = true
 						inSession = true
 					}
 					if err := rows.Delete(ik); err != nil {
@@ -227,16 +358,21 @@ func (m *Manager) RunActivityRetention(p RetentionPolicy) (RetentionResult, erro
 
 	// 3. Size and count caps.
 	if p.MaxBytes > 0 || p.MaxRecords > 0 {
-		st, err := m.measureLog()
+		scan, err := m.scanLog()
 		if err != nil {
 			return res, err
 		}
-		targetRows := 0
-		if p.MaxRecords > 0 && st.rows > p.MaxRecords {
+		st := scan.st
+		// The count cap prunes down to 90% of itself, and never below one row.
+		countCap, targetRows := p.MaxRecords > 0 && st.rows > p.MaxRecords, 0
+		if countCap {
 			targetRows = int(float64(p.MaxRecords) * 0.9)
+			if targetRows < 1 {
+				targetRows = 1
+			}
 		}
 		over := func() bool {
-			return (p.MaxBytes > 0 && st.bytes > p.MaxBytes) || (targetRows > 0 && st.rows > targetRows)
+			return (p.MaxBytes > 0 && st.bytes > p.MaxBytes) || (countCap && st.rows > targetRows)
 		}
 		cause := func() string {
 			if p.MaxBytes > 0 && st.bytes > p.MaxBytes {
@@ -247,7 +383,7 @@ func (m *Manager) RunActivityRetention(p RetentionPolicy) (RetentionResult, erro
 
 		// 3a. Bodies. Only the size cap is helped by this.
 		if p.MaxBytes > 0 && st.bytes > p.MaxBytes {
-			n, err := m.stripBodies(&st, p.MaxBytes)
+			n, err := m.stripBodies(&st, p.MaxBytes, scan.strip)
 			if err != nil {
 				return res, err
 			}
@@ -255,7 +391,7 @@ func (m *Manager) RunActivityRetention(p RetentionPolicy) (RetentionResult, erro
 		}
 		// 3b. Rows outside the window.
 		if over() {
-			n, err := m.pruneOutsideWindow(&st, over)
+			n, err := m.pruneOutsideWindow(&st, over, scan.outside, scan.newest)
 			if err != nil {
 				return res, err
 			}
@@ -264,6 +400,11 @@ func (m *Manager) RunActivityRetention(p RetentionPolicy) (RetentionResult, erro
 		// 3c. Whole sessions, and 3d. the last one.
 		if over() {
 			c := cause()
+			// Recorded before the first row goes: a pass that is interrupted
+			// midway has still told the operator.
+			if err := m.updateShortfall(p, c); err != nil {
+				return res, err
+			}
 			removed, trimmed, err := m.pruneSessions(&st, over)
 			if err != nil {
 				return res, err
@@ -300,23 +441,69 @@ func (m *Manager) expireSummaries(cutoff time.Time) (int, error) {
 	}); err != nil {
 		return 0, err
 	}
+	n := 0
 	for _, id := range expired {
-		if err := m.dropSessionIndex(id, false, nil); err != nil {
-			return 0, err
+		dropped, err := m.dropSession(id, removalSummary, cutoff, nil)
+		if err != nil {
+			return n, err
+		}
+		if dropped {
+			n++
 		}
 	}
-	return len(expired), nil
+	return n, nil
 }
 
-// dropSessionIndex removes a session's index entries and its summary, in
-// batches. With rows it also removes the activity rows themselves.
-func (m *Manager) dropSessionIndex(id string, rows bool, st *retentionState) error {
+// Summary removal modes, stored on the summary while a removal is under way.
+const (
+	// removalSummary drops the summary and its index; the rows stay.
+	removalSummary = "summary"
+	// removalSession drops the rows too.
+	removalSession = "session"
+)
+
+// dropSession removes a session's index entries and its summary, in batches.
+// In removalSession mode it removes the activity rows too.
+//
+// The first batch marks the summary as being removed, in the same transaction
+// that deletes its first rows. A removal interrupted by a crash is therefore
+// visible on the summary and is finished at the next start
+// (ResumeSessionRemovals); until then the readers do not show the session.
+//
+// expireBefore, when set, is re-checked in that first transaction: a summary
+// whose last activity is no longer before it (a row arrived since it was
+// selected) is left alone, and dropSession reports false.
+func (m *Manager) dropSession(id, mode string, expireBefore time.Time, st *retentionState) (bool, error) {
 	prefix := workSessionRowPrefix(id)
+	first := true
 	for {
-		more := false
+		more, skipped := false, false
 		err := m.db.db.Update(func(tx *bbolt.Tx) error {
 			idx := tx.Bucket([]byte(WorkSessionRowsBucket))
 			acts := tx.Bucket([]byte(ActivityRecordsBucket))
+			sums := tx.Bucket([]byte(WorkSessionsBucket))
+
+			if first && sums != nil {
+				sum, err := loadSummary(sums, id)
+				if err != nil {
+					return err
+				}
+				if sum != nil {
+					if !expireBefore.IsZero() && !sum.LastActivityAt.Before(expireBefore) {
+						skipped = true
+						return nil
+					}
+					oldSize := len(sums.Get([]byte(id)))
+					sum.Removal = mode
+					if err := storeSummary(sums, sum); err != nil {
+						return err
+					}
+					if st != nil {
+						st.bytes += int64(len(sums.Get([]byte(id))) - oldSize)
+					}
+				}
+			}
+
 			var keys [][]byte
 			var sizes []int64
 			if idx != nil {
@@ -331,7 +518,7 @@ func (m *Manager) dropSessionIndex(id string, rows bool, st *retentionState) err
 				}
 			}
 			for i, k := range keys {
-				if rows && acts != nil {
+				if mode == removalSession && acts != nil {
 					ak := k[len(prefix):]
 					if v := acts.Get(ak); v != nil {
 						if st != nil {
@@ -350,23 +537,52 @@ func (m *Manager) dropSessionIndex(id string, rows bool, st *retentionState) err
 					return err
 				}
 			}
-			if !more {
-				if sums := tx.Bucket([]byte(WorkSessionsBucket)); sums != nil {
-					if v := sums.Get([]byte(id)); v != nil && st != nil {
-						st.bytes -= int64(len(id) + len(v))
-					}
-					return sums.Delete([]byte(id))
+			if !more && sums != nil {
+				if v := sums.Get([]byte(id)); v != nil && st != nil {
+					st.bytes -= int64(len(id) + len(v))
 				}
+				return sums.Delete([]byte(id))
 			}
 			return nil
 		})
 		if err != nil {
-			return err
+			return false, err
 		}
+		if skipped {
+			return false, nil
+		}
+		first = false
 		if !more {
-			return nil
+			return true, nil
 		}
 	}
+}
+
+// ResumeSessionRemovals finishes every session removal that a crash
+// interrupted. Called once at start, before sessions are read.
+func (m *Manager) ResumeSessionRemovals() (int, error) {
+	pending := map[string]string{}
+	if err := m.db.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(WorkSessionsBucket))
+		if b == nil {
+			return nil
+		}
+		return b.ForEach(func(k, v []byte) error {
+			var s WorkSessionSummary
+			if json.Unmarshal(v, &s) == nil && s.Removal != "" {
+				pending[string(k)] = s.Removal
+			}
+			return nil
+		})
+	}); err != nil {
+		return 0, err
+	}
+	for id, mode := range pending {
+		if _, err := m.dropSession(id, mode, time.Time{}, nil); err != nil {
+			return 0, err
+		}
+	}
+	return len(pending), nil
 }
 
 // pruneAged deletes rows older than cutoff, oldest first. It reports whether a
@@ -395,7 +611,8 @@ func (m *Manager) pruneAged(cutoff time.Time) (deleted int, inWindow bool, err e
 				inWindow = inWindow || in
 				batch++
 			}
-			return sums.flush()
+			_, err := sums.flush()
+			return err
 		})
 		if err != nil {
 			return deleted, inWindow, err
@@ -407,65 +624,80 @@ func (m *Manager) pruneAged(cutoff time.Time) (deleted int, inWindow bool, err e
 	}
 }
 
-// stripBodies removes Arguments and Response from the oldest rows that still
-// have them until the log is within maxBytes or every row has been visited.
-// Every other field of a row is kept (FR-032).
-func (m *Manager) stripBodies(st *retentionState, maxBytes int64) (int, error) {
+// stripRecordBodies removes the argument and response bodies of a row and
+// reports whether anything was removed. Every other field is kept (FR-032).
+// The internal `_auth_*` arguments are kept too: rows written before the
+// attribution fields existed carry their owner there, and a row must stay
+// readable by its owner after stripping. The owner is also copied to the
+// first-class fields.
+func stripRecordBodies(rec *ActivityRecord) bool {
+	removed := rec.Response != ""
+	var kept map[string]interface{}
+	for k, v := range rec.Arguments {
+		if strings.HasPrefix(k, sniffAuthArgument) {
+			if kept == nil {
+				kept = make(map[string]interface{})
+			}
+			kept[k] = v
+			continue
+		}
+		removed = true
+	}
+	if !removed {
+		return false
+	}
+	if rec.TokenName == "" {
+		rec.TokenName = rec.EffectiveTokenName()
+	}
+	if rec.TokenPrefix == "" {
+		rec.TokenPrefix = extractAuthMetadataField(rec, authArgTokenPrefix)
+	}
+	rec.Arguments, rec.Response, rec.BodiesRemoved = kept, "", true
+	return true
+}
+
+// stripBodies removes the bodies of the candidate rows, oldest first, until
+// the log is within maxBytes or the candidates are used up.
+func (m *Manager) stripBodies(st *retentionState, maxBytes int64, candidates [][]byte) (int, error) {
 	stripped := 0
-	for st.bytes > maxBytes {
-		visited, end := 0, false
+	for len(candidates) > 0 && st.bytes > maxBytes {
+		n := len(candidates)
+		if n > retentionBatch {
+			n = retentionBatch
+		}
+		batch := candidates[:n]
+		used := 0
 		err := m.db.db.Update(func(tx *bbolt.Tx) error {
 			acts := tx.Bucket([]byte(ActivityRecordsBucket))
-			meta, err := tx.CreateBucketIfNotExists([]byte(MetaBucket))
-			if err != nil {
-				return err
-			}
 			if acts == nil {
-				end = true
+				used = len(batch)
 				return nil
 			}
 			rows := tx.Bucket([]byte(WorkSessionRowsBucket))
-			c := acts.Cursor()
-			var k, v []byte
-			if from := meta.Get([]byte(bodiesStrippedThroughKey)); from != nil {
-				k, v = c.Seek(from)
-				if k != nil && bytes.Equal(k, from) {
-					k, v = c.Next()
-				}
-			} else {
-				k, v = c.First()
-			}
-			type rewrite struct {
-				k, v []byte
-				ws   string
-			}
-			var writes []rewrite
-			var last []byte
 			freed := int64(0)
-			for ; k != nil && visited < retentionBatch && st.bytes-freed > maxBytes; k, v = c.Next() {
-				visited++
-				last = append(last[:0], k...)
-				var rec ActivityRecord
-				if rec.UnmarshalBinary(v) != nil || (len(rec.Arguments) == 0 && rec.Response == "") {
+			for _, k := range batch {
+				if st.bytes-freed <= maxBytes {
+					break
+				}
+				used++
+				v := acts.Get(k)
+				if v == nil {
 					continue
 				}
-				rec.Arguments, rec.Response, rec.BodiesRemoved = nil, "", true
+				var rec ActivityRecord
+				if rec.UnmarshalBinary(v) != nil || !stripRecordBodies(&rec) {
+					continue
+				}
 				data, err := rec.MarshalBinary()
 				if err != nil || len(data) >= len(v) {
 					continue
 				}
 				freed += int64(len(v) - len(data))
-				writes = append(writes, rewrite{append([]byte(nil), k...), data, rec.WorkSessionID})
-			}
-			if k == nil {
-				end = true
-			}
-			for _, w := range writes {
-				if err := acts.Put(w.k, w.v); err != nil {
+				if err := acts.Put(k, data); err != nil {
 					return err
 				}
-				if w.ws != "" && rows != nil {
-					ik := workSessionRowKey(w.ws, w.k)
+				if rec.WorkSessionID != "" && rows != nil {
+					ik := workSessionRowKey(rec.WorkSessionID, k)
 					if iv := rows.Get(ik); iv != nil {
 						nv := append([]byte(nil), iv...)
 						nv[0] |= rowFlagBodiesRemoved
@@ -477,86 +709,78 @@ func (m *Manager) stripBodies(st *retentionState, maxBytes int64) (int, error) {
 				stripped++
 			}
 			st.bytes -= freed
-			if last != nil {
-				return meta.Put([]byte(bodiesStrippedThroughKey), last)
-			}
 			return nil
 		})
 		if err != nil {
 			return stripped, err
 		}
-		if end || visited == 0 {
+		if used == 0 {
 			break
 		}
+		candidates = candidates[used:]
 	}
 	return stripped, nil
 }
 
-// pruneOutsideWindow deletes, oldest first, rows that belong to no session
-// with a summary: rows with no work session, and rows of sessions older than
-// the window. Rows of a session inside the window are skipped.
-func (m *Manager) pruneOutsideWindow(st *retentionState, over func() bool) (int, error) {
+// pruneOutsideWindow deletes, oldest first, candidate rows that belong to no
+// session with a summary: rows with no work session, and rows of sessions
+// older than the window. Each candidate is re-read and re-checked; a row of a
+// session inside the window is never removed here, and neither is the newest
+// row of the log.
+func (m *Manager) pruneOutsideWindow(st *retentionState, over func() bool, candidates [][]byte, newest []byte) (int, error) {
 	deleted := 0
-	var resume []byte
-	for over() {
-		visited, end := 0, false
+	for len(candidates) > 0 && over() {
+		n := len(candidates)
+		if n > retentionBatch {
+			n = retentionBatch
+		}
+		batch := candidates[:n]
+		used := 0
 		err := m.db.db.Update(func(tx *bbolt.Tx) error {
 			acts := tx.Bucket([]byte(ActivityRecordsBucket))
 			if acts == nil {
-				end = true
+				used = len(batch)
 				return nil
 			}
 			sums := newTxSummaries(tx)
-			type kv struct{ k, v []byte }
-			var doomed []kv
 			pending := retentionState{}
-			c := acts.Cursor()
-			var k, v []byte
-			if resume == nil {
-				k, v = c.First()
-			} else {
-				k, v = c.Seek(resume)
-			}
-			// The newest row is never removed: the log is not emptied.
-			lastKey, _ := acts.Cursor().Last()
-			for ; k != nil && visited < retentionBatch; k, v = c.Next() {
+			for _, k := range batch {
 				if !overAfter(st, pending, over) {
 					break
 				}
-				visited++
-				if bytes.Equal(k, lastKey) {
+				used++
+				if bytes.Equal(k, newest) {
+					continue
+				}
+				v := acts.Get(k)
+				if v == nil {
 					continue
 				}
 				var rec ActivityRecord
 				if rec.UnmarshalBinary(v) == nil && rec.WorkSessionID != "" && sums.get(rec.WorkSessionID) != nil {
 					continue // inside the window: whole or not at all
 				}
-				doomed = append(doomed, kv{append([]byte(nil), k...), append([]byte(nil), v...)})
-				pending.rows++
-				pending.bytes += int64(len(k) + len(v))
-			}
-			if k == nil {
-				end = true
-			} else {
-				resume = append([]byte(nil), k...)
-			}
-			for _, d := range doomed {
-				freed, _, err := deleteRowTx(tx, sums, d.k, d.v)
+				freed, _, err := deleteRowTx(tx, sums, k, append([]byte(nil), v...))
 				if err != nil {
 					return err
 				}
-				st.rows--
-				st.bytes -= freed
+				pending.rows++
+				pending.bytes += freed
 				deleted++
 			}
-			return sums.flush()
+			st.rows -= pending.rows
+			st.bytes -= pending.bytes
+			delta, err := sums.flush()
+			st.bytes += delta
+			return err
 		})
 		if err != nil {
 			return deleted, err
 		}
-		if end || visited == 0 {
+		if used == 0 {
 			break
 		}
+		candidates = candidates[used:]
 	}
 	return deleted, nil
 }
@@ -583,7 +807,7 @@ func (m *Manager) pruneSessions(st *retentionState, over func() bool) (removed, 
 	sort.Slice(sums, func(i, j int) bool { return sums[i].LastActivityAt.Before(sums[j].LastActivityAt) })
 
 	for len(sums) > 1 && over() {
-		if err := m.dropSessionIndex(sums[0].ID, true, st); err != nil {
+		if _, err := m.dropSession(sums[0].ID, removalSession, time.Time{}, st); err != nil {
 			return removed, trimmed, err
 		}
 		removed++
@@ -645,7 +869,9 @@ func (m *Manager) trimSession(id string, st *retentionState, over func() bool) (
 			}
 			st.rows -= pending.rows
 			st.bytes -= pending.bytes
-			return sums.flush()
+			delta, err := sums.flush()
+			st.bytes += delta
+			return err
 		})
 		if err != nil {
 			return trimmed, err

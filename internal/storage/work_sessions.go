@@ -2,6 +2,8 @@ package storage
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -41,9 +43,10 @@ const (
 	// (FR-012), in characters.
 	MaxWorkSessionReasonLen = 200
 
-	// maxSummaryConnections bounds the connection ids a summary lists; the
-	// count keeps growing past it.
-	maxSummaryConnections = 32
+	// maxSummaryConnections bounds the distinct connections a summary can
+	// tell apart. Each is kept as a short hash, so the count is exact up to
+	// this many connections and stops there.
+	maxSummaryConnections = 4096
 
 	workSessionKeySep = byte(0)
 )
@@ -118,9 +121,10 @@ type WorkSessionSummary struct {
 	// later row arrives.
 	EndedAt time.Time `json:"ended_at,omitzero"`
 
-	// ConnectionIDs are the distinct MCP connections seen, up to a bound;
-	// ConnectionCount is the true number.
-	ConnectionIDs   []string `json:"connection_ids,omitempty"`
+	// ConnectionKeys are short hashes of the distinct MCP connections seen,
+	// and ConnectionCount their number. The count is exact up to
+	// maxSummaryConnections.
+	ConnectionKeys  []string `json:"connection_keys,omitempty"`
 	ConnectionCount int      `json:"connection_count,omitempty"`
 
 	// TruncatedStartAt is set when rows of the session were removed by
@@ -129,17 +133,50 @@ type WorkSessionSummary struct {
 	// Rebuilt is set when the summary was rebuilt from the remaining rows
 	// (FR-013); its lifetime facts then cover only those rows.
 	Rebuilt bool `json:"rebuilt,omitempty"`
+	// Removal is set while retention is removing the session in batches
+	// ("summary": index and summary only; "session": the rows too). A
+	// summary that carries it is not shown, and the removal is finished at
+	// the next start if a crash interrupted it.
+	Removal string `json:"removal,omitempty"`
 
 	Servers map[string]*WorkSessionPartition `json:"servers,omitempty"`
 }
 
+// sortedServers returns the admitted server names in a fixed order, so that
+// every reader breaks a tie between two servers the same way.
+func (s *WorkSessionSummary) sortedServers(allow func(server string) bool) []string {
+	names := make([]string, 0, len(s.Servers))
+	for name := range s.Servers {
+		if allow == nil || allow(name) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 // Totals sums the partitions the allow function admits (nil admits all).
 func (s *WorkSessionSummary) Totals(allow func(server string) bool) WorkSessionPartition {
+	t, _ := s.totals(allow)
+	return t
+}
+
+// LastFailureServer names the server of the most recent failure among the
+// admitted partitions, and whether there is one. It is the server whose last
+// failure facts Totals returns.
+func (s *WorkSessionSummary) LastFailureServer(allow func(server string) bool) (string, bool) {
+	t, server := s.totals(allow)
+	return server, !t.LastFailureAt.IsZero()
+}
+
+// totals sums the admitted partitions and names the server of the last
+// failure. Two servers that failed at the same instant are ordered by name,
+// here and nowhere else, so the facts and the server always agree.
+func (s *WorkSessionSummary) totals(allow func(server string) bool) (WorkSessionPartition, string) {
 	var t WorkSessionPartition
-	for name, p := range s.Servers {
-		if allow != nil && !allow(name) {
-			continue
-		}
+	lastServer := ""
+	for _, name := range s.sortedServers(allow) {
+		p := s.Servers[name]
 		t.Attempts += p.Attempts
 		t.Failures += p.Failures
 		t.Blocks += p.Blocks
@@ -159,25 +196,10 @@ func (s *WorkSessionSummary) Totals(allow func(server string) bool) WorkSessionP
 			t.LastErrorClass, t.LastErrorCode = p.LastErrorClass, p.LastErrorCode
 			t.LastTool, t.LastReason = p.LastTool, p.LastReason
 			t.LastFailureBlock = p.LastFailureBlock
+			lastServer = name
 		}
 	}
-	return t
-}
-
-// LastFailureServer names the server of the most recent failure among the
-// admitted partitions, and whether there is one.
-func (s *WorkSessionSummary) LastFailureServer(allow func(server string) bool) (string, bool) {
-	var best time.Time
-	name, ok := "", false
-	for n, p := range s.Servers {
-		if allow != nil && !allow(n) {
-			continue
-		}
-		if p.LastFailureAt.After(best) {
-			best, name, ok = p.LastFailureAt, n, true
-		}
-	}
-	return name, ok
+	return t, lastServer
 }
 
 func roleFlags(role AttemptRole, bodiesRemoved bool) byte {
@@ -321,18 +343,26 @@ func (s *WorkSessionSummary) applyRow(r *ActivityRecord, role AttemptRole) {
 	// Ownership. The first attributed row names the owner. A later row of
 	// another credential makes the session ownerless; only pre-124 rows can do
 	// that, since the credential is part of what derives the id now.
-	rowHasIdentity := r.TokenName != "" || r.TokenPrefix != "" || r.UserID != ""
+	// The identity is read the way ActivityIdentityOwner.Owns reads it,
+	// including the internal arguments of rows written before the
+	// first-class fields existed; otherwise such a row of another credential
+	// would be folded into this owner's session unnoticed.
+	rowName, rowPrefix := r.EffectiveTokenName(), r.TokenPrefix
+	if rowPrefix == "" {
+		rowPrefix = extractAuthMetadataField(r, authArgTokenPrefix)
+	}
+	rowHasIdentity := rowName != "" || rowPrefix != "" || r.UserID != ""
 	summaryHasIdentity := s.TokenName != "" || s.TokenPrefix != "" || s.UserID != ""
 	switch {
 	case !rowHasIdentity:
 	case !summaryHasIdentity && !s.Ownerless:
-		s.TokenName, s.TokenPrefix, s.UserID = r.TokenName, r.TokenPrefix, r.UserID
-	case r.TokenName != s.TokenName || (r.TokenPrefix != "" && s.TokenPrefix != "" && r.TokenPrefix != s.TokenPrefix) ||
+		s.TokenName, s.TokenPrefix, s.UserID = rowName, rowPrefix, r.UserID
+	case rowName != s.TokenName || (rowPrefix != "" && s.TokenPrefix != "" && rowPrefix != s.TokenPrefix) ||
 		(r.UserID != "" && s.UserID != "" && r.UserID != s.UserID):
 		s.Ownerless = true
 	default:
 		if s.TokenPrefix == "" {
-			s.TokenPrefix = r.TokenPrefix
+			s.TokenPrefix = rowPrefix
 		}
 		if s.UserID == "" {
 			s.UserID = r.UserID
@@ -368,22 +398,18 @@ func (s *WorkSessionSummary) applyRow(r *ActivityRecord, role AttemptRole) {
 		s.EndedAt = time.Time{} // the session is active again (FR-015)
 	}
 
-	if r.SessionID != "" {
+	if r.SessionID != "" && len(s.ConnectionKeys) < maxSummaryConnections {
+		key := connectionKey(r.SessionID)
 		known := false
-		for _, id := range s.ConnectionIDs {
-			if id == r.SessionID {
+		for _, k := range s.ConnectionKeys {
+			if k == key {
 				known = true
 				break
 			}
 		}
 		if !known {
-			if len(s.ConnectionIDs) < maxSummaryConnections {
-				s.ConnectionIDs = append(s.ConnectionIDs, r.SessionID)
-				s.ConnectionCount = len(s.ConnectionIDs)
-			} else {
-				// Past the bound the ids are not kept; the count is a floor.
-				s.ConnectionCount = maxSummaryConnections + 1
-			}
+			s.ConnectionKeys = append(s.ConnectionKeys, key)
+			s.ConnectionCount = len(s.ConnectionKeys)
 		}
 	}
 
@@ -427,6 +453,13 @@ func (s *WorkSessionSummary) applyRow(r *ActivityRecord, role AttemptRole) {
 	}
 }
 
+// connectionKey is a short hash of a connection id: enough to tell the
+// connections of one session apart, without keeping the ids.
+func connectionKey(sessionID string) string {
+	sum := sha256.Sum256([]byte(sessionID))
+	return hex.EncodeToString(sum[:6])
+}
+
 // forgetStoredRow lowers the STORED counters for a row that retention removed.
 // Lifetime facts are untouched (FR-013).
 func (s *WorkSessionSummary) forgetStoredRow(flags byte, server string, at time.Time) {
@@ -439,6 +472,9 @@ func (s *WorkSessionSummary) forgetStoredRow(flags byte, server string, at time.
 			p.StoredBlocks--
 		}
 	}
+	// The truncated start is the time of the earliest row still stored; the
+	// caller's flush sets it from the index. Until then, and when no row is
+	// left, it is the time of the last row removed.
 	if at.After(s.TruncatedStartAt) {
 		s.TruncatedStartAt = at
 	}
@@ -498,6 +534,9 @@ func (m *Manager) GetWorkSessionSummary(id string) (*WorkSessionSummary, error) 
 			return nil
 		}
 		s, err := loadSummary(b, id)
+		if s != nil && s.Removal != "" {
+			s = nil // being removed by retention
+		}
 		out = s
 		return err
 	})
@@ -518,6 +557,9 @@ func (m *Manager) ListWorkSessionSummaries() ([]*WorkSessionSummary, error) {
 			var s WorkSessionSummary
 			if err := json.Unmarshal(v, &s); err != nil {
 				return nil // a corrupt summary is skipped, not fatal to the list
+			}
+			if s.Removal != "" {
+				return nil // being removed by retention
 			}
 			out = append(out, &s)
 			return nil

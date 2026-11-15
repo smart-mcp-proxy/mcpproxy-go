@@ -142,9 +142,9 @@ func TestRetention_BodiesAreRemovedBeforeRows(t *testing.T) {
 	}
 	assert.Equal(t, res.BodiesStripped, strippedSeen)
 
-	st, err := m.measureLog()
+	scan, err := m.scanLog()
 	require.NoError(t, err)
-	assert.LessOrEqual(t, st.bytes, p.MaxBytes, "the activity bucket and the new buckets together fit the budget")
+	assert.LessOrEqual(t, scan.st.bytes, p.MaxBytes, "the activity bucket and the new buckets together fit the budget")
 
 	// The oldest rows were stripped first.
 	oldestStripped, newestKept := false, false
