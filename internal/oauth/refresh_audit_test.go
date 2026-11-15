@@ -66,6 +66,7 @@ func TestRefreshAudit_OneReportPerFailedFlight(t *testing.T) {
 	assert.Equal(t, RefreshClassServerError, got.Class)
 	assert.Equal(t, RefreshTriggerReactive, got.Trigger, "a transient reactive failure is reported, which the completion hook never sees")
 	assert.False(t, got.At.IsZero())
+	assert.NotContains(t, got.Code, "server_error", "only a catalogue code crosses the boundary, never error text")
 }
 
 // A cooldown that answers from memory sends nothing and reports nothing; a

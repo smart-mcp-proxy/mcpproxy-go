@@ -62,3 +62,32 @@ func TestRefreshManager_NotificationsAreNumberedInDecisionOrder(t *testing.T) {
 	assert.Equal(t, []uint64{2}, failed, "the failure of schedule 1 is numbered after its save and before the next")
 	assert.Equal(t, 1, emitter.GetFailedEvents(), "the existing oauth.refresh_failed event is still emitted once")
 }
+
+// Review finding: the numbered save notification is sent after the manager's
+// lock is released, so an emitter may read the manager back.
+type readingEmitter struct {
+	orderEmitter
+	manager *RefreshManager
+	read    chan struct{}
+}
+
+func (e *readingEmitter) EmitOAuthTokenSavedNumbered(serverName string, seq uint64) {
+	_ = e.manager.GetSchedule(serverName) // would deadlock under the lock
+	e.orderEmitter.EmitOAuthTokenSavedNumbered(serverName, seq)
+	close(e.read)
+}
+
+func TestRefreshManager_SaveNotificationIsSentOutsideTheLock(t *testing.T) {
+	manager := NewRefreshManager(newMockTokenStore(), nil, nil, zaptest.NewLogger(t))
+	emitter := &readingEmitter{manager: manager, read: make(chan struct{})}
+	manager.SetEventEmitter(emitter)
+	require.NoError(t, manager.Start(context.Background()))
+	defer manager.Stop()
+
+	go manager.OnTokenSaved("srv", time.Now().Add(time.Hour))
+	select {
+	case <-emitter.read:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the emitter could not read the manager: the notification was sent under the lock")
+	}
+}

@@ -474,11 +474,22 @@ func (m *RefreshManager) OnTokenSaved(serverName string, expiresAt time.Time) {
 // PR2b): the new schedule carries the binding, so a terminal outcome of
 // another binding's flight never fails it (Sol r1 on #1621).
 func (m *RefreshManager) OnTokenSavedFor(serverName string, expiresAt time.Time, binding commitview.CredentialBinding) {
+	// The notification is sent after the lock is released: an emitter may
+	// read the manager back (GetSchedule, GetRefreshState).
+	if seq, ordered := m.installScheduleForSavedToken(serverName, expiresAt, binding); ordered != nil {
+		ordered.EmitOAuthTokenSavedNumbered(serverName, seq)
+	}
+}
+
+// installScheduleForSavedToken does the work of OnTokenSavedFor under the
+// lock. It returns the notification number of the save and the emitter to
+// tell, or a nil emitter when there is nothing to send.
+func (m *RefreshManager) installScheduleForSavedToken(serverName string, expiresAt time.Time, binding commitview.CredentialBinding) (uint64, RefreshOrderEmitter) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if !m.started {
-		return
+		return 0, nil
 	}
 
 	// A late notification from a superseded binding (Sol r3 on #1621): a
@@ -493,7 +504,7 @@ func (m *RefreshManager) OnTokenSavedFor(serverName string, expiresAt time.Time,
 			zap.String("server", serverName),
 			zap.String("save_binding", binding.String()),
 			zap.String("schedule_binding", existing.Binding.String()))
-		return
+		return 0, nil
 	}
 
 	// Cancel existing schedule if any
@@ -507,9 +518,8 @@ func (m *RefreshManager) OnTokenSavedFor(serverName string, expiresAt time.Time,
 	// Spec 124 D5: number the save under the lock, so it is ordered against
 	// any failure the manager accepts for this server.
 	seq := m.nextNotifySeqLocked(serverName)
-	if ordered, ok := m.eventEmitter.(RefreshOrderEmitter); ok {
-		ordered.EmitOAuthTokenSavedNumbered(serverName, seq)
-	}
+	ordered, _ := m.eventEmitter.(RefreshOrderEmitter)
+	return seq, ordered
 }
 
 // nextNotifySeqLocked returns the next notification number of a server.

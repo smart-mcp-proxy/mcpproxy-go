@@ -93,14 +93,20 @@ func upstreamEventMessage(kind UpstreamEventKind, code string) string {
 // any. It decides only from the transition; whether a recovery is worth a row
 // (a loss was recorded first) is decided by the collapser, which has the
 // history.
-func transitionEvent(server string, t types.Transition) (UpstreamEvent, bool) {
+func transitionEvent(server, transport string, t types.Transition) (UpstreamEvent, bool) {
 	ev := UpstreamEvent{Server: server, At: t.At.UTC()}
+	stdio := transport == "stdio"
 
 	code := t.TerminalCode
 	if code == "" && t.Err != nil {
-		code = string(diagnostics.Classify(t.Err, diagnostics.ClassifierHints{ServerID: server}))
+		code = string(diagnostics.Classify(t.Err, diagnostics.ClassifierHints{ServerID: server, Transport: transport}))
 	}
 	if code == string(diagnostics.UnknownUnclassified) {
+		code = ""
+	}
+	// A connection that was established did not "exit before initialize",
+	// whatever the classifier makes of the error text.
+	if t.From == types.StateReady && code == string(diagnostics.STDIOExitBeforeInitialize) {
 		code = ""
 	}
 	loginCode := code == string(diagnostics.OAuthLoginRequired) || code == string(diagnostics.OAuthReauthRequired)
@@ -121,9 +127,17 @@ func transitionEvent(server string, t types.Transition) (UpstreamEvent, bool) {
 
 	case t.From == types.StateReady && t.To != types.StateReady:
 		ev.Code = code
-		if strings.HasPrefix(code, "MCPX_STDIO_EXIT") {
+		switch {
+		case strings.HasPrefix(code, "MCPX_STDIO_EXIT"):
 			ev.Kind = UpstreamProcessExited
-		} else {
+		case stdio && t.Err != nil:
+			// An established stdio connection that fails is its process (or
+			// its pipes) going away. The error is usually just "transport
+			// closed", which carries no exit code.
+			ev.Kind = UpstreamProcessExited
+		default:
+			// Any other transport, and a stdio server that was disconnected
+			// on purpose (no error): a lost or closed connection.
 			ev.Kind = UpstreamConnectionLost
 		}
 		return ev, true
@@ -155,9 +169,17 @@ type upstreamEventCollapser struct {
 	mu sync.Mutex
 	// latest is the most recent row of each (server, kind, owner).
 	latest map[upstreamRowKey]*upstreamRow
-	// hourStart / hourRows count the rows a server added in the current hour.
-	hourStart map[string]time.Time
-	hourRows  map[string]int
+	// hourRows counts the rows a server added in each hour, keyed by the
+	// hour of the EVENT. Events of one server can arrive slightly out of
+	// order (the state drain and the refresh observer deliver separately),
+	// so a late event of the previous hour must not reset the current one.
+	hourRows map[string]map[int64]int
+	// seen is when each server last had an event, for cleanup.
+	seen   map[string]time.Time
+	lastGC time.Time
+	// suppressed counts events not recorded because their server was at the
+	// hourly bound and had no row of their kind to merge into.
+	suppressed int
 	// down marks servers with a recorded loss, exit or login requirement that
 	// no recovery has followed. Only such a server gets a "restored" row.
 	down map[string]bool
@@ -172,8 +194,8 @@ type upstreamEventCollapser struct {
 func newUpstreamEventCollapser() *upstreamEventCollapser {
 	return &upstreamEventCollapser{
 		latest:    make(map[upstreamRowKey]*upstreamRow),
-		hourStart: make(map[string]time.Time),
-		hourRows:  make(map[string]int),
+		hourRows:  make(map[string]map[int64]int),
+		seen:      make(map[string]time.Time),
 		down:      make(map[string]bool),
 		loginOpen: make(map[upstreamOwnerKey]*upstreamRow),
 		loginSeq:  make(map[upstreamOwnerKey]uint64),
@@ -183,6 +205,10 @@ func newUpstreamEventCollapser() *upstreamEventCollapser {
 // place decides which row an event goes into. It returns the row and whether
 // the row is new; a nil row means the event is not recorded at all.
 func (c *upstreamEventCollapser) place(e UpstreamEvent) (row *upstreamRow, isNew bool) {
+	if e.At.After(c.seen[e.Server]) {
+		c.seen[e.Server] = e.At
+	}
+	c.gc(e.At)
 	key := upstreamRowKey{e.Server, e.Kind, e.Owner}
 	owner := upstreamOwnerKey{e.Server, e.Owner}
 
@@ -217,7 +243,7 @@ func (c *upstreamEventCollapser) place(e UpstreamEvent) (row *upstreamRow, isNew
 			}
 		}
 		row, isNew = c.rowFor(key, e)
-		if !stale {
+		if !stale && row != nil {
 			c.loginOpen[owner] = row
 		}
 		return row, isNew
@@ -225,27 +251,97 @@ func (c *upstreamEventCollapser) place(e UpstreamEvent) (row *upstreamRow, isNew
 	return c.rowFor(key, e)
 }
 
-// rowFor applies the per-minute collapse and the hourly bound.
+// Bounds of the collapser's own memory.
+const (
+	// upstreamMergeAt is the number of rows in an hour at which a server's
+	// repeats start merging into the latest row of their kind regardless of
+	// the minute window. The rows between it and the hard limit are left for
+	// kinds and owners that have no row yet.
+	upstreamMergeAt = 100
+	// collapserGCInterval is how often idle state is dropped.
+	collapserGCInterval = 10 * time.Minute
+	// collapserRowIdle is how long a row can still be merged into.
+	collapserRowIdle = 2 * time.Hour
+	// collapserServerIdle is how long a server with no event keeps its
+	// down/login state. A notification cannot plausibly be this late, and a
+	// removed server's state must not stay for the life of the process.
+	collapserServerIdle = 7 * 24 * time.Hour
+)
+
+// rowFor applies the per-minute collapse and the hourly bound. It returns a
+// nil row when the event cannot be recorded without breaking the bound.
 func (c *upstreamEventCollapser) rowFor(key upstreamRowKey, e UpstreamEvent) (*upstreamRow, bool) {
-	hour := e.At.Truncate(time.Hour)
-	if !c.hourStart[e.Server].Equal(hour) {
-		c.hourStart[e.Server] = hour
-		c.hourRows[e.Server] = 0
+	hour := e.At.Truncate(time.Hour).Unix()
+	hours := c.hourRows[e.Server]
+	if hours == nil {
+		hours = make(map[int64]int)
+		c.hourRows[e.Server] = hours
 	}
+	used := hours[hour]
+
 	last := c.latest[key]
-	merge := last != nil && (e.At.Sub(last.firstAt) < upstreamEventCollapseWindow ||
-		c.hourRows[e.Server] >= MaxUpstreamEventRowsPerHour)
-	if merge && !e.At.Before(last.firstAt) {
+	if last != nil && !e.At.Before(last.firstAt) &&
+		(e.At.Sub(last.firstAt) < upstreamEventCollapseWindow || used >= upstreamMergeAt) {
 		last.count++
 		if e.At.After(last.lastAt) {
 			last.lastAt = e.At
 		}
 		return last, false
 	}
+	if used >= MaxUpstreamEventRowsPerHour {
+		// The hard limit, and nothing of this kind and owner to merge into.
+		// Merging into another owner's row would mix two users (FR-025), so
+		// the event is not recorded.
+		c.suppressed++
+		return nil, false
+	}
 	row := &upstreamRow{id: ulid.Make().String(), firstAt: e.At, lastAt: e.At, count: 1, code: e.Code}
 	c.latest[key] = row
-	c.hourRows[e.Server]++
+	hours[hour] = used + 1
 	return row, true
+}
+
+// gc drops state that can no longer matter: rows too old to merge into, hour
+// counters of past hours, and everything about a server that has had no event
+// for a long time (a removed server). now is the time of the current event.
+func (c *upstreamEventCollapser) gc(now time.Time) {
+	if now.Sub(c.lastGC) < collapserGCInterval {
+		return
+	}
+	c.lastGC = now
+	for k, row := range c.latest {
+		if now.Sub(row.lastAt) > collapserRowIdle {
+			delete(c.latest, k)
+		}
+	}
+	oldestHour := now.Add(-2 * time.Hour).Truncate(time.Hour).Unix()
+	for server, hours := range c.hourRows {
+		for h := range hours {
+			if h < oldestHour {
+				delete(hours, h)
+			}
+		}
+		if len(hours) == 0 {
+			delete(c.hourRows, server)
+		}
+	}
+	for server, at := range c.seen {
+		if now.Sub(at) <= collapserServerIdle {
+			continue
+		}
+		delete(c.seen, server)
+		delete(c.down, server)
+		for k := range c.loginOpen {
+			if k.server == server {
+				delete(c.loginOpen, k)
+			}
+		}
+		for k := range c.loginSeq {
+			if k.server == server {
+				delete(c.loginSeq, k)
+			}
+		}
+	}
 }
 
 // noteTokenSaved clears the open login requirement of (server, owner), unless
@@ -367,8 +463,8 @@ func (r *Runtime) installUpstreamEventObserver() {
 	if r == nil || r.upstreamManager == nil || r.activityService == nil {
 		return
 	}
-	r.upstreamManager.SetTransitionObserver(func(server string, t types.Transition) {
-		if ev, ok := transitionEvent(server, t); ok {
+	r.upstreamManager.SetTransitionObserver(func(server, transport string, t types.Transition) {
+		if ev, ok := transitionEvent(server, transport, t); ok {
 			r.activityService.RecordUpstreamEvent(ev)
 		}
 	})
@@ -378,6 +474,7 @@ func (r *Runtime) installUpstreamEventObserver() {
 			Server: f.ServerName,
 			Kind:   UpstreamOAuthRefreshFailed,
 			At:     f.At.UTC(),
+			Code:   f.Code,
 		})
 	})
 }

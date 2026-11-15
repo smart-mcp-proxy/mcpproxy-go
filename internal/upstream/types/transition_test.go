@@ -166,6 +166,49 @@ func TestTransitionCapture_StalledObserverKeepsTheNewest(t *testing.T) {
 		got := sink.snapshot()
 		return len(got) > 0 && got[len(got)-1].To == StateReady
 	}, 5*time.Second, time.Millisecond, "the final Ready is delivered")
+
+	// Nothing was dropped: the delivered records form one unbroken chain, and
+	// the transitions that were folded are accounted for.
+	require.Eventually(t, func() bool {
+		sm.mu.RLock()
+		defer sm.mu.RUnlock()
+		return !sm.draining
+	}, 5*time.Second, time.Millisecond)
+	got := sink.snapshot()
+	total := 0
+	for i, tr := range got {
+		total += 1 + tr.Folded
+		if i > 0 {
+			assert.Equal(t, got[i-1].To, tr.From, "record %d continues from the previous one", i)
+		}
+	}
+	assert.Equal(t, 1+maxQueuedTransitions*2+1, total, "every transition is delivered or counted as folded")
+}
+
+// A full queue folds a pair whose middle state is not Ready first, so a loss
+// and a recovery stay separate records while any other pair can be folded.
+func TestTransitionCapture_FoldingKeepsLossAndRecoveryApart(t *testing.T) {
+	sm := NewStateManager()
+	sm.mu.Lock()
+	sm.transitions = []Transition{
+		{From: StateError, To: StateReady},      // a recovery
+		{From: StateReady, To: StateError},      // a loss
+		{From: StateError, To: StateConnecting}, // foldable with the next
+		{From: StateConnecting, To: StateError},
+	}
+	sm.foldOldestLocked()
+	q := append([]Transition(nil), sm.transitions...)
+	sm.mu.Unlock()
+
+	require.Len(t, q, 3)
+	assert.Equal(t, Transition{From: StateError, To: StateReady}, q[0], "the recovery is still its own record")
+	// The loss absorbed the step after it: it still leaves Ready, so it is
+	// still a loss, and it says one transition was folded into it.
+	assert.Equal(t, Transition{From: StateReady, To: StateConnecting, Folded: 1}, q[1])
+	assert.Equal(t, Transition{From: StateConnecting, To: StateError}, q[2])
+	for i := 1; i < len(q); i++ {
+		assert.Equal(t, q[i-1].To, q[i].From, "the chain is unbroken")
+	}
 }
 
 // Without an observer nothing is queued and no goroutine is started.

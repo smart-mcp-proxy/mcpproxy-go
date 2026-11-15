@@ -26,6 +26,13 @@ type Transition struct {
 	Err error
 	// TerminalCode is the diagnostics code of a terminal failure, when set.
 	TerminalCode string
+	// Folded is the number of earlier transitions folded into this one
+	// because the observer had stalled and the queue was full. A folded
+	// record still starts where the first one started and ends where the
+	// last one ended, so the observer sees every state the connection is
+	// left in; what it loses is the intermediate states, and it is told how
+	// many.
+	Folded int
 }
 
 // TransitionObserver receives transitions in the order they happened, one at
@@ -55,10 +62,7 @@ func (sm *StateManager) captureLocked(oldState ConnectionState) {
 		return
 	}
 	if len(sm.transitions) >= maxQueuedTransitions {
-		// The observer has stalled. Drop the OLDEST undelivered transition,
-		// never the newest: the latest state (a final Ready) must arrive.
-		copy(sm.transitions, sm.transitions[1:])
-		sm.transitions = sm.transitions[:len(sm.transitions)-1]
+		sm.foldOldestLocked()
 	}
 	sm.transitions = append(sm.transitions, Transition{
 		From:         oldState,
@@ -71,6 +75,34 @@ func (sm *StateManager) captureLocked(oldState ConnectionState) {
 		sm.draining = true
 		go sm.drainTransitions()
 	}
+}
+
+// foldOldestLocked makes room in a full queue by folding two adjacent
+// transitions into one, never by dropping one: the folded record goes from
+// the first one's start to the second one's end and keeps the later time and
+// error. It prefers a pair whose middle state is not Ready, so that a loss and
+// a recovery stay two records for as long as any other pair can be folded.
+// Caller holds sm.mu.
+func (sm *StateManager) foldOldestLocked() {
+	q := sm.transitions
+	if len(q) < 2 {
+		return
+	}
+	at := 0
+	for i := 0; i+1 < len(q); i++ {
+		if q[i].To != StateReady {
+			at = i
+			break
+		}
+	}
+	a, b := q[at], q[at+1]
+	folded := Transition{
+		From: a.From, To: b.To, At: b.At, Err: b.Err, TerminalCode: b.TerminalCode,
+		Folded: a.Folded + b.Folded + 1,
+	}
+	q[at] = folded
+	copy(q[at+1:], q[at+2:])
+	sm.transitions = q[:len(q)-1]
 }
 
 // drainTransitions delivers queued transitions in order. At most one drain

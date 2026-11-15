@@ -497,7 +497,11 @@ func (m *Manager) SetToolDiscoveryCallback(callback func(ctx context.Context, se
 // ServerTransitionObserver receives one state change of one upstream server.
 // Calls for the same server arrive one at a time, in the order the changes
 // happened; calls for different servers may be concurrent.
-type ServerTransitionObserver func(serverName string, t types.Transition)
+//
+// transport is the server's configured transport ("stdio", "http", ...). For
+// a stdio server a lost connection is its process going away, which the error
+// text alone does not say once the connection was established.
+type ServerTransitionObserver func(serverName, transport string, t types.Transition)
 
 // SetTransitionObserver installs the observer on every existing client and on
 // every client created later. The runtime uses it to record connection loss
@@ -508,14 +512,15 @@ func (m *Manager) SetTransitionObserver(observer ServerTransitionObserver) {
 	m.transitionObserver = observer
 	for _, client := range m.clients {
 		if client != nil {
-			m.wireTransitionObserverLocked(client, client.GetConfig().Name)
+			cfg := client.GetConfig()
+			m.wireTransitionObserverLocked(client, cfg.Name, serverTransport(cfg))
 		}
 	}
 }
 
 // wireTransitionObserverLocked connects one client's state manager to the
 // manager's observer. Caller holds m.mu.
-func (m *Manager) wireTransitionObserverLocked(client *managed.Client, serverName string) {
+func (m *Manager) wireTransitionObserverLocked(client *managed.Client, serverName, transport string) {
 	observer := m.transitionObserver
 	if observer == nil {
 		client.StateManager.SetTransitionObserver(nil)
@@ -528,8 +533,22 @@ func (m *Manager) wireTransitionObserverLocked(client *managed.Client, serverNam
 		if client.Unregistered() {
 			return
 		}
-		observer(serverName, t)
+		observer(serverName, transport, t)
 	})
+}
+
+// serverTransport names a server's transport for the transition observer.
+func serverTransport(cfg *config.ServerConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	if cfg.Protocol != "" && cfg.Protocol != "auto" {
+		return cfg.Protocol
+	}
+	if cfg.Command != "" {
+		return "stdio"
+	}
+	return "http"
 }
 
 // SetPromptsChangedCallback sets the callback for triggering aggregated-prompt

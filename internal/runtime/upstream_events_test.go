@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -40,23 +41,28 @@ func eventService(t *testing.T) (*ActivityService, *storage.Manager) {
 func TestTransitionEvent_Classification(t *testing.T) {
 	at := evBase
 	cases := []struct {
-		name     string
-		tr       types.Transition
-		wantKind UpstreamEventKind
-		wantCode string
-		none     bool
+		name      string
+		tr        types.Transition
+		wantKind  UpstreamEventKind
+		wantCode  string
+		none      bool
+		transport string
 	}{
-		{"ready to error is a loss", types.Transition{From: types.StateReady, To: types.StateError, At: at, Err: errors.New("EOF")}, UpstreamConnectionLost, "", false},
-		{"ready to disconnected is a loss", types.Transition{From: types.StateReady, To: types.StateDisconnected, At: at}, UpstreamConnectionLost, "", false},
-		{"a terminal stdio exit is a process exit", types.Transition{From: types.StateReady, To: types.StateError, At: at, Err: errors.New("x"), TerminalCode: string(diagnostics.STDIOExitNonzero)}, UpstreamProcessExited, string(diagnostics.STDIOExitNonzero), false},
-		{"back to ready is a recovery", types.Transition{From: types.StateDiscovering, To: types.StateReady, At: at}, UpstreamConnectionRestored, "", false},
-		{"parking for login", types.Transition{From: types.StateConnecting, To: types.StatePendingAuth, At: at, Err: errors.New("login")}, UpstreamLoginRequired, string(diagnostics.OAuthLoginRequired), false},
-		{"a reconnect attempt that fails again is not an event", types.Transition{From: types.StateConnecting, To: types.StateError, At: at, Err: errors.New("refused")}, "", "", true},
-		{"connecting is not an event", types.Transition{From: types.StateDisconnected, To: types.StateConnecting, At: at}, "", "", true},
-		{"ready to ready is not an event", types.Transition{From: types.StateReady, To: types.StateReady, At: at}, "", "", true},
+		{"ready to error is a loss", types.Transition{From: types.StateReady, To: types.StateError, At: at, Err: errors.New("EOF")}, UpstreamConnectionLost, "", false, ""},
+		{"ready to disconnected is a loss", types.Transition{From: types.StateReady, To: types.StateDisconnected, At: at}, UpstreamConnectionLost, "", false, ""},
+		{"a terminal stdio exit is a process exit", types.Transition{From: types.StateReady, To: types.StateError, At: at, Err: errors.New("x"), TerminalCode: string(diagnostics.STDIOExitNonzero)}, UpstreamProcessExited, string(diagnostics.STDIOExitNonzero), false, ""},
+		{"back to ready is a recovery", types.Transition{From: types.StateDiscovering, To: types.StateReady, At: at}, UpstreamConnectionRestored, "", false, ""},
+		{"parking for login", types.Transition{From: types.StateConnecting, To: types.StatePendingAuth, At: at, Err: errors.New("login")}, UpstreamLoginRequired, string(diagnostics.OAuthLoginRequired), false, ""},
+		{"a reconnect attempt that fails again is not an event", types.Transition{From: types.StateConnecting, To: types.StateError, At: at, Err: errors.New("refused")}, "", "", true, ""},
+		{"an established stdio connection that fails is its process going away", types.Transition{From: types.StateReady, To: types.StateError, At: at, Err: errors.New("transport closed")}, UpstreamProcessExited, "", false, "stdio"},
+		{"a stdio server disconnected on purpose is a closed connection", types.Transition{From: types.StateReady, To: types.StateDisconnected, At: at}, UpstreamConnectionLost, "", false, "stdio"},
+		{"an established connection never exited before initialize", types.Transition{From: types.StateReady, To: types.StateError, At: at, Err: errors.New("x"), TerminalCode: string(diagnostics.STDIOExitBeforeInitialize)}, UpstreamProcessExited, "", false, "stdio"},
+		{"the same error over http is a lost connection", types.Transition{From: types.StateReady, To: types.StateError, At: at, Err: errors.New("transport closed")}, UpstreamConnectionLost, "", false, "http"},
+		{"connecting is not an event", types.Transition{From: types.StateDisconnected, To: types.StateConnecting, At: at}, "", "", true, ""},
+		{"ready to ready is not an event", types.Transition{From: types.StateReady, To: types.StateReady, At: at}, "", "", true, ""},
 	}
 	for _, tc := range cases {
-		ev, ok := transitionEvent("github", tc.tr)
+		ev, ok := transitionEvent("github", tc.transport, tc.tr)
 		if tc.none {
 			assert.False(t, ok, tc.name)
 			continue
@@ -74,7 +80,7 @@ func TestTransitionEvent_Classification(t *testing.T) {
 func TestUpstreamEvent_RowShapeAndNoRawError(t *testing.T) {
 	svc, store := eventService(t)
 	raw := errors.New("dial tcp 10.0.0.7:443: secret-internal-hostname refused")
-	ev, ok := transitionEvent("github", types.Transition{From: types.StateReady, To: types.StateError, At: evBase, Err: raw})
+	ev, ok := transitionEvent("github", "http", types.Transition{From: types.StateReady, To: types.StateError, At: evBase, Err: raw})
 	require.True(t, ok)
 	svc.RecordUpstreamEvent(ev)
 
@@ -228,4 +234,84 @@ func TestUpstreamEvent_OneOpenLoginRequired(t *testing.T) {
 	svc.RecordUpstreamEvent(UpstreamEvent{Server: "github", Kind: UpstreamConnectionRestored, At: evBase.Add(time.Hour)})
 	login(2*time.Hour, 0)
 	assert.Len(t, loginRows(), 5)
+}
+
+// Review finding: the hourly bound is kept per hour of the event, so a late
+// event of the previous hour does not reset the current hour's count.
+func TestUpstreamEvent_LateEventDoesNotResetTheHourlyBound(t *testing.T) {
+	c := newUpstreamEventCollapser()
+	hour := evBase.Truncate(time.Hour)
+	rows := 0
+	place := func(kind UpstreamEventKind, at time.Time, owner string) {
+		if row, isNew := c.place(UpstreamEvent{Server: "github", Kind: kind, At: at, Owner: owner}); row != nil && isNew {
+			rows++
+		}
+	}
+	// Fill the hour to the limit with distinct owners (no row to merge into).
+	for i := 0; i < MaxUpstreamEventRowsPerHour; i++ {
+		place(UpstreamOAuthRefreshFailed, hour.Add(time.Duration(i)*time.Second), fmt.Sprintf("user-%03d", i))
+	}
+	require.Equal(t, MaxUpstreamEventRowsPerHour, rows)
+
+	// A late event of the previous hour, then more of this hour.
+	place(UpstreamConnectionLost, hour.Add(-time.Minute), "")
+	before := rows
+	for i := 0; i < 50; i++ {
+		place(UpstreamOAuthRefreshFailed, hour.Add(30*time.Minute+time.Duration(i)*time.Second), fmt.Sprintf("late-%03d", i))
+	}
+	assert.Equal(t, before, rows, "the current hour is still at its limit")
+	assert.Equal(t, 50, c.suppressed, "an event with nothing of its kind and owner to merge into is not recorded past the limit")
+
+	// The next hour has its own budget.
+	place(UpstreamOAuthRefreshFailed, hour.Add(time.Hour+time.Second), "user-next")
+	assert.Equal(t, before+1, rows)
+}
+
+// Review finding: past the merge threshold repeats merge into the latest row
+// of their kind, leaving the rest of the hour's budget for unseen keys.
+func TestUpstreamEvent_RepeatsMergeBeforeTheHardLimit(t *testing.T) {
+	c := newUpstreamEventCollapser()
+	hour := evBase.Truncate(time.Hour)
+	rows := 0
+	kinds := []UpstreamEventKind{UpstreamConnectionLost, UpstreamProcessExited, UpstreamOAuthRefreshFailed}
+	for i := 0; i < 59*60; i++ {
+		if _, isNew := c.place(UpstreamEvent{Server: "github", Kind: kinds[i%len(kinds)], At: hour.Add(time.Duration(i) * time.Second)}); isNew {
+			rows++
+		}
+	}
+	assert.LessOrEqual(t, rows, upstreamMergeAt, "repeats of a known kind stop adding rows at the merge threshold")
+	assert.Greater(t, rows, 60, "three kinds a minute did pass sixty rows")
+	_, isNew := c.place(UpstreamEvent{Server: "github", Kind: UpstreamLoginRequired, At: hour.Add(59*time.Minute + 30*time.Second)})
+	assert.True(t, isNew, "a kind with no row yet still gets one")
+}
+
+// Review finding: the collapser forgets servers that have had no event for a
+// long time, so removed servers do not stay in memory.
+func TestUpstreamEvent_CollapserForgetsIdleServers(t *testing.T) {
+	c := newUpstreamEventCollapser()
+	for i := 0; i < 200; i++ {
+		c.place(UpstreamEvent{Server: fmt.Sprintf("gone-%03d", i), Kind: UpstreamLoginRequired, At: evBase, Seq: 1})
+	}
+	require.Len(t, c.down, 200)
+	c.place(UpstreamEvent{Server: "alive", Kind: UpstreamConnectionLost, At: evBase.Add(collapserServerIdle + time.Hour)})
+	assert.Len(t, c.down, 1)
+	assert.Len(t, c.seen, 1)
+	assert.Empty(t, c.loginOpen)
+	assert.Empty(t, c.loginSeq)
+	assert.Len(t, c.latest, 1)
+	assert.Len(t, c.hourRows, 1)
+}
+
+// Review finding: a refresh failure row carries the diagnostics code when the
+// error classifies to one in the catalogue.
+func TestUpstreamEvent_RefreshFailureKeepsItsCode(t *testing.T) {
+	svc, store := eventService(t)
+	code := string(diagnostics.OAuthReauthRequired)
+	svc.RecordUpstreamEvent(UpstreamEvent{Server: "github", Kind: UpstreamOAuthRefreshFailed, At: evBase, Code: code})
+	rows := upstreamEventRows(t, store, "github")
+	require.Len(t, rows, 1)
+	assert.Equal(t, code, rows[0].Metadata[UpstreamEventMetaCode])
+	entry, ok := diagnostics.Get(diagnostics.OAuthReauthRequired)
+	require.True(t, ok)
+	assert.Equal(t, entry.UserMessage, rows[0].ErrorMessage, "the fixed catalogue message of the code")
 }

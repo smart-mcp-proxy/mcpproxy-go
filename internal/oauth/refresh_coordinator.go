@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 )
@@ -190,6 +191,22 @@ type RefreshAttemptFailure struct {
 	Trigger    RefreshTrigger
 	// At is when the failure was observed.
 	At time.Time
+	// Code is the diagnostics code (MCPX_*) of the failure when the error
+	// classifies to one in the catalogue, else empty. Only the code crosses
+	// this boundary, never the error text.
+	Code string
+}
+
+// refreshFailureCode classifies a refresh error to a catalogue code.
+func refreshFailureCode(serverName string, err error) string {
+	code := diagnostics.Classify(err, diagnostics.ClassifierHints{ServerID: serverName, Transport: "http"})
+	if code == "" || code == diagnostics.UnknownUnclassified {
+		return ""
+	}
+	if _, ok := diagnostics.Get(code); !ok {
+		return ""
+	}
+	return string(code)
 }
 
 // SetAuditObserver installs the function called once for every refresh that
@@ -460,7 +477,10 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 	audit := c.audit
 	c.mu.Unlock()
 	if audit != nil {
-		audit(RefreshAttemptFailure{ServerName: req.ServerName, Class: cls, Trigger: req.Trigger, At: c.now()})
+		audit(RefreshAttemptFailure{
+			ServerName: req.ServerName, Class: cls, Trigger: req.Trigger, At: c.now(),
+			Code: refreshFailureCode(req.ServerName, refreshErr),
+		})
 	}
 
 	// FR-006a: a login or another writer superseded this flight's generation.
