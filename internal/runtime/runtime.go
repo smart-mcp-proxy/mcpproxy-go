@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -188,13 +190,19 @@ type Runtime struct {
 	// MCP serving path reads it via Truncator(). An atomic.Pointer makes the
 	// swap/read race-free (#861) and independent of r.mu, so the accessor stays
 	// lock-free on the hot path and composes with the config commit serialization.
-	truncator        atomic.Pointer[truncate.Truncator]
-	sigCache         *toolsig.Cache // Spec 085 FR-008: single process-wide signature cache (indexing warms, MCP reads)
-	secretResolver   *secret.Resolver
-	tokenizer        tokens.Tokenizer
-	refreshManager   *oauth.RefreshManager // Proactive OAuth token refresh
-	updateChecker    *updatecheck.Checker  // Background version checking
-	telemetryService *telemetry.Service    // Anonymous usage telemetry (Spec 036)
+	truncator      atomic.Pointer[truncate.Truncator]
+	sigCache       *toolsig.Cache // Spec 085 FR-008: single process-wide signature cache (indexing warms, MCP reads)
+	secretResolver *secret.Resolver
+	tokenizer      tokens.Tokenizer
+
+	// tokenSavingsCache holds the last tokenized savings estimate and
+	// tokenSavingsKey the inputs it was computed from (CalculateTokenSavings).
+	tokenSavingsMu    sync.Mutex
+	tokenSavingsCache *tokens.TokenSavingsMetrics
+	tokenSavingsKey   string
+	refreshManager    *oauth.RefreshManager // Proactive OAuth token refresh
+	updateChecker     *updatecheck.Checker  // Background version checking
+	telemetryService  *telemetry.Service    // Anonymous usage telemetry (Spec 036)
 
 	// bundleRefresher is the TPA bundle refresh scheduler (Spec 087 / Spec 101
 	// US3 B19), registered by the server and started in
@@ -2474,66 +2482,41 @@ func (r *Runtime) CalculateTokenSavings() (*contracts.ServerTokenMetrics, error)
 		model = r.cfg.Tokenizer.DefaultModel
 	}
 
-	// Create savings calculator
-	savingsCalc := tokens.NewSavingsCalculator(r.tokenizer, r.logger.Sugar(), model)
-
-	// Get all connected servers and their tools
-	serverInfos := []tokens.ServerToolInfo{}
-
-	// Get all server names
-	serverNames := r.upstreamManager.GetAllServerNames()
-	for _, serverName := range serverNames {
-		client, exists := r.upstreamManager.GetClient(serverName)
-		if !exists {
-			continue
-		}
-
-		// Get tools for this server
-		toolsList, err := client.ListTools(r.appCtx)
-		if err != nil {
-			r.logger.Debug("Failed to list tools for server", zap.String("server", serverName), zap.Error(err))
-			continue
-		}
-
-		// Convert to ToolInfo format
-		toolInfos := make([]tokens.ToolInfo, 0, len(toolsList))
-		for _, tool := range toolsList {
-			// Parse input schema from ParamsJSON
-			var inputSchema map[string]interface{}
-			if tool.ParamsJSON != "" {
-				if err := json.Unmarshal([]byte(tool.ParamsJSON), &inputSchema); err != nil {
-					r.logger.Debug("Failed to parse tool params JSON",
-						zap.String("tool", tool.Name),
-						zap.Error(err))
-					inputSchema = make(map[string]interface{})
-				}
-			} else {
-				inputSchema = make(map[string]interface{})
-			}
-
-			toolInfos = append(toolInfos, tokens.ToolInfo{
-				Name:        tool.Name,
-				Description: tool.Description,
-				InputSchema: inputSchema,
-			})
-		}
-
-		serverInfos = append(serverInfos, tokens.ServerToolInfo{
-			ServerName: serverName,
-			ToolCount:  len(toolsList),
-			Tools:      toolInfos,
-		})
-	}
-
-	// Calculate savings
 	topK := r.cfg.ToolsLimit
 	if topK == 0 {
 		topK = 15 // Default
 	}
 
-	savingsMetrics, err := savingsCalc.CalculateProxySavings(serverInfos, topK)
-	if err != nil {
-		return nil, fmt.Errorf("failed to calculate savings: %w", err)
+	// The tool lists come from the supervisor's StateView, the copy discovery
+	// keeps current, not from a live tools/list on every upstream. The Web UI
+	// and the tray poll GET /api/v1/activity/usage every half minute, so the
+	// live calls cost one upstream round trip per server per poll (about a
+	// thousand an hour for a dozen servers), and on a busy machine the poll
+	// took seconds to minutes. Tokenizing every tool definition is the other
+	// expensive part, so its result is kept until a server's tool definitions,
+	// the model or topK change.
+	serverInfos, fingerprint := r.tokenSavingsInputs()
+	cacheKey := fmt.Sprintf("%s|%d|%s", model, topK, fingerprint)
+
+	r.tokenSavingsMu.Lock()
+	cached := r.tokenSavingsCache
+	cachedKey := r.tokenSavingsKey
+	r.tokenSavingsMu.Unlock()
+
+	var savingsMetrics *tokens.TokenSavingsMetrics
+	if cached != nil && cachedKey == cacheKey {
+		savingsMetrics = cached
+	} else {
+		savingsCalc := tokens.NewSavingsCalculator(r.tokenizer, r.logger.Sugar(), model)
+		computed, err := savingsCalc.CalculateProxySavings(serverInfos, topK)
+		if err != nil {
+			return nil, fmt.Errorf("failed to calculate savings: %w", err)
+		}
+		savingsMetrics = computed
+		r.tokenSavingsMu.Lock()
+		r.tokenSavingsCache = computed
+		r.tokenSavingsKey = cacheKey
+		r.tokenSavingsMu.Unlock()
 	}
 
 	// Convert to contracts type
@@ -2542,7 +2525,7 @@ func (r *Runtime) CalculateTokenSavings() (*contracts.ServerTokenMetrics, error)
 		AverageQueryResultSize:  savingsMetrics.AverageQueryResultSize,
 		SavedTokens:             savingsMetrics.SavedTokens,
 		SavedTokensPercentage:   savingsMetrics.SavedTokensPercentage,
-		PerServerToolListSizes:  savingsMetrics.PerServerToolListSizes,
+		PerServerToolListSizes:  copyIntMap(savingsMetrics.PerServerToolListSizes),
 	}
 
 	// Spec 109-k / audit finding F-Token: once a real retrieve_tools call has
@@ -2562,6 +2545,105 @@ func (r *Runtime) CalculateTokenSavings() (*contracts.ServerTokenMetrics, error)
 	}
 
 	return result, nil
+}
+
+// tokenSavingsInputs builds the per-server tool lists for the token savings
+// estimate from the StateView (connected servers whose discovery has
+// completed), plus a fingerprint that changes whenever one of those tool sets
+// does.
+//
+// The estimate therefore describes the tool set mcpproxy holds and serves,
+// the same one GET /servers/{id}/tools lists. Two consequences differ from a
+// live tools/list: a quarantined server contributes nothing (its tools are
+// not published to the view and no client can reach them), and a tool set
+// that discovery deliberately retained after a lenient empty result stays
+// counted until an authoritative refresh replaces it.
+//
+// The fingerprint is a digest of exactly what the estimate tokenizes (server
+// name, tool name, description, input schema). A discovery epoch plus a tool
+// count would not do: the epoch is the connection token, so a
+// tools/list_changed re-discovery on the same connection keeps it, and an
+// edited description or schema keeps the count too. Hashing the definitions
+// costs far less than tokenizing them.
+func (r *Runtime) tokenSavingsInputs() ([]tokens.ServerToolInfo, string) {
+	sup := r.Supervisor()
+	if sup == nil || sup.StateView() == nil {
+		return nil, ""
+	}
+	// The committed snapshot is read before the view, as GetServerTools does
+	// (Spec 116 PR2): the view lags a removal commit, so a row may belong to a
+	// server that no longer exists, or to the predecessor of a same-name
+	// replacement. Neither is counted.
+	committed := r.committedSnapshot()
+	snapshot := sup.StateView().Snapshot()
+	names := make([]string, 0, len(snapshot.Servers))
+	for name, status := range snapshot.Servers {
+		if status == nil || !status.Connected || !status.ToolsDiscovered {
+			continue
+		}
+		if committed.absent(name) {
+			continue
+		}
+		if inc, ok := r.ServerIncarnation(name); ok && status.Incarnation != inc {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	digest := sha256.New()
+	// Every field is length-prefixed so adjacent fields cannot run together.
+	writeField := func(b []byte) {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(b)))
+		digest.Write(size[:])
+		digest.Write(b)
+	}
+	infos := make([]tokens.ServerToolInfo, 0, len(names))
+	for _, name := range names {
+		status := snapshot.Servers[name]
+		writeField([]byte(name))
+		writeField([]byte(strconv.Itoa(len(status.Tools))))
+		toolInfos := make([]tokens.ToolInfo, 0, len(status.Tools))
+		for _, tool := range status.Tools {
+			inputSchema := tool.InputSchema
+			if inputSchema == nil {
+				inputSchema = map[string]interface{}{}
+			}
+			writeField([]byte(tool.Name))
+			writeField([]byte(tool.Description))
+			// encoding/json sorts map keys, so the same schema always yields
+			// the same bytes. A schema that cannot be encoded falls back to a
+			// marker; it cannot be tokenized as JSON either.
+			schemaJSON, err := json.Marshal(inputSchema)
+			if err != nil {
+				schemaJSON = []byte("unencodable")
+			}
+			writeField(schemaJSON)
+			toolInfos = append(toolInfos, tokens.ToolInfo{
+				Name:        tool.Name,
+				Description: tool.Description,
+				InputSchema: inputSchema,
+			})
+		}
+		infos = append(infos, tokens.ServerToolInfo{
+			ServerName: name,
+			ToolCount:  len(status.Tools),
+			Tools:      toolInfos,
+		})
+	}
+	return infos, hex.EncodeToString(digest.Sum(nil))
+}
+
+func copyIntMap(m map[string]int) map[string]int {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]int, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 // contains checks if a string slice contains a specific string
