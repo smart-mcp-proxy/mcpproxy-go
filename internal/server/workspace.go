@@ -222,16 +222,44 @@ func (p *MCPProxyServer) markSessionWorked(ctx context.Context, sessionID string
 	principal := principalFromContext(ctx)
 	runName := p.requestRunName(ctx, principal)
 
-	return p.sessionStore.EnsurePersistedKeyed(sessionID, workSessionKey(principal, runName), func(info *SessionInfo) (string, string) {
-		id, effective := p.resolveWorkSessionEffective(runtime.WorkSessionIdentity{
+	return p.sessionStore.EnsurePersistedKeyed(sessionID, workSessionKey(principal, runName), func(info *SessionInfo, cached func(string) (string, bool)) (string, string) {
+		id, effective := p.resolveKeyedWorkSession(runtime.WorkSessionIdentity{
 			Principal:     principal,
 			ClientName:    info.ClientName,
 			ClientVersion: info.ClientVersion,
 			WorkspaceRoot: info.Workspace,
 			RunName:       runName,
-		})
+		}, cached)
 		return id, workSessionKey(principal, effective.RunName)
 	})
+}
+
+// resolveKeyedWorkSession resolves a connection's work session for one
+// credential. It first asks which identity the session would be filed under
+// and whether the connection already holds that identity's session; only when
+// it does not is a session resolved, so a dropped run name never opens a
+// competing session beside the one the connection keeps.
+func (p *MCPProxyServer) resolveKeyedWorkSession(identity runtime.WorkSessionIdentity, cached func(string) (string, bool)) (string, runtime.WorkSessionIdentity) {
+	effective := p.effectiveWorkSessionIdentity(identity)
+	if id, ok := cached(workSessionKey(effective.Principal, effective.RunName)); ok {
+		return id, effective
+	}
+	return p.resolveWorkSessionEffective(identity)
+}
+
+// effectiveWorkSessionIdentity is the identity a session would be filed under,
+// without resolving it.
+func (p *MCPProxyServer) effectiveWorkSessionIdentity(id runtime.WorkSessionIdentity) runtime.WorkSessionIdentity {
+	if p.workSessionEffectiveIdentity != nil {
+		return p.workSessionEffectiveIdentity(id)
+	}
+	if p.workSessionResolver != nil || p.workSessionResolverEffective != nil {
+		return id
+	}
+	if p.mainServer == nil || p.mainServer.runtime == nil {
+		return id
+	}
+	return p.mainServer.runtime.EffectiveWorkSessionIdentity(id)
 }
 
 // resolveWorkSessionEffective resolves a work session and returns the identity

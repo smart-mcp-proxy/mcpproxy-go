@@ -148,6 +148,13 @@ func NewWorkSessionTracker(idleWindow time.Duration) *WorkSessionTracker {
 	}
 }
 
+// SetNowForTest replaces the tracker's clock. Tests only.
+func (t *WorkSessionTracker) SetNowForTest(now func() time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.now = now
+}
+
 // SetIdleWindow updates the idle window (hot-reloadable config).
 func (t *WorkSessionTracker) SetIdleWindow(d time.Duration) {
 	if d <= 0 {
@@ -216,6 +223,29 @@ func (t *WorkSessionTracker) ResolveEffective(id WorkSessionIdentity) (string, W
 	}
 	t.sessions[k] = entry
 	return entry.id, id
+}
+
+// EffectiveIdentity returns the identity a Resolve of id would file the
+// session under, WITHOUT resolving it: the same identity, or the one with the
+// run name dropped when the principal is over its daily bound and the named
+// session is not already live. A caller that holds a cached session for the
+// effective identity uses it to find that session before asking the tracker
+// to open one, so that no unused competing session is created.
+func (t *WorkSessionTracker) EffectiveIdentity(id WorkSessionIdentity) WorkSessionIdentity {
+	if id.RunName == "" || id.CorrelationID != "" {
+		return id
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.now()
+	if entry, ok := t.sessions[id.key()]; ok && now.Sub(entry.lastActivity) <= t.idleWindow {
+		return id
+	}
+	if t.namedDay != now.UTC().Format("2006-01-02") || t.named[id.Principal] < MaxNamedWorkSessionsPerDay {
+		return id
+	}
+	id.RunName = ""
+	return id
 }
 
 // admitNamedLocked counts one more named work session for the principal today

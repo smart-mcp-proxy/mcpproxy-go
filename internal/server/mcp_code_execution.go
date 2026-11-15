@@ -119,6 +119,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	// no config at all means nothing to disable.
 	if cfg := p.currentConfig(); cfg != nil && !cfg.EnableCodeExecution {
 		recordCodeExecRefusal(ctx, config.ErrCodeExecutionDisabled)
+		p.emitCodeExecutionRefused(withPolicyRefusal(ctx), config.CodeExecutionDisabledMessage)
 		return mcp.NewToolResultError(config.CodeExecutionDisabledMessage), nil
 	}
 
@@ -145,6 +146,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	// and both CLI modes send the NAME, never the content).
 	code, scriptName, errMsg := p.resolveCodeExecutionSource(ctx, args, &options)
 	if errMsg != "" {
+		p.emitCodeExecutionRefused(ctx, errMsg)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -233,7 +235,9 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 				zap.String("execution_id", options.ExecutionID),
 				zap.Error(err),
 			)
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to acquire JavaScript runtime: %v", err)), nil
+			msg := fmt.Sprintf("Failed to acquire JavaScript runtime: %v", err)
+			p.emitCodeExecutionRefused(ctx, msg)
+			return mcp.NewToolResultError(msg), nil
 		}
 
 		acquireDuration := time.Since(acquireStart)
@@ -1791,4 +1795,17 @@ func tierForAnnotations(annotations *config.ToolAnnotations, found bool) string 
 		return perm
 	}
 	return contracts.OperationTypeRead
+}
+
+// emitCodeExecutionRefused records a code_execution call that answered an
+// error before the script ran: the feature is disabled, the source could not
+// be resolved (no such stored script, both or neither of code and script), no
+// runtime could be acquired. These exits used to leave no activity row, so
+// the attempt and its failure were missing from the work session (Spec 124
+// D2). The row is the wrapper's own failed internal_tool_call, with no
+// arguments recorded. The profile refusal above is NOT routed here: its
+// blocking policy decision is already the one counted row of that attempt.
+func (p *MCPProxyServer) emitCodeExecutionRefused(ctx context.Context, msg string) {
+	p.emitActivityInternalToolCall(ctx, "code_execution", "", "", "", sessionIDFromContext(ctx),
+		mintActivityRequestID("", "code_execution"), "error", msg, 0, nil, nil, nil, "")
 }

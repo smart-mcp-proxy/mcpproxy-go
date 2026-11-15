@@ -119,9 +119,9 @@ func (p *MCPProxyServer) requestWorkSession(ctx context.Context, sessionID strin
 			// name is dropped when the credential is over its bound, and the
 			// cache and the idle clock must then use the unnamed identity.
 			effective := identity
-			id := p.sessionStore.WorkSessionForKey(sessionID, workSessionKey(principal, runName), func(*SessionInfo) (string, string) {
+			id := p.sessionStore.WorkSessionForKey(sessionID, workSessionKey(principal, runName), func(_ *SessionInfo, cached func(string) (string, bool)) (string, string) {
 				var resolved string
-				resolved, effective = p.resolveWorkSessionEffective(identity)
+				resolved, effective = p.resolveKeyedWorkSession(identity, cached)
 				return resolved, workSessionKey(principal, effective.RunName)
 			})
 			if id != "" {

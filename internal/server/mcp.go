@@ -159,6 +159,10 @@ type MCPProxyServer struct {
 	// production.
 	workSessionResolverEffective func(runtime.WorkSessionIdentity) (string, runtime.WorkSessionIdentity)
 
+	// workSessionEffectiveIdentity replaces the runtime's tracker peek in
+	// tests. Nil in production.
+	workSessionEffectiveIdentity func(runtime.WorkSessionIdentity) runtime.WorkSessionIdentity
+
 	// workSessionToucher replaces the runtime's idle-clock refresh in tests
 	// (Spec 124 FR-019). Nil in production.
 	workSessionToucher func(string, runtime.WorkSessionIdentity)
@@ -1194,6 +1198,29 @@ func (p *MCPProxyServer) auditToolCallFromStatus(ctx context.Context, status str
 // second authz (FR-043(j)). Warnings and redactions write no audit line.
 func (p *MCPProxyServer) emitActivityPolicyDecision(ctx context.Context, serverName, toolName, sessionID, requestID, decision, reason, reasonKey string) {
 	p.emitActivityPolicyDecisionWithBlockReason(ctx, serverName, toolName, sessionID, requestID, decision, reason, reasonKey, "")
+}
+
+// emitRefusedBeforeDispatch records a tool call that answered an error before
+// any gate or dispatch ran, because the request itself was unusable: no tool
+// name, a name that is not server:tool, arguments that do not parse. These
+// exits used to leave no activity row at all, so the attempt and its failure
+// were missing from the work session (Spec 124 D2: every attempt has exactly
+// one counted row).
+//
+// The row is a blocking policy decision, the sole row of its attempt: MCPProxy
+// refused the call. It is written straight to the activity log and NOT through
+// emitActivityPolicyDecision, because that funnel also writes the audit line,
+// and the audit contract for these exits is already settled by their callers
+// (Spec 107: malformed args_json is exactly one `authz deny` and no
+// `tool_call`; the name exits write no line). The unusable arguments are not
+// recorded.
+func (p *MCPProxyServer) emitRefusedBeforeDispatch(ctx context.Context, serverName, toolName, requestID, msg string) {
+	if p.mainServer == nil || p.mainServer.runtime == nil {
+		return
+	}
+	sessionID := sessionIDFromContext(ctx)
+	p.mainServer.runtime.EmitActivityPolicyDecisionAttributed(serverName, toolName, sessionID, requestID,
+		"blocked", msg, "", p.activityAttribution(ctx, sessionID))
 }
 
 // emitActivityCompanionDecision is emitActivityPolicyDecision for a blocking
@@ -3059,7 +3086,9 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 	toolName, err := request.RequireString("name")
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'name': %v", err)), nil
+		msg := fmt.Sprintf("Missing required parameter 'name': %v", err)
+		p.emitRefusedBeforeDispatch(ctx, "", "", mintActivityRequestID("", ""), msg)
+		return mcp.NewToolResultError(msg), nil
 	}
 	// Whitespace is never significant in a canonical id; case is (every gate
 	// below keys on the exact name), so padding is trimmed and nothing else.
@@ -3229,17 +3258,22 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// reason: malformed args_json is not one of FR-012's named gates.
 	if argsErrMsg != "" {
 		p.auditAuthz(ctx, "deny", telemetry.BlockReasonOther)
+		p.emitRefusedBeforeDispatch(ctx, serverName, actualToolName, requestID, argsErrMsg)
 		return mcp.NewToolResultError(argsErrMsg), nil
 	}
 
 	// Handle upstream tools via upstream manager (requires server:tool format)
 	if !strings.Contains(toolName, ":") {
-		return mcp.NewToolResultError(fmt.Sprintf("Invalid tool name format: %s (expected server:tool)", toolName)), nil
+		msg := fmt.Sprintf("Invalid tool name format: %s (expected server:tool)", toolName)
+		p.emitRefusedBeforeDispatch(ctx, serverName, actualToolName, requestID, msg)
+		return mcp.NewToolResultError(msg), nil
 	}
 
 	// Validate tool name was parsed correctly
 	if serverName == "" || actualToolName == "" {
-		return mcp.NewToolResultError(fmt.Sprintf("Invalid tool name format: %s", toolName)), nil
+		msg := fmt.Sprintf("Invalid tool name format: %s", toolName)
+		p.emitRefusedBeforeDispatch(ctx, serverName, actualToolName, requestID, msg)
+		return mcp.NewToolResultError(msg), nil
 	}
 
 	// Spec 057 / Profiles v2: profile filter — runs independently of agent-scope
@@ -4013,7 +4047,9 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	toolName, err := request.RequireString("name")
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'name': %v", err)), nil
+		msg := fmt.Sprintf("Missing required parameter 'name': %v", err)
+		p.emitRefusedBeforeDispatch(ctx, "", "", mintActivityRequestID("", ""), msg)
+		return mcp.NewToolResultError(msg), nil
 	}
 
 	// Get optional args parameter - handle both new JSON string format and legacy object format

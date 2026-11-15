@@ -27,6 +27,7 @@ func trackerProxy(t *testing.T) (*MCPProxyServer, *SessionStore, *runtime.WorkSe
 	tr := runtime.NewWorkSessionTracker(30 * time.Minute)
 	p.workSessionResolver = tr.Resolve
 	p.workSessionResolverEffective = tr.ResolveEffective
+	p.workSessionEffectiveIdentity = tr.EffectiveIdentity
 	p.workSessionToucher = tr.Touch
 	return p, store, tr
 }
@@ -309,4 +310,60 @@ func TestRunNameWarnedSetIsBounded(t *testing.T) {
 	n := len(w.seen)
 	w.mu.Unlock()
 	assert.LessOrEqual(t, n, maxRunNameWarned)
+}
+
+// Review round 2: the session pinned while a connection was unpersisted is
+// kept when a concurrent call persists the connection, so a request that is
+// still writing rows does not move to another session.
+func TestRequestWorkSession_ProvisionalPinSurvivesPersistence(t *testing.T) {
+	p, store, _ := trackerProxy(t)
+	store.SetSession("c1", "ide", "1.0", false, false, nil)
+	ctx := tokenCtx(workSessionCtx("c1"), "alpha", "mcp_agt_aaaa")
+
+	pinned := p.requestWorkSession(ctx, "c1") // the prompt request's first row
+	require.NotEmpty(t, pinned)
+
+	// Roots arrive, and another request of the same credential persists the
+	// connection.
+	store.mu.Lock()
+	store.sessions["c1"].Workspace = "file:///repos/late-roots"
+	store.mu.Unlock()
+	assert.Equal(t, pinned, p.markSessionWorked(ctx, "c1"), "the persisting call adopts the pin")
+
+	assert.Equal(t, pinned, p.requestWorkSession(ctx, "c1"), "the prompt request's next row is in the same session")
+	assert.Equal(t, pinned, store.WorkSessionID("c1"))
+}
+
+// Review round 2: a rejected run name must not open a competing unnamed
+// session beside the one the connection keeps. After the idle window the
+// connection's cached session is touched back to life, and a reconnect of the
+// same identity joins it.
+func TestRequestWorkSession_RejectedNameDoesNotOpenACompetingSession(t *testing.T) {
+	p, store := newWorkSessionProxy(t)
+	tr := runtime.NewWorkSessionTracker(30 * time.Minute)
+	now := time.Date(2026, 11, 15, 1, 0, 0, 0, time.UTC)
+	tr.SetNowForTest(func() time.Time { return now })
+	p.workSessionResolver = tr.Resolve
+	p.workSessionResolverEffective = tr.ResolveEffective
+	p.workSessionEffectiveIdentity = tr.EffectiveIdentity
+	p.workSessionToucher = tr.Touch
+
+	store.SetSession("c1", "ide", "1.0", false, false, nil)
+	base := tokenCtx(workSessionCtx("c1"), "alpha", "mcp_agt_aaaa")
+	unnamed := p.markSessionWorked(base, "c1")
+	require.NotEmpty(t, unnamed)
+	for i := 0; i < runtime.MaxNamedWorkSessionsPerDay; i++ {
+		p.requestWorkSession(reqcontext.WithRunHeader(base, "run-"+time.Duration(i).String()), "c1")
+	}
+
+	now = now.Add(45 * time.Minute) // past the idle window, same day
+	rejected := reqcontext.WithRunHeader(base, "one-too-many")
+	assert.Equal(t, unnamed, p.requestWorkSession(rejected, "c1"), "the connection keeps its session")
+
+	// A reconnect of the same identity joins the session the connection is
+	// still writing to, not a second one opened by the rejected name.
+	reconnect := tr.Resolve(runtime.WorkSessionIdentity{
+		Principal: principalFromContext(base), ClientName: "ide", ClientVersion: "1.0",
+	})
+	assert.Equal(t, unnamed, reconnect)
 }

@@ -68,8 +68,8 @@ type SessionInfo struct {
 	// the connection has NOT been persisted (it has only read prompts so
 	// far). It pins one answer for every row of such a request: the roots
 	// reply can arrive between two rows and would otherwise change the
-	// identity under them. It is not used once the connection is persisted,
-	// whose first tool call resolves after the workspace has settled.
+	// identity under them. When the connection is persisted the pins move
+	// into workSessionByKey, so a request still in flight keeps its session.
 	provisionalByKey map[string]string
 
 	// persistDone is closed once the durable record exists. Concurrent first
@@ -326,7 +326,9 @@ func (s *SessionStore) SetWorkspace(sessionID, workspaceRoot string) {
 func (s *SessionStore) EnsurePersisted(sessionID string, resolveWorkSession func(*SessionInfo) string) string {
 	var keyed KeyedWorkSessionResolver
 	if resolveWorkSession != nil {
-		keyed = func(info *SessionInfo) (string, string) { return resolveWorkSession(info), "" }
+		keyed = func(info *SessionInfo, _ func(string) (string, bool)) (string, string) {
+			return resolveWorkSession(info), ""
+		}
 	}
 	return s.EnsurePersistedKeyed(sessionID, "", keyed)
 }
@@ -336,7 +338,12 @@ func (s *SessionStore) EnsurePersisted(sessionID string, resolveWorkSession func
 // differs from the requested one only when the resolver dropped the run name
 // (the credential is over its bound of named sessions); the store then caches
 // under the effective key, never under the rejected one.
-type KeyedWorkSessionResolver func(*SessionInfo) (workSessionID, effectiveKey string)
+//
+// cached looks a key up in the connection's own cache. The resolver calls it
+// with the effective key BEFORE it opens a session: when the connection
+// already holds that key's session, that is the answer, and opening a new one
+// would leave an unused competing session behind.
+type KeyedWorkSessionResolver func(info *SessionInfo, cached func(key string) (string, bool)) (workSessionID, effectiveKey string)
 
 // EnsurePersistedKeyed is EnsurePersisted for a request made under one
 // credential key (principal and run name). The connection is persisted once;
@@ -374,6 +381,20 @@ func (s *SessionStore) EnsurePersistedKeyed(sessionID, key string, resolveWorkSe
 	// write, possibly by another credential, keeps that record id but still
 	// resolves its own session, never inheriting the first credential's.
 	info.persisted = true
+	// A session pinned while the connection was unpersisted (it had only read
+	// prompts) is kept: a request that is still writing rows must not move to
+	// another session because a concurrent call persisted the connection.
+	for k, id := range info.provisionalByKey {
+		if _, ok := info.workSessionByKey[k]; !ok {
+			if info.workSessionByKey == nil {
+				info.workSessionByKey = make(map[string]string)
+			}
+			info.workSessionByKey[k] = id
+			if info.workSessionID == "" && k == key {
+				info.workSessionID = id
+			}
+		}
+	}
 	info.provisionalByKey = nil
 	requestWorkSessionID := s.workSessionForKeyLocked(info, key, resolveWorkSession)
 
@@ -443,17 +464,18 @@ func (s *SessionStore) workSessionForKeyLocked(info *SessionInfo, key string, re
 		return info.workSessionID
 	}
 	cp := *info
-	id, effectiveKey := resolve(&cp)
+	id, effectiveKey := resolve(&cp, func(k string) (string, bool) {
+		existing, ok := info.workSessionByKey[k]
+		return existing, ok
+	})
 	if id == "" {
 		return ""
 	}
-	if effectiveKey != key {
-		// The run name was dropped. The credential's unnamed session on this
-		// connection, if it has one, is the answer (FR-006), and nothing is
-		// cached under the rejected name.
-		if existing, ok := info.workSessionByKey[effectiveKey]; ok {
-			return existing
-		}
+	if existing, ok := info.workSessionByKey[effectiveKey]; ok {
+		// The run name was dropped and the credential's unnamed session on
+		// this connection is the answer (FR-006). Nothing is cached under
+		// the rejected name.
+		return existing
 	}
 	if info.workSessionByKey == nil {
 		info.workSessionByKey = make(map[string]string)
@@ -470,8 +492,8 @@ func (s *SessionStore) workSessionForKeyLocked(info *SessionInfo, key string, re
 //
 // On a persisted connection this is the credential's cached session. On one
 // that has not been persisted (it has only read prompts) the answer is pinned
-// provisionally, so that every row of a request agrees, and is dropped when
-// the connection's first tool call persists it. It returns "" only for an
+// provisionally, so that every row of a request agrees, and is adopted as the
+// credential's session when the connection's first tool call persists it. It returns "" only for an
 // unknown connection, and the caller then derives the session from the
 // request alone.
 func (s *SessionStore) WorkSessionForKey(sessionID, key string, resolve KeyedWorkSessionResolver) string {
@@ -494,7 +516,10 @@ func (s *SessionStore) WorkSessionForKey(sessionID, key string, resolve KeyedWor
 		return ""
 	}
 	cp := *info
-	id, effectiveKey := resolve(&cp)
+	id, effectiveKey := resolve(&cp, func(k string) (string, bool) {
+		existing, ok := info.provisionalByKey[k]
+		return existing, ok
+	})
 	if id == "" {
 		return ""
 	}

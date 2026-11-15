@@ -4252,6 +4252,12 @@ func (r *Runtime) ResolveWorkSessionEffective(id WorkSessionIdentity) (string, W
 	return r.workSessionTracker().ResolveEffective(id)
 }
 
+// EffectiveWorkSessionIdentity returns the identity a work session would be
+// filed under, without resolving it (see WorkSessionTracker.EffectiveIdentity).
+func (r *Runtime) EffectiveWorkSessionIdentity(id WorkSessionIdentity) WorkSessionIdentity {
+	return r.workSessionTracker().EffectiveIdentity(id)
+}
+
 // workSessionTracker returns the one tracker of this runtime. Spec 124: work
 // sessions are resolved per request, from any request goroutine, so the lazy
 // creation must be safe for concurrent first use.

@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
@@ -128,4 +129,43 @@ func TestAttemptInvariant_CompanionDecisionIsNotCountedAgain(t *testing.T) {
 	f.proxy.emitActivityPolicyDecision(ctx, "github", "list_issues", "", "req-sole-2", "blocked",
 		"outside profile", telemetry.BlockReasonProfileScope)
 	f.eventuallyCounts("inv-companion", attemptCounts{attempts: 2, failures: 2, blocks: 1})
+}
+
+// Review round 2: a call refused before any gate or dispatch, because the
+// request itself was unusable, used to leave no activity row. It is one failed
+// attempt of the session.
+func TestAttemptInvariant_MalformedCallIsOneFailedAttempt(t *testing.T) {
+	f := newProfilesV3RESTFixture(t, nil)
+	key := f.mint("inv-malformed", "")
+
+	// Arguments that do not parse.
+	f.callTool(key, "call_tool_read", map[string]interface{}{"name": "github:list_issues", "args_json": "{"}, "")
+	f.eventuallyCounts("inv-malformed", attemptCounts{attempts: 1, failures: 1, blocks: 1})
+
+	// A name that is not server:tool, and no name at all.
+	f.callTool(key, "call_tool_read", map[string]interface{}{"name": "no-colon", "args_json": "{}"}, "")
+	f.callTool(key, "call_tool_read", map[string]interface{}{"args_json": "{}"}, "")
+	f.eventuallyCounts("inv-malformed", attemptCounts{attempts: 3, failures: 3, blocks: 3})
+
+	rows := 0
+	for _, r := range f.activities() {
+		if r.TokenName != "inv-malformed" {
+			continue
+		}
+		rows++
+		assert.Equal(t, storage.ActivityTypePolicyDecision, r.Type, "MCPProxy refused the call; nothing was dispatched")
+		assert.Empty(t, r.Arguments, "the unusable arguments are not recorded")
+		assert.NotEmpty(t, r.WorkSessionID)
+	}
+	assert.Equal(t, 3, rows, "one row per refused request and no mirror")
+}
+
+// Review round 2: code_execution refused because the feature is disabled is
+// one blocked attempt, not a call that left no trace.
+func TestAttemptInvariant_DisabledCodeExecutionIsOneBlockedAttempt(t *testing.T) {
+	f := newProfilesV3RESTFixture(t, func(cfg *config.Config) { cfg.EnableCodeExecution = false })
+	key := f.mint("inv-codeexec", "")
+
+	f.callTool(key, "code_execution", map[string]interface{}{"code": "1+1"}, "")
+	f.eventuallyCounts("inv-codeexec", attemptCounts{attempts: 1, failures: 1, blocks: 1})
 }
