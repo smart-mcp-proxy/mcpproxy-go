@@ -1322,6 +1322,12 @@ func (r *Runtime) Close() error {
 	// evicting a replacement installed by someone else.
 	r.stopBundleRefresher()
 
+	// Spec 125: background skill refreshes write BBolt state (staged file
+	// rows, records) from their own goroutines, so they are joined here,
+	// before the storage manager starts to stop. appCancel above ended their
+	// context; no new one starts once this returns.
+	r.skills.close()
+
 	// The index closes AFTER the telemetry flush above, not before it. That
 	// flush builds one last heartbeat, and tool_count is read from this index
 	// (GetToolCount). Closing first made GetDocumentCount fail, which sent the

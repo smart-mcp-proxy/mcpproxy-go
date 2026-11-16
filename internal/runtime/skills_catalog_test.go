@@ -7,6 +7,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -772,4 +773,83 @@ func TestSkillsTrigger_ConfigChange(t *testing.T) {
 	g.rt.onSkillsConfigChanged(now, was)
 	g.rt.skills.wait()
 	assert.Equal(t, n+1, g.fx.Count("skills/list"))
+}
+
+// A binary file is never stored, so there is nothing to re-verify it against
+// on the next refresh. While the listing still names the same address, digest
+// and size that a previous refresh read and verified, it is not downloaded
+// again on every sweep; any change to those three reads it again.
+func TestSkillsRefresh_VerifiedBinaryIsNotReadAgain(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	g.fx.AddSkill(skillstest.Skill{Path: "bin", Files: map[string][]byte{"big.bin": sized(400, 1)}, Binary: []string{"big.bin"}})
+	require.NoError(t, g.refresh(t))
+	reads := g.fx.Count("resources/read")
+	require.Equal(t, storage.SkillStatusPending, g.records(t)["bin"].Status)
+
+	require.NoError(t, g.refresh(t))
+	assert.Equal(t, reads, g.fx.Count("resources/read"), "an unchanged, already verified binary is not read again")
+	rec := g.records(t)["bin"]
+	assert.Equal(t, storage.SkillStatusPending, rec.Status, rec.UnusableReason)
+	for _, f := range rec.Current.Files {
+		if f.RelPath == "big.bin" {
+			assert.False(t, f.Text)
+			assert.False(t, f.Stored)
+		}
+	}
+
+	g.fx.Mutate("bin", "big.bin", sized(400, 2))
+	require.NoError(t, g.refresh(t))
+	assert.Equal(t, reads+1, g.fx.Count("resources/read"), "a binary whose digest changed is read and verified again")
+}
+
+// An unusable skill proves nothing about its files: its binary is read again.
+func TestSkillsRefresh_BinaryOfUnusableSkillIsReadAgain(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	g.fx.AddSkill(skillstest.Skill{Path: "bin", Files: map[string][]byte{"big.bin": sized(400, 1)}, Binary: []string{"big.bin"}, WrongDigest: []string{"big.bin"}})
+	require.NoError(t, g.refresh(t))
+	require.Equal(t, storage.SkillStatusUnusable, g.records(t)["bin"].Status)
+	reads := g.fx.Count("resources/read")
+
+	require.NoError(t, g.refresh(t))
+	assert.Greater(t, g.fx.Count("resources/read"), reads)
+}
+
+// Background refreshes write storage from their own goroutines. Close must
+// wait for one that is in flight, and nothing may start after Close.
+//
+// Runtime.Close is not safe to call twice (the index and the cache manager
+// close channels), and the rig already closes the runtime in a cleanup. So the
+// checks run in a cleanup registered before the rig, which therefore runs
+// after that Close.
+func TestSkillsRefresh_CloseJoinsBackgroundRefresh(t *testing.T) {
+	var g *skillsRig
+	var inFlight, finished atomic.Bool
+	t.Cleanup(func() {
+		if !inFlight.Load() {
+			return // the test failed before a refresh was in flight
+		}
+		assert.True(t, finished.Load(), "Close returned while a refresh was still running")
+
+		lists := g.fx.Count("skills/list")
+		g.rt.triggerSkillsRefresh(skillsSrv)
+		g.rt.skills.wait()
+		assert.Equal(t, lists, g.fx.Count("skills/list"), "no refresh starts after Close")
+	})
+
+	g = newSkillsRig(t, skillsRigOpts{enable: true, autoTrig: true})
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf"})
+	g.rt.skills.wait() // the connect-time trigger, if any, is done
+
+	reached := make(chan struct{})
+	var once sync.Once
+	g.rt.skills.afterList = func(string) {
+		once.Do(func() { close(reached) })
+		time.Sleep(200 * time.Millisecond)
+		finished.Store(true)
+	}
+	g.rt.triggerSkillsRefresh(skillsSrv)
+	<-reached
+	inFlight.Store(true)
+	// The test ends here with the refresh inside afterList; the rig's cleanup
+	// calls Close now.
 }

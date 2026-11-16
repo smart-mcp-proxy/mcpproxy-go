@@ -102,7 +102,11 @@ type skillsCatalogState struct {
 	limits        skillsLimits
 	afterList     func(serverName string)
 	noAutoTrigger atomic.Bool
-	wg            sync.WaitGroup
+
+	// wg counts the background refreshes; closed stops new ones. Both change
+	// under mu, so no refresh can be added once close has started to wait.
+	wg     sync.WaitGroup
+	closed bool
 }
 
 // init allocates the maps; callers hold mu.
@@ -125,6 +129,17 @@ func (s *skillsCatalogState) joiners(serverName string) int {
 
 // wait blocks until every background trigger has finished (tests only).
 func (s *skillsCatalogState) wait() { s.wg.Wait() }
+
+// close stops new background refreshes and joins the running ones. They write
+// storage from their own goroutines, so Runtime.Close calls this before the
+// storage manager starts to stop; the cancelled lifetime context makes each
+// one return at its next upstream request.
+func (s *skillsCatalogState) close() {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	s.wg.Wait()
+}
 
 func (s *skillsCatalogState) setStatus(serverName string, mut func(*SkillsServerStatus)) {
 	s.mu.Lock()
@@ -318,9 +333,19 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 		storedLimit: r.skills.limits.stored(),
 	}
 
+	// What earlier refreshes verified, read without the lock: it only decides
+	// which binary files need no second download. The apply below reads the
+	// records again under the lock.
+	known := map[string]*storage.SkillApprovalRecord{}
+	if list, err := sm.ListSkillApprovals(serverName); err == nil {
+		for _, p := range list {
+			known[p.SkillURI] = p
+		}
+	}
+
 	var outcomes []skillOutcome
 	for _, e := range entries {
-		o, err := r.readSkill(ctx, serverName, inc, e, budget)
+		o, err := r.readSkill(ctx, serverName, inc, e, known[e.URI], budget)
 		if err != nil {
 			return err
 		}
@@ -486,7 +511,7 @@ func unusableOutcome(o skillOutcome, u *skills.UnusableError) skillOutcome {
 // readSkill reads one skill's files. A skill-level failure is an unusable
 // outcome and not an error; only a cancelled context or a replaced server
 // stops the whole refresh. At most one skill's file bytes are held at once.
-func (r *Runtime) readSkill(ctx context.Context, serverName string, inc int64, e skills.Entry, b *skillsBudget) (skillOutcome, error) {
+func (r *Runtime) readSkill(ctx context.Context, serverName string, inc int64, e skills.Entry, prev *storage.SkillApprovalRecord, b *skillsBudget) (skillOutcome, error) {
 	um, sm := r.upstreamManager, r.storageManager
 	o := skillOutcome{uri: e.URI, path: skillPathOf(e.URI)}
 	o.name = o.path[strings.LastIndex(o.path, "/")+1:]
@@ -534,6 +559,10 @@ func (r *Runtime) readSkill(ctx context.Context, serverName string, inc int64, e
 				content, have = blob, true
 				sf.Text, sf.Stored = true, true
 			}
+		}
+
+		if !have && ref.URI != e.URI && verifiedBinaryBefore(prev, ref) {
+			continue // sf.Text and sf.Stored stay false
 		}
 
 		if !have {
@@ -610,6 +639,24 @@ func (r *Runtime) readSkill(ctx context.Context, serverName string, inc int64, e
 	b.stored += skillStored
 	o.usable = true
 	return o, nil
+}
+
+// verifiedBinaryBefore reports whether an earlier refresh read and verified
+// this exact binary file: the same address, digest and size in the current
+// content of a usable record. Binary files are not stored, so there are no
+// bytes to check again, and they are never served; reading megabytes on every
+// sweep to learn nothing new is the cost this avoids. An unusable record
+// proves nothing about its files.
+func verifiedBinaryBefore(prev *storage.SkillApprovalRecord, ref skills.FileRef) bool {
+	if prev == nil || prev.Status == storage.SkillStatusUnusable {
+		return false
+	}
+	for _, f := range prev.Current.Files {
+		if f.URI == ref.URI {
+			return !f.Text && f.Digest == ref.Digest && f.Size == ref.Size
+		}
+	}
+	return false
 }
 
 // --- reads for later slices ---
@@ -739,7 +786,13 @@ func (r *Runtime) triggerSkillsRefresh(serverName string) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	r.skills.mu.Lock()
+	if r.skills.closed {
+		r.skills.mu.Unlock()
+		return
+	}
 	r.skills.wg.Add(1)
+	r.skills.mu.Unlock()
 	go func() {
 		defer r.skills.wg.Done()
 		err := r.RefreshServerSkills(ctx, serverName)
