@@ -1131,13 +1131,3 @@ func (m *Manager) rebuildSummary(id string) (bool, error) {
 func (m *Manager) CloseOpenWorkSessionsAtStart() (int, error) {
 	return m.MarkWorkSessionsEnded(time.Now().UTC().Add(24 * time.Hour))
 }
-
-// sortRefs orders timeline refs by time, then by key for a stable order.
-func sortRefs(refs []WorkSessionRowRef) {
-	sort.SliceStable(refs, func(i, j int) bool {
-		if !refs[i].Timestamp.Equal(refs[j].Timestamp) {
-			return refs[i].Timestamp.Before(refs[j].Timestamp)
-		}
-		return bytes.Compare(refs[i].ActivityKey, refs[j].ActivityKey) < 0
-	})
-}

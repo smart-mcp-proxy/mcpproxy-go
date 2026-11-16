@@ -908,19 +908,13 @@ func (m *RefreshManager) handleRefreshFailureFor(serverName string, err error, m
 	m.rescheduleAfterDelayFor(serverName, backoff, schedule)
 }
 
-// failScheduleIfCurrent marks the schedule failed only while it is still the
+// failScheduleIfCurrentSeq marks the schedule failed only while it is still the
 // one the failure was recorded against. A login whose OnTokenSaved replaced
 // the schedule after handleRefreshFailure released m.mu supersedes the
 // failure (Spec 113 FR-006a): the new grant's schedule keeps running and no
 // stale failure event is emitted. lastError "" keeps the current LastError.
-func (m *RefreshManager) failScheduleIfCurrent(serverName string, expected *RefreshSchedule, lastError string, stopTimer bool) bool {
-	_, _, ok := m.failScheduleIfCurrentSeq(serverName, expected, lastError, stopTimer)
-	return ok
-}
-
-// failScheduleIfCurrentSeq is failScheduleIfCurrent that also returns the
-// notification number taken for the accepted failure and the time it was
-// accepted, both under the lock.
+// It returns the notification number taken for the accepted failure and the
+// time it was accepted, both under the lock.
 func (m *RefreshManager) failScheduleIfCurrentSeq(serverName string, expected *RefreshSchedule, lastError string, stopTimer bool) (uint64, time.Time, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
