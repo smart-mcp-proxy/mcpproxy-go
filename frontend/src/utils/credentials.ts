@@ -19,8 +19,22 @@ export interface LifecycleFields {
   credential_state?: string
 }
 
+// A credential minted with `--expires never` carries Go's zero time
+// ("0001-01-01T00:00:00Z") as its expires_at. It has no expiry at all: never
+// expired, never a lease, never "expiring soon".
+export function isNeverExpires(value: string | null | undefined): boolean {
+  if (!value) return false
+  const t = new Date(value).getTime()
+  return !Number.isNaN(t) && new Date(t).getUTCFullYear() <= 1
+}
+
+// "Never" for a credential without an expiry, else the short date-time.
+export function expiresText(value: string): string {
+  return isNeverExpires(value) ? 'Never' : formatDateTimeShort(value)
+}
+
 function ms(value: string | null | undefined): number | null {
-  if (!value) return null
+  if (!value || isNeverExpires(value)) return null
   const t = new Date(value).getTime()
   return Number.isNaN(t) ? null : t
 }

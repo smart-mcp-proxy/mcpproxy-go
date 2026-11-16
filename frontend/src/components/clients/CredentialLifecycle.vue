@@ -22,7 +22,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { PURPOSE_LABEL, bindingText, isLease, issuerText, leaseText, stateBadge } from '@/utils/credentials'
+import { PURPOSE_LABEL, bindingText, isLease, isNeverExpires, issuerText, leaseText, stateBadge } from '@/utils/credentials'
 import { formatDateTimeShort } from '@/utils/datetime'
 import { useNow } from '@/composables/useNow'
 import type { CredentialIssuer } from '@/types/api'
@@ -66,6 +66,7 @@ const dangling = computed(() => props.profileState === 'dangling')
 // A revoked lease keeps its planned end too (no countdown, no reconnect).
 const expiryText = computed(() => {
   if (lease.value || !props.expiresAt) return ''
+  if (isNeverExpires(props.expiresAt)) return 'Never expires'
   if (isLease(fields.value) && state.value.label !== 'Revoked') return ''
   const past = new Date(props.expiresAt).getTime() <= nowMs.value
   if (isLease(fields.value)) return `Lease ${past ? 'ended' : 'was to end'} ${formatDateTimeShort(props.expiresAt)}`

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -51,4 +52,46 @@ func TestCredentialsService_IssueToken_DurationCapUnchanged(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "365 days")
+}
+
+// Client credentials keep their capped expiry: "never" is not a duration, and
+// is refused over REST and MCP alike, with nothing stored.
+func TestCredentialsService_IssueClient_NeverIsRefused(t *testing.T) {
+	h := newCredHarness(t)
+	for name, req := range map[string]IssueClientRequest{
+		"mcp":  mcpClientReq("cli-mcp", "ro", auth.TokenExpiryNever),
+		"rest": {ID: "cli-rest", ExpiresIn: auth.TokenExpiryNever, Expiry: ExpiryClientCap},
+	} {
+		_, err := h.cs.IssueClient(context.Background(), mcpActor(), req)
+		require.Error(t, err, name)
+	}
+	all, err := h.sm.ListAgentTokens()
+	require.NoError(t, err)
+	assert.Empty(t, all, "no credential was stored")
+}
+
+// "never" is accepted only as the whole value.
+func TestCredentialsService_IssueToken_NeverIsExact(t *testing.T) {
+	h := newCredHarness(t)
+	h.cfg.RequireMCPAuth = false
+	for _, v := range []string{"Never", "never ", "forever"} {
+		_, err := h.cs.IssueToken(context.Background(), funnelActor(), IssueTokenRequest{
+			Name: "n1", Permissions: []string{"read"}, ExpiresIn: v, Expiry: ExpiryTokenDefault,
+		})
+		require.Error(t, err, v)
+	}
+}
+
+// A never-expiring token's view and state: active far in the future, not a lease.
+func TestCredentialsService_NeverTokenState(t *testing.T) {
+	h := newCredHarness(t)
+	h.cfg.RequireMCPAuth = false
+	res, err := h.cs.IssueToken(context.Background(), funnelActor(), IssueTokenRequest{
+		Name: "forever2", Permissions: []string{"read"}, ExpiresIn: auth.TokenExpiryNever, Expiry: ExpiryTokenDefault,
+	})
+	require.NoError(t, err)
+	assert.False(t, res.View.Lease)
+	tok, err := h.sm.GetAgentTokenByName("forever2")
+	require.NoError(t, err)
+	assert.Equal(t, CredentialStateActive, CredentialStateOf(tok, time.Now().Add(100*365*24*time.Hour)))
 }

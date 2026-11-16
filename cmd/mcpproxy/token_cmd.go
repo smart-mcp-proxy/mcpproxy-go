@@ -88,6 +88,7 @@ Examples:
   mcpproxy token create --name ci --profile work-readonly
   mcpproxy token create --name deploy-bot --servers github,gitlab --permissions read,write
   mcpproxy token create --name ci-agent --servers "*" --permissions read --expires 7d
+  mcpproxy token create --name keychain-claude --profile work-readonly --expires never
   mcpproxy token create --name loop-guard --profile work-readonly --rate-limit 60 --rate-burst 10
 
 --rate-limit caps how many upstream tool calls the token may make: that many a

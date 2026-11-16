@@ -110,6 +110,16 @@ final class TokensCreateModelTests: XCTestCase {
         XCTAssertEqual(list.tokens[0].servers, ["*"])
     }
 
+    // MARK: Never-expiring tokens
+
+    /// `token create --expires never` is stored with a zero ExpiresAt, which the
+    /// API sends as Go's zero time. The row says "Never expires", not a date in year 1.
+    func testAZeroExpiryMeansNeverExpires() {
+        XCTAssertTrue(token(#"{"name":"a","expires_at":"0001-01-01T00:00:00Z","created_at":"x"}"#).neverExpires)
+        XCTAssertFalse(token(#"{"name":"b","expires_at":"2026-12-01T00:00:00Z","created_at":"x"}"#).neverExpires)
+        XCTAssertFalse(token(#"{"name":"c","created_at":"x"}"#).neverExpires)
+    }
+
     // MARK: Row presentation
 
     func testAProfileTokenShowsItsProfileChip() {
