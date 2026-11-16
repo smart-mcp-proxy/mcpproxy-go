@@ -199,6 +199,12 @@ func (p *MCPProxyServer) resolveDirectDescribeIDWith(ctx context.Context, cat *d
 // applies to the same entry: profile scope, agent-token server scope, the
 // operation-permission tier, and agent callability.
 func (p *MCPProxyServer) directEntryVisibleToSession(ctx context.Context, entry *directCatalogEntry) bool {
+	// describe_tool on /mcp/s/<server> sees only that server's entries, so
+	// neither resolution (display or canonical form) nor the did_you_mean
+	// corpus can reach another server's tool (#1909).
+	if confined, ok := describeConfinedServer(ctx); ok && entry.ServerName != confined {
+		return false
+	}
 	authCtx := auth.AuthContextFromContext(ctx)
 	view := p.directProfileViewFor(ctx)
 	isScopedAgent := isScopeRestrictedCaller(authCtx)

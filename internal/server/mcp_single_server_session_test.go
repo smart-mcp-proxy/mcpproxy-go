@@ -104,3 +104,60 @@ func TestStripServerPrefixInJSON_DidYouMeanKeepsOnlyThisServer(t *testing.T) {
 	require.Len(t, doc.Errors, 1)
 	assert.Equal(t, []string{"read_file"}, doc.Errors[0].DidYouMean)
 }
+
+// mcp-go checks the session id only on POST. The guard in front of every
+// /mcp/s/<server> transport refuses a foreign id on GET and DELETE too, so
+// another endpoint's session record cannot be registered or closed here.
+func TestSingleServerSessionGuard_RefusesForeignIDOnEveryMethod(t *testing.T) {
+	var reached int
+	guarded := httptest.NewServer(singleServerSessionGuard("beta", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached++
+		w.WriteHeader(http.StatusNoContent)
+	})))
+	defer guarded.Close()
+
+	do := func(method, sid string) int {
+		req, _ := http.NewRequest(method, guarded.URL, nil)
+		if sid != "" {
+			req.Header.Set("Mcp-Session-Id", sid)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	foreign := newSingleServerSessionIDs("alpha").Generate()
+	for _, m := range []string{http.MethodGet, http.MethodDelete, http.MethodPost} {
+		assert.Equal(t, http.StatusNotFound, do(m, foreign), "%s with alpha's session on beta", m)
+		assert.Equal(t, http.StatusNotFound, do(m, "mcp-session-980d2b73-e933-46a0-8d2f-0b9090f6bb79"), "%s with an untagged id", m)
+	}
+	assert.Zero(t, reached, "a refused request never reaches the transport")
+
+	own := newSingleServerSessionIDs("beta").Generate()
+	assert.Equal(t, http.StatusNoContent, do(http.MethodGet, own))
+	assert.Equal(t, http.StatusNoContent, do(http.MethodDelete, own))
+	assert.Equal(t, http.StatusNoContent, do(http.MethodPost, ""), "initialize carries no session id")
+	assert.Equal(t, 3, reached)
+}
+
+// On /mcp/s/x__y a bare "z" is "x__y:z", which is also the DISPLAY name of
+// server x's tool "y:z". describe_tool must describe x__y's own z and never
+// x's tool, even for a caller who may see both servers.
+func TestSingleServerSurface_DescribeToolDisplayNameCollision(t *testing.T) {
+	p := directCanonicalOverlapFixture(t, true)
+	for _, ctx := range []context.Context{scopedCtx("x", "x__y"), singleServerAdminCtx()} {
+		req := mcp.CallToolRequest{}
+		req.Params.Arguments = map[string]any{"tool_ids": []any{"z"}}
+		result, err := p.singleServerDescribeHandler("x__y")(ctx, req)
+		require.NoError(t, err)
+		text := result.Content[0].(mcp.TextContent).Text
+		assert.NotContains(t, text, "HIDDEN_SENTINEL", "server x's tool must not be described on /mcp/s/x__y")
+	}
+	// The agent sees exactly one side of the collision once confined, so it
+	// gets x__y's own tool.
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"tool_ids": []any{"z"}}
+	result, err := p.singleServerDescribeHandler("x__y")(scopedCtx("x", "x__y"), req)
+	require.NoError(t, err)
+	assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "authorized canonical-id owner")
+}

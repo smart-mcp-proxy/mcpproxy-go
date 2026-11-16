@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/google/uuid"
@@ -299,6 +300,18 @@ func (p *MCPProxyServer) screenUpstreamInstructions(name, text string) string {
 	return text
 }
 
+// describeConfinedServerKey confines describe_tool resolution to one server.
+type describeConfinedServerKey struct{}
+
+func withDescribeConfinedServer(ctx context.Context, server string) context.Context {
+	return context.WithValue(ctx, describeConfinedServerKey{}, server)
+}
+
+func describeConfinedServer(ctx context.Context) (string, bool) {
+	s, ok := ctx.Value(describeConfinedServerKey{}).(string)
+	return s, ok && s != ""
+}
+
 // singleServerSessionIDs mints and checks the Mcp-Session-Id of ONE
 // /mcp/s/<server> surface. mcp-go's default manager accepts any well-formed
 // "mcp-session-<uuid>", so a session id minted on one surface (and the client
@@ -338,6 +351,24 @@ func (m *singleServerSessionIDs) Validate(sessionID string) (isTerminated bool, 
 
 func (m *singleServerSessionIDs) Terminate(string) (isNotAllowed bool, err error) {
 	return false, nil
+}
+
+// singleServerSessionGuard refuses a request on /mcp/s/<server> whose
+// Mcp-Session-Id was not minted by that endpoint. mcp-go validates the id only
+// on POST: its GET (the legacy standalone stream) and DELETE accept any id and
+// would register or close the session record another endpoint's session owns.
+// Unknown-session is a 404, as the transport answers for a terminated one.
+func singleServerSessionGuard(server string, next http.Handler) http.Handler {
+	ids := newSingleServerSessionIDs(server)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if sid := r.Header.Get("Mcp-Session-Id"); sid != "" {
+			if _, err := ids.Validate(sid); err != nil {
+				http.Error(w, "Session not found", http.StatusNotFound)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // singleServerStreamableOptions is the Streamable HTTP option set of a
@@ -412,7 +443,7 @@ func (p *MCPProxyServer) singleServerDescribeHandler(name string) mcpserver.Tool
 			}
 		}
 
-		result, err := inner(ctx, request)
+		result, err := inner(withDescribeConfinedServer(ctx, name), request)
 		if err != nil || result == nil {
 			return result, err
 		}

@@ -15,12 +15,15 @@ that server exactly as if it had connected to it directly:
 - **Its own tool names.** `get_story`, not `shortcut__get_story`, and descriptions
   without the `[server]` prefix.
 - **Its own instructions.** The `initialize` response carries the instructions the
-  upstream server sent mcpproxy, and nothing of mcpproxy's.
+  upstream server sent mcpproxy, and nothing of mcpproxy's, when they pass the
+  checks under [Security](#security); otherwise it carries none.
 - **Only its tools**, plus `describe_tool`, which takes and returns the same bare
   names.
 
 mcpproxy still holds the server's credentials. For an OAuth server it signs in
-once, stores the tokens in the OS keyring and refreshes them for every client, so
+once, stores the tokens in its database (`config.db`, encrypted when
+[`oauth_token_encryption_key`](./oauth-token-encryption.md) is set) and refreshes
+them for every client, so
 many concurrent agent sessions share one grant instead of each racing to rotate
 its own refresh token.
 
@@ -69,6 +72,12 @@ filters as `/mcp/all`:
 - The upstream's instructions are forwarded only for a caller the endpoint admits
   and only while the server is enabled and not quarantined; they are text the
   upstream wrote, so they are held back from a server you have not approved.
+  They are also scanned for tool-poisoning patterns each time and withheld (with
+  a log line) when the scan flags them, cannot cover them, or they exceed 8 KiB.
+- Session ids are bound to the endpoint that issued them: a session started on
+  `/mcp/s/a` is refused (`404`) on `/mcp/s/b`, for every method.
+- `describe_tool` resolves only this server's tools; its `did_you_mean`
+  suggestions name only this server's tools.
 - Tools that are pending approval or changed since approval are hidden from agent
   tokens and cannot be called by anyone, as on `/mcp/all`. An administrator
   credential keeps them in the operator listing, as on `/mcp/all`, but a call is
