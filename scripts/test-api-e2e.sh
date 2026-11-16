@@ -1164,7 +1164,7 @@ for _ in $(seq 1 40); do
 done
 if [ -n "$WS_ID" ] && jq -e --arg run "$WS_RUN" '
         .data.total == 1 and (.data.sessions[0]
-            | .run_name == $run and .surface == "api" and .attempts >= 3 and .failures >= 1
+            | .run_name == $run and .surface == "rest" and .attempts >= 3 and .failures >= 1
               and .last_failure != null and (.last_failure.reason | length) > 0)' < "$TEST_RESULTS_FILE" >/dev/null; then
     log_pass "Work session: a named REST run is listed as failed"
 else
