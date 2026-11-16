@@ -517,11 +517,13 @@ func (m *RefreshManager) installScheduleForSavedToken(serverName string, expires
 	m.scheduleRefreshLocked(serverName, expiresAt, binding)
 	if replaced != nil && m.schedules[serverName] == replaced {
 		// Nothing was scheduled for the new token (no expiry, or too close
-		// to it). The old schedule belongs to the grant this save replaced
-		// and its timer is stopped: it is removed, so a failure of the old
-		// grant that is still in flight is no longer "current" and cannot
-		// be reported after this save (Spec 124 D5).
-		delete(m.schedules, serverName)
+		// to it), so the old schedule's record stays, with its timer
+		// stopped, as before. It gets a new identity, though: a failure of
+		// the grant this save replaced that is still in flight compares
+		// against the old one, is no longer "current", and is not reported
+		// after this save (Spec 124 D5).
+		renewed := *replaced
+		m.schedules[serverName] = &renewed
 	}
 
 	// Spec 124 D5: number the save under the lock, so it is ordered against

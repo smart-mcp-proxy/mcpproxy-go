@@ -104,9 +104,9 @@ func TestRefreshManager_SaveNotificationIsSentOutsideTheLock(t *testing.T) {
 }
 
 // Review round 3: a save that needs no proactive schedule (no expiry) still
-// replaces the old grant's schedule, so a failure of the old grant that
+// renews the identity of the old grant's schedule, so a failure of the old grant that
 // arrives afterwards is not current and is not reported.
-func TestRefreshManager_SaveWithoutExpiryRetiresTheOldSchedule(t *testing.T) {
+func TestRefreshManager_SaveWithoutExpiryRenewsTheScheduleIdentity(t *testing.T) {
 	emitter := &orderEmitter{}
 	manager := NewRefreshManager(newMockTokenStore(), nil, nil, zaptest.NewLogger(t))
 	manager.SetEventEmitter(emitter)
@@ -122,9 +122,10 @@ func TestRefreshManager_SaveWithoutExpiryRetiresTheOldSchedule(t *testing.T) {
 
 	manager.OnTokenSaved("srv", time.Time{}) // a new login, token without expiry
 	manager.mu.RLock()
-	_, still := manager.schedules["srv"]
+	cur := manager.schedules["srv"]
 	manager.mu.RUnlock()
-	assert.False(t, still, "the old grant's schedule is gone")
+	require.NotNil(t, cur, "the schedule record is kept")
+	assert.NotSame(t, oldPtr, cur, "under a new identity")
 
 	// The old grant's terminal failure lands now.
 	manager.failScheduleAndNotify("srv", oldPtr, "invalid_grant", true, errors.New("invalid_grant"))
