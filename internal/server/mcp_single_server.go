@@ -9,6 +9,7 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
@@ -153,6 +154,29 @@ func (p *MCPProxyServer) singleServerNameFor(srv *mcpserver.MCPServer) (string, 
 	return "", false
 }
 
+// singleServerAdmits reports whether the caller in ctx may reach the
+// /mcp/s/<name> surface at all: the server exists, the credential's server
+// allow-list covers it, and the caller's effective profile (token pin, client
+// binding, anonymous profile) reaches it. It is the door check the HTTP route
+// answers 404 on, so an out-of-scope caller learns nothing about the server,
+// not even its instructions, whatever the discovery filters would later hide.
+// The profile is resolved list-only, exactly as the direct surface's listing
+// filter does, so admission never varies with a connection's set_profile.
+func (p *MCPProxyServer) singleServerAdmits(ctx context.Context, name string) bool {
+	if !p.upstreamConfigured(name) {
+		return false
+	}
+	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.CanAccessServer(name) {
+		return false
+	}
+	resolveCtx := listOnlyProfileResolution(ctx)
+	_, scope, idx := p.resolveActiveProfileWithIndex(resolveCtx)
+	if res := p.ResolveProfileV3(resolveCtx, idx); res.Scope != nil {
+		scope = res.Scope
+	}
+	return scope.Allows(name)
+}
+
 // upstreamConfigured reports whether an upstream server called name exists.
 func (p *MCPProxyServer) upstreamConfigured(name string) bool {
 	if p.upstreamManager == nil {
@@ -164,9 +188,18 @@ func (p *MCPProxyServer) upstreamConfigured(name string) bool {
 
 // upstreamInstructions returns the instructions the upstream server sent in
 // its own initialize response, or "" when it sent none or is not connected.
+//
+// Upstream-authored text is untrusted, so it is forwarded only for a server
+// that is enabled and not quarantined, the same gate its tools pass.
 func (p *MCPProxyServer) upstreamInstructions(name string) string {
 	if p.upstreamManager == nil {
 		return ""
+	}
+	if p.storage != nil {
+		sc, err := p.storage.GetUpstreamServer(name)
+		if err != nil || sc == nil || !sc.Enabled || sc.Quarantined {
+			return ""
+		}
 	}
 	client, ok := p.upstreamManager.GetClient(name)
 	if !ok || client == nil {

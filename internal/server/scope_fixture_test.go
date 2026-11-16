@@ -155,7 +155,8 @@ func startCountingUpstream(t *testing.T, proxy *MCPProxyServer, rt *runtime.Runt
 	t.Helper()
 	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
 
-	mcpSrv := mcpserver.NewMCPServer(server, "1.0.0-test", mcpserver.WithToolCapabilities(true))
+	mcpSrv := mcpserver.NewMCPServer(server, "1.0.0-test", mcpserver.WithToolCapabilities(true),
+		mcpserver.WithInstructions("upstream instructions of "+server))
 	up := &countingUpstream{upstreamCalls: &upstreamCalls{}, Server: server, mcpSrv: mcpSrv}
 	for _, tool := range tools {
 		up.serve(tool)

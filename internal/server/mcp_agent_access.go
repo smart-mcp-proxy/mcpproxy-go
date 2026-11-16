@@ -328,6 +328,9 @@ func (p *MCPProxyServer) instructionsForCaller(ctx context.Context, srv *mcpserv
 	// server itself, so it answers with that server's own instructions and
 	// nothing of mcpproxy's.
 	if name, ok := p.singleServerNameFor(srv); ok {
+		if !p.singleServerAdmits(ctx, name) {
+			return ""
+		}
 		return p.upstreamInstructions(name)
 	}
 	access := p.callerAccessFor(ctx)

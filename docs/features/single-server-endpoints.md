@@ -63,6 +63,18 @@ filters as `/mcp/all`:
   probe which servers are configured.
 - The token's permission tiers, profile policy and tool quarantine apply exactly as
   on `/mcp/all`: a read-only token does not see write or destructive tools.
+- A caller whose effective profile does not reach the server (a token pinned to
+  another profile, a client binding, or the anonymous profile) gets the same 404,
+  even when its server allow-list is `*`.
+- The upstream's instructions are forwarded only for a caller the endpoint admits
+  and only while the server is enabled and not quarantined; they are text the
+  upstream wrote, so they are held back from a server you have not approved.
+- Tools that are pending approval or changed since approval are hidden from agent
+  tokens and cannot be called by anyone, as on `/mcp/all`. An administrator
+  credential keeps them in the operator listing, as on `/mcp/all`, but a call is
+  refused before it reaches the upstream.
+- Removing a server makes its endpoint answer 404 on the next request; replacing it
+  re-registers the new server's tools and drops the old ones.
 - Calls dispatch through the same handlers as `/mcp/all`, bound to the catalog
   entry rather than re-resolved by name.
 

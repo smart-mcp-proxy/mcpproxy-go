@@ -5687,12 +5687,8 @@ func (s *Server) serveSingleServer(w http.ResponseWriter, r *http.Request) {
 	if i := strings.Index(name, "/"); i >= 0 {
 		name = name[:i]
 	}
-	if authCtx := auth.AuthContextFromContext(r.Context()); authCtx != nil && !authCtx.CanAccessServer(name) {
-		http.Error(w, `{"error":"Server not found"}`, http.StatusNotFound)
-		return
-	}
 	var srv *server.MCPServer
-	if s.mcpProxy != nil {
+	if s.mcpProxy != nil && s.mcpProxy.singleServerAdmits(r.Context(), name) {
 		srv = s.mcpProxy.SingleServerMCP(name)
 	}
 	if srv == nil {
