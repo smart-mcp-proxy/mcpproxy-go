@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -51,7 +52,7 @@ func TestHealthCheck_TransientTimeoutToleratedBelowThreshold(t *testing.T) {
 // TestHealthCheck_HardErrorTriggersImmediateError verifies that hard
 // connection failures (connection refused, host unreachable) bypass the
 // flap-resistance threshold — the server is genuinely down and the user
-// should see that immediately, not wait 90 seconds.
+// should see that immediately, not wait out the timeout budget.
 func TestHealthCheck_HardErrorTriggersImmediateError(t *testing.T) {
 	mc := newTestClientForHealth(t)
 	hardErr := errors.New("dial tcp 127.0.0.1:65535: connect: connection refused")
@@ -123,4 +124,32 @@ func TestHealthCheck_ResetOnConnect(t *testing.T) {
 
 	// Use ctx to silence unused import warnings on stripped builds.
 	_ = context.Background()
+}
+
+// TestHealthCheck_ThresholdPinnedAtFive pins the loaded-host tolerance (#1909)
+// with literal numbers: five consecutive timeouts mark Error, four do not,
+// and a hard failure (refused, DNS, auth) marks Error on the first miss.
+// The probe cadence is the 30s config default, so five misses is ~2.5 minutes
+// plus up to 15s per probe (the timer restarts after each probe returns).
+func TestHealthCheck_ThresholdPinnedAtFive(t *testing.T) {
+	require.Equal(t, 5, healthCheckFailureThreshold)
+	require.Equal(t, 15*time.Second, healthCheckProbeTimeout)
+	require.Equal(t, 30*time.Second, (&config.Config{}).ResolveHealthCheckInterval(nil))
+
+	timeoutErr := errors.New("ping: context deadline exceeded")
+
+	mc := newTestClientForHealth(t)
+	for i := 1; i <= 4; i++ {
+		assert.False(t, mc.recordHealthCheckFailure(timeoutErr), "timeout #%d must not trip", i)
+	}
+	assert.True(t, mc.recordHealthCheckFailure(timeoutErr), "5th consecutive timeout must trip")
+
+	for name, msg := range map[string]string{
+		"refused": "dial tcp 127.0.0.1:1: connect: connection refused",
+		"dns":     "dial tcp: lookup nope.invalid: no such host",
+		"auth":    "request failed: 401 Unauthorized",
+	} {
+		hc := newTestClientForHealth(t)
+		assert.True(t, hc.recordHealthCheckFailure(errors.New(msg)), "%s must trip at once", name)
+	}
 }

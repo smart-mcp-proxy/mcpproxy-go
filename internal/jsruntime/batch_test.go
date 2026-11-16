@@ -686,6 +686,13 @@ func TestCallToolsMalformedCallsAreWholeCallErrors(t *testing.T) {
 		{name: "args is null", code: `call_tools([{server: "s", tool: "t", args: null}])`, wantMessage: "element 0: args"},
 		{name: "first offending element is named", code: `call_tools([{server: "s", tool: "t"}, {server: "s"}, 7])`, wantMessage: "element 1"},
 		{name: "options is not an object", code: `call_tools([{server: "s", tool: "t"}], 4)`, wantMessage: "options must be an object"},
+		{name: "options is an array", code: `call_tools([{server: "s", tool: "t"}], [4])`, wantMessage: "options must be an object"},
+		{name: "options is a Map", code: `call_tools([{server: "s", tool: "t"}], new Map([["max_parallel", 4]]))`, wantMessage: "options must be an object"},
+		{name: "options is a proxy", code: `call_tools([{server: "s", tool: "t"}], new Proxy({max_parallel: 4}, {}))`, wantMessage: "options must be an object"},
+		{name: "options is a function", code: `call_tools([{server: "s", tool: "t"}], function(){})`, wantMessage: "options must be an object"},
+		{name: "options is a Date", code: `call_tools([{server: "s", tool: "t"}], new Date(0))`, wantMessage: "options must be an object"},
+		{name: "max_parallel as a Number object", code: `call_tools([{server: "s", tool: "t"}], {max_parallel: new Number(0)})`, wantMessage: "between 1 and 32"},
+		{name: "max_parallel from a getter", code: `call_tools([{server: "s", tool: "t"}], {get max_parallel(){ return 40 }})`, wantMessage: "between 1 and 32"},
 		{name: "fractional max_parallel", code: `call_tools([{server: "s", tool: "t"}], {max_parallel: 2.5})`, wantMessage: "max_parallel must be an integer"},
 		{name: "non-numeric max_parallel", code: `call_tools([{server: "s", tool: "t"}], {max_parallel: "4"})`, wantMessage: "max_parallel must be an integer"},
 		{name: "max_parallel below range", code: `call_tools([{server: "s", tool: "t"}], {max_parallel: 0})`, wantMessage: "between 1 and 32"},
@@ -722,6 +729,25 @@ func TestCallToolsMalformedCallsAreWholeCallErrors(t *testing.T) {
 				t.Errorf("recorded %d tool calls for a malformed batch", len(ec.ToolCalls))
 			}
 		})
+	}
+}
+
+// TestCallToolsOptionsReadOnlyMaxParallel: only an own enumerable
+// max_parallel is read; inherited and non-enumerable ones, and every other
+// key, are ignored without being read.
+func TestCallToolsOptionsReadOnlyMaxParallel(t *testing.T) {
+	for _, code := range []string{
+		`call_tools([{server: "s", tool: "t"}], Object.create({max_parallel: 0}))`,
+		`var o = {}; Object.defineProperty(o, "max_parallel", {value: 0, enumerable: false}); call_tools([{server: "s", tool: "t"}], o)`,
+		`call_tools([{server: "s", tool: "t"}], {get other(){ throw new Error("read an ignored option") }, max_parallel: 2})`,
+	} {
+		slots, _ := batchSlots(t, newBatchStub(), code, ExecutionOptions{TimeoutMs: 10000})
+		if len(slots) != 1 {
+			t.Fatalf("%s: got %d slots, want 1", code, len(slots))
+		}
+		if ok, _ := slots[0].(map[string]interface{})["ok"].(bool); !ok {
+			t.Errorf("%s: slot 0 failed: %#v", code, slots[0])
+		}
 	}
 }
 

@@ -1170,14 +1170,8 @@ func (a *App) getLatestRelease() (*GitHubRelease, error) {
 
 	// Default behavior: get latest stable release only
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
-	resp, err := http.Get(url) // #nosec G107 -- URL is constructed from known repo constant
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
 	var release GitHubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+	if err := fetchJSON(url, maxReleaseJSONBytes, &release); err != nil {
 		return nil, err
 	}
 	return &release, nil
@@ -1186,14 +1180,8 @@ func (a *App) getLatestRelease() (*GitHubRelease, error) {
 // getLatestReleaseIncludingPrereleases fetches the latest release including prereleases
 func (a *App) getLatestReleaseIncludingPrereleases() (*GitHubRelease, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases", repo)
-	resp, err := http.Get(url) // #nosec G107 -- URL is constructed from known repo constant
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
 	var releases []GitHubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+	if err := fetchJSON(url, maxReleaseJSONBytes, &releases); err != nil {
 		return nil, err
 	}
 
@@ -1310,9 +1298,49 @@ func (a *App) applyUpdate(r io.Reader, opts update.Options) error {
 	return update.Apply(r, opts)
 }
 
-// downloadToFile fetches url into destPath, refusing any non-200 response.
-func downloadToFile(url, destPath string) error {
-	resp, err := http.Get(url) // #nosec G107 -- URL comes from the GitHub releases API for this repo
+// maxReleaseJSONBytes bounds a GitHub releases API response. The all-releases
+// listing (prerelease channel) is the largest; 8 MiB is far above a real page.
+const maxReleaseJSONBytes = 8 << 20
+
+// maxChecksumsDownloadBytes bounds the checksums.txt download. It matches the
+// parser's own ceiling in internal/updatecheck.
+const maxChecksumsDownloadBytes = 4 << 20
+
+// Shared HTTP clients for the updater. http.Get uses the default client, which
+// has no timeout, so a stalled GitHub/CDN connection would hang the update
+// goroutine forever. Variables so tests can substitute short timeouts.
+var (
+	updateAPIClient      = &http.Client{Timeout: 30 * time.Second}
+	updateDownloadClient = &http.Client{Timeout: 15 * time.Minute}
+)
+
+// fetchJSON GETs url and decodes at most maxBytes of JSON into v. A non-200
+// status or a body larger than maxBytes is an error.
+func fetchJSON(url string, maxBytes int64, v any) error {
+	resp, err := updateAPIClient.Get(url) // #nosec G107 -- URL is constructed from known repo constant
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected HTTP status %s", resp.Status)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(body)) > maxBytes {
+		return fmt.Errorf("response from %s exceeds %d bytes", url, maxBytes)
+	}
+	return json.Unmarshal(body, v)
+}
+
+// downloadToFile fetches url into destPath, refusing any non-200 response and
+// any body larger than maxBytes (the partial file is removed).
+func downloadToFile(url, destPath string, maxBytes int64) error {
+	resp, err := updateDownloadClient.Get(url) // #nosec G107 -- URL comes from the GitHub releases API for this repo
 	if err != nil {
 		return err
 	}
@@ -1326,9 +1354,13 @@ func downloadToFile(url, destPath string) error {
 	if err != nil {
 		return err
 	}
-	_, copyErr := io.Copy(f, io.LimitReader(resp.Body, maxUpdateDownloadBytes))
+	n, copyErr := io.Copy(f, io.LimitReader(resp.Body, maxBytes+1))
 	closeErr := f.Close()
+	if copyErr == nil && n > maxBytes {
+		copyErr = fmt.Errorf("download exceeds the %d byte limit", maxBytes)
+	}
 	if copyErr != nil {
+		_ = os.Remove(destPath)
 		return copyErr
 	}
 	return closeErr
@@ -1358,7 +1390,7 @@ func (a *App) resolveAssetDigest(release *GitHubRelease, assetName, workDir stri
 	}
 
 	checksumsPath := filepath.Join(workDir, checksumsAssetName)
-	if err := downloadToFile(checksumsURL, checksumsPath); err != nil {
+	if err := downloadToFile(checksumsURL, checksumsPath, maxChecksumsDownloadBytes); err != nil {
 		return "", fmt.Errorf("download %s for release %s: %w", checksumsAssetName, release.TagName, err)
 	}
 
@@ -1391,8 +1423,9 @@ func (a *App) resolveAssetDigest(release *GitHubRelease, assetName, workDir stri
 // downloaded file before anything is extracted from it - update.Options.Checksum
 // would instead hash the extracted member, which the manifest says nothing
 // about. Signature verification of checksums.txt itself (the cosign bundle the
-// release also publishes, as `mcpproxy update --self` verifies) is a follow-up;
-// it needs the cosign binary, which a tray user's machine usually lacks.
+// release also publishes, as `mcpproxy update --self` verifies) is a follow-up:
+// the CLI shells out to an external cosign binary, which a tray user's machine
+// usually lacks, so it cannot be reused here without an in-process verifier.
 func (a *App) downloadAndApplyUpdate(release *GitHubRelease, assetName, url string) error {
 	workDir, err := os.MkdirTemp("", "mcpproxy-tray-update-*")
 	if err != nil {
@@ -1411,7 +1444,7 @@ func (a *App) downloadAndApplyUpdate(release *GitHubRelease, assetName, url stri
 	// asset name itself, which is server-supplied): ExtractBinary dispatches
 	// tar.gz vs zip off the path suffix.
 	archivePath := filepath.Join(workDir, "artifact"+archiveExt(assetName))
-	if err := downloadToFile(url, archivePath); err != nil {
+	if err := downloadToFile(url, archivePath, maxUpdateDownloadBytes); err != nil {
 		return fmt.Errorf("download %s: %w", assetName, err)
 	}
 

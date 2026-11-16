@@ -95,7 +95,7 @@ func newTaxonomyUpstream(t *testing.T) *httptest.Server {
 		r.Body = io.NopCloser(strings.NewReader(string(body)))
 		inner.ServeHTTP(w, r)
 	}))
-	t.Cleanup(hs.Close)
+	t.Cleanup(func() { closeHTTPFixture(hs) })
 	return hs
 }
 

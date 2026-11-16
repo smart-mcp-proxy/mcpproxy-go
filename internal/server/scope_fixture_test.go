@@ -155,7 +155,8 @@ func startCountingUpstream(t *testing.T, proxy *MCPProxyServer, rt *runtime.Runt
 	t.Helper()
 	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
 
-	mcpSrv := mcpserver.NewMCPServer(server, "1.0.0-test", mcpserver.WithToolCapabilities(true))
+	mcpSrv := mcpserver.NewMCPServer(server, "1.0.0-test", mcpserver.WithToolCapabilities(true),
+		mcpserver.WithInstructions("upstream instructions of "+server))
 	up := &countingUpstream{upstreamCalls: &upstreamCalls{}, Server: server, mcpSrv: mcpSrv}
 	for _, tool := range tools {
 		up.serve(tool)
@@ -165,7 +166,9 @@ func startCountingUpstream(t *testing.T, proxy *MCPProxyServer, rt *runtime.Runt
 	require.NoError(t, err)
 	httpSrv := &http.Server{Handler: mcpserver.NewStreamableHTTPServer(mcpSrv), ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = httpSrv.Serve(ln) }()
-	t.Cleanup(func() { _ = httpSrv.Shutdown(context.Background()) })
+	// Close, not Shutdown: the proxy may still hold this upstream's
+	// standalone GET stream (GH #1910), and Shutdown waits for it.
+	t.Cleanup(func() { _ = httpSrv.Close() })
 	up.URL = fmt.Sprintf("http://%s", ln.Addr().String())
 
 	serverCfg := &config.ServerConfig{Name: server, URL: up.URL, Protocol: "streamable-http", Enabled: true}

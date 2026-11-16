@@ -19,6 +19,8 @@ MCPProxy supports three routing modes that control how upstream MCP tools are ex
 | `direct` | All tools exposed as `serverName__toolName` | Small tool sets, simple setups, maximum compatibility |
 | `code_execution` | `code_execution` + `retrieve_tools` for discovery | Multi-step orchestration, reduced round-trips |
 
+To serve **one** upstream server at its own URL, under its own tool names and with its own instructions, use [`/mcp/s/<server>`](./single-server-endpoints.md).
+
 > The configured mode is served on the default `/mcp` endpoint. Each mode also has a dedicated endpoint (`/mcp/call`, `/mcp/all`, `/mcp/code`) — see [Dedicated Endpoints](#dedicated-endpoints) below.
 
 ## Configuration

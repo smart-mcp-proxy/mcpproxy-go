@@ -277,6 +277,15 @@ type MCPProxyServer struct {
 
 	directCatalogGeneration atomic.Uint64
 
+	// Single-server surfaces (/mcp/s/<server>, mcp_single_server.go): one MCP
+	// server per upstream that lists only that upstream's tools, under their
+	// own names. They are projections of the published direct catalog and are
+	// re-registered under directRefreshMu, after the direct surface. The lock
+	// order is directRefreshMu, then singleServersMu.
+	singleServerOpts []mcpserver.ServerOption
+	singleServersMu  sync.Mutex
+	singleServers    map[string]*singleServerSurface
+
 	// directRefreshMu serializes whole rebuilds so SetTools and the matching
 	// publishDirectCatalog cannot interleave with another rebuild's pair.
 	directRefreshMu sync.Mutex
@@ -325,6 +334,12 @@ type MCPProxyServer struct {
 	// remove and re-add landing after the record read must leave the gate
 	// bound to the removed incarnation).
 	toolGateAfterRecordRead func(serverName string)
+
+	// replayAfterGate, when non-nil, runs in Server.ReplayToolCall after the
+	// shared gate answered and before the live identity check. Nil in
+	// production; the only writer is a test (a connection that drops or
+	// changes generation in exactly that window).
+	replayAfterGate func()
 
 	// Spec 049: in-memory only counter of retrieve_tools calls that opted into
 	// include_disabled. Never persisted (privacy, consistent with Spec 042).

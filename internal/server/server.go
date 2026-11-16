@@ -47,6 +47,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
@@ -109,6 +110,9 @@ func (s *Server) setSecurityScanner(svc securityScannerService) {
 type Server struct {
 	logger  *zap.Logger
 	runtime *runtime.Runtime
+	// singleServerHTTP maps each /mcp/s/<server> MCP server to its Streamable
+	// HTTP transport, created on first use (serveSingleServer).
+	singleServerHTTP sync.Map // *server.MCPServer -> *server.StreamableHTTPServer
 	// bundleDegradedLogged is the last degraded-coverage reason already logged
 	// by bundleAdmissionSuspended (Spec 101 FR-007), so the suspension is
 	// logged once per reason rather than once per settle event.
@@ -3258,8 +3262,8 @@ func (s *Server) streamingNoDeadline(next http.Handler) http.Handler {
 
 // clientFacingStreamableOptions returns the options every client-facing
 // Streamable HTTP transport must be built with. It exists so the set cannot
-// drift between the five Streamable HTTP endpoints (/mcp, /mcp/all, /mcp/code,
-// /mcp/call and /mcp/p/<slug>) — a pin applied to four of five would leave one
+// drift between the six Streamable HTTP endpoints (/mcp, /mcp/all, /mcp/code,
+// /mcp/call, /mcp/p/<slug> and /mcp/s/<server>) — a pin applied to five of six would leave one
 // door open on a different protocol era.
 //
 // SCOPE, precisely: this covers the Streamable HTTP surfaces. mcp-go offers no
@@ -3422,9 +3426,15 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux.Handle("/mcp/p/", profileHandler)
 	mux.Handle("/mcp/p", profileHandler)
 
+	// /mcp/s/<server> → one upstream's tools under their own names, with the
+	// upstream's own instructions (mcp_single_server.go). The same auth,
+	// host-validation and streaming wrappers as every other MCP route.
+	singleServerHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(http.HandlerFunc(s.serveSingleServer))))))
+	mux.Handle("/mcp/s/", singleServerHandler)
+
 	s.logger.Info("Registered routing mode MCP endpoints",
 		zap.String("default_mode", cfg.RoutingMode),
-		zap.Strings("endpoints", []string{"/mcp/all", "/mcp/code", "/mcp/call", "/mcp/p/<slug>"}))
+		zap.Strings("endpoints", []string{"/mcp/all", "/mcp/code", "/mcp/call", "/mcp/p/<slug>", "/mcp/s/<server>"}))
 
 	// Legacy endpoints for backward compatibility
 	mux.Handle("/v1/tool_code", mcpHandler)
@@ -4485,6 +4495,14 @@ func (s *Server) GetServerToolCalls(serverName string, limit int) ([]*contracts.
 	return s.runtime.GetServerToolCalls(serverName, limit)
 }
 
+// replayBlockReasonTokenPermission labels a replay refused for the agent
+// token's permission tier; httpapi maps *profile.ToolBlockedError to 403.
+const replayBlockReasonTokenPermission profile.BlockReason = "token_permission"
+
+// replayBlockReasonToolNotCallable labels a replay refused by the shared
+// per-tool gate or the live identity check (tool disabled / not certified).
+const replayBlockReasonToolNotCallable profile.BlockReason = "tool_not_callable"
+
 // ReplayToolCall replays a tool call with modified arguments. ctx is the
 // caller's request context: it governs the concurrency-limiter queue wait as
 // well as the upstream call (spec 093 FR-005).
@@ -4501,8 +4519,20 @@ func (s *Server) GetServerToolCalls(serverName string, limit int) ([]*contracts.
 // and no `(server, tool)` pair was ever resolved to audit.
 func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error) {
 	original, lookupErr := s.runtime.GetToolCallByID(id)
-	if lookupErr != nil || original == nil || s.mcpProxy == nil {
-		return s.runtime.ReplayToolCall(ctx, id, arguments)
+	// Fail closed for every caller: without the record or the proxy there is no
+	// gate to answer to, and the ungated runtime delegate is never reachable
+	// from here (an administrator included).
+	if lookupErr != nil {
+		return nil, lookupErr
+	}
+	if original == nil {
+		return nil, fmt.Errorf("tool call not found: %s", id)
+	}
+	if s.mcpProxy == nil {
+		return nil, &profile.ToolBlockedError{
+			Reason:  replayBlockReasonToolNotCallable,
+			Message: "Tool call replay is unavailable: the MCP proxy is not initialized",
+		}
 	}
 
 	callArgs := arguments
@@ -4536,9 +4566,37 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 			sessionIDFromContext(ctx), requestID, "blocked", profile.ErrToolOutsideProfile.Error(), telemetry.BlockReasonProfileScope)
 		return nil, profile.ErrToolOutsideProfile
 	}
+	// Agent token server access first, so a scoped caller learns nothing about
+	// a server outside its scope from the shape of any later refusal (the
+	// order handleCallToolVariant keeps: effective server scope, then the
+	// identity gate).
+	replayAuth := auth.AuthContextFromContext(ctx)
+	authCtx := auth.ScopedView(replayAuth, (replayAuth == nil || replayAuth.Anonymous) && profileResolution.anonymousConfinementActive())
+	scopedCaller := auth.IsNonAdmin(authCtx)
+	if scopedCaller && !authCtx.CanAccessServer(original.ServerName) {
+		s.mcpProxy.emitActivityPolicyDecision(ctx, original.ServerName, original.ToolName,
+			sessionIDFromContext(ctx), requestID, "blocked", profile.ErrToolOutsideProfile.Error(), telemetry.BlockReasonTokenPermission)
+		return nil, profile.ErrToolOutsideProfile
+	}
+
+	// Replay is a dispatch path, so it answers to the SAME shared per-tool gate
+	// as every other one (evaluateExactToolGate: server quarantine / disabled,
+	// tool-level quarantine, enabled_tools / disabled_tools, review-dirty) and
+	// takes the tool's identity, annotations and tier from it, never from a
+	// separate read. The stored record only names WHICH tool to replay.
+	gate := s.mcpProxy.evaluateExactToolGate(original.ServerName, original.ToolName)
+	identity := gate.identity
+	annotations, annotationsFound := identity.Annotations, identity.Found
+	if annotationsFound {
+		auditSetOperation(ctx, tierForAnnotations(annotations, annotationsFound))
+	}
+	if identity.Unresolved() {
+		message := unresolvedToolIdentityMessage(original.ServerName, original.ToolName, identity.DiscoveryDone)
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, message, telemetry.BlockReasonToolNotCallable)
+	}
+
 	if policy := profileResolution.Policy; policy != nil {
-		annotations, found := s.mcpProxy.EffectiveAnnotations(original.ServerName, original.ToolName)
-		intrinsic := profile.IntrinsicTier(annotations, found)
+		intrinsic := profile.IntrinsicTier(annotations, annotationsFound)
 		if admitted, reason, tier := policy.Decide(original.ServerName, original.ToolName, intrinsic); !admitted && reason != profile.ReasonServerNotInProfile {
 			message, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, original.ServerName, original.ToolName, profileRefusalSubject(profileResolution, profileIndex))
 			refusal := &profile.ToolBlockedError{Reason: blockReason, Message: message}
@@ -4546,6 +4604,55 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 				sessionIDFromContext(ctx), requestID, "blocked", message, telemetry.BlockReasonOther, string(blockReason))
 			return nil, refusal
 		}
+	}
+
+	// Agent token authorization: replay dispatches a real call, so a scoped
+	// credential needs the TARGET tool's permission tier (fail closed to
+	// destructive when unknown), exactly as handleCallToolVariant enforces.
+	// Exact-match, not hierarchical.
+	if scopedCaller {
+		if perm := tierForAnnotations(annotations, annotationsFound); perm != "" && !authCtx.HasPermission(perm) {
+			message := tokenTierRefusalText(perm, original.ServerName, original.ToolName)
+			return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonTokenPermission, message, telemetry.BlockReasonTokenPermission)
+		}
+	}
+
+	// The shared policy gates, in handleCallToolVariant's order of answer.
+	if refusal := s.mcpProxy.replayGateRefusal(ctx, gate, requestID); refusal != nil {
+		return nil, refusal
+	}
+	if s.mcpProxy.replayAfterGate != nil {
+		s.mcpProxy.replayAfterGate()
+	}
+
+	// Live identity. Replay is an operator convenience, not a hot path, so it
+	// is stricter than handleCallToolVariant: it dispatches only onto a
+	// CERTIFIED connection generation, and only the SAME generation every
+	// verdict above (quarantine, profile policy, token tier, audit operation)
+	// was computed from. A missing or disconnected client, a gate identity
+	// that was not certified, or a live generation that differs from the
+	// gate's is refused with zero upstream calls; the caller retries and the
+	// next replay evaluates everything against the new generation. The
+	// dispatch is pinned to that generation, so a reconnect between this
+	// check and the transport is refused by the managed client.
+	client, exists := s.mcpProxy.upstreamManager.GetClient(original.ServerName)
+	if !exists || !client.IsConnected() {
+		message := fmt.Sprintf("Server '%s' is not connected - use 'upstream_servers' tool to check server configuration", original.ServerName)
+		if exists {
+			message = fmt.Sprintf("Server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", original.ServerName, client.GetState().String())
+		}
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, message, telemetry.BlockReasonToolNotCallable)
+	}
+	discoveryWindow := unresolvedToolIdentityMessage(original.ServerName, original.ToolName, false)
+	if !identity.certified() {
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, discoveryWindow, telemetry.BlockReasonToolNotCallable)
+	}
+	certified, message, refuse := s.mcpProxy.liveIdentityRefusal(gate.serverConfig, original.ServerName, original.ToolName, identity, client)
+	if refuse {
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, message, telemetry.BlockReasonToolNotCallable)
+	}
+	if !certified.certified() || certified.DiscoveryEpoch != identity.DiscoveryEpoch {
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, discoveryWindow, telemetry.BlockReasonToolNotCallable)
 	}
 
 	// Spec 107 (round-3 cross-review finding, PR-D): the persisted record's
@@ -4561,11 +4668,30 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 	s.mcpProxy.auditAuthz(ctx, "allow", "")
 
 	startTime := time.Now()
-	result, err := s.runtime.ReplayToolCall(ctx, id, arguments)
+	ctx = s.mcpProxy.withReviewDirtyRecheck(ctx, original.ServerName)
+	result, err := s.runtime.ReplayToolCallWithOptions(ctx, id, arguments, runtime.ReplayOptions{
+		PinEpoch: true,
+		Epoch:    certified.DiscoveryEpoch,
+	})
 	durationMs := time.Since(startTime).Milliseconds()
 
 	var limitErr *limiter.LimitError
+	dirty := isReviewNotRecordedRefusal(err)
 	switch {
+	case dirty || errors.Is(err, managed.ErrConnectionGenerationChanged):
+		// The generation moved (or the review state changed) while the call
+		// waited: the managed client refused before the transport, so nothing
+		// reached the upstream. Same refusal bodies as the other dispatch
+		// paths; the allow line is closed by an error tool_call, never a
+		// second authz.
+		message := unresolvedToolIdentityMessage(original.ServerName, original.ToolName, false)
+		if dirty {
+			message = reviewNotRecordedMessage(original.ServerName)
+		}
+		s.mcpProxy.auditToolCall(ctx, "error", "", audit.ErrorClassUpstreamUnavailable, durationMs, nil, nil)
+		s.mcpProxy.emitActivityPolicyDecision(ctx, original.ServerName, original.ToolName,
+			sessionIDFromContext(ctx), requestID, "blocked", message, telemetry.BlockReasonToolNotCallable)
+		return nil, &profile.ToolBlockedError{Reason: replayBlockReasonToolNotCallable, Message: message}
 	case errors.As(err, &limitErr) && limitErr.Shed():
 		// Spec 093 FR-011: a shed never reached the upstream, so it is the
 		// tool_call half of the authz-allow pair, never a second authz —
@@ -5580,4 +5706,29 @@ func (s *Server) ServerIncarnation(serverName string) (int64, bool) {
 		return 0, false
 	}
 	return s.runtime.ServerIncarnation(serverName)
+}
+
+// serveSingleServer serves /mcp/s/<server>. An unknown server, or one the
+// caller's credential may not use, gets the same 404, so the route cannot be
+// used to probe which servers exist.
+func (s *Server) serveSingleServer(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/mcp/s/")
+	name = strings.TrimSuffix(name, "/")
+	if i := strings.Index(name, "/"); i >= 0 {
+		name = name[:i]
+	}
+	var srv *server.MCPServer
+	if s.mcpProxy != nil && s.mcpProxy.singleServerAdmits(r.Context(), name) {
+		srv = s.mcpProxy.SingleServerMCP(name)
+	}
+	if srv == nil {
+		http.Error(w, `{"error":"Server not found"}`, http.StatusNotFound)
+		return
+	}
+	transport, ok := s.singleServerHTTP.Load(srv)
+	if !ok {
+		transport, _ = s.singleServerHTTP.LoadOrStore(srv,
+			server.NewStreamableHTTPServer(srv, singleServerStreamableOptions(s.liveConfig, name)...))
+	}
+	singleServerSessionGuard(name, transport.(*server.StreamableHTTPServer)).ServeHTTP(w, r)
 }

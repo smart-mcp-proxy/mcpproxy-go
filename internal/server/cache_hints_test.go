@@ -36,7 +36,7 @@ func cacheHintTestServer(t *testing.T) *httptest.Server {
 		return mcp.NewToolResultText("ok"), nil
 	})
 	hs := httptest.NewServer(mcpserver.NewStreamableHTTPServer(srv))
-	t.Cleanup(hs.Close)
+	t.Cleanup(func() { closeHTTPFixture(hs) })
 	return hs
 }
 
@@ -110,7 +110,7 @@ func TestRoutingModeServersCarryCacheHints(t *testing.T) {
 			srv := proxy.GetMCPServerForMode(mode)
 			require.NotNil(t, srv)
 			hs := httptest.NewServer(mcpserver.NewStreamableHTTPServer(srv))
-			t.Cleanup(hs.Close)
+			t.Cleanup(func() { closeHTTPFixture(hs) })
 			result := postModernCacheProbe(t, hs.URL, mcp.MethodToolsList, map[string]any{})
 			assert.Equal(t, string(mcp.CacheScopePrivate), result["cacheScope"])
 			assert.Equal(t, float64(mcpListCacheTTLMs), result["ttlMs"])

@@ -258,6 +258,9 @@ func (c *Client) Connect(ctx context.Context) error {
 			c.stdioProc.Untrack()
 			c.stdioProc = nil
 		}
+		// GH #1910: the old connection's GET stream goes with it. No wait:
+		// c.mu is held and the listener's dispatch takes it.
+		c.stopListChangedStream(false)
 		if c.client != nil {
 			c.client.Close()
 			c.client = nil

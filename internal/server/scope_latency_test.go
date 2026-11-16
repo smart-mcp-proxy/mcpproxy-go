@@ -290,7 +290,13 @@ func connectLatencyPromptUpstream(t *testing.T, proxy *MCPProxyServer, server st
 		})
 	}
 	testServer := servertest.NewTestStreamableHTTPServer(mcpSrv)
-	t.Cleanup(testServer.Close)
+	// Cut held connections first (a GH #1910 GET stream) so Close does not
+	// wait on them. Inlined, not closeHTTPFixture: the scope-latency workflow
+	// copies only this file onto the merge-base checkout.
+	t.Cleanup(func() {
+		testServer.CloseClientConnections()
+		testServer.Close()
+	})
 	require.NoError(t, um.AddServerConfig(server, &config.ServerConfig{
 		Name: server, Protocol: "streamable-http", URL: testServer.URL, Enabled: true,
 	}))
