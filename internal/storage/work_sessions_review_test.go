@@ -992,3 +992,29 @@ func TestCloseOpenWorkSessions_AtStartLeavesThisProcessAlone(t *testing.T) {
 	cur, _ = m.GetWorkSessionSummary("ws-current")
 	assert.Equal(t, cur.LastActivityAt, cur.EndedAt)
 }
+
+// Review round 4: a request row with a credential but no user id, mixed with
+// a row of a known user (rows from before the user was recorded), makes the
+// session ownerless in either order; rows that all carry the user do not.
+func TestWorkSessionSummary_MixedUserAttributionIsOwnerless(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	withUser := func(r *ActivityRecord) { r.UserID = "u-alice" }
+	legacy := func(r *ActivityRecord) { r.Type, r.Status = ActivityTypePolicyDecision, "blocked" }
+
+	require.NoError(t, m.SaveActivity(wsRow("ws-legacy-first", 0, legacy)))
+	require.NoError(t, m.SaveActivity(wsRow("ws-legacy-first", time.Second, withUser)))
+	require.NoError(t, m.SaveActivity(wsRow("ws-legacy-last", 0, withUser)))
+	require.NoError(t, m.SaveActivity(wsRow("ws-legacy-last", time.Second, legacy)))
+	require.NoError(t, m.SaveActivity(wsRow("ws-all-user", 0, withUser)))
+	require.NoError(t, m.SaveActivity(wsRow("ws-all-user", time.Second, withUser)))
+	require.NoError(t, m.SaveActivity(wsRow("ws-no-user", 0, nil)))
+	require.NoError(t, m.SaveActivity(wsRow("ws-no-user", time.Second, legacy)))
+
+	for id, ownerless := range map[string]bool{"ws-legacy-first": true, "ws-legacy-last": true, "ws-all-user": false, "ws-no-user": false} {
+		s, err := m.GetWorkSessionSummary(id)
+		require.NoError(t, err)
+		require.NotNil(t, s, id)
+		assert.Equal(t, ownerless, s.Ownerless, id)
+	}
+}

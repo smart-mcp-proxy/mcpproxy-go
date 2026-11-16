@@ -91,6 +91,11 @@ type WorkSessionPartition struct {
 	// LastFailureBlock says whether the last failure was a policy block, so a
 	// list that excludes blocks can tell.
 	LastFailureBlock bool `json:"last_failure_block,omitempty"`
+
+	// ProjectName is the project of the latest row of this server that
+	// carried one. A caller whose reach is narrowed reads the project from
+	// the servers in reach only, like every other fact.
+	ProjectName string `json:"project_name,omitempty"`
 }
 
 // WorkSessionSummary is the durable record of one work session.
@@ -156,6 +161,28 @@ type WorkSessionSummary struct {
 	// recorded. A name does not prove which generation of the token wrote
 	// it, so such a row and a row with a prefix never share an owner.
 	NameOnly bool `json:"name_only,omitempty"`
+	// NoUser records that a request row with a credential but no user id
+	// was folded in.
+	NoUser bool `json:"no_user,omitempty"`
+}
+
+// ProjectNameIn returns the session's project as read from the servers that
+// allow admits (nil admits all, and then it is the session's own): the
+// project of the admitted server with the latest activity that has one.
+func (s *WorkSessionSummary) ProjectNameIn(allow func(string) bool) string {
+	if allow == nil {
+		return s.ProjectName
+	}
+	name, at, from := "", time.Time{}, ""
+	for server, p := range s.Servers {
+		if p.ProjectName == "" || !allow(server) {
+			continue
+		}
+		if name == "" || p.LastActivityAt.After(at) || (p.LastActivityAt.Equal(at) && server < from) {
+			name, at, from = p.ProjectName, p.LastActivityAt, server
+		}
+	}
+	return name
 }
 
 // UnattributedRows reports whether the session holds a request row that
@@ -417,6 +444,16 @@ func (s *WorkSessionSummary) applyRow(r *ActivityRecord, role AttemptRole) {
 		// either order: no agent token may claim the name-only row's facts.
 		s.Ownerless = true
 	}
+	if requestRow && rowHasIdentity && r.UserID == "" {
+		s.NoUser = true
+	}
+	if s.NoUser && (r.UserID != "" || s.UserID != "") {
+		// A request row with no user and a row of a known user in one
+		// session, in either order (rows from before the user was recorded
+		// on every row): a user principal may not claim the row it cannot
+		// be shown, so the session belongs to no one.
+		s.Ownerless = true
+	}
 	switch {
 	case !rowHasIdentity:
 		if requestRow {
@@ -497,6 +534,9 @@ func (s *WorkSessionSummary) applyRow(r *ActivityRecord, role AttemptRole) {
 	}
 	if p.FirstActivityAt.IsZero() || ts.Before(p.FirstActivityAt) {
 		p.FirstActivityAt = ts
+	}
+	if r.ProjectName != "" && (p.ProjectName == "" || !ts.Before(p.LastActivityAt)) {
+		p.ProjectName = r.ProjectName
 	}
 	if ts.After(p.LastActivityAt) {
 		p.LastActivityAt = ts

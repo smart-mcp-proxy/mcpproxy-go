@@ -521,3 +521,25 @@ func TestWorkSessions_HiddenActivityDoesNotReopenAScopedSession(t *testing.T) {
 	assert.Equal(t, s1, s2)
 	assert.Equal(t, t1, t2)
 }
+
+// Review round 4 (FR-048): the project a scoped caller reads comes from the
+// servers in reach, so a row on a hidden server that carries another project
+// (the workspace arrived late) changes nothing.
+func TestWorkSessions_HiddenActivityDoesNotChangeTheProject(t *testing.T) {
+	f := newWSFixture(t)
+	f.row("ws-proj", "scoped-ci", f.prefix, 0, func(r *storage.ActivityRecord) { r.ProjectName = "alpha-project" })
+	read := func() string {
+		return wsNormalize(scopeGet(t, f.srv, "/api/v1/work-sessions/ws-proj", f.token))
+	}
+	before := read()
+	require.Contains(t, before, "alpha-project")
+
+	f.row("ws-proj", "scoped-ci", f.prefix, time.Minute, func(r *storage.ActivityRecord) {
+		r.ServerName, r.ToolName, r.ProjectName = "beta", "beta_tool", "hidden-project"
+	})
+	after := read()
+	assert.Equal(t, before, after)
+	assert.NotContains(t, after, "hidden-project")
+	admin := scopeGet(t, f.srv, "/api/v1/work-sessions/ws-proj", scopeAdminAPIKey)
+	assert.Contains(t, admin.Body.String(), "hidden-project", "an administrator reads the session's latest project")
+}

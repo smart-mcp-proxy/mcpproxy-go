@@ -156,7 +156,7 @@ func (v workSessionReach) project(s *storage.WorkSessionSummary, now time.Time) 
 		TokenName:      s.TokenName,
 		ClientID:       s.ClientID,
 		ClientName:     s.ClientName,
-		ProjectName:    s.ProjectName,
+		ProjectName:    s.ProjectNameIn(allow),
 		Surface:        s.Surface,
 		RunName:        s.RunName,
 		Attempts:       t.Attempts,
