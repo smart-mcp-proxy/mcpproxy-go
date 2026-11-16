@@ -2233,6 +2233,10 @@ type AddServerRequest struct {
 	// a nil pointer means "leave unchanged" on PATCH (and "inherit the default
 	// aggregate behavior" on create); a present value (including false) is applied.
 	ExposePrompts *bool `json:"expose_prompts,omitempty"`
+	// ExposeSkills is the per-server skills override (MCP skills extension).
+	// Tri-state *bool mirroring config.ServerConfig.ExposeSkills: nil means
+	// "leave unchanged" on PATCH and "inherit" on create.
+	ExposeSkills *bool `json:"expose_skills,omitempty"`
 	// ForwardHeaders is the per-server allowlist of inbound MCP client header
 	// NAMES forwarded to this server on tools/call (Spec 112). Names only, never
 	// values. On PATCH a nil slice (field omitted) leaves the stored allowlist
@@ -2597,6 +2601,9 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	if req.ExposePrompts != nil {
 		serverConfig.ExposePrompts = req.ExposePrompts
 	}
+	if req.ExposeSkills != nil {
+		serverConfig.ExposeSkills = req.ExposeSkills
+	}
 	// Spec 112: carry the forward_headers allowlist through on create, after
 	// validating the names (write-time layer of FR-005).
 	if len(req.ForwardHeaders) > 0 {
@@ -2897,6 +2904,13 @@ func resolveServerPatch(serverName string, req *AddServerRequest, existingSrv *c
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.ExposePrompts = existingSrv.ExposePrompts
+	}
+	// expose_skills: same tri-state preserve-the-existing-pointer rule.
+	if req.ExposeSkills != nil {
+		updates.ExposeSkills = req.ExposeSkills
+		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.ExposeSkills = existingSrv.ExposeSkills
 	}
 	// Spec 112: forward_headers preserves the existing allowlist when the
 	// request omits it (nil slice); a non-nil slice replaces it and an empty

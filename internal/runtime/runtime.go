@@ -3240,6 +3240,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		if serverStatus.Config != nil && serverStatus.Config.ExposePrompts != nil {
 			serverMap["expose_prompts"] = *serverStatus.Config.ExposePrompts
 		}
+		if serverStatus.Config != nil && serverStatus.Config.ExposeSkills != nil {
+			serverMap["expose_skills"] = *serverStatus.Config.ExposeSkills
+		}
 
 		// Spec 112: surface the forward_headers allowlist (names only).
 		if serverStatus.Config != nil && len(serverStatus.Config.ForwardHeaders) > 0 {
@@ -3583,6 +3586,9 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 		// path. Tri-state *bool — only emit when set.
 		if srv.ExposePrompts != nil {
 			serverInfo["expose_prompts"] = *srv.ExposePrompts
+		}
+		if srv.ExposeSkills != nil {
+			serverInfo["expose_skills"] = *srv.ExposeSkills
 		}
 
 		// Spec 112: forward_headers allowlist in parity with the StateView path.

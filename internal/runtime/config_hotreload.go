@@ -319,6 +319,14 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "aggregate_upstream_prompts")
 	}
 
+	// Upstream skills (spec 125 - hot-reloadable, opt-in). A lone enable_skills
+	// toggle must be reported as a hot-applied change, not swallowed as "no
+	// changes detected" and not classified restart-required. The consumer
+	// arrives in a later slice.
+	if oldCfg.EnableSkills != newCfg.EnableSkills {
+		result.ChangedFields = append(result.ChangedFields, "enable_skills")
+	}
+
 	// Discovery & health-check cadence (spec 074 — hot-reloadable). The health
 	// loop (managed client) and indexing loop (runtime) re-resolve their interval
 	// each cycle, and ApplyConfig propagates the new global config to the upstream

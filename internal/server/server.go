@@ -2381,6 +2381,9 @@ func applyServerUpdates(existing, updates *config.ServerConfig) {
 	if updates.ExposePrompts != nil {
 		existing.ExposePrompts = updates.ExposePrompts
 	}
+	if updates.ExposeSkills != nil {
+		existing.ExposeSkills = updates.ExposeSkills
+	}
 	if updates.MaxConcurrentRequests != nil {
 		existing.MaxConcurrentRequests = updates.MaxConcurrentRequests
 	}
