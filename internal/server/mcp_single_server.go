@@ -409,22 +409,30 @@ func (p *MCPProxyServer) singleServerDescribeHandler(name string) mcpserver.Tool
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if args, ok := request.Params.Arguments.(map[string]any); ok {
 			if ids, ok := args["tool_ids"].([]any); ok {
+				cat := p.loadDirectCatalog()
+				ownTool := func(tool string) bool {
+					e, ok := cat.LookupCanonicalForAuth(name+":"+tool, func(e *directCatalogEntry) bool { return e.ServerName == name })
+					return ok && e != nil && e.ServerName == name
+				}
 				qualified := make([]any, len(ids))
 				for i, id := range ids {
 					s, isString := id.(string)
-					// Every id is resolved as this server's tool: this server's own
-					// qualifier ("<server>:" or "<server>__") is removed and the bare
-					// name is qualified again with the exact server name. Another
-					// server's id, including one whose name merely starts with
-					// "<server>__" (a server named "<server>__x"), therefore resolves
-					// to not-found rather than to that server's definition.
+					// Every id is resolved as this server's tool. A listed bare name
+					// wins as is, even one that starts with "<server>__" (an upstream
+					// may name a tool that way). Otherwise this server's own qualifier
+					// ("<server>:" or "<server>__") is removed. The result is qualified
+					// with the exact server name, and resolution is confined to this
+					// server (withDescribeConfinedServer), so another server's id,
+					// including one for a server named "<server>__x", is not found.
 					if isString {
 						bare := strings.TrimSpace(s)
-						switch {
-						case strings.HasPrefix(bare, name+":"):
-							bare = strings.TrimPrefix(bare, name+":")
-						case strings.HasPrefix(bare, prefix):
-							bare = strings.TrimPrefix(bare, prefix)
+						if !ownTool(bare) {
+							switch {
+							case strings.HasPrefix(bare, name+":"):
+								bare = strings.TrimPrefix(bare, name+":")
+							case strings.HasPrefix(bare, prefix):
+								bare = strings.TrimPrefix(bare, prefix)
+							}
 						}
 						s = name + ":" + bare
 					}

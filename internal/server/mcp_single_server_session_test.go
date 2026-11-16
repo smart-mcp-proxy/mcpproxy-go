@@ -13,6 +13,9 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // A session id minted on /mcp/s/<a> is refused on /mcp/s/<b>, so a session
@@ -153,11 +156,42 @@ func TestSingleServerSurface_DescribeToolDisplayNameCollision(t *testing.T) {
 		text := result.Content[0].(mcp.TextContent).Text
 		assert.NotContains(t, text, "HIDDEN_SENTINEL", "server x's tool must not be described on /mcp/s/x__y")
 	}
-	// The agent sees exactly one side of the collision once confined, so it
-	// gets x__y's own tool.
-	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{"tool_ids": []any{"z"}}
-	result, err := p.singleServerDescribeHandler("x__y")(scopedCtx("x", "x__y"), req)
-	require.NoError(t, err)
-	assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "authorized canonical-id owner")
+	// Confined, every caller sees one side of the collision: x__y's own tool,
+	// administrators included.
+	for _, ctx := range []context.Context{scopedCtx("x", "x__y"), singleServerAdminCtx()} {
+		req := mcp.CallToolRequest{}
+		req.Params.Arguments = map[string]any{"tool_ids": []any{"z"}}
+		result, err := p.singleServerDescribeHandler("x__y")(ctx, req)
+		require.NoError(t, err)
+		assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "authorized canonical-id owner")
+	}
+}
+
+// An upstream tool whose own name starts with "<server>__" is described by that
+// listed name, not by the name with the prefix removed.
+func TestSingleServerSurface_DescribeToolNameStartingWithServerPrefix(t *testing.T) {
+	p := createTestMCPProxyServer(t)
+	tools := []*config.ToolMetadata{
+		{ServerName: "gh", Name: "gh__x", Description: "PREFIXED_TOOL", ParamsJSON: `{"type":"object"}`, Hash: "h1"},
+		{ServerName: "gh", Name: "x", Description: "PLAIN_TOOL", ParamsJSON: `{"type":"object"}`, Hash: "h2"},
+	}
+	require.NoError(t, p.storage.SaveUpstreamServer(&config.ServerConfig{Name: "gh", Enabled: true}))
+	for _, tool := range tools {
+		require.NoError(t, p.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: tool.ServerName, ToolName: tool.Name, Status: storage.ToolApprovalStatusApproved,
+		}))
+	}
+	p.publishDirectCatalog(buildDirectCatalog(tools, nil))
+
+	describe := func(id string) string {
+		req := mcp.CallToolRequest{}
+		req.Params.Arguments = map[string]any{"tool_ids": []any{id}}
+		result, err := p.singleServerDescribeHandler("gh")(singleServerAdminCtx(), req)
+		require.NoError(t, err)
+		return result.Content[0].(mcp.TextContent).Text
+	}
+	assert.Contains(t, describe("gh__x"), "PREFIXED_TOOL")
+	assert.NotContains(t, describe("gh__x"), "PLAIN_TOOL")
+	assert.Contains(t, describe("x"), "PLAIN_TOOL")
+	assert.Contains(t, describe("gh:x"), "PLAIN_TOOL", "this server's colon qualifier still works")
 }
