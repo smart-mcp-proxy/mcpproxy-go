@@ -1300,6 +1300,11 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	// scoped and stamp-free (Spec 105 FR-006, cross-review round 2). It is a
 	// no-op while no prompts are registered.
 	opts = append(opts, mcpserver.WithPromptFilter(p.filterAggregatedPromptsForAuth))
+	// Single-server surfaces take the options built so far but NOT the two
+	// name-based built-in filters below: those match tools by bare name
+	// ("profiles", "credentials", "code_execution", "retrieve_tools", ...), and
+	// on /mcp/s/<server> every tool is an upstream tool carrying its bare name.
+	singleBase := append([]mcpserver.ServerOption{}, opts...)
 	opts = append(opts, mcpserver.WithToolFilter(p.filterProfileV3Tools))
 	// Name the caller's reachable servers in retrieve_tools' description
 	// (no-op on the direct surface, which has no retrieve_tools).
@@ -1330,6 +1335,17 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 		"mcpproxy-go",
 		mcpServerVersion(),
 		directOpts...,
+	)
+
+	// Single-server surfaces (/mcp/s/<server>) run the SAME discovery filter
+	// chain as the direct server, in the same order with the stamp strip last,
+	// so they can never authorize more than /mcp/all would. They carry no
+	// static instructions: the caller-instructions hook substitutes the
+	// upstream server's own (instructionsForCaller).
+	p.singleServerOpts = append(singleBase,
+		mcpserver.WithToolFilter(p.filterDirectModeToolsForAuth),
+		mcpserver.WithToolFilter(p.filterDirectToolsForAgentCallability),
+		mcpserver.WithToolFilter(stripDirectToolStampFilter),
 	)
 
 	// The code-execution and call-tool servers carry the same initialize
@@ -1524,6 +1540,7 @@ func (p *MCPProxyServer) refreshDirectModeToolsLocked() {
 	p.publishDirectCatalog(cat)
 	p.directSurfaceToolsFP = toolsFP
 	p.directSurfaceRoutingFP = routingFP
+	p.refreshSingleServerSurfacesLocked(cat)
 
 	p.logger.Info("refreshed direct mode tools",
 		zap.Int("tool_count", len(directTools)),

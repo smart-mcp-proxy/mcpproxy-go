@@ -303,6 +303,21 @@ func fwdCallDirect(t *testing.T, c *client.Client, server, tool string) string {
 	return fwdText(res)
 }
 
+// fwdCallSingleServer calls a tool on a /mcp/s/<server> surface, where it is
+// listed under its bare upstream name.
+func fwdCallSingleServer(t *testing.T, c *client.Client, tool string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req := mcp.CallToolRequest{}
+	req.Params.Name = tool
+	req.Params.Arguments = map[string]interface{}{}
+	res, err := c.CallTool(ctx, req)
+	require.NoError(t, err)
+	require.False(t, res.IsError, "%s -> %s", tool, fwdText(res))
+	return fwdText(res)
+}
+
 func fwdCallCode(t *testing.T, c *client.Client, server, tool string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -880,10 +895,13 @@ func TestForwardHeaders_EveryClientFacingMountForwards(t *testing.T) {
 				mounts = append(mounts, "/mcp/p/fwd")
 			}
 			continue
+		case "/mcp/s/":
+			mounts = append(mounts, "/mcp/s/gw")
+			continue
 		}
 		mounts = append(mounts, p)
 	}
-	assert.ElementsMatch(t, []string{"/mcp", "/mcp/all", "/mcp/code", "/mcp/call", "/mcp/p/fwd", "/v1/tool_code", "/v1/tool-code"}, mounts,
+	assert.ElementsMatch(t, []string{"/mcp", "/mcp/all", "/mcp/code", "/mcp/call", "/mcp/p/fwd", "/mcp/s/gw", "/v1/tool_code", "/v1/tool-code"}, mounts,
 		"a mount was added or removed: give it a strategy here so its forwarding is covered")
 
 	for _, path := range mounts {
@@ -896,6 +914,8 @@ func TestForwardHeaders_EveryClientFacingMountForwards(t *testing.T) {
 				fwdCallDirect(t, c, "gw", "echo_headers")
 			case "/mcp/code":
 				fwdCallCode(t, c, "gw", "echo_headers")
+			case "/mcp/s/gw":
+				fwdCallSingleServer(t, c, "echo_headers")
 			default:
 				fwdCallRead(t, c, "gw", "echo_headers")
 			}

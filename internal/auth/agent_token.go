@@ -248,6 +248,13 @@ const (
 	MaxTokenExpiry = 365 * 24 * time.Hour
 )
 
+// TokenExpiryNever is the expires_in value an admin passes over REST/CLI to
+// mint an agent token that never expires (stored as a zero ExpiresAt). It is
+// accepted only for agent tokens issued by an admin, never through the MCP
+// create_token tool or for client credentials, and ParseTokenExpiry itself
+// still rejects it.
+const TokenExpiryNever = "never"
+
 // ParseTokenExpiry is THE expiry rule for an agent token (Spec 107 FR-011,
 // contracts/entitlement-predicate.md §5): positive, at most 365 days, fixed
 // error text. Accepted formats: "30d" (days), "720h" (hours), or any Go

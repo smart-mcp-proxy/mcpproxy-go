@@ -839,6 +839,17 @@ func extractOAuthHandler(mcpClient *client.Client) *transport.OAuthHandler {
 // mcp-go's handler.RefreshToken when the live handler has a client id, else
 // the stored DCR credentials.
 func (c *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
+	// Spec 123 FR-031: an undecryptable stored row is reported with its own
+	// code whether or not a live handler exists, and the refresh never falls
+	// back to a login. Only that outcome is decided here; every other case
+	// keeps the order below.
+	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
+	if c.storage != nil {
+		if _, err := c.storage.GetOAuthTokenBound(serverKey, c.CredentialBinding()); oauth.IsTokenUndecryptable(err) {
+			return fmt.Errorf("failed to get stored token for %s: %w", c.config.Name, oauth.TokenUndecryptableError(c.config.Name, err))
+		}
+	}
+
 	handler := c.GetOAuthHandler()
 	if handler == nil {
 		return fmt.Errorf("no OAuth handler available for %s", c.config.Name)
@@ -848,7 +859,6 @@ func (c *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
 		return fmt.Errorf("no storage available for token refresh")
 	}
 
-	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
 	record, err := c.storage.GetOAuthTokenBound(serverKey, c.CredentialBinding())
 	if err != nil {
 		return fmt.Errorf("failed to get stored token for %s: %w", c.config.Name, err)

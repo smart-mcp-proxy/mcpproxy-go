@@ -465,6 +465,10 @@ func outputDiagnosticsWithProfileChecks(diag map[string]interface{}, info map[st
 			// Show deprecated config warnings even when no issues
 			displayDeprecatedConfigs(diag)
 
+			// Spec 123 FR-030: stored OAuth token protection (silent when
+			// no key is configured and nothing is sealed).
+			displayOAuthTokenStorage(diag)
+
 			// Host-environment hint (snap-docker, issue #457). Surfaced even
 			// when no per-server diagnostics fired because the upstreams may
 			// still be in retry — the hint preempts the next failure.
@@ -634,6 +638,9 @@ func outputDiagnosticsWithProfileChecks(diag map[string]interface{}, info map[st
 			fmt.Println("  • Check server status: mcpproxy upstream list")
 			fmt.Println()
 		}
+
+		// Spec 123 FR-030: stored OAuth token protection.
+		displayOAuthTokenStorage(diag)
 
 		// 5. Tools Pending Quarantine Approval
 		displayQuarantineStats(quarantineStats)

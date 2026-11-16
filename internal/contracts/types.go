@@ -816,7 +816,64 @@ type Diagnostics struct {
 	RuntimeWarnings   []string                  `json:"runtime_warnings"`
 	DeprecatedConfigs []DeprecatedConfigWarning `json:"deprecated_configs,omitempty"` // Deprecated config fields found
 	DockerStatus      *DockerStatus             `json:"docker_status,omitempty"`
-	Timestamp         time.Time                 `json:"timestamp"`
+	// OAuthTokenStorage (Spec 123 FR-030) reports the state of the stored
+	// upstream OAuth rows: encryption on or off, the public key id, the row
+	// counts by state, the undecryptable servers and the compaction advice.
+	// It never carries key material or the key reference.
+	OAuthTokenStorage *OAuthTokenStorageReport `json:"oauth_token_storage,omitempty"`
+	Timestamp         time.Time                `json:"timestamp"`
+}
+
+// OAuthTokenStorageReport is the OAuth token storage section of doctor and of
+// `mcpproxy auth tokens status` (Spec 123 FR-030). The three counts
+// (Plaintext, Sealed, Undecryptable) partition the rows and sum to the row
+// total; a key_mismatch row is counted once, under Undecryptable. It carries
+// the public key id and key-source metadata only: never the key, its bytes,
+// the contents of the key source or the key reference.
+type OAuthTokenStorageReport struct {
+	// EncryptionEnabled is true when an encryption key is configured.
+	EncryptionEnabled bool `json:"encryption_enabled"`
+	// KeyID is the public, non-secret id of the configured key (administrator only).
+	KeyID string `json:"key_id,omitempty"`
+	// KeySourceKind is how the key was obtained: literal, env, env_file,
+	// ref_file, ref_env or ref_keyring (administrator only).
+	KeySourceKind string `json:"key_source_kind,omitempty"`
+	// KeySourceInDataDir is true when the key file lies inside the data directory.
+	KeySourceInDataDir bool `json:"key_source_in_data_dir,omitempty"`
+	// Plaintext counts valid JSON rows; Sealed counts envelopes the configured
+	// key opens; Undecryptable counts everything else.
+	Plaintext     int `json:"plaintext"`
+	Sealed        int `json:"sealed"`
+	Undecryptable int `json:"undecryptable"`
+	// UndecryptableByReason breaks Undecryptable down by reason.
+	UndecryptableByReason OAuthTokenUndecryptableByReason `json:"undecryptable_by_reason"`
+	// Servers lists the undecryptable rows by server.
+	Servers []OAuthTokenStorageServer `json:"servers"`
+	// CompactionAdvised mirrors the compaction marker: freed pages may still
+	// hold old plaintext until `mcpproxy db compact --keep-backup=false`.
+	CompactionAdvised bool `json:"compaction_advised"`
+	// Warnings are stable codes: literal_key, key_file_in_data_dir,
+	// plaintext_rows_with_key, compaction_advised, backup_file_present
+	// (administrator only).
+	Warnings []string `json:"warnings"`
+}
+
+// OAuthTokenUndecryptableByReason counts undecryptable rows by reason.
+type OAuthTokenUndecryptableByReason struct {
+	NoKey              int `json:"no_key"`
+	KeyMismatch        int `json:"key_mismatch"`
+	AuthFailed         int `json:"auth_failed"`
+	UnsupportedVersion int `json:"unsupported_version"`
+	Malformed          int `json:"malformed"`
+}
+
+// OAuthTokenStorageServer is one undecryptable row.
+type OAuthTokenStorageServer struct {
+	BucketKey string `json:"bucket_key"`
+	Server    string `json:"server"`
+	Reason    string `json:"reason"`
+	// RowKeyID is the key id in the row's envelope (administrator only).
+	RowKeyID string `json:"row_key_id,omitempty"`
 }
 
 // DeprecatedConfigWarning represents a deprecated configuration field found in the config file.
