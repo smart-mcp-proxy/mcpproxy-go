@@ -17,6 +17,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/skills"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 // Spec 125 (skills over MCP), PR-1, plan D6: the runtime skills catalog.
@@ -298,8 +299,11 @@ func (r *Runtime) refreshServerSkills(ctx context.Context, serverName string) er
 	defer cancel()
 
 	err := r.runSkillsRefresh(ctx, serverName)
-	if errors.Is(err, errSkillsSwitchedOff) {
-		// The same answer as when the refresh finds skills off at its start.
+	if err != nil && (errors.Is(err, errSkillsSwitchedOff) || !r.skillsEligible(serverName)) {
+		// Whatever stopped it, a refresh of a server whose skills are off by
+		// now gets the answer it would have got at its start: nothing to do.
+		// That also covers a request that was still in flight when the switch
+		// changed and then failed or ran into the deadline.
 		return nil
 	}
 	if err != nil && !errors.Is(err, errSkillsCaptureStale) && !errors.Is(err, errSkillsSwitchedOff) &&
@@ -345,6 +349,12 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 		// skills were switched off is not a failure anyone needs to hear of.
 		if errors.Is(lerr, skills.ErrStopped) || !eligible() {
 			return errSkillsSwitchedOff
+		}
+		// A request that failed on a connection since retired or replaced
+		// says nothing about the server; the reconnect reads its skills again.
+		if errors.Is(lerr, managed.ErrInstanceRetired) ||
+			(capture.Client != nil && !capture.Client.CaptureIsCurrent(capture)) {
+			return fmt.Errorf("%w: %v", errSkillsCaptureStale, lerr)
 		}
 		if !errors.As(lerr, &tr) {
 			return fmt.Errorf("list skills: %w", lerr)

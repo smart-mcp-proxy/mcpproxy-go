@@ -1005,3 +1005,23 @@ func TestSkillsRefresh_ListingErrorAfterSwitchOffIsNotAFailure(t *testing.T) {
 	assert.NoError(t, <-done)
 	assert.Empty(t, g.rt.SkillsStatus(skillsSrv).Error)
 }
+
+// A listing that fails because its connection was replaced while it ran is a
+// superseded refresh, not a failed one: the reconnect reads the skills again.
+func TestSkillsRefresh_ListingErrorOnAReplacedConnectionIsSuperseded(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf"})
+	g.fx.SetListFailure(true)
+	g.fx.SetDelay(150 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() { done <- g.refresh(t) }()
+	require.Eventually(t, func() bool { return g.fx.Count("skills/list") == 1 }, 10*time.Second, time.Millisecond)
+	c, _ := g.rt.upstreamManager.GetClient(skillsSrv)
+	c.Retire()
+
+	err := <-done
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrSkillsRefreshSuperseded)
+	assert.Empty(t, g.rt.SkillsStatus(skillsSrv).Error, "a superseded refresh is not a status error")
+}

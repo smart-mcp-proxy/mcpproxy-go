@@ -85,10 +85,11 @@ func ParseFrontmatter(skillMD []byte) (map[string]any, error) {
 // end. Real frontmatter has a few dozen.
 const maxFrontmatterNodes = 10000
 
-// plainDecimal matches a number written in plain decimal notation, the only
-// notation JSON has. YAML's other forms (hex, octal, underscores, .inf) are
-// left to the YAML library.
-var plainDecimal = regexp.MustCompile(`^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$`)
+// plainDecimal matches a number YAML reads as exactly its decimal text: a
+// whole number with no leading zero, or a number with a fraction or an
+// exponent. Everything YAML reads differently (012 is octal, 0x1F, 1_000,
+// .inf) is left to the YAML library.
+var plainDecimal = regexp.MustCompile(`^[-+]?((0|[1-9]\d*)|(\d+\.\d*|\.\d+)([eE][-+]?\d+)?|\d+[eE][-+]?\d+)$`)
 
 // yamlValue turns a YAML node into the value a JSON listing would hold for it.
 // The block is read node by node, and not through the library's own decoding
@@ -157,15 +158,39 @@ func yamlValue(n *yaml.Node, budget *int) (any, error) {
 					return json.Number(c), nil
 				}
 			}
-			var v any
-			if err := n.Decode(&v); err != nil {
-				return nil, err
-			}
-			return v, nil
+			return yamlDecoded(n)
+		case "!!str":
+			return n.Value, nil
 		}
-		return n.Value, nil // strings, and anything else by its text
+		// Binary, timestamps and the like: what YAML decodes them to.
+		return yamlDecoded(n)
 	}
 	return nil, errors.New("unsupported YAML node")
+}
+
+// yamlDecoded is the YAML library's own reading of a scalar, as the JSON value
+// it would become in a listing: numbers and strings as they are, anything else
+// (a timestamp) through its JSON form.
+func yamlDecoded(n *yaml.Node) (any, error) {
+	var v any
+	if err := n.Decode(&v); err != nil {
+		return nil, err
+	}
+	switch v.(type) {
+	case nil, bool, string, int, int64, uint64, float64:
+		return v, nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var out any
+	if err := dec.Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // canonicalDecimal gives a plain decimal literal the one spelling its value

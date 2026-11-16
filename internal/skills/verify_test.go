@@ -251,3 +251,21 @@ func TestParseFrontmatterStructure(t *testing.T) {
 		t.Error("multiplying aliases were expanded without a bound")
 	}
 }
+
+// Where YAML reads a value differently from its plain text, the listing was
+// produced from YAML's reading, so that is what the file is compared with.
+func TestParseFrontmatterFollowsYAMLForNonDecimalValues(t *testing.T) {
+	p, err := ParseFrontmatter([]byte("---\nmode: 012\nhex: 0x1F\nlabel: !!binary SGVsbG8=\nwhen: 2026-01-02\nplain: 12\ntext: \"012\"\n---\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := map[string]any{
+		"mode": json.Number("10"), "hex": json.Number("31"), "label": "Hello",
+		"when": "2026-01-02T00:00:00Z", "plain": json.Number("12"), "text": "012",
+	}
+	for k, want := range listed {
+		if !FrontmatterEqual(map[string]any{k: want}, map[string]any{k: p[k]}) {
+			t.Errorf("%s: listing %#v, file %#v", k, want, p[k])
+		}
+	}
+}
