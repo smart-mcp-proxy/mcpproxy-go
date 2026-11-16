@@ -48,6 +48,7 @@ func (c *Client) withRefreshReplay(refresh oauth.RefreshFunc, endpoint func(cont
 		start := time.Now()
 		tok, err := refresh(first, rec)
 		cancelFirst()
+		firstFailedAt := time.Now()
 		c.logRefreshReplayAttempt(1, start, err)
 		if err == nil {
 			return tok, nil
@@ -82,6 +83,10 @@ func (c *Client) withRefreshReplay(refresh oauth.RefreshFunc, endpoint func(cont
 		// cannot be overwritten (the persist path compares the flight
 		// generation), but the old token is still sent once, as it is when a
 		// login races the first attempt.
+		// The first request was sent and failed, and a second one follows:
+		// it is recorded now, because the coordinator only sees what this
+		// function returns, the second request's outcome.
+		oauth.ReportRefreshAttemptFailure(ctx, err, firstFailedAt)
 		start = time.Now()
 		tok, err = refresh(budget, current)
 		c.logRefreshReplayAttempt(2, start, err)

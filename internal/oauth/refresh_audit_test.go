@@ -3,6 +3,8 @@ package oauth
 import (
 	"context"
 	"fmt"
+	"github.com/mark3labs/mcp-go/client"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"sync"
 	"testing"
 	"time"
@@ -168,4 +170,51 @@ func TestRefreshAudit_TimeIsTakenWhenTheRefreshReturns(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, 1, sink.count())
 	assert.Equal(t, afterRefresh, sink.got[0].At)
+}
+
+// Review round 11: a refresh function that sends two token requests (the
+// replay of a lost response) has each failed request recorded: the first
+// through the flight's context, the last by the flight itself.
+func TestRefreshAudit_ReplayedAttemptsAreEachRecorded(t *testing.T) {
+	firstAt := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	cases := map[string]struct {
+		first, second error
+		want          int
+	}{
+		"first fails, replay succeeds":    {transientRefreshErr(), nil, 1},
+		"both fail":                       {transientRefreshErr(), transientRefreshErr(), 2},
+		"first was never sent":            {MarkRefreshNotSent(context.DeadlineExceeded), transientRefreshErr(), 1},
+		"first refused by a retired gate": {dialgate.ErrRetired, nil, 0},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newCoordFixture(t, "cid")
+			c := newTestCoordinator()
+			sink := &auditSink{}
+			c.SetAuditObserver(sink.observe)
+
+			req := f.req(RefreshTriggerReactive, "rt-0")
+			inner := req.Refresh
+			req.Refresh = func(ctx context.Context, rec *storage.OAuthTokenRecord) (*client.Token, error) {
+				ReportRefreshAttemptFailure(ctx, tc.first, firstAt)
+				f.mu.Lock()
+				f.failErr = tc.second
+				f.mu.Unlock()
+				return inner(ctx, rec)
+			}
+			_, _, err := c.Do(context.Background(), req)
+			if tc.second == nil {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+			require.Equal(t, tc.want, sink.count())
+			if tc.want > 0 && !RefreshWasNotSent(tc.first) {
+				assert.Equal(t, firstAt, sink.got[0].At, "the first request keeps its own time")
+				assert.Equal(t, RefreshTriggerReactive, sink.got[0].Trigger)
+			}
+		})
+	}
+	// Outside a flight the report is a no-op.
+	ReportRefreshAttemptFailure(context.Background(), transientRefreshErr(), firstAt)
 }

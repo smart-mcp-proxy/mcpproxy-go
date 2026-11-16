@@ -482,3 +482,41 @@ func TestRefreshReplay_LookupTimeoutIsMarkedNotSent(t *testing.T) {
 	require.True(t, oauth.RefreshWasNotSent(err))
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
+
+// Spec 124 D5 (review round 11): the replay wrapper reports the first token
+// request when it failed and a second one follows, and reports nothing when
+// no second request is made (the caller records what the wrapper returns).
+func TestRefreshReplay_ReportsTheFirstFailedRequest(t *testing.T) {
+	endpoint := func(context.Context) (string, error) { return "https://replay.example/token", nil }
+	for name, tc := range map[string]struct {
+		first    error
+		wantRuns int
+		wantRep  int
+	}{
+		"lost response is replayed": {io.ErrUnexpectedEOF, 2, 1},
+		"a refusal is not replayed": {transport.OAuthError{ErrorCode: "invalid_grant"}, 1, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, rec := newRefreshReplayClient(t)
+			calls := 0
+			fn := c.withRefreshReplay(func(context.Context, *storage.OAuthTokenRecord) (*client.Token, error) {
+				calls++
+				if calls == 1 {
+					return nil, tc.first
+				}
+				return &client.Token{AccessToken: "at-1"}, nil
+			}, endpoint)
+			var reported []error
+			ctx := oauth.WithAttemptFailureReporter(context.Background(), func(err error, at time.Time) {
+				require.False(t, at.IsZero())
+				reported = append(reported, err)
+			})
+			_, _ = fn(ctx, rec)
+			require.Equal(t, tc.wantRuns, calls)
+			require.Len(t, reported, tc.wantRep)
+			if tc.wantRep == 1 {
+				require.ErrorIs(t, reported[0], tc.first)
+			}
+		})
+	}
+}

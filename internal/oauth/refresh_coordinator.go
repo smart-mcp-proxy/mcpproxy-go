@@ -209,6 +209,46 @@ func refreshFailureCode(serverName string, err error) string {
 	return string(code)
 }
 
+// auditAttempt reports one failed token request to the audit observer. A
+// failure before anything was sent (no client id, no token endpoint, a
+// retired instance) is not a failed token request and is not reported.
+func (c *RefreshCoordinator) auditAttempt(req RefreshRequest, err error, at time.Time) {
+	if err == nil || RefreshWasNotSent(err) || dialgate.IsRetired(err) {
+		return
+	}
+	c.mu.Lock()
+	audit := c.audit
+	c.mu.Unlock()
+	if audit == nil {
+		return
+	}
+	cls, _ := ClassifyRefreshError(err)
+	audit(RefreshAttemptFailure{
+		ServerName: req.ServerName, Class: cls, Trigger: req.Trigger, At: at,
+		Code: refreshFailureCode(req.ServerName, err),
+	})
+}
+
+type attemptFailureReporterKey struct{}
+
+// WithAttemptFailureReporter returns a context whose refresh function can
+// report a failed token request that it follows with another one. The
+// coordinator installs it for every flight.
+func WithAttemptFailureReporter(ctx context.Context, report func(error, time.Time)) context.Context {
+	return context.WithValue(ctx, attemptFailureReporterKey{}, report)
+}
+
+// ReportRefreshAttemptFailure records a token request that was sent and
+// failed and that the refresh function is about to follow with another one
+// (Spec 124 D5). The failure a refresh function RETURNS is recorded by the
+// coordinator and must not be reported here as well. at is when the request
+// failed. Outside a coordinator flight it does nothing.
+func ReportRefreshAttemptFailure(ctx context.Context, err error, at time.Time) {
+	if report, ok := ctx.Value(attemptFailureReporterKey{}).(func(error, time.Time)); ok && report != nil {
+		report(err, at)
+	}
+}
+
 // SetAuditObserver installs the function called once for every refresh that
 // was actually sent and failed. nil removes it.
 //
@@ -427,7 +467,13 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 	c.mu.Unlock()
 
 	saved := &atomic.Uint64{}
-	tok, refreshErr := req.Refresh(withFlightSavedRevision(withFlightGeneration(ctx, gen), saved), rec)
+	// A refresh function that sends more than one token request (the replay
+	// of a lost response) reports each failed request that is followed by
+	// another through this context; the flight reports the last one itself.
+	refreshCtx := WithAttemptFailureReporter(ctx, func(attemptErr error, at time.Time) {
+		c.auditAttempt(req, attemptErr, at)
+	})
+	tok, refreshErr := req.Refresh(withFlightSavedRevision(withFlightGeneration(refreshCtx, gen), saved), rec)
 	// The time of the outcome, before the storage reads below: an audit row
 	// must not be placed after calls that only waited for those reads.
 	refreshedAt := c.now()
@@ -476,17 +522,7 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 	// Spec 124 D5: a token request was sent and failed. Reported here, past
 	// the returns that sent nothing, and before supersession can turn this
 	// flight's failure into a successful return of a newer grant.
-	// A refresh that failed before it sent anything (no client id, no token
-	// endpoint) is not a failed token request and is not reported.
-	c.mu.Lock()
-	audit := c.audit
-	c.mu.Unlock()
-	if audit != nil && !RefreshWasNotSent(refreshErr) {
-		audit(RefreshAttemptFailure{
-			ServerName: req.ServerName, Class: cls, Trigger: req.Trigger, At: refreshedAt,
-			Code: refreshFailureCode(req.ServerName, refreshErr),
-		})
-	}
+	c.auditAttempt(req, refreshErr, refreshedAt)
 
 	// FR-006a: a login or another writer superseded this flight's generation.
 	// Its failure has no side effects; a newer grant is handed out.
