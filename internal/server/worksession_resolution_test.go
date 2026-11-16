@@ -237,6 +237,41 @@ func TestRequestWorkSession_RejectedRunNamesCreateNoAliases(t *testing.T) {
 	after := len(store.sessions["c1"].workSessionByKey)
 	store.mu.RUnlock()
 	assert.Equal(t, admitted, after, "no cache entry per rejected name")
+
+	// Review round 4: a rejected name is not stamped on the rows of the
+	// unnamed session it joined; an admitted one is.
+	rejected := p.activityAttribution(named(runtime.MaxNamedWorkSessionsPerDay+7), "c1")
+	assert.Equal(t, unnamed, rejected.WorkSessionID)
+	assert.Empty(t, rejected.RunName)
+	admittedAttr := p.activityAttribution(named(3), "c1")
+	assert.NotEqual(t, unnamed, admittedAttr.WorkSessionID)
+	assert.Equal(t, "run-"+time.Duration(3).String(), admittedAttr.RunName)
+}
+
+// Review round 4: an administrator's request on a connection that an agent
+// token opened is not stamped with that token. Its rows and its work session
+// are the administrator's, and the token cannot read them.
+func TestActivityAttribution_AdminRequestOnATokensConnection(t *testing.T) {
+	p, store, _ := trackerProxy(t)
+	store.SetSession("c1", "ide", "1.0", false, false, nil)
+	store.SetSessionIdentity("c1", "alpha", "")
+	store.SetSessionTokenPrefix("c1", "mcp_agt_aaaa")
+
+	agent := p.activityAttribution(tokenCtx(workSessionCtx("c1"), "alpha", "mcp_agt_aaaa"), "c1")
+	require.Equal(t, "alpha", agent.TokenName)
+
+	admin := p.activityAttribution(auth.WithAuthContext(workSessionCtx("c1"), auth.AdminContext()), "c1")
+	assert.Empty(t, admin.TokenName, "the session's token is not the administrator")
+	assert.Empty(t, admin.TokenPrefix)
+	assert.NotEmpty(t, admin.WorkSessionID)
+	assert.NotEqual(t, agent.WorkSessionID, admin.WorkSessionID)
+	assert.Equal(t, "ide", admin.ClientName, "the client name is still the connection's")
+
+	// With no request credential at all (the internal funnels), the session's
+	// token still stands in.
+	internal := p.activityAttribution(workSessionCtx("c1"), "c1")
+	assert.Equal(t, "alpha", internal.TokenName)
+	assert.Equal(t, "mcp_agt_aaaa", internal.TokenPrefix)
 }
 
 // Review finding: when the connection record failed to write, the retry may

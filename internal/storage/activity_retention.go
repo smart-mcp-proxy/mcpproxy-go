@@ -1280,10 +1280,25 @@ func (m *Manager) trimSession(id string, st *retentionState, over func() bool) (
 			for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix) && len(keys) <= retentionBatch; k, _ = c.Next() {
 				keys = append(keys, append([]byte(nil), k[len(prefix):]...))
 			}
-			if len(keys) <= 1 {
-				return nil // only the newest row is left
+			if len(keys) == 0 {
+				return nil
 			}
-			keys = keys[:len(keys)-1]
+			// The session's newest row is kept when it is the newest row of
+			// the log, which is never removed. When a newer row exists
+			// outside the session (an upstream event, say), the session's
+			// last row may go too, or a one-record cap would keep two rows.
+			// A full batch always leaves its last key for the next one.
+			keepLast := len(keys) > retentionBatch
+			if !keepLast {
+				newest, _ := acts.Cursor().Last()
+				keepLast = newest == nil || bytes.Equal(newest, keys[len(keys)-1])
+			}
+			if keepLast {
+				if len(keys) == 1 {
+					return nil // only the newest row is left
+				}
+				keys = keys[:len(keys)-1]
+			}
 			pending := retentionState{}
 			for _, ak := range keys {
 				if !overAfter(st, pending, over) {

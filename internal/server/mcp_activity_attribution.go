@@ -78,7 +78,15 @@ func (p *MCPProxyServer) activityAttribution(ctx context.Context, sessionID stri
 			if attr.ClientName == "" {
 				attr.ClientName = info.ClientName
 			}
-			if attr.TokenName == "" {
+			// The session's credential stands in only when the emitter has
+			// no request credential at all (the ctx-less internal funnels).
+			// A request that authenticated as something else on the same
+			// connection, an administrator's API key for one, is not the
+			// session's token: stamping it as such would hand its rows and
+			// its work session to that token (Spec 124 FR-041).
+			requestAuth := auth.AuthContextFromContext(ctx)
+			sessionCredential := requestAuth == nil
+			if attr.TokenName == "" && sessionCredential {
 				attr.TokenName = info.TokenName
 			}
 			// Spec 108-j J15: the ctx-less internal-tool funnel has no
@@ -87,7 +95,7 @@ func (p *MCPProxyServer) activityAttribution(ctx context.Context, sessionID stri
 			if attr.TokenPrefix == "" && attr.TokenName != "" && attr.TokenName == info.TokenName {
 				attr.TokenPrefix = info.TokenPrefix
 			}
-			if attr.ClientID == "" {
+			if attr.ClientID == "" && sessionCredential {
 				attr.ClientID = info.ClientID
 			}
 			if attr.ProfileSource == "" {
@@ -119,13 +127,13 @@ func (p *MCPProxyServer) activityAttribution(ctx context.Context, sessionID stri
 	// of the request, so they are fixed here, at emit time, with the rest of
 	// the attribution. The activity service has no request to read them from.
 	if attr.WorkSessionID == "" {
-		attr.WorkSessionID = p.requestWorkSession(ctx, sessionID)
+		// The run name is the one the session is filed under: a name the
+		// daily allowance refused is not stamped on the unnamed session's
+		// rows.
+		attr.WorkSessionID, attr.RunName = p.requestWorkSessionRun(ctx, sessionID)
 	}
 	if ac := auth.AuthContextFromContext(ctx); ac != nil && attr.UserID == "" {
 		attr.UserID = ac.UserID
-	}
-	if attr.RunName == "" {
-		attr.RunName = p.requestRunName(ctx, principalFromContext(ctx))
 	}
 	attr.PolicyRefusal = isPolicyRefusal(ctx)
 	return attr

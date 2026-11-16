@@ -890,3 +890,105 @@ func TestMarkWorkSessionsEnded_InBatches(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, n, "closing is idempotent")
 }
+
+// Review round 4: a failed row that cancels a summary expiry is counted once
+// in the stored counters, not once by the recount and again as the new row.
+func TestRetention_FailedRowCancellingAnExpiryIsCountedOnce(t *testing.T) {
+	for _, block := range []bool{false, true} {
+		m, cleanup := setupTestStorageForActivity(t)
+		for i := 0; i < 4; i++ {
+			retRow(t, m, "ws-1", 9*24*time.Hour-time.Duration(i)*time.Minute, func(r *ActivityRecord) { r.Status = ActivityStatusError })
+		}
+		refs, _ := m.WorkSessionRowRefs("ws-1")
+		require.NoError(t, m.db.db.Update(func(tx *bbolt.Tx) error {
+			sums := tx.Bucket([]byte(WorkSessionsBucket))
+			s, err := loadSummary(sums, "ws-1")
+			if err != nil {
+				return err
+			}
+			s.Removal = removalSummary
+			if err := storeSummary(sums, s); err != nil {
+				return err
+			}
+			idx := tx.Bucket([]byte(WorkSessionRowsBucket))
+			for _, ref := range refs[:2] {
+				if err := idx.Delete(workSessionRowKey("ws-1", ref.ActivityKey)); err != nil {
+					return err
+				}
+			}
+			return nil
+		}))
+		retRow(t, m, "ws-1", time.Minute, func(r *ActivityRecord) {
+			r.Status = ActivityStatusError
+			if block {
+				r.Type, r.Status = ActivityTypePolicyDecision, "blocked"
+			}
+		})
+		s, _ := m.GetWorkSessionSummary("ws-1")
+		require.NotNil(t, s)
+		tot := s.Totals(nil)
+		assert.Equal(t, 5, tot.Failures, "block=%v", block)
+		assert.Equal(t, 3, tot.StoredFailures, "two entries left and the new row; block=%v", block)
+		if block {
+			assert.Equal(t, 1, tot.Blocks)
+		}
+		cleanup()
+	}
+}
+
+// Review round 4: with a newer row outside the session (an upstream event),
+// the session's last row is not protected, so a one-record cap is reached.
+func TestRetention_NewerEventDoesNotLeaveTwoRowsUnderACapOfOne(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	retRow(t, m, "ws-1", time.Hour, nil)
+	require.NoError(t, m.SaveActivity(&ActivityRecord{
+		Type: ActivityTypeUpstreamEvent, Status: ActivityStatusError, ServerName: "github", Timestamp: retNow.Add(-time.Minute),
+	}))
+	p := retPolicy()
+	p.MaxRecords = 1
+	_, err := m.RunActivityRetention(p)
+	require.NoError(t, err)
+	assert.Equal(t, 1, countRows(t, m))
+	rows, _, err := m.ListActivities(ActivityFilter{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, ActivityTypeUpstreamEvent, rows[0].Type, "the newest row of the log stays")
+
+	// The session's only row stays when it IS the newest row of the log.
+	m2, cleanup2 := setupTestStorageForActivity(t)
+	defer cleanup2()
+	require.NoError(t, m2.SaveActivity(&ActivityRecord{
+		Type: ActivityTypeUpstreamEvent, Status: ActivityStatusError, ServerName: "github", Timestamp: retNow.Add(-time.Hour),
+	}))
+	retRow(t, m2, "ws-1", time.Minute, nil)
+	_, err = m2.RunActivityRetention(p)
+	require.NoError(t, err)
+	rows, _, _ = m2.ListActivities(ActivityFilter{Limit: 5})
+	require.Len(t, rows, 1)
+	assert.Equal(t, "ws-1", rows[0].WorkSessionID)
+}
+
+// Review round 4: closing at start touches only sessions of the previous
+// process; closing at stop touches all.
+func TestCloseOpenWorkSessions_AtStartLeavesThisProcessAlone(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	retRow(t, m, "ws-previous", time.Hour, nil)
+	retRow(t, m, "ws-current", time.Minute, nil)
+	processStart := retNow.Add(-10 * time.Minute)
+
+	n, err := m.CloseOpenWorkSessionsAtStart(processStart)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	prev, _ := m.GetWorkSessionSummary("ws-previous")
+	cur, _ := m.GetWorkSessionSummary("ws-current")
+	assert.False(t, prev.EndedAt.IsZero())
+	assert.True(t, cur.EndedAt.IsZero(), "a session this process opened stays open")
+
+	n, err = m.CloseOpenWorkSessions()
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	cur, _ = m.GetWorkSessionSummary("ws-current")
+	assert.Equal(t, cur.LastActivityAt, cur.EndedAt)
+}

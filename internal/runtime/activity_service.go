@@ -53,6 +53,9 @@ type SessionWorkSessionResolver func(sessionID string) string
 type ActivityService struct {
 	storage *storage.Manager
 	logger  *zap.Logger
+	// createdAt is when this process's service was built: every row it
+	// records is later, which tells its sessions from the previous process's.
+	createdAt time.Time
 
 	// clientResolver stamps the MCP client onto each activity record at WRITE
 	// time. Read-time joining against the sessions API is not viable: the core
@@ -137,6 +140,7 @@ func NewActivityService(storage *storage.Manager, logger *zap.Logger) *ActivityS
 	s := &ActivityService{
 		storage:       storage,
 		logger:        logger,
+		createdAt:     time.Now().UTC(),
 		eventCh:       make(chan Event, 100), // Buffer for non-blocking event delivery
 		done:          make(chan struct{}),
 		maxAge:        DefaultRetentionMaxAge,
@@ -368,6 +372,12 @@ func (s *ActivityService) Start(ctx context.Context, rt *Runtime) {
 // runRetentionLoop periodically cleans up old activity records.
 func (s *ActivityService) runRetentionLoop(ctx context.Context) {
 	s.prepareWorkSessions(ctx)
+	if ctx.Err() != nil {
+		// Stopped during preparation: the backfill may be half done, and a
+		// cleanup over half-indexed sessions could remove the indexed part
+		// of one and leave the rest to be rebuilt as a different session.
+		return
+	}
 
 	// Run initial cleanup
 	s.runRetentionCleanup()
@@ -412,7 +422,9 @@ func (s *ActivityService) reapWorkSessions() {
 //     (FR-013).
 //   - Rows written before Spec 124 are indexed and summarised, once.
 func (s *ActivityService) prepareWorkSessions(ctx context.Context) {
-	if _, err := s.storage.CloseOpenWorkSessionsAtStart(); err != nil {
+	// Only sessions of the previous process: writers are already admitted,
+	// and a session this process opened meanwhile must stay open.
+	if _, err := s.storage.CloseOpenWorkSessionsAtStart(s.createdAt); err != nil {
 		s.logger.Warn("Failed to close open work sessions at start", zap.Error(err))
 	}
 	// A session removal that a crash interrupted is finished first, so that
@@ -516,6 +528,14 @@ func (s *ActivityService) Stop() {
 	// passed the stopped check above is already registered here; one arriving
 	// later is turned away, so this returns only when the DB has no writer left.
 	s.workersWG.Wait()
+
+	// FR-015: the end of every session still open is recorded when the core
+	// stops. No writer is left, so nothing can reopen one after this.
+	if s.storage != nil {
+		if _, err := s.storage.CloseOpenWorkSessions(); err != nil {
+			s.logger.Warn("Failed to record work-session ends at stop", zap.Error(err))
+		}
+	}
 }
 
 // handleEvent processes an activity event and persists it to storage.

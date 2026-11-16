@@ -594,7 +594,9 @@ func indexActivityTx(tx *bbolt.Tx, r *ActivityRecord, key []byte, role AttemptRo
 			// That mode drops index entries without touching the stored
 			// counters (the summary was about to go), so they are counted
 			// again from what is left.
-			recountStoredFromIndex(rows, s)
+			// The entry of the row being saved is already in the index and
+			// is left out: applyRow below counts that row.
+			recountStoredFromIndex(rows, s, ik)
 		}
 		prefix := workSessionRowPrefix(s.ID)
 		if k, _ := rows.Cursor().Seek(prefix); k != nil && bytes.HasPrefix(k, prefix) {
@@ -614,14 +616,18 @@ func indexActivityTx(tx *bbolt.Tx, r *ActivityRecord, key []byte, role AttemptRo
 }
 
 // recountStoredFromIndex sets the stored failure and block counters of a
-// summary from the session's remaining index entries.
-func recountStoredFromIndex(rows *bbolt.Bucket, s *WorkSessionSummary) {
+// summary from the session's remaining index entries, leaving out the entry
+// at key `except`.
+func recountStoredFromIndex(rows *bbolt.Bucket, s *WorkSessionSummary, except []byte) {
 	for _, p := range s.Servers {
 		p.StoredFailures, p.StoredBlocks = 0, 0
 	}
 	prefix := workSessionRowPrefix(s.ID)
 	c := rows.Cursor()
 	for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+		if bytes.Equal(k, except) {
+			continue
+		}
 		flags, server := parseIndexValue(v)
 		role := flagsRole(flags)
 		p := s.Servers[server]
@@ -1085,49 +1091,68 @@ func (m *Manager) rebuildSummary(id string) (bool, error) {
 		return true
 	}
 
+	published := false
 	for {
-		done := false
-		if err := m.db.db.View(func(tx *bbolt.Tx) error {
-			done = fold(tx, repairChunk)
-			return nil
-		}); err != nil {
-			return false, err
+		for {
+			done := false
+			if err := m.db.db.View(func(tx *bbolt.Tx) error {
+				done = fold(tx, repairChunk)
+				return nil
+			}); err != nil {
+				return false, err
+			}
+			if done {
+				break
+			}
 		}
-		if done {
-			break
+
+		caughtUp := true
+		err := m.db.db.Update(func(tx *bbolt.Tx) error {
+			sums, err := tx.CreateBucketIfNotExists([]byte(WorkSessionsBucket))
+			if err != nil {
+				return err
+			}
+			// Rows indexed since the reading passed them: a short tail. If
+			// it is not short (a burst of writes got in between), the
+			// writer is released and the reading goes on outside it.
+			if !fold(tx, repairChunk) {
+				caughtUp = false
+				return nil
+			}
+			if s.StartedAt.IsZero() {
+				return nil // every row is gone; nothing to summarise
+			}
+			// A live row may have created a summary meanwhile. It holds only
+			// the rows written since, all of which were just folded in above,
+			// so the rebuilt summary replaces it and nothing is lowered.
+			if existing, err := loadSummary(sums, id); err != nil {
+				return err
+			} else if existing != nil && !existing.EndedAt.IsZero() {
+				s.EndedAt = existing.EndedAt
+			} else if existing == nil {
+				s.EndedAt = s.LastActivityAt
+			}
+			published = true
+			return storeSummary(sums, s)
+		})
+		if err != nil || caughtUp {
+			return published, err
 		}
 	}
-
-	published := false
-	err := m.db.db.Update(func(tx *bbolt.Tx) error {
-		sums, err := tx.CreateBucketIfNotExists([]byte(WorkSessionsBucket))
-		if err != nil {
-			return err
-		}
-		// Rows indexed since the reading passed them (a short tail).
-		fold(tx, 0)
-		if s.StartedAt.IsZero() {
-			return nil // every row is gone; nothing to summarise
-		}
-		// A live row may have created a summary meanwhile. It holds only the
-		// rows written since, all of which were just folded in above, so the
-		// rebuilt summary replaces it and nothing is lowered.
-		if existing, err := loadSummary(sums, id); err != nil {
-			return err
-		} else if existing != nil && !existing.EndedAt.IsZero() {
-			s.EndedAt = existing.EndedAt
-		} else if existing == nil {
-			s.EndedAt = s.LastActivityAt
-		}
-		published = true
-		return storeSummary(sums, s)
-	})
-	return published, err
 }
 
 // CloseOpenWorkSessionsAtStart gives every summary with no end its last
 // activity as its end. Work-session ids do not survive a restart, so no
 // session that was open when the core stopped can continue.
-func (m *Manager) CloseOpenWorkSessionsAtStart() (int, error) {
+//
+// before is when this process started recording: a session whose last
+// activity is later was opened by this process and is left open.
+func (m *Manager) CloseOpenWorkSessionsAtStart(before time.Time) (int, error) {
+	return m.MarkWorkSessionsEnded(before)
+}
+
+// CloseOpenWorkSessions gives every summary with no end its last activity as
+// its end. Called when the core stops, after the last writer (FR-015).
+func (m *Manager) CloseOpenWorkSessions() (int, error) {
 	return m.MarkWorkSessionsEnded(time.Now().UTC().Add(24 * time.Hour))
 }

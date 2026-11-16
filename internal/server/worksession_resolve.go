@@ -100,6 +100,15 @@ func workSessionKey(principal, runName string) string {
 //     not been persisted) is derived from the request: principal, client name
 //     or surface, run name.
 func (p *MCPProxyServer) requestWorkSession(ctx context.Context, sessionID string) string {
+	id, _ := p.requestWorkSessionRun(ctx, sessionID)
+	return id
+}
+
+// requestWorkSessionRun is requestWorkSession that also returns the run name
+// the session is filed under: the request's name, or "" when it had none, an
+// invalid one, or one the credential's daily allowance refused. A row is
+// stamped with this name, never with one its session does not carry.
+func (p *MCPProxyServer) requestWorkSessionRun(ctx context.Context, sessionID string) (string, string) {
 	principal := principalFromContext(ctx)
 	runName := p.requestRunName(ctx, principal)
 	if sessionID == "" {
@@ -126,7 +135,7 @@ func (p *MCPProxyServer) requestWorkSession(ctx context.Context, sessionID strin
 			})
 			if id != "" {
 				p.touchWorkSession(id, effective)
-				return id
+				return id, effective.RunName
 			}
 		}
 	}
@@ -137,8 +146,8 @@ func (p *MCPProxyServer) requestWorkSession(ctx context.Context, sessionID strin
 	} else {
 		identity.ClientName = reqcontext.ClientSurface(ctx)
 	}
-	id, _ := p.resolveWorkSessionEffective(identity)
-	return id
+	id, effective := p.resolveWorkSessionEffective(identity)
+	return id, effective.RunName
 }
 
 // touchWorkSession moves the idle clock of a reused work session.

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -451,4 +452,33 @@ func TestUpstreamEvent_SavesMaintainTheWatermark(t *testing.T) {
 	c2.noteTokenSaved("fresh", "", 1000)
 	assert.Len(t, c2.loginSeq, 1)
 	assert.Len(t, c2.seen, 1)
+}
+
+// Review round 4 (Spec 124 FR-015): stopping the service records the end of
+// every session still open, and a service stopped during its preparation does
+// not run a cleanup over a half-prepared log.
+func TestActivityService_StopClosesSessionsAndCancelledStartSkipsCleanup(t *testing.T) {
+	svc, store := eventService(t)
+	for i := 0; i < 5; i++ {
+		require.NoError(t, store.SaveActivity(&storage.ActivityRecord{
+			Type: storage.ActivityTypeToolCall, Status: storage.ActivityStatusSuccess, ServerName: "github",
+			Timestamp: time.Now().UTC().Add(time.Duration(i) * time.Second), WorkSessionID: "ws-open",
+		}))
+	}
+	svc.maxRecords = 1
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	svc.runRetentionLoop(ctx)
+	_, total, err := store.ListActivities(storage.ActivityFilter{Limit: 1})
+	require.NoError(t, err)
+	assert.Equal(t, 5, total, "no cleanup ran after a cancelled preparation")
+
+	sum, _ := store.GetWorkSessionSummary("ws-open")
+	require.NotNil(t, sum)
+	require.True(t, sum.EndedAt.IsZero(), "opened after this service was built: not closed at start")
+
+	svc.Stop()
+	sum, _ = store.GetWorkSessionSummary("ws-open")
+	assert.Equal(t, sum.LastActivityAt, sum.EndedAt, "the end is recorded when the core stops")
 }
