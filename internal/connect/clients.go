@@ -107,6 +107,19 @@ var allClients = []ClientDef{
 		ReloadHint:      "Run \"MCP: List Servers\" → Restart (or reload the window) in VS Code to load MCPProxy",
 	},
 	{
+		ID:        "copilot",
+		Name:      "GitHub Copilot (VS Code, Copilot CLI)",
+		Format:    "json",
+		ServerKey: "mcpServers",
+		Supported: true,
+		Icon:      "vscode",
+		// Current VS Code versions run agents on the Copilot SDK and read their
+		// MCP servers from ~/.copilot/mcp-config.json, the file the Copilot CLI
+		// reads as well, instead of their own Code/User/mcp.json (#1896).
+		ClientInfoNames: []string{"copilot"},
+		ReloadHint:      "Reload the VS Code window (or restart Copilot CLI) to load MCPProxy",
+	},
+	{
 		ID:        "codex",
 		Name:      "Codex CLI",
 		Format:    "toml",
@@ -238,6 +251,11 @@ func ConfigPath(clientID, homeDir string) string {
 		default: // linux
 			return filepath.Join(homeDir, ".config", "Code", "User", "mcp.json")
 		}
+
+	case "copilot":
+		// The Copilot user config, read by current VS Code versions and by the
+		// Copilot CLI: a fixed dotfile under $HOME on every OS.
+		return filepath.Join(homeDir, ".copilot", "mcp-config.json")
 
 	case "codex":
 		return filepath.Join(homeDir, ".codex", "config.toml")
@@ -522,10 +540,10 @@ func (s *Service) checkedPaths(clientID string) []string {
 // (the default), a clean, keyless entry is written.
 func buildServerEntry(clientID string, p serverEntryParams) map[string]interface{} {
 	switch clientID {
-	case "claude-code", "vscode", "zcode":
-		// Claude Code (~/.claude.json), VS Code (mcp.json) and ZCode
-		// (~/.zcode/cli/config.json, mcp.servers) "type":"http" entries all
-		// support a "headers" object.
+	case "claude-code", "vscode", "copilot", "zcode":
+		// Claude Code (~/.claude.json), VS Code (mcp.json), its Copilot config
+		// (~/.copilot/mcp-config.json) and ZCode (~/.zcode/cli/config.json,
+		// mcp.servers) "type":"http" entries all support a "headers" object.
 		return withAPIKeyHeader(map[string]interface{}{
 			"type": "http",
 			"url":  p.baseURL,
