@@ -134,3 +134,37 @@ func TestRefreshManager_SaveWithoutExpiryRenewsTheScheduleIdentity(t *testing.T)
 	assert.Empty(t, failed, "a superseded failure reports no login requirement")
 	assert.Zero(t, emitter.GetFailedEvents())
 }
+
+// Review round 4: the record kept after a save that installs no schedule is
+// the new grant's: its expiry and binding, no failure state.
+func TestRefreshManager_UnschedulableSaveLeavesAFreshRecord(t *testing.T) {
+	emitter := &orderEmitter{}
+	manager := NewRefreshManager(newMockTokenStore(), nil, nil, zaptest.NewLogger(t))
+	manager.SetEventEmitter(emitter)
+	require.NoError(t, manager.Start(context.Background()))
+	defer manager.Stop()
+
+	manager.OnTokenSaved("srv", time.Now().Add(time.Hour))
+	manager.mu.Lock()
+	failed := manager.schedules["srv"]
+	failed.RefreshState, failed.LastError, failed.RetryCount = RefreshStateFailed, "invalid_grant", 3
+	manager.mu.Unlock()
+
+	soon := time.Now().Add(3 * time.Second) // too close for a proactive refresh
+	manager.OnTokenSaved("srv", soon)
+	manager.mu.RLock()
+	cur := manager.schedules["srv"]
+	manager.mu.RUnlock()
+	require.NotNil(t, cur)
+	require.NotSame(t, failed, cur)
+	assert.Equal(t, RefreshStateIdle, cur.RefreshState)
+	assert.Empty(t, cur.LastError)
+	assert.Zero(t, cur.RetryCount)
+	assert.True(t, cur.ExpiresAt.Equal(soon))
+	assert.Nil(t, cur.Timer)
+
+	// A terminal failure of the NEW grant is current and is reported.
+	manager.failScheduleAndNotify("srv", cur, "invalid_grant", true, errors.New("invalid_grant"))
+	_, failures := emitter.snapshot()
+	assert.Len(t, failures, 1)
+}

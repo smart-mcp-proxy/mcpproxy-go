@@ -482,3 +482,21 @@ func TestActivityService_StopClosesSessionsAndCancelledStartSkipsCleanup(t *test
 	sum, _ = store.GetWorkSessionSummary("ws-open")
 	assert.Equal(t, sum.LastActivityAt, sum.EndedAt, "the end is recorded when the core stops")
 }
+
+// Review round 4: a folded record that ends waiting for a login leaves the
+// login requirement open, whatever recoveries it hid on the way.
+func TestTransitionEvents_FoldedRecordEndingInPendingAuthKeepsTheLoginOpen(t *testing.T) {
+	c := newUpstreamEventCollapser()
+	c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(-time.Hour), Code: string(diagnostics.OAuthLoginRequired)})
+	evs := transitionEvents("srv", "http", types.Transition{
+		From: types.StatePendingAuth, To: types.StatePendingAuth, At: evBase,
+		Folded: 2, FoldedLost: 1, FoldedRestored: 1, FoldedLogin: 1,
+	})
+	require.NotEmpty(t, evs)
+	assert.Equal(t, UpstreamLoginRequired, evs[len(evs)-1].Kind, "the login requirement is replayed last")
+	for _, ev := range evs {
+		c.place(ev)
+	}
+	assert.Len(t, c.loginOpen, 1)
+	assert.True(t, c.down["srv"])
+}

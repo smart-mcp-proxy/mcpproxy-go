@@ -173,6 +173,14 @@ func transitionEvents(server, transport string, t types.Transition) []UpstreamEv
 		lost--
 		lossNext = false
 	}
+	// A record that ends waiting for a login keeps one hidden login
+	// requirement for the end: it is the state the server is left in, and no
+	// recovery replayed before it may close it.
+	loginAtEnd := 0
+	if t.To == types.StatePendingAuth && login > 0 {
+		loginAtEnd = 1
+		login--
+	}
 	for ; login > 0; login-- {
 		add(UpstreamLoginRequired, string(diagnostics.OAuthLoginRequired))
 	}
@@ -186,6 +194,9 @@ func transitionEvents(server, transport string, t types.Transition) []UpstreamEv
 			restored--
 		}
 		lossNext = !lossNext
+	}
+	if loginAtEnd > 0 {
+		add(UpstreamLoginRequired, string(diagnostics.OAuthLoginRequired))
 	}
 	if ev, ok := transitionEvent(server, transport, t); ok {
 		out = append(out, ev)

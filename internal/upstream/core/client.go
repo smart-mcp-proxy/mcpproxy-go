@@ -918,7 +918,8 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(data.Encode()))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create refresh request: %w", err)
+		// Nothing was sent (a malformed token endpoint, for example).
+		return nil, oauth.MarkRefreshNotSent(fmt.Errorf("failed to create refresh request: %w", err))
 	}
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
