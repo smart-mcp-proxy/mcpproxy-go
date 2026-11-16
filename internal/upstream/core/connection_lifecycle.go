@@ -211,16 +211,7 @@ func (c *Client) registerNotificationHandler() {
 		return
 	}
 
-	c.client.OnNotification(func(notification mcp.JSONRPCNotification) {
-		switch notification.Method {
-		case string(mcp.MethodNotificationToolsListChanged):
-			c.handleToolsListChangedNotification()
-		case string(mcp.MethodNotificationPromptsListChanged):
-			c.handlePromptsListChangedNotification()
-		default:
-			// Ignore all other notifications (logging, resources, progress, ...).
-		}
-	})
+	c.client.OnNotification(c.dispatchNotification)
 
 	// Log capability status after registration
 	if c.serverInfo != nil && c.serverInfo.Capabilities.Tools != nil && c.serverInfo.Capabilities.Tools.ListChanged {
@@ -229,6 +220,20 @@ func (c *Client) registerNotificationHandler() {
 	} else {
 		c.logger.Debug("Server does not advertise tool change notifications support",
 			zap.String("server", c.config.Name))
+	}
+}
+
+// dispatchNotification routes one upstream notification. mcp-go calls it for
+// notifications on a request's response stream; the standalone GET stream of a
+// streamable-HTTP upstream (GH #1910, list_changed_stream.go) calls it too.
+func (c *Client) dispatchNotification(notification mcp.JSONRPCNotification) {
+	switch notification.Method {
+	case string(mcp.MethodNotificationToolsListChanged):
+		c.handleToolsListChangedNotification()
+	case string(mcp.MethodNotificationPromptsListChanged):
+		c.handlePromptsListChangedNotification()
+	default:
+		// Ignore all other notifications (logging, resources, progress, ...).
 	}
 }
 
@@ -312,6 +317,10 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 
 	c.logger.Info("Disconnecting from upstream MCP server",
 		zap.Bool("was_connected", wasConnected))
+
+	// GH #1910: end the standalone GET stream before the transport closes.
+	// c.mu is not held here, so the wait cannot block the listener's dispatch.
+	c.stopListChangedStream(true)
 
 	if c.upstreamLogger != nil {
 		c.upstreamLogger.Info("Disconnecting from server",

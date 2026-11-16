@@ -71,7 +71,7 @@ func (p *cancelProbe) serve(t *testing.T, wrap func(http.Handler) http.Handler) 
 		h = wrap(h)
 	}
 	httpServer := httptest.NewServer(h)
-	t.Cleanup(httpServer.Close)
+	t.Cleanup(func() { closeHTTPFixture(httpServer) })
 	return httpServer.URL
 }
 

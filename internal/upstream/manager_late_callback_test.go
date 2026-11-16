@@ -49,7 +49,7 @@ func TestManager_LateCallbacks_ReachExistingClients(t *testing.T) {
 		return mcp.NewToolResultText("ok"), nil
 	})
 	testServer := servertest.NewTestStreamableHTTPServer(upstream)
-	t.Cleanup(testServer.Close)
+	t.Cleanup(func() { closeHTTPFixture(testServer) })
 
 	// 1. Client created and connected BEFORE any callback is set.
 	require.NoError(t, m.AddServerConfig("srv-late", &config.ServerConfig{

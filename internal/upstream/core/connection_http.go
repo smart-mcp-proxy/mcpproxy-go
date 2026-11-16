@@ -168,6 +168,9 @@ func (c *Client) runAuthStrategies(ctx context.Context, authStrategies []authStr
 
 		// Register notification handler for tools/list_changed
 		c.registerNotificationHandler()
+		// GH #1910: a streamable-HTTP upstream delivers that notification
+		// only on a standalone GET stream; open one if it advertises it.
+		c.startListChangedStream(c.client, c.serverInfo)
 
 		return nil
 	}

@@ -55,7 +55,7 @@ func unpinnedProxyEndpoint(t *testing.T, s *Server, srv *mcpserver.MCPServer) st
 		mcpserver.WithHTTPContextFunc(captureClientHeaders(s.liveConfig)),
 	)
 	httpServer := httptest.NewServer(s.mcpAuthMiddleware(streamable))
-	t.Cleanup(httpServer.Close)
+	t.Cleanup(func() { closeHTTPFixture(httpServer) })
 	return httpServer.URL
 }
 

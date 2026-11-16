@@ -85,7 +85,7 @@ func TestClient_ListPrompts_NotConnected_ReturnsError(t *testing.T) {
 func TestClient_ListPrompts_Success(t *testing.T) {
 	upstream := newTestPromptManagedUpstream(t)
 	testServer := servertest.NewTestStreamableHTTPServer(upstream)
-	defer testServer.Close()
+	defer closeHTTPFixture(testServer)
 
 	mc := connectedManagedTestClient(t, testServer.URL)
 
@@ -104,7 +104,7 @@ func TestClient_ListPrompts_Success(t *testing.T) {
 func TestClient_SetConfig_PropagatesExposePromptsToCoreClient(t *testing.T) {
 	upstream := newTestPromptManagedUpstream(t)
 	testServer := servertest.NewTestStreamableHTTPServer(upstream)
-	defer testServer.Close()
+	defer closeHTTPFixture(testServer)
 
 	mc := connectedManagedTestClient(t, testServer.URL)
 
@@ -129,7 +129,7 @@ func TestClient_ListPrompts_UpstreamError(t *testing.T) {
 
 	// Close the upstream out from under an established, "ready" client so the
 	// next request fails at the transport layer instead of via IsConnected().
-	testServer.Close()
+	closeHTTPFixture(testServer)
 
 	prompts, err := mc.ListPrompts(context.Background())
 	require.Error(t, err)
@@ -148,7 +148,7 @@ func TestClient_GetPrompt_NotConnected_ReturnsError(t *testing.T) {
 func TestClient_GetPrompt_Success(t *testing.T) {
 	upstream := newTestPromptManagedUpstream(t)
 	testServer := servertest.NewTestStreamableHTTPServer(upstream)
-	defer testServer.Close()
+	defer closeHTTPFixture(testServer)
 
 	mc := connectedManagedTestClient(t, testServer.URL)
 
@@ -165,7 +165,7 @@ func TestClient_GetPrompt_UpstreamError(t *testing.T) {
 	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	mc := connectedManagedTestClient(t, testServer.URL)
 
-	testServer.Close()
+	closeHTTPFixture(testServer)
 
 	result, err := mc.GetPrompt(context.Background(), "greeting", nil)
 	require.Error(t, err)
