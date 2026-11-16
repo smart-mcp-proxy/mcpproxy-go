@@ -245,12 +245,45 @@ func sniffRow(v []byte) (workSession string, hasArguments, hasResponse bool) {
 			}
 			hasResponse = len(val) > 0
 		case "arguments":
-			start := i
-			if !skipValue() {
-				return conservative()
+			if i >= n || v[i] != '{' {
+				// null, or something stripping does not touch.
+				if !skipValue() {
+					return conservative()
+				}
+				break
 			}
-			// "null" and "{}" are no arguments.
-			hasArguments = i-start > 2 && v[start] == '{'
+			// An argument is a body unless it is one of the internal
+			// `_auth_*` ones, which stripping keeps: a row that has only
+			// those has nothing to strip and must not be nominated again
+			// on every pass.
+			i++
+			for {
+				skipSpace()
+				if i < n && v[i] == '}' {
+					i++
+					break
+				}
+				name, ok := readString()
+				if !ok {
+					return conservative()
+				}
+				skipSpace()
+				if i >= n || v[i] != ':' {
+					return conservative()
+				}
+				i++
+				skipSpace()
+				if !skipValue() {
+					return conservative()
+				}
+				if !bytes.HasPrefix(name, []byte(sniffAuthArgument)) {
+					hasArguments = true
+				}
+				skipSpace()
+				if i < n && v[i] == ',' {
+					i++
+				}
+			}
 		default:
 			if !skipValue() {
 				return conservative()
@@ -268,16 +301,34 @@ func sniffRow(v []byte) (workSession string, hasArguments, hasResponse bool) {
 	}
 }
 
+// summaryUnindexedBefore reads UnindexedBefore out of a stored summary. The
+// field is absent from nearly every summary, so the common case is one
+// substring search and no decoding.
+func summaryUnindexedBefore(v []byte) time.Time {
+	if !bytes.Contains(v, []byte(`"unindexed_before"`)) {
+		return time.Time{}
+	}
+	var s struct {
+		UnindexedBefore time.Time `json:"unindexed_before"`
+	}
+	if json.Unmarshal(v, &s) != nil {
+		return time.Time{}
+	}
+	return s.UnindexedBefore
+}
+
 // scanLog reads the activity log once, in bounded read transactions, and
 // measures the bytes that count against the size cap: the activity rows and
 // the three buckets this feature adds (FR-034).
 func (m *Manager) scanLog() (logScan, error) {
 	var scan logScan
-	live := map[string]bool{}
+	// live maps each session with a summary to its UnindexedBefore time
+	// (zero for nearly all of them).
+	live := map[string]time.Time{}
 	if err := m.db.db.View(func(tx *bbolt.Tx) error {
 		if b := tx.Bucket([]byte(WorkSessionsBucket)); b != nil {
-			_ = b.ForEach(func(k, _ []byte) error {
-				live[string(k)] = true
+			_ = b.ForEach(func(k, v []byte) error {
+				live[string(k)] = summaryUnindexedBefore(v)
 				return nil
 			})
 		}
@@ -323,7 +374,8 @@ func (m *Manager) scanLog() (logScan, error) {
 						scan.stripTruncated = true
 					}
 				}
-				if ws == "" || !live[ws] {
+				unindexedBefore, isLive := live[ws]
+				if ws == "" || !isLive || (!unindexedBefore.IsZero() && activityKeyTime(k).Before(unindexedBefore)) {
 					if len(scan.outside) < maxRetentionCandidates {
 						scan.outside = append(scan.outside, append([]byte(nil), k...))
 					} else {
@@ -989,8 +1041,10 @@ func (m *Manager) pruneOutsideWindow(st *retentionState, over func() bool, candi
 					continue
 				}
 				var rec ActivityRecord
-				if rec.UnmarshalBinary(v) == nil && rec.WorkSessionID != "" && sums.get(rec.WorkSessionID) != nil {
-					continue // inside the window: whole or not at all
+				if rec.UnmarshalBinary(v) == nil && rec.WorkSessionID != "" {
+					if sum := sums.get(rec.WorkSessionID); sum != nil && !unindexedRow(tx, sum, rec.WorkSessionID, k) {
+						continue // inside the window: whole or not at all
+					}
 				}
 				freed, _, err := deleteRowTx(tx, sums, k, append([]byte(nil), v...))
 				if err != nil {
@@ -1017,6 +1071,18 @@ func (m *Manager) pruneOutsideWindow(st *retentionState, over func() bool, candi
 	return deleted, nil
 }
 
+// unindexedRow reports whether the row at key is one a cancelled summary
+// expiry left behind: older than the session's UnindexedBefore and without an
+// index entry. Such a row is in no timeline and no count, so it is removed
+// like a row outside the window.
+func unindexedRow(tx *bbolt.Tx, sum *WorkSessionSummary, id string, key []byte) bool {
+	if sum.UnindexedBefore.IsZero() || !activityKeyTime(key).Before(sum.UnindexedBefore) {
+		return false
+	}
+	rows := tx.Bucket([]byte(WorkSessionRowsBucket))
+	return rows == nil || rows.Get(workSessionRowKey(id, key)) == nil
+}
+
 // overAfter reports whether the log would still be over its caps once the
 // pending deletions are applied.
 func overAfter(st *retentionState, pending retentionState, over func() bool) bool {
@@ -1032,7 +1098,12 @@ func overAfter(st *retentionState, pending retentionState, over func() bool) boo
 // first, and trims the last remaining one from its oldest end when it alone is
 // still over the caps.
 func (m *Manager) pruneSessions(st *retentionState, over func() bool) (removed, trimmed int, err error) {
-	lastSkipped := ""
+	// refused counts how often each session's removal was refused in this
+	// stage. A refusal is either a stale selection (the session got a row
+	// between the listing and the removal), which a second try settles, or
+	// the session holding the newest row of the log, which is never removed.
+	// Either way the stage goes on with the next session.
+	refused := map[string]int{}
 	for over() {
 		// The order is read again for every removal: a session that got a
 		// row since is no longer the one with the oldest last activity.
@@ -1052,23 +1123,25 @@ func (m *Manager) pruneSessions(st *retentionState, over func() bool) (removed, 
 			}
 			return sums[i].ID < sums[j].ID
 		})
-		victim := sums[0]
+		var victim *WorkSessionSummary
+		for _, s := range sums {
+			if refused[s.ID] < 2 {
+				victim = s
+				break
+			}
+		}
+		if victim == nil {
+			return removed, trimmed, nil
+		}
 		ok, err := m.removeSession(victim.ID, victim.LastActivityAt, st)
 		if err != nil {
 			return removed, trimmed, err
 		}
 		if ok {
 			removed++
-			lastSkipped = ""
 			continue
 		}
-		// The selection went stale between the listing and the removal. It
-		// is made again; a second refusal of the same session ends the stage
-		// rather than spin.
-		if lastSkipped == victim.ID {
-			return removed, trimmed, nil
-		}
-		lastSkipped = victim.ID
+		refused[victim.ID]++
 	}
 	return removed, trimmed, nil
 }

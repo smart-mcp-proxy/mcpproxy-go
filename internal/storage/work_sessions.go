@@ -131,6 +131,11 @@ type WorkSessionSummary struct {
 	// TruncatedStartAt is set when rows of the session were removed by
 	// retention: the time of the earliest row removed last.
 	TruncatedStartAt time.Time `json:"truncated_start_at,omitzero"`
+	// UnindexedBefore is set when the removal of an expired summary was
+	// cancelled by a new row: the index entries already dropped are not put
+	// back, so rows of this session older than this time are stored without
+	// an index entry. Retention treats them as rows outside the window.
+	UnindexedBefore time.Time `json:"unindexed_before,omitzero"`
 	// Rebuilt is set when the summary was rebuilt from the remaining rows
 	// (FR-013); its lifetime facts then cover only those rows.
 	Rebuilt bool `json:"rebuilt,omitempty"`
@@ -581,6 +586,14 @@ func indexActivityTx(tx *bbolt.Tx, r *ActivityRecord, key []byte, role AttemptRo
 		if k, _ := rows.Cursor().Seek(prefix); k != nil && bytes.HasPrefix(k, prefix) {
 			s.TruncatedStartAt = activityKeyTime(k[len(prefix):])
 		}
+		if mode == removalSummary {
+			// The rows whose entries were dropped are still stored. They
+			// are all older than the first entry left (the one just put, if
+			// no other is); retention may now take them one by one.
+			if at := s.TruncatedStartAt; at.After(s.UnindexedBefore) {
+				s.UnindexedBefore = at
+			}
+		}
 	}
 	s.applyRow(r, role)
 	return storeSummary(sums, s)
@@ -895,36 +908,61 @@ func (m *Manager) GetActivitiesByKeys(keys [][]byte) ([]*ActivityRecord, error) 
 // is at or before idleBefore and that has no end yet (FR-015). The end of a
 // session is its last activity. Returns how many were closed.
 func (m *Manager) MarkWorkSessionsEnded(idleBefore time.Time) (int, error) {
-	closed := 0
-	err := m.db.db.Update(func(tx *bbolt.Tx) error {
+	idle := func(s *WorkSessionSummary) bool {
+		return s.EndedAt.IsZero() && !s.LastActivityAt.IsZero() && !s.LastActivityAt.After(idleBefore)
+	}
+	// The summaries are read without the writer, and closed in bounded write
+	// transactions that check each one again: many sessions can go idle
+	// together (a restart closes every open one), and SaveActivity must not
+	// wait behind all of them.
+	var ids []string
+	if err := m.db.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(WorkSessionsBucket))
 		if b == nil {
 			return nil
 		}
-		var toStore []*WorkSessionSummary
-		if err := b.ForEach(func(_, v []byte) error {
+		return b.ForEach(func(k, v []byte) error {
 			var s WorkSessionSummary
-			if err := json.Unmarshal(v, &s); err != nil {
+			if json.Unmarshal(v, &s) == nil && idle(&s) {
+				ids = append(ids, string(k))
+			}
+			return nil
+		})
+	}); err != nil {
+		return 0, err
+	}
+	closed := 0
+	for len(ids) > 0 {
+		n := min(len(ids), markEndedBatch)
+		batch := ids[:n]
+		ids = ids[n:]
+		if err := m.db.db.Update(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(WorkSessionsBucket))
+			if b == nil {
 				return nil
 			}
-			if s.EndedAt.IsZero() && !s.LastActivityAt.IsZero() && !s.LastActivityAt.After(idleBefore) {
+			for _, id := range batch {
+				s, err := loadSummary(b, id)
+				if err != nil || s == nil || !idle(s) {
+					continue // gone, unreadable, or it got a row meanwhile
+				}
 				s.EndedAt = s.LastActivityAt
-				toStore = append(toStore, &s)
+				if err := storeSummary(b, s); err != nil {
+					return err
+				}
+				closed++
 			}
 			return nil
 		}); err != nil {
-			return err
+			return closed, err
 		}
-		for _, s := range toStore {
-			if err := storeSummary(b, s); err != nil {
-				return err
-			}
-			closed++
-		}
-		return nil
-	})
-	return closed, err
+	}
+	return closed, nil
 }
+
+// markEndedBatch is how many summaries MarkWorkSessionsEnded closes in one
+// write transaction.
+var markEndedBatch = 500
 
 // workSessionIDsInIndex returns the distinct work-session ids that have index
 // entries, with one seek per session.

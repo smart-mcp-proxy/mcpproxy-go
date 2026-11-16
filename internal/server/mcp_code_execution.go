@@ -134,6 +134,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	// Extract language (optional, default: "javascript")
 	explicitLanguage, errMsg := codeExecStringArg(args, "language")
 	if errMsg != "" {
+		p.emitCodeExecutionRefused(ctx, errMsg)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 	if explicitLanguage != "" {
@@ -160,6 +161,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	// Extract options object (optional)
 	if optionsObj, ok := args["options"].(map[string]interface{}); ok && optionsObj != nil {
 		if errMsg := applyCodeExecutionOptions(optionsObj, &options); errMsg != "" {
+			p.emitCodeExecutionRefused(ctx, errMsg)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 	}

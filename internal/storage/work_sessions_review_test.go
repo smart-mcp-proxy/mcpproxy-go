@@ -731,3 +731,162 @@ func TestWalkWorkSessionTimeline_MergesEventsInTimeOrder(t *testing.T) {
 	}))
 	assert.Equal(t, 3, n)
 }
+
+// Review round 3: the rows a cancelled summary expiry left without an index
+// entry are still reachable by retention, so a cap is enforced afterwards.
+func TestRetention_CancelledExpiryLeavesNoUnprunableRows(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	for i := 0; i < 4; i++ {
+		retRow(t, m, "ws-1", 9*24*time.Hour-time.Duration(i)*time.Minute, nil)
+	}
+	refs, _ := m.WorkSessionRowRefs("ws-1")
+	require.NoError(t, m.db.db.Update(func(tx *bbolt.Tx) error {
+		sums := tx.Bucket([]byte(WorkSessionsBucket))
+		s, err := loadSummary(sums, "ws-1")
+		if err != nil {
+			return err
+		}
+		s.Removal = removalSummary
+		if err := storeSummary(sums, s); err != nil {
+			return err
+		}
+		idx := tx.Bucket([]byte(WorkSessionRowsBucket))
+		for _, ref := range refs[:2] {
+			if err := idx.Delete(workSessionRowKey("ws-1", ref.ActivityKey)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	retRow(t, m, "ws-1", time.Minute, nil) // the session wakes up
+
+	s, _ := m.GetWorkSessionSummary("ws-1")
+	require.NotNil(t, s)
+	assert.Equal(t, refs[2].Timestamp, s.UnindexedBefore, "rows older than the first entry left are unindexed")
+	require.Equal(t, 5, countRows(t, m))
+
+	// Not over any cap: nothing is touched.
+	p := retPolicy()
+	_, err := m.RunActivityRetention(p)
+	require.NoError(t, err)
+	assert.Equal(t, 5, countRows(t, m))
+
+	// Over the record cap (which prunes to 90% of itself): the two unindexed
+	// rows go first, as rows outside the window.
+	p.MaxRecords = 4
+	res, err := m.RunActivityRetention(p)
+	require.NoError(t, err)
+	assert.Equal(t, 2, res.RowsOutsideWindow)
+	assert.Equal(t, 3, countRows(t, m))
+	left, _ := m.WorkSessionRowRefs("ws-1")
+	assert.Len(t, left, 3, "the indexed rows of the session are still whole")
+
+	// And a cap of one row is reached.
+	p.MaxRecords = 1
+	_, err = m.RunActivityRetention(p)
+	require.NoError(t, err)
+	assert.Equal(t, 1, countRows(t, m))
+}
+
+// Review round 3: a row whose only arguments are the internal _auth_* ones
+// has nothing to strip and is not nominated, so such rows cannot use up the
+// nominations of every rescan in front of bodies that can be stripped.
+func TestRetention_AuthOnlyRowsDoNotStarveStripping(t *testing.T) {
+	enc := func(r *ActivityRecord) []byte {
+		data, err := r.MarshalBinary()
+		require.NoError(t, err)
+		return data
+	}
+	_, args, resp := sniffRow(enc(&ActivityRecord{Type: ActivityTypeToolCall, Arguments: map[string]interface{}{
+		sniffAuthArgument + "token_name": "ci", sniffAuthArgument + "x": map[string]interface{}{"a": "}"},
+	}}))
+	assert.False(t, args, "auth-only arguments are not a body")
+	assert.False(t, resp)
+	_, args, _ = sniffRow(enc(&ActivityRecord{Type: ActivityTypeToolCall, Arguments: map[string]interface{}{
+		sniffAuthArgument + "token_name": "ci", "query": "x",
+	}}))
+	assert.True(t, args)
+
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	old := maxRetentionCandidates
+	maxRetentionCandidates = 5
+	defer func() { maxRetentionCandidates = old }()
+
+	for i := 0; i < 400; i++ {
+		retRow(t, m, "ws-1", 3*time.Hour-time.Duration(i)*time.Second, func(r *ActivityRecord) {
+			r.Arguments = map[string]interface{}{sniffAuthArgument + "token_name": "legacy"}
+		})
+	}
+	for i := 0; i < 5; i++ {
+		retRow(t, m, "ws-1", time.Hour-time.Duration(i)*time.Second, func(r *ActivityRecord) {
+			r.Response = strings.Repeat("x", 4000)
+		})
+	}
+	scan, err := m.scanLog()
+	require.NoError(t, err)
+	p := retPolicy()
+	p.MaxBytes = scan.st.bytes - 15000
+	res, err := m.RunActivityRetention(p)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, res.BodiesStripped, 4, "the bodies behind the auth-only rows were reached")
+	assert.Equal(t, 405, countRows(t, m), "stripping was enough; no row was removed")
+}
+
+// Review round 3: a session that cannot be removed (it holds the newest row
+// of the log) does not stop the removal of the next one.
+func TestRetention_ProtectedSessionDoesNotBlockTheNext(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	// Same last activity; ws-a sorts first by id and holds the newest key.
+	at := retNow.Add(-time.Hour)
+	save := func(ws, id string) {
+		require.NoError(t, m.SaveActivity(&ActivityRecord{
+			ID: id, Type: ActivityTypeToolCall, Status: ActivityStatusSuccess, ServerName: "github",
+			Timestamp: at, WorkSessionID: ws,
+		}))
+	}
+	save("ws-b", "01AAAAAAAAAAAAAAAAAAAAAAAA")
+	save("ws-a", "01ZZZZZZZZZZZZZZZZZZZZZZZZ")
+
+	p := retPolicy()
+	p.MaxRecords = 1
+	res, err := m.RunActivityRetention(p)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.SessionsRemoved)
+	a, _ := m.GetWorkSessionSummary("ws-a")
+	b, _ := m.GetWorkSessionSummary("ws-b")
+	assert.NotNil(t, a, "the session with the newest row stays")
+	assert.Nil(t, b, "the other session was removed")
+	assert.Equal(t, 1, countRows(t, m))
+}
+
+// Review round 3: idle sessions are closed in bounded write transactions, and
+// a session that got a row since it was listed is left open.
+func TestMarkWorkSessionsEnded_InBatches(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	old := markEndedBatch
+	markEndedBatch = 2
+	defer func() { markEndedBatch = old }()
+
+	for i := 0; i < 5; i++ {
+		retRow(t, m, fmt.Sprintf("ws-idle-%d", i), 2*time.Hour, nil)
+	}
+	retRow(t, m, "ws-busy", time.Minute, nil)
+
+	n, err := m.MarkWorkSessionsEnded(retNow.Add(-time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 5, n)
+	for i := 0; i < 5; i++ {
+		s, _ := m.GetWorkSessionSummary(fmt.Sprintf("ws-idle-%d", i))
+		require.NotNil(t, s)
+		assert.Equal(t, s.LastActivityAt, s.EndedAt)
+	}
+	busy, _ := m.GetWorkSessionSummary("ws-busy")
+	assert.True(t, busy.EndedAt.IsZero())
+	n, err = m.MarkWorkSessionsEnded(retNow.Add(-time.Hour))
+	require.NoError(t, err)
+	assert.Zero(t, n, "closing is idempotent")
+}

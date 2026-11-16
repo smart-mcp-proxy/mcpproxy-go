@@ -169,3 +169,16 @@ func TestAttemptInvariant_DisabledCodeExecutionIsOneBlockedAttempt(t *testing.T)
 	f.callTool(key, "code_execution", map[string]interface{}{"code": "1+1"}, "")
 	f.eventuallyCounts("inv-codeexec", attemptCounts{attempts: 1, failures: 1, blocks: 1})
 }
+
+// Review round 3: code_execution refused for a malformed language or option
+// is one failed attempt, like every other exit of the handler.
+func TestAttemptInvariant_InvalidCodeExecutionRequestIsOneFailedAttempt(t *testing.T) {
+	f := newProfilesV3RESTFixture(t, func(cfg *config.Config) { cfg.EnableCodeExecution = true })
+	key := f.mint("inv-codeexec-args", "")
+
+	f.callTool(key, "code_execution", map[string]interface{}{"code": "1+1", "language": 123}, "")
+	f.eventuallyCounts("inv-codeexec-args", attemptCounts{attempts: 1, failures: 1})
+
+	f.callTool(key, "code_execution", map[string]interface{}{"code": "1+1", "options": map[string]interface{}{"timeout_ms": 0}}, "")
+	f.eventuallyCounts("inv-codeexec-args", attemptCounts{attempts: 2, failures: 2})
+}

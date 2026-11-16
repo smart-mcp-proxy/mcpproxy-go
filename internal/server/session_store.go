@@ -447,6 +447,10 @@ func (s *SessionStore) EnsurePersistedKeyed(sessionID, key string, resolveWorkSe
 	return workSessionID
 }
 
+// maxConnectionWorkSessionKeys bounds the work sessions one connection pins
+// (one per credential and run name) over its whole life.
+const maxConnectionWorkSessionKeys = 4096
+
 // workSessionForKeyLocked returns the work session of one credential key on
 // a connection, resolving and caching it the first time the key is seen.
 // Caller holds s.mu.
@@ -476,6 +480,13 @@ func (s *SessionStore) workSessionForKeyLocked(info *SessionInfo, key string, re
 		// this connection is the answer (FR-006). Nothing is cached under
 		// the rejected name.
 		return existing
+	}
+	if len(info.workSessionByKey) >= maxConnectionWorkSessionKeys {
+		// A connection open for many days can use the daily allowance of run
+		// names every day. Past the bound nothing more is pinned: the id
+		// comes from the tracker on each call, as it does for a request
+		// with no connection. Ids already pinned are kept.
+		return id
 	}
 	if info.workSessionByKey == nil {
 		info.workSessionByKey = make(map[string]string)
@@ -525,6 +536,9 @@ func (s *SessionStore) WorkSessionForKey(sessionID, key string, resolve KeyedWor
 	}
 	if existing, ok := info.provisionalByKey[effectiveKey]; ok {
 		return existing
+	}
+	if len(info.provisionalByKey) >= maxConnectionWorkSessionKeys {
+		return id
 	}
 	if info.provisionalByKey == nil {
 		info.provisionalByKey = make(map[string]string)

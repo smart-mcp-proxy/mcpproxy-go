@@ -271,7 +271,8 @@ func (t *WorkSessionTracker) admitNamedLocked(principal string, now time.Time) b
 // When the entry was reaped or has gone idle, it is reinstated under the same
 // id: the connection will keep stamping that id, and another connection with
 // the same identity must join it, not open a second session beside it. An
-// identity that has since been given a different live session is left alone.
+// identity that has since been given a different live session keeps it; the
+// touched session's own entry, if it still has one, is refreshed instead.
 func (t *WorkSessionTracker) Touch(workSessionID string, id WorkSessionIdentity) {
 	if workSessionID == "" || id.isEmpty() {
 		return
@@ -286,7 +287,17 @@ func (t *WorkSessionTracker) Touch(workSessionID string, id WorkSessionIdentity)
 	case ok && entry.id == workSessionID:
 		entry.lastActivity = now
 	case ok && now.Sub(entry.lastActivity) <= t.idleWindow:
-		// A different, live session owns this identity now.
+		// A different, live session owns this identity now. The touched
+		// session may still be filed under the identity it was resolved
+		// with (a connection pinned before its workspace was known): keep
+		// that entry's idle clock moving, so the session a connection is
+		// still writing to is not reaped under it.
+		for _, e := range t.sessions {
+			if e.id == workSessionID {
+				e.lastActivity = now
+				break
+			}
+		}
 	default:
 		t.sessions[k] = &workSessionEntry{id: workSessionID, lastActivity: now, startedAt: now}
 	}

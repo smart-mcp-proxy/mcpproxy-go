@@ -373,3 +373,29 @@ func TestWorkSession_ResolveEffectiveReportsADroppedRunName(t *testing.T) {
 	assert.Equal(t, unnamed, ws)
 	assert.Empty(t, eff.RunName, "the caller caches and touches under the unnamed identity")
 }
+
+// Review round 3 (Spec 124): a connection pinned a session before its
+// workspace was known; another connection then opened a session under the
+// full identity. Touching the first session with the full identity must keep
+// its own entry alive, not let it be reaped while the connection still writes
+// to it.
+func TestWorkSession_TouchRefreshesASessionFiledUnderAnEarlierIdentity(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC))
+	early := WorkSessionIdentity{Principal: "agent-1", ClientName: "ide", ClientVersion: "1.0"}
+	full := early
+	full.WorkspaceRoot = "/repos/project"
+
+	w1 := tr.Resolve(early)
+	w2 := tr.Resolve(full)
+	require.NotEqual(t, w1, w2)
+
+	// Both connections stay busy for longer than the idle window.
+	for i := 0; i < 4; i++ {
+		advance(20 * time.Minute)
+		tr.Touch(w1, full) // the first connection now knows its workspace
+		tr.Touch(w2, full)
+	}
+	assert.Equal(t, w2, tr.Resolve(full), "the full identity keeps its own session")
+	assert.Equal(t, w1, tr.Resolve(early), "the earlier session was kept alive under its own identity")
+	assert.Zero(t, tr.Reap(30*time.Minute))
+}
