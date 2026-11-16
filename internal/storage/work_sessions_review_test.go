@@ -508,26 +508,7 @@ func TestRetention_LiveRowCancelsAnExpiry(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		retRow(t, m, "ws-1", 9*24*time.Hour-time.Duration(i)*time.Minute, func(r *ActivityRecord) { r.Status = ActivityStatusError })
 	}
-	refs, _ := m.WorkSessionRowRefs("ws-1")
-	require.NoError(t, m.db.db.Update(func(tx *bbolt.Tx) error {
-		sums := tx.Bucket([]byte(WorkSessionsBucket))
-		s, err := loadSummary(sums, "ws-1")
-		if err != nil {
-			return err
-		}
-		s.Removal = removalSummary
-		if err := storeSummary(sums, s); err != nil {
-			return err
-		}
-		// One batch of the expiry dropped two index entries.
-		idx := tx.Bucket([]byte(WorkSessionRowsBucket))
-		for _, ref := range refs[:2] {
-			if err := idx.Delete(workSessionRowKey("ws-1", ref.ActivityKey)); err != nil {
-				return err
-			}
-		}
-		return nil
-	}))
+	expireFirstEntries(t, m, "ws-1", 2)
 
 	retRow(t, m, "ws-1", time.Minute, nil)
 	s, _ := m.GetWorkSessionSummary("ws-1")
@@ -740,25 +721,7 @@ func TestRetention_CancelledExpiryLeavesNoUnprunableRows(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		retRow(t, m, "ws-1", 9*24*time.Hour-time.Duration(i)*time.Minute, nil)
 	}
-	refs, _ := m.WorkSessionRowRefs("ws-1")
-	require.NoError(t, m.db.db.Update(func(tx *bbolt.Tx) error {
-		sums := tx.Bucket([]byte(WorkSessionsBucket))
-		s, err := loadSummary(sums, "ws-1")
-		if err != nil {
-			return err
-		}
-		s.Removal = removalSummary
-		if err := storeSummary(sums, s); err != nil {
-			return err
-		}
-		idx := tx.Bucket([]byte(WorkSessionRowsBucket))
-		for _, ref := range refs[:2] {
-			if err := idx.Delete(workSessionRowKey("ws-1", ref.ActivityKey)); err != nil {
-				return err
-			}
-		}
-		return nil
-	}))
+	refs := expireFirstEntries(t, m, "ws-1", 2)
 	retRow(t, m, "ws-1", time.Minute, nil) // the session wakes up
 
 	s, _ := m.GetWorkSessionSummary("ws-1")
@@ -899,25 +862,7 @@ func TestRetention_FailedRowCancellingAnExpiryIsCountedOnce(t *testing.T) {
 		for i := 0; i < 4; i++ {
 			retRow(t, m, "ws-1", 9*24*time.Hour-time.Duration(i)*time.Minute, func(r *ActivityRecord) { r.Status = ActivityStatusError })
 		}
-		refs, _ := m.WorkSessionRowRefs("ws-1")
-		require.NoError(t, m.db.db.Update(func(tx *bbolt.Tx) error {
-			sums := tx.Bucket([]byte(WorkSessionsBucket))
-			s, err := loadSummary(sums, "ws-1")
-			if err != nil {
-				return err
-			}
-			s.Removal = removalSummary
-			if err := storeSummary(sums, s); err != nil {
-				return err
-			}
-			idx := tx.Bucket([]byte(WorkSessionRowsBucket))
-			for _, ref := range refs[:2] {
-				if err := idx.Delete(workSessionRowKey("ws-1", ref.ActivityKey)); err != nil {
-					return err
-				}
-			}
-			return nil
-		}))
+		expireFirstEntries(t, m, "ws-1", 2)
 		retRow(t, m, "ws-1", time.Minute, func(r *ActivityRecord) {
 			r.Status = ActivityStatusError
 			if block {
@@ -1017,4 +962,88 @@ func TestWorkSessionSummary_MixedUserAttributionIsOwnerless(t *testing.T) {
 		require.NotNil(t, s, id)
 		assert.Equal(t, ownerless, s.Ownerless, id)
 	}
+}
+
+// expireFirstEntries does what one batch of a summary expiry does to a
+// session: marks it as being removed, drops its first n index entries and
+// lowers the stored counters for them. It returns the session's entries as
+// they were before.
+func expireFirstEntries(t *testing.T, m *Manager, id string, n int) []WorkSessionRowRef {
+	t.Helper()
+	refs, err := m.WorkSessionRowRefs(id)
+	require.NoError(t, err)
+	require.NoError(t, m.db.db.Update(func(tx *bbolt.Tx) error {
+		sums := tx.Bucket([]byte(WorkSessionsBucket))
+		s, err := loadSummary(sums, id)
+		if err != nil {
+			return err
+		}
+		s.Removal = removalSummary
+		idx := tx.Bucket([]byte(WorkSessionRowsBucket))
+		for _, ref := range refs[:n] {
+			ik := workSessionRowKey(id, ref.ActivityKey)
+			flags, server := parseIndexValue(idx.Get(ik))
+			s.forgetStoredRow(flags, server, ref.Timestamp)
+			if err := idx.Delete(ik); err != nil {
+				return err
+			}
+		}
+		return storeSummary(sums, s)
+	}))
+	return refs
+}
+
+// Review round 5: a session whose summary expired completely (rows kept,
+// index gone) and that then resumes under the same id does not shield its old
+// rows from the caps.
+func TestRetention_ResumedAfterCompletedExpiryOldRowsArePrunable(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	for i := 0; i < 20; i++ {
+		retRow(t, m, "ws-1", 9*24*time.Hour-time.Duration(i)*time.Minute, nil)
+	}
+	p := retPolicy()
+	res, err := m.RunActivityRetention(p)
+	require.NoError(t, err)
+	require.Equal(t, 1, res.SummariesExpired)
+	require.Equal(t, 20, countRows(t, m), "the rows outlive the summary")
+
+	retRow(t, m, "ws-1", time.Minute, nil) // the connection comes back
+	s, _ := m.GetWorkSessionSummary("ws-1")
+	require.NotNil(t, s)
+	assert.False(t, s.UnindexedBefore.IsZero())
+
+	p.MaxRecords = 10
+	res, err = m.RunActivityRetention(p)
+	require.NoError(t, err)
+	assert.Equal(t, 12, res.RowsOutsideWindow, "down to 90% of the cap, from the old rows")
+	assert.Equal(t, 9, countRows(t, m))
+	left, _ := m.WorkSessionRowRefs("ws-1")
+	assert.Len(t, left, 1, "the resumed session's own row is untouched")
+}
+
+// Review round 5 (FR-038): a stage that needs more nominations than one list
+// holds continues behind the last one; it does not read the log again.
+func TestRetention_ContinuationsDoNotRescanTheLog(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	old := maxRetentionCandidates
+	maxRetentionCandidates = 10
+	defer func() { maxRetentionCandidates = old }()
+
+	const n = 200
+	for i := 0; i < n; i++ {
+		retRow(t, m, "ws-1", 3*time.Hour-time.Duration(i)*time.Second, func(r *ActivityRecord) {
+			r.Response = strings.Repeat("x", 2000)
+		})
+	}
+	scan, err := m.scanLog()
+	require.NoError(t, err)
+	p := retPolicy()
+	p.MaxBytes = scan.st.bytes - int64(n-20)*2000 // nearly every body must go
+	res, err := m.RunActivityRetention(p)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, res.BodiesStripped, n-25)
+	assert.Equal(t, n, countRows(t, m), "stripping was enough")
+	assert.LessOrEqual(t, res.RowsScanned, 2*n+n/2, "the log is measured once and its tail is read once more, not once per list")
 }

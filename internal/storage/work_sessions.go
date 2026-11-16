@@ -621,7 +621,12 @@ func indexActivityTx(tx *bbolt.Tx, r *ActivityRecord, key []byte, role AttemptRo
 		return err
 	}
 	if s == nil {
-		s = &WorkSessionSummary{ID: r.WorkSessionID}
+		// A new summary. Rows of this id from before it (the session's
+		// summary expired, with its index, and a long-lived connection came
+		// back under the same id) are stored without an index entry;
+		// retention treats them as rows outside the window. For a session
+		// that really is new there are none.
+		s = &WorkSessionSummary{ID: r.WorkSessionID, UnindexedBefore: activityKeyTime(key)}
 	}
 	if s.Removal != "" {
 		// Retention was removing this session and a new row has arrived for
@@ -630,14 +635,8 @@ func indexActivityTx(tx *bbolt.Tx, r *ActivityRecord, key []byte, role AttemptRo
 		// and the session is truncated to what is still stored.
 		mode := s.Removal
 		s.Removal = ""
-		if mode == removalSummary {
-			// That mode drops index entries without touching the stored
-			// counters (the summary was about to go), so they are counted
-			// again from what is left.
-			// The entry of the row being saved is already in the index and
-			// is left out: applyRow below counts that row.
-			recountStoredFromIndex(rows, s, ik)
-		}
+		// (The stored counters are already true in both modes: each removal
+		// batch lowered them for the entries it dropped.)
 		prefix := workSessionRowPrefix(s.ID)
 		if k, _ := rows.Cursor().Seek(prefix); k != nil && bytes.HasPrefix(k, prefix) {
 			s.TruncatedStartAt = activityKeyTime(k[len(prefix):])
@@ -653,32 +652,6 @@ func indexActivityTx(tx *bbolt.Tx, r *ActivityRecord, key []byte, role AttemptRo
 	}
 	s.applyRow(r, role)
 	return storeSummary(sums, s)
-}
-
-// recountStoredFromIndex sets the stored failure and block counters of a
-// summary from the session's remaining index entries, leaving out the entry
-// at key `except`.
-func recountStoredFromIndex(rows *bbolt.Bucket, s *WorkSessionSummary, except []byte) {
-	for _, p := range s.Servers {
-		p.StoredFailures, p.StoredBlocks = 0, 0
-	}
-	prefix := workSessionRowPrefix(s.ID)
-	c := rows.Cursor()
-	for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
-		if bytes.Equal(k, except) {
-			continue
-		}
-		flags, server := parseIndexValue(v)
-		role := flagsRole(flags)
-		p := s.Servers[server]
-		if p == nil || !role.Counted || !role.Failed {
-			continue
-		}
-		p.StoredFailures++
-		if role.Block {
-			p.StoredBlocks++
-		}
-	}
 }
 
 // indexableServerName reports whether a server name can be the left part of

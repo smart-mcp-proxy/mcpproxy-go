@@ -4868,21 +4868,23 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 	// hand-rolled builder never recorded.
 	args := activityArgsFromRequest(request)
 
+	// The three refusals below are MCPProxy's own policy, so their rows count
+	// as policy blocks (Spec 124 D2), as in handleUpstreamServers.
 	// Spec 028: Agent tokens cannot perform quarantine operations
 	if auth.IsNonAdmin(auth.AuthContextFromContext(ctx)) {
 		errMsg := "Agent tokens cannot perform quarantine security operations"
-		p.emitActivityInternalToolCall(ctx, "quarantine_security", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall(withPolicyRefusal(ctx), "quarantine_security", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
 	// Security checks
 	if p.config.ReadOnlyMode {
-		p.emitActivityInternalToolCall(ctx, "quarantine_security", targetServer, "", "", sessionID, requestID, "error", "Quarantine operations not allowed in read-only mode", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall(withPolicyRefusal(ctx), "quarantine_security", targetServer, "", "", sessionID, requestID, "error", "Quarantine operations not allowed in read-only mode", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError("Quarantine operations not allowed in read-only mode"), nil
 	}
 
 	if p.config.DisableManagement {
-		p.emitActivityInternalToolCall(ctx, "quarantine_security", targetServer, "", "", sessionID, requestID, "error", "Server management is disabled for security", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall(withPolicyRefusal(ctx), "quarantine_security", targetServer, "", "", sessionID, requestID, "error", "Server management is disabled for security", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError("Server management is disabled for security"), nil
 	}
 

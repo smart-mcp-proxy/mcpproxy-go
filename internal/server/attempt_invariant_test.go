@@ -182,3 +182,13 @@ func TestAttemptInvariant_InvalidCodeExecutionRequestIsOneFailedAttempt(t *testi
 	f.callTool(key, "code_execution", map[string]interface{}{"code": "1+1", "options": map[string]interface{}{"timeout_ms": 0}}, "")
 	f.eventuallyCounts("inv-codeexec-args", attemptCounts{attempts: 2, failures: 2})
 }
+
+// Review round 5: quarantine_security refused for an agent token is a policy
+// block, like the other management refusals.
+func TestAttemptInvariant_QuarantineRefusalIsABlock(t *testing.T) {
+	f := newProfilesV3RESTFixture(t, nil)
+	key := f.mint("inv-quarantine", "")
+
+	f.callTool(key, "quarantine_security", map[string]interface{}{"operation": "list_quarantined"}, "")
+	f.eventuallyCounts("inv-quarantine", attemptCounts{attempts: 1, failures: 1, blocks: 1})
+}

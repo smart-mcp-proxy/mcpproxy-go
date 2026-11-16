@@ -123,6 +123,18 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		return mcp.NewToolResultError(config.CodeExecutionDisabledMessage), nil
 	}
 
+	// Spec 124 FR-005: the work session is resolved once, here, and rides in
+	// the context, so the execution's own row and every sub-call's row carry
+	// it. A sub-call that finishes long after the script (an upstream that
+	// ignored the cancellation) would otherwise resolve again, after the
+	// idle window, and start a session of its own.
+	if attr, _ := activityAttributionFromContext(ctx); attr.WorkSessionID == "" {
+		attr.WorkSessionID, attr.RunName = p.requestWorkSessionRun(ctx, "")
+		if attr.WorkSessionID != "" {
+			ctx = withActivityAttribution(ctx, attr)
+		}
+	}
+
 	// Parse arguments. MaxToolCalls starts at the unset sentinel so an explicit
 	// max_tool_calls: 0 — the documented unlimited override — survives default
 	// resolution instead of being floored to the configured limit.

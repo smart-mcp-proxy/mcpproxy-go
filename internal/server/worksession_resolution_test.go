@@ -414,10 +414,13 @@ func TestCodeExecutionSubCall_InheritsTheParentWorkSession(t *testing.T) {
 	require.NotEmpty(t, parent)
 
 	caller := &upstreamToolCaller{proxy: proxy, parentCallID: "parent"}
-	caller.emitSubCallActivity(ctx, "github", "echo", "req-sub", nil, nil, assert.AnError, time.Now(), time.Millisecond)
 
 	var row *storage.ActivityRecord
 	require.Eventually(t, func() bool {
+		// Emitted on every attempt: the fixture starts the activity service
+		// on its own goroutine, and an event published before it has
+		// subscribed is not delivered.
+		caller.emitSubCallActivity(ctx, "github", "echo", "req-sub", nil, nil, assert.AnError, time.Now(), time.Millisecond)
 		rows, _, err := rt.StorageManager().ListActivities(storage.ActivityFilter{Limit: 50})
 		if err != nil {
 			return false
@@ -432,4 +435,27 @@ func TestCodeExecutionSubCall_InheritsTheParentWorkSession(t *testing.T) {
 	}, attributionWait, 10*time.Millisecond)
 	assert.Equal(t, parent, row.WorkSessionID, "the sub-call belongs to the parent's work session")
 	assert.Equal(t, "nightly-7", row.RunName)
+}
+
+// Review round 5 (FR-005): a work session pinned on the context is what a
+// row is stamped with, however much later it is emitted. Without the pin a
+// row emitted after the idle window resolves a new session.
+func TestActivityAttribution_PinnedWorkSessionOutlivesTheIdleWindow(t *testing.T) {
+	p, _, tr := trackerProxy(t)
+	now := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
+	tr.SetNowForTest(func() time.Time { return now })
+	ctx := reqcontext.WithRunHeader(reqcontext.WithClientSurface(
+		tokenCtx(context.Background(), "ci", "mcp_agt_aaaa"), "rest"), "nightly-7")
+
+	attr, _ := activityAttributionFromContext(ctx)
+	attr.WorkSessionID, attr.RunName = p.requestWorkSessionRun(ctx, "")
+	require.NotEmpty(t, attr.WorkSessionID)
+	pinned := withActivityAttribution(ctx, attr)
+
+	now = now.Add(2 * time.Hour) // a sub-call that ignored its cancellation
+	late := p.activityAttribution(pinned, "")
+	assert.Equal(t, attr.WorkSessionID, late.WorkSessionID)
+	assert.Equal(t, "nightly-7", late.RunName)
+	assert.NotEqual(t, attr.WorkSessionID, p.activityAttribution(ctx, "").WorkSessionID,
+		"precondition: unpinned, the same request resolves a new session by now")
 }

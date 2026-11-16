@@ -76,8 +76,10 @@ type RetentionResult struct {
 	// ShortfallCause is set when this pass removed or trimmed a session inside
 	// the window.
 	ShortfallCause string
-
-	countCapStarted bool
+	// RowsScanned is how many activity rows the pass read while measuring the
+	// log and nominating rows (FR-038: about one read of the log, plus the
+	// part behind a cut candidate list once per stage).
+	RowsScanned int
 }
 
 // RetentionShortfall records that the caps could not hold the whole retention
@@ -121,16 +123,19 @@ type logScan struct {
 	outside [][]byte
 	// newest is the key of the newest row, which is never removed.
 	newest []byte
+	// visited is how many rows the scan read.
+	visited int
 	// stripTruncated / outsideTruncated say a candidate list was cut at
 	// maxRetentionCandidates: more such rows exist than were nominated.
 	stripTruncated   bool
 	outsideTruncated bool
 }
 
-// maxRetentionRescans bounds how often one pass reads the log again because
-// a candidate list was cut. Each rescan handles maxRetentionCandidates more
-// rows, so the bound covers a log far larger than the record cap allows.
-const maxRetentionRescans = 32
+// maxRetentionContinuations bounds how often one stage of a pass continues
+// its nominations because a candidate list was cut. Each continuation handles
+// maxRetentionCandidates more rows, so the bound covers a log far larger than
+// the record cap allows.
+const maxRetentionContinuations = 32
 
 const sniffAuthArgument = "_auth_"
 
@@ -321,6 +326,27 @@ func summaryUnindexedBefore(v []byte) time.Time {
 // measures the bytes that count against the size cap: the activity rows and
 // the three buckets this feature adds (FR-034).
 func (m *Manager) scanLog() (logScan, error) {
+	return m.scanLogFrom(scanAll, nil)
+}
+
+// scanWhat says what a scan collects.
+type scanWhat int
+
+const (
+	// scanAll measures the log and nominates rows for both stages.
+	scanAll scanWhat = iota
+	// scanStripOnly and scanOutsideOnly continue one stage's nominations
+	// after the key where the previous list was cut. They measure nothing
+	// and stop as soon as their list is full, so the continuation of a
+	// stage reads the part of the log behind the cut once, not the log again
+	// (FR-038).
+	scanStripOnly
+	scanOutsideOnly
+)
+
+// scanLogFrom is scanLog for the rows after the key `after` (nil = from the
+// start), collecting what `what` says.
+func (m *Manager) scanLogFrom(what scanWhat, after []byte) (logScan, error) {
 	var scan logScan
 	// live maps each session with a summary to its UnindexedBefore time
 	// (zero for nearly all of them).
@@ -332,9 +358,11 @@ func (m *Manager) scanLog() (logScan, error) {
 				return nil
 			})
 		}
-		for _, name := range []string{WorkSessionsBucket, WorkSessionRowsBucket, UpstreamEventsByServerBucket} {
-			_, size := bucketBytes(tx.Bucket([]byte(name)))
-			scan.st.bytes += size
+		if what == scanAll {
+			for _, name := range []string{WorkSessionsBucket, WorkSessionRowsBucket, UpstreamEventsByServerBucket} {
+				_, size := bucketBytes(tx.Bucket([]byte(name)))
+				scan.st.bytes += size
+			}
 		}
 		return nil
 	}); err != nil {
@@ -342,6 +370,10 @@ func (m *Manager) scanLog() (logScan, error) {
 	}
 
 	var resume []byte
+	if len(after) > 0 {
+		resume = append([]byte(nil), after...)
+	}
+	full := false // a continuation's list is full: stop reading
 	for {
 		done := false
 		err := m.db.db.View(func(tx *bbolt.Tx) error {
@@ -361,32 +393,39 @@ func (m *Manager) scanLog() (logScan, error) {
 				}
 			}
 			n := 0
-			for ; k != nil && n < scanChunk; k, v = c.Next() {
+			var lastKey []byte
+			for ; k != nil && n < scanChunk && !full; k, v = c.Next() {
 				n++
-				scan.st.rows++
-				scan.st.bytes += int64(len(k) + len(v))
+				lastKey = k
+				scan.visited++
+				if what == scanAll {
+					scan.st.rows++
+					scan.st.bytes += int64(len(k) + len(v))
+				}
 				scan.newest = append(scan.newest[:0], k...)
 				ws, hasArguments, hasResponse := sniffRow(v)
-				if hasArguments || hasResponse {
+				if what != scanOutsideOnly && (hasArguments || hasResponse) {
 					if len(scan.strip) < maxRetentionCandidates {
 						scan.strip = append(scan.strip, append([]byte(nil), k...))
 					} else {
 						scan.stripTruncated = true
+						full = what == scanStripOnly
 					}
 				}
 				unindexedBefore, isLive := live[ws]
-				if ws == "" || !isLive || (!unindexedBefore.IsZero() && activityKeyTime(k).Before(unindexedBefore)) {
+				if what != scanStripOnly && (ws == "" || !isLive || (!unindexedBefore.IsZero() && activityKeyTime(k).Before(unindexedBefore))) {
 					if len(scan.outside) < maxRetentionCandidates {
 						scan.outside = append(scan.outside, append([]byte(nil), k...))
 					} else {
 						scan.outsideTruncated = true
+						full = what == scanOutsideOnly
 					}
 				}
 			}
-			if k == nil {
+			if k == nil || full {
 				done = true
 			} else {
-				resume = append(resume[:0], scan.newest...)
+				resume = append(resume[:0], lastKey...)
 			}
 			return nil
 		})
@@ -542,80 +581,86 @@ func (m *Manager) RunActivityRetention(p RetentionPolicy) (RetentionResult, erro
 	// moves on to deleting rows, or whole sessions, while bodies or outside
 	// rows that could have satisfied the cap remain.
 	if p.MaxBytes > 0 || p.MaxRecords > 0 {
-		for rescan := 0; ; rescan++ {
-			scan, err := m.scanLog()
+		scan, err := m.scanLog()
+		if err != nil {
+			return res, err
+		}
+		st := scan.st
+		newest := scan.newest
+		res.RowsScanned += scan.visited
+		// The count cap prunes down to 90% of itself, and never below one
+		// row.
+		countCap, targetRows := p.MaxRecords > 0 && st.rows > p.MaxRecords, 0
+		if countCap {
+			targetRows = int(float64(p.MaxRecords) * 0.9)
+			if targetRows < 1 {
+				targetRows = 1
+			}
+		}
+		over := func() bool {
+			return (p.MaxBytes > 0 && st.bytes > p.MaxBytes) || (countCap && st.rows > targetRows)
+		}
+		cause := func() string {
+			if p.MaxBytes > 0 && st.bytes > p.MaxBytes {
+				return ShortfallSizeCap
+			}
+			return ShortfallRecordCap
+		}
+
+		// 3a. Bodies. Only the size cap is helped by this.
+		strip, truncated := scan.strip, scan.stripTruncated
+		for round := 0; p.MaxBytes > 0 && st.bytes > p.MaxBytes; round++ {
+			n, err := m.stripBodies(&st, p.MaxBytes, strip)
 			if err != nil {
 				return res, err
 			}
-			st := scan.st
-			// The count cap prunes down to 90% of itself, and never below
-			// one row.
-			countCap, targetRows := p.MaxRecords > 0 && st.rows > p.MaxRecords, 0
-			if rescan > 0 && p.MaxRecords > 0 {
-				// A pass that already started pruning for the count cap
-				// keeps pruning to its target, not to the cap.
-				countCap = st.rows > int(float64(p.MaxRecords)*0.9) && res.countCapStarted
+			res.BodiesStripped += n
+			if !truncated || len(strip) == 0 || st.bytes <= p.MaxBytes || round >= maxRetentionContinuations {
+				break
 			}
-			if countCap {
-				res.countCapStarted = true
-				targetRows = int(float64(p.MaxRecords) * 0.9)
-				if targetRows < 1 {
-					targetRows = 1
-				}
+			// More bodies remain than were nominated: nominate the next
+			// ones, from behind the last.
+			more, err := m.scanLogFrom(scanStripOnly, strip[len(strip)-1])
+			if err != nil {
+				return res, err
 			}
-			over := func() bool {
-				return (p.MaxBytes > 0 && st.bytes > p.MaxBytes) || (countCap && st.rows > targetRows)
+			res.RowsScanned += more.visited
+			strip, truncated = more.strip, more.stripTruncated
+		}
+		// 3b. Rows outside the window.
+		outside, truncated := scan.outside, scan.outsideTruncated
+		for round := 0; over(); round++ {
+			n, err := m.pruneOutsideWindow(&st, over, outside, newest)
+			if err != nil {
+				return res, err
 			}
-			cause := func() string {
-				if p.MaxBytes > 0 && st.bytes > p.MaxBytes {
-					return ShortfallSizeCap
-				}
-				return ShortfallRecordCap
+			res.RowsOutsideWindow += n
+			if !truncated || len(outside) == 0 || !over() || round >= maxRetentionContinuations {
+				break
 			}
-			again := func(truncated bool) bool {
-				return truncated && over() && rescan < maxRetentionRescans
+			more, err := m.scanLogFrom(scanOutsideOnly, outside[len(outside)-1])
+			if err != nil {
+				return res, err
 			}
-
-			// 3a. Bodies. Only the size cap is helped by this.
-			if p.MaxBytes > 0 && st.bytes > p.MaxBytes {
-				n, err := m.stripBodies(&st, p.MaxBytes, scan.strip)
-				if err != nil {
-					return res, err
-				}
-				res.BodiesStripped += n
-				if p.MaxBytes > 0 && st.bytes > p.MaxBytes && scan.stripTruncated && rescan < maxRetentionRescans {
-					continue // more bodies remain than were nominated
-				}
+			res.RowsScanned += more.visited
+			outside, truncated = more.outside, more.outsideTruncated
+		}
+		// 3c. Whole sessions, and 3d. the last one.
+		if over() {
+			c := cause()
+			// Recorded before the first row goes: a pass that is interrupted
+			// midway has still told the operator.
+			if err := m.updateShortfall(p, c); err != nil {
+				return res, err
 			}
-			// 3b. Rows outside the window.
-			if over() {
-				n, err := m.pruneOutsideWindow(&st, over, scan.outside, scan.newest)
-				if err != nil {
-					return res, err
-				}
-				res.RowsOutsideWindow += n
-				if again(scan.outsideTruncated) {
-					continue // more outside rows remain than were nominated
-				}
+			removed, trimmed, err := m.pruneSessions(&st, over)
+			if err != nil {
+				return res, err
 			}
-			// 3c. Whole sessions, and 3d. the last one.
-			if over() {
-				c := cause()
-				// Recorded before the first row goes: a pass that is
-				// interrupted midway has still told the operator.
-				if err := m.updateShortfall(p, c); err != nil {
-					return res, err
-				}
-				removed, trimmed, err := m.pruneSessions(&st, over)
-				if err != nil {
-					return res, err
-				}
-				res.SessionsRemoved, res.RowsTrimmed = removed, trimmed
-				if removed > 0 || trimmed > 0 {
-					res.ShortfallCause = c
-				}
+			res.SessionsRemoved, res.RowsTrimmed = removed, trimmed
+			if removed > 0 || trimmed > 0 {
+				res.ShortfallCause = c
 			}
-			break
 		}
 	}
 
@@ -717,7 +762,7 @@ func (m *Manager) dropSession(id, mode string, expireBefore time.Time, st *reten
 				}
 			}
 
-			var keys [][]byte
+			var keys, vals [][]byte
 			var sizes []int64
 			if idx != nil {
 				c := idx.Cursor()
@@ -727,7 +772,29 @@ func (m *Manager) dropSession(id, mode string, expireBefore time.Time, st *reten
 						break
 					}
 					keys = append(keys, append([]byte(nil), k...))
+					vals = append(vals, append([]byte(nil), v...))
 					sizes = append(sizes, int64(len(k)+len(v)))
+				}
+			}
+			if mode == removalSummary && more && sums != nil {
+				// The rows stay while their index entries go. The stored
+				// counters follow each batch, so that a live row that cancels
+				// the expiry finds them true and has nothing to recount
+				// under the writer.
+				if sum, err := loadSummary(sums, id); err != nil {
+					return err
+				} else if sum != nil {
+					oldSize := len(sums.Get([]byte(id)))
+					for i, k := range keys {
+						flags, server := parseIndexValue(vals[i])
+						sum.forgetStoredRow(flags, server, activityKeyTime(k[len(prefix):]))
+					}
+					if err := storeSummary(sums, sum); err != nil {
+						return err
+					}
+					if st != nil {
+						st.bytes += int64(len(sums.Get([]byte(id))) - oldSize)
+					}
 				}
 			}
 			for i, k := range keys {
