@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 )
 
 // Spec 125 PR-1 (T021/T022): `mcpproxy skills list|show|refresh`.
@@ -347,4 +349,27 @@ func TestSkillsShow_RefusesAFileThatChangedBetweenChunks(t *testing.T) {
 	_, _, err := runCLI(t, GetSkillsCommand, "table", "show", "alpha:hf-cli")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "changed while it was being read")
+}
+
+// An error can carry upstream text too: a server may answer skills/list with
+// an error message of its choosing, and the command's error is printed by the
+// shell-facing error path. It is escaped like everything else, and still the
+// same error underneath.
+func TestSkillsCommands_ErrorsAreEscaped(t *testing.T) {
+	newRESTRecorder(t, map[string]cannedResponse{
+		"POST /api/v1/servers/alpha/skills/refresh": refuse(http.StatusInternalServerError,
+			`{"success":false,"error":"Skills refresh failed: list skills: \u001b]0;owned\u0007 \u001b[2J boom"}`),
+		"GET /api/v1/servers/alpha/skills": refuse(http.StatusInternalServerError,
+			`{"success":false,"error":"Failed to list skills: \u001b[31mred"}`),
+	})
+	for _, args := range [][]string{{"refresh", "alpha"}, {"list", "--server", "alpha"}, {"show", "alpha:x"}} {
+		_, _, err := runCLI(t, GetSkillsCommand, "table", args...)
+		require.Error(t, err, args)
+		require.NotContains(t, err.Error(), "\x1b", args)
+		require.NotContains(t, err.Error(), "\x07", args)
+		require.Contains(t, err.Error(), `\x1b`, args)
+	}
+	_, _, err := runCLI(t, GetSkillsCommand, "table", "refresh", "alpha")
+	var apiErr *cliclient.APIError
+	require.True(t, errors.As(err, &apiErr), "the escaped error still unwraps to the API error")
 }

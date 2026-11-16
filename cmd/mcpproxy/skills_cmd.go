@@ -62,7 +62,7 @@ Examples:
   mcpproxy skills list
   mcpproxy skills list --server hf -o json`,
 		Args: cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error { return runSkillsList(server) },
+		RunE: func(_ *cobra.Command, _ []string) error { return termSafeErr(runSkillsList(server)) },
 	}
 	cmd.Flags().StringVarP(&server, "server", "s", "", "List only this server")
 	return cmd
@@ -83,7 +83,9 @@ Examples:
   mcpproxy skills show hf:hf-cli --file references/auth.md
   mcpproxy skills show hf:hf-cli --approved`,
 		Args: argsOrHelpJSON(cobra.ExactArgs(1)),
-		RunE: func(_ *cobra.Command, args []string) error { return runSkillsShow(args[0], file, approved) },
+		RunE: func(_ *cobra.Command, args []string) error {
+			return termSafeErr(runSkillsShow(args[0], file, approved))
+		},
 	}
 	cmd.Flags().StringVar(&file, "file", "", "File inside the skill (default SKILL.md)")
 	cmd.Flags().BoolVar(&approved, "approved", false, "Read the approved copy instead of the current one")
@@ -100,7 +102,7 @@ Needs the server to announce the skills extension.
 Examples:
   mcpproxy skills refresh hf`,
 		Args: argsOrHelpJSON(cobra.ExactArgs(1)),
-		RunE: func(_ *cobra.Command, args []string) error { return runSkillsRefresh(args[0]) },
+		RunE: func(_ *cobra.Command, args []string) error { return termSafeErr(runSkillsRefresh(args[0])) },
 	}
 }
 
@@ -199,6 +201,23 @@ func skillStatusCell(e contracts.SkillEntry) string {
 // shown as visible escapes instead. Structured output (-o json|yaml) does not
 // go through here: its encoder escapes on its own and stays exact.
 func termSafe(s string) string { return termEscape(s, false) }
+
+// escapedError is an error whose message is safe to print; the error it wraps
+// is still there for errors.Is and errors.As.
+type escapedError struct{ err error }
+
+func (e escapedError) Error() string { return termSafe(e.err.Error()) }
+func (e escapedError) Unwrap() error { return e.err }
+
+// termSafeErr escapes the message of an error a skills command returns. Such a
+// message can quote an upstream server (the text of its JSON-RPC error), and
+// it is printed by the command's error path, not by the code above.
+func termSafeErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	return escapedError{err}
+}
 
 // termSafeText is termSafe for a block of text: line feeds and tabs stay.
 func termSafeText(s string) string { return termEscape(s, true) }

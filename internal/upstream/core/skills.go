@@ -117,11 +117,13 @@ func (c *Client) ListSkills(ctx context.Context) (entries []skills.Entry, entryE
 	if _, _, gerr := c.skillsGuard(); gerr != nil {
 		return nil, nil, gerr
 	}
+	// Not asking is reported as such, never as an empty listing: the caller
+	// unlists what an empty listing no longer contains.
 	if !c.SupportsSkills() {
-		return nil, nil, nil
+		return nil, nil, skills.ErrNotServed
 	}
 	if v := c.exposeSkills.Load(); v != nil && !*v {
-		return nil, nil, nil
+		return nil, nil, skills.ErrNotServed
 	}
 
 	c.mu.RLock()

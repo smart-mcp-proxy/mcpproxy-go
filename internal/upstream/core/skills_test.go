@@ -65,7 +65,7 @@ func TestListSkillsSendsNothingWithoutSupport(t *testing.T) {
 	c := connectSkillsClient(t, fx.URL())
 
 	entries, errs, err := c.ListSkills(context.Background())
-	require.NoError(t, err)
+	require.ErrorIs(t, err, skills.ErrNotServed, "not asking is not an empty listing")
 	assert.Empty(t, entries)
 	assert.Empty(t, errs)
 	assert.Zero(t, fx.Count("skills/list"))
@@ -79,7 +79,7 @@ func TestListSkillsSendsNothingWhenNotExposed(t *testing.T) {
 	c.SetExposeSkills(&off)
 
 	entries, _, err := c.ListSkills(context.Background())
-	require.NoError(t, err)
+	require.ErrorIs(t, err, skills.ErrNotServed)
 	assert.Empty(t, entries)
 	assert.Zero(t, fx.Count("skills/list"))
 

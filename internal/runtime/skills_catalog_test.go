@@ -1110,3 +1110,62 @@ func TestSkillsRefresh_BoundsWhatIsStoredForDisplay(t *testing.T) {
 	}
 	assert.Equal(t, 1, g.rt.SkillsStatus(skillsSrv).EntryErrors, "the over-long address is counted")
 }
+
+func TestCutTextStaysWithinItsBound(t *testing.T) {
+	for _, in := range []string{strings.Repeat("a", 300), strings.Repeat("é", 300), strings.Repeat("日本", 100), "short", "", "bad\xffbytes"} {
+		for _, limit := range []int{8, 16, 256} {
+			out := cutText(in, limit)
+			assert.LessOrEqual(t, len(out), limit, "%q cut to %d", in[:min(len(in), 12)], limit)
+			assert.True(t, utf8.ValidString(out))
+			if len(strings.ToValidUTF8(in, "�")) <= limit {
+				assert.NotContains(t, out, "…", "text that fits is not marked as cut")
+			} else {
+				assert.True(t, strings.HasSuffix(out, "…"))
+			}
+		}
+	}
+}
+
+// A change to one server made through the REST API or the MCP tool is a config
+// commit like any other: including a server in skills refreshes it, without
+// waiting for the next sweep.
+func TestSkillsTrigger_AnyCommitThatIncludesAServerRefreshesIt(t *testing.T) {
+	no := false
+	g := newSkillsRig(t, skillsRigOpts{enable: true, expose: &no, autoTrig: true})
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf"})
+	g.rt.skills.wait()
+	require.Zero(t, g.fx.Count("skills/list"))
+
+	next := *g.rt.Config()
+	next.Servers = append([]*config.ServerConfig(nil), next.Servers...)
+	for i, sc := range next.Servers {
+		if sc.Name == skillsSrv {
+			cp := *sc
+			cp.ExposeSkills = nil
+			next.Servers[i] = &cp
+		}
+	}
+	g.rt.UpdateConfig(&next, "")
+	require.Eventually(t, func() bool { return len(g.records(t)) == 1 }, 10*time.Second, 10*time.Millisecond)
+}
+
+// A server that is not asked for skills gives no listing at all, which is not
+// the same as an empty listing: earlier records must not be marked unlisted
+// because of it.
+func TestSkillsRefresh_NotAskedIsNotAnEmptyListing(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf"})
+	require.NoError(t, g.refresh(t))
+	require.True(t, g.records(t)["pdf"].Listed)
+
+	// The connection's own switch says no while the configuration still says
+	// yes: the state a refresh can meet while a config change is being applied.
+	c, _ := g.rt.upstreamManager.GetClient(skillsSrv)
+	off := false
+	excluded := *c.GetConfig()
+	excluded.ExposeSkills = &off
+	c.SetConfig(&excluded)
+
+	require.NoError(t, g.refresh(t))
+	assert.True(t, g.records(t)["pdf"].Listed, "a server that was not asked did not unlist anything")
+}

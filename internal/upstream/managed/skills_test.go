@@ -86,7 +86,7 @@ func TestManagedListSkillsNoRequestWithoutSupport(t *testing.T) {
 	fx := skillstest.New(t, skillstest.WithoutExtension())
 	mc := connectedManagedTestClient(t, fx.URL())
 	entries, _, _, err := mc.ListSkillsCaptured(context.Background())
-	require.NoError(t, err)
+	require.ErrorIs(t, err, skills.ErrNotServed)
 	assert.Empty(t, entries)
 	assert.Zero(t, fx.Count("skills/list"))
 }
@@ -104,7 +104,7 @@ func TestManagedSetConfigPushesExposeSkills(t *testing.T) {
 	mc.SetConfig(&excluded)
 
 	entries, _, _, err := mc.ListSkillsCaptured(context.Background())
-	require.NoError(t, err)
+	require.ErrorIs(t, err, skills.ErrNotServed)
 	assert.Empty(t, entries)
 	assert.Zero(t, fx.Count("skills/list"), "an excluded server is not asked for skills")
 

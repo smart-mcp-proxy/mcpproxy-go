@@ -2374,8 +2374,6 @@ func (r *Runtime) ReloadConfiguration() error {
 		zap.Int("server_delta", newCount-oldCount))
 
 	r.emitConfigReloaded(path)
-	// Spec 125 D6: enable_skills or a server's expose_skills turning on.
-	r.onSkillsConfigChanged(oldCfg, running)
 
 	return nil
 }

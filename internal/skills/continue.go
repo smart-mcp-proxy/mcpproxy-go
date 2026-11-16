@@ -9,6 +9,12 @@ import (
 // check stopped. It is not a failure of the upstream.
 var ErrStopped = errors.New("skills: the read was stopped by its caller")
 
+// ErrNotServed is returned by a listing that was not sent: the server does not
+// announce skills, or it is excluded from them. It is deliberately not an
+// empty listing. An empty listing says "this server has no skills now" and
+// unlists what was known; a server that was not asked says nothing.
+var ErrNotServed = errors.New("skills: the server is not asked for skills")
+
 type continueCheckKey struct{}
 
 // WithContinueCheck attaches a check that a multi-request read asks before

@@ -2416,8 +2416,6 @@ func (r *Runtime) applyConfigInTx(tx *CommitTx, newCfg *config.Config, cfgPath s
 		}
 
 		r.emitConfigReloaded(r.ConfigPath())
-		// Spec 125 D6: enable_skills or a server's expose_skills turning on.
-		r.onSkillsConfigChanged(live, hotCfg)
 		if serversChanged {
 			r.emitServersChanged("config hot-reload", map[string]any{
 				"changed_fields": changedFields,

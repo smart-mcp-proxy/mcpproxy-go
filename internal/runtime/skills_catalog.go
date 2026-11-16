@@ -372,7 +372,10 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 	if lerr != nil {
 		// Asked again here as well: a listing that fails or times out after
 		// skills were switched off is not a failure anyone needs to hear of.
-		if errors.Is(lerr, skills.ErrStopped) || !eligible() {
+		// ErrNotServed: the connection itself was not asked (its own copy of
+		// the switch can trail the configuration for a moment). No listing was
+		// received, so nothing may be concluded from it.
+		if errors.Is(lerr, skills.ErrStopped) || errors.Is(lerr, skills.ErrNotServed) || !eligible() {
 			return errSkillsSwitchedOff
 		}
 		// A request that failed on a connection since retired or replaced
@@ -641,15 +644,19 @@ const (
 // cutText shortens s to at most limit bytes without splitting a character,
 // and marks the cut.
 func cutText(s string, limit int) string {
+	const mark = "…"
 	s = strings.ToValidUTF8(s, "\uFFFD")
 	if len(s) <= limit {
 		return s
 	}
-	cut := limit
+	cut := limit - len(mark)
+	if cut < 0 {
+		cut = 0
+	}
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
-	return s[:cut] + "…"
+	return s[:cut] + mark
 }
 
 // describeSkill is what a listing entry says about itself, before anything is
