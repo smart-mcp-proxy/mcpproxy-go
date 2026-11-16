@@ -249,8 +249,11 @@ type StateManager struct {
 
 	// Ordered transition capture (Spec 124 D5). See transition.go.
 	transitionObserver TransitionObserver
-	transitions        []Transition
-	draining           bool
+	// loginClassifier says whether a change into the error state is a login
+	// requirement (Spec 124 D5).
+	loginClassifier func(Transition) bool
+	transitions     []Transition
+	draining        bool
 }
 
 // NewStateManager creates a new state manager

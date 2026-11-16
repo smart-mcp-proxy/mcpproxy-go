@@ -203,6 +203,9 @@ type Manager struct {
 	// transitionObserver receives every state change of every server's
 	// current instance, in the order it happened (Spec 124 D5).
 	transitionObserver ServerTransitionObserver
+	// transitionLoginClassifier says whether a change into the error state is
+	// a login requirement; handed to every state manager with the observer.
+	transitionLoginClassifier func(serverName, transport string, t types.Transition) bool
 
 	// Prompts-changed callback for notifications/prompts/list_changed handling (F13)
 	promptsChangedCallback func(serverName string)
@@ -506,10 +509,15 @@ type ServerTransitionObserver func(serverName, transport string, t types.Transit
 // SetTransitionObserver installs the observer on every existing client and on
 // every client created later. The runtime uses it to record connection loss
 // and recovery in the activity log with the time they actually happened.
-func (m *Manager) SetTransitionObserver(observer ServerTransitionObserver) {
+//
+// isLogin says whether a change into the error state means a login is
+// required; the state managers use it so that folding a full queue never
+// hides such a change uncounted. It may be nil.
+func (m *Manager) SetTransitionObserver(observer ServerTransitionObserver, isLogin func(serverName, transport string, t types.Transition) bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.transitionObserver = observer
+	m.transitionLoginClassifier = isLogin
 	for _, client := range m.clients {
 		if client != nil {
 			cfg := client.GetConfig()
@@ -524,7 +532,13 @@ func (m *Manager) wireTransitionObserverLocked(client *managed.Client, serverNam
 	observer := m.transitionObserver
 	if observer == nil {
 		client.StateManager.SetTransitionObserver(nil)
+		client.StateManager.SetTransitionLoginClassifier(nil)
 		return
+	}
+	if isLogin := m.transitionLoginClassifier; isLogin != nil {
+		client.StateManager.SetTransitionLoginClassifier(func(t types.Transition) bool {
+			return isLogin(serverName, transport, t)
+		})
 	}
 	client.StateManager.SetTransitionObserver(func(t types.Transition) {
 		// A superseded instance's transitions (the Disconnect of an instance

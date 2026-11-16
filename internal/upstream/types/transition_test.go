@@ -282,3 +282,31 @@ func TestTransitionCapture_FoldingRemembersTheLastLogin(t *testing.T) {
 	assert.Equal(t, 1, f.FoldedLogin)
 	assert.False(t, f.FoldedLoginLast, "a recovery followed it")
 }
+
+// Review round 8: a change into the error state that the classifier calls a
+// login requirement is an edge of its own: folding counts it instead of
+// hiding it.
+func TestTransitionCapture_FoldingCountsALoginRequirementInTheErrorState(t *testing.T) {
+	sm := NewStateManager()
+	loginErr := errors.New("login required")
+	sm.SetTransitionLoginClassifier(func(tr Transition) bool { return tr.Err == loginErr })
+	sm.SetTransitionObserver(func(Transition) {})
+	sm.mu.Lock()
+	sm.transitions = nil
+	sm.draining = true // keep what is captured below in the queue
+	sm.currentState, sm.lastError = StateError, loginErr
+	sm.captureLocked(StateConnecting)
+	require.Len(t, sm.transitions, 1)
+	captured := sm.transitions[0]
+	sm.mu.Unlock()
+	assert.True(t, captured.Login, "set at capture")
+
+	f, hides := foldPair(captured, Transition{From: StateError, To: StateConnecting})
+	assert.True(t, hides, "the pair is not a free fold")
+	assert.Equal(t, 1, f.FoldedLogin)
+	assert.True(t, f.FoldedLoginLast)
+
+	// Without the mark the same pair folds freely.
+	_, hides = foldPair(Transition{From: StateConnecting, To: StateError, Err: errors.New("other")}, Transition{From: StateError, To: StateConnecting})
+	assert.False(t, hides)
+}

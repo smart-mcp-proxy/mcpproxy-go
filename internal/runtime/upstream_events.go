@@ -107,20 +107,7 @@ func upstreamEventMessage(kind UpstreamEventKind, code string) string {
 func transitionEvent(server, transport string, t types.Transition) (UpstreamEvent, bool) {
 	ev := UpstreamEvent{Server: server, At: t.At.UTC()}
 	stdio := transport == "stdio"
-
-	code := t.TerminalCode
-	if code == "" && t.Err != nil {
-		code = string(diagnostics.Classify(t.Err, diagnostics.ClassifierHints{ServerID: server, Transport: transport}))
-	}
-	if code == string(diagnostics.UnknownUnclassified) {
-		code = ""
-	}
-	// A connection that was established did not "exit before initialize",
-	// whatever the classifier makes of the error text.
-	if t.From == types.StateReady && code == string(diagnostics.STDIOExitBeforeInitialize) {
-		code = ""
-	}
-	loginCode := code == string(diagnostics.OAuthLoginRequired) || code == string(diagnostics.OAuthReauthRequired)
+	code, loginCode := transitionCode(server, transport, t)
 
 	switch {
 	case t.To == types.StateReady && t.From != types.StateReady:
@@ -232,6 +219,34 @@ func transitionEvents(server, transport string, t types.Transition) []UpstreamEv
 	return out
 }
 
+// transitionCode is the diagnostics code of a transition and whether it means
+// that a login is required.
+func transitionCode(server, transport string, t types.Transition) (code string, login bool) {
+	code = t.TerminalCode
+	if code == "" && t.Err != nil {
+		code = string(diagnostics.Classify(t.Err, diagnostics.ClassifierHints{ServerID: server, Transport: transport}))
+	}
+	if code == string(diagnostics.UnknownUnclassified) {
+		code = ""
+	}
+	// A connection that was established did not "exit before initialize",
+	// whatever the classifier makes of the error text.
+	if t.From == types.StateReady && code == string(diagnostics.STDIOExitBeforeInitialize) {
+		code = ""
+	}
+	return code, code == string(diagnostics.OAuthLoginRequired) || code == string(diagnostics.OAuthReauthRequired)
+}
+
+// transitionIsLoginError says whether a change into the error state is a login
+// requirement. The state managers ask it at capture, under their lock.
+func transitionIsLoginError(server, transport string, t types.Transition) bool {
+	if t.To != types.StateError {
+		return false
+	}
+	_, login := transitionCode(server, transport, t)
+	return login
+}
+
 type upstreamRowKey struct {
 	server string
 	kind   UpstreamEventKind
@@ -267,6 +282,8 @@ type upstreamEventCollapser struct {
 	// loginSavedAt is when the latest numbered token save of each (server,
 	// owner) was applied, to order unnumbered login requirements against it.
 	loginSavedAt map[upstreamOwnerKey]time.Time
+	// restoredAt is the time of the latest recovery of each server.
+	restoredAt map[string]time.Time
 	// lastSaveGC is when a token save last ran the idle-server cleanup.
 	lastSaveGC time.Time
 	// now is the clock of token-save notifications, which carry no time.
@@ -297,6 +314,7 @@ func newUpstreamEventCollapser() *upstreamEventCollapser {
 		loginOpen:    make(map[upstreamOwnerKey]*upstreamRow),
 		loginSeq:     make(map[upstreamOwnerKey]uint64),
 		loginSavedAt: make(map[upstreamOwnerKey]time.Time),
+		restoredAt:   make(map[string]time.Time),
 		now:          time.Now,
 	}
 }
@@ -313,6 +331,11 @@ func (c *upstreamEventCollapser) place(e UpstreamEvent) (row *upstreamRow, isNew
 
 	switch e.Kind {
 	case UpstreamConnectionRestored:
+		// Remembered also when the recovery gets no row (a first connect):
+		// a login failure from before it, delivered after it, is history.
+		if e.At.After(c.restoredAt[e.Server]) {
+			c.restoredAt[e.Server] = e.At
+		}
 		if !c.down[e.Server] {
 			return nil, false // the first connect, or a recovery nobody saw fail
 		}
@@ -328,7 +351,7 @@ func (c *upstreamEventCollapser) place(e UpstreamEvent) (row *upstreamRow, isNew
 				stillOpen = true
 				continue
 			}
-			delete(c.loginOpen, k)
+			c.closeLogin(k)
 		}
 		c.down[e.Server] = stillOpen
 	case UpstreamConnectionLost, UpstreamProcessExited:
@@ -343,6 +366,11 @@ func (c *upstreamEventCollapser) place(e UpstreamEvent) (row *upstreamRow, isNew
 		// save that has already been applied (its delivery stalled) is as
 		// stale as an older numbered failure.
 		if saved, ok := c.loginSavedAt[owner]; ok && e.Seq == 0 && e.At.Before(saved) {
+			stale = true
+		}
+		// Numbered or not, a requirement from before a recovery already
+		// processed was closed by that recovery.
+		if restored, ok := c.restoredAt[e.Server]; ok && e.At.Before(restored) {
 			stale = true
 		}
 		if !stale {
@@ -467,6 +495,7 @@ func (c *upstreamEventCollapser) forgetIdleServers(now time.Time) {
 		}
 		delete(c.seen, server)
 		delete(c.down, server)
+		delete(c.restoredAt, server)
 		for k := range c.loginOpen {
 			if k.server == server {
 				delete(c.loginOpen, k)
@@ -515,7 +544,15 @@ func (c *upstreamEventCollapser) noteTokenSaved(server, owner string, seq uint64
 	if open := c.loginOpen[k]; open != nil && !at.IsZero() && open.lastAt.After(at) {
 		return
 	}
+	c.closeLogin(k)
+}
+
+// closeLogin ends the open login requirement of (server, owner). Its row is
+// no longer one a later requirement may be merged into: the next requirement
+// is a new episode with its own row and its own time, however soon it comes.
+func (c *upstreamEventCollapser) closeLogin(k upstreamOwnerKey) {
 	delete(c.loginOpen, k)
+	delete(c.latest, upstreamRowKey{k.server, UpstreamLoginRequired, k.owner})
 }
 
 // RecordUpstreamEvent writes or updates the activity row of an upstream event.
@@ -628,7 +665,7 @@ func (r *Runtime) installUpstreamEventObserver() {
 		for _, ev := range transitionEvents(server, transport, t) {
 			r.activityService.RecordUpstreamEvent(ev)
 		}
-	})
+	}, transitionIsLoginError)
 	// Every token refresh that was sent and failed, transient ones included.
 	oauth.DefaultRefreshCoordinator().SetAuditObserver(func(f oauth.RefreshAttemptFailure) {
 		r.activityService.RecordUpstreamEvent(UpstreamEvent{

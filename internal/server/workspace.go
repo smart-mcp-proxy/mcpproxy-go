@@ -244,7 +244,32 @@ func (p *MCPProxyServer) resolveKeyedWorkSession(identity runtime.WorkSessionIde
 	if id, ok := cached(workSessionKey(effective.Principal, effective.RunName)); ok {
 		return id, effective
 	}
-	return p.resolveWorkSessionEffective(identity)
+	id, filed := p.resolveWorkSessionEffective(identity)
+	if filed.RunName != effective.RunName {
+		// The identity changed between the question and the resolution (a
+		// concurrent request used the last named session of the day). If
+		// the connection already holds the session of the identity it ended
+		// up with, that one is the answer, and the tracker is told so: the
+		// session just opened beside it must not be the one a reconnect
+		// joins.
+		if kept, ok := cached(workSessionKey(filed.Principal, filed.RunName)); ok && kept != id {
+			p.adoptWorkSession(kept, filed)
+			return kept, filed
+		}
+	}
+	return id, filed
+}
+
+// adoptWorkSession files the identity under the given session in the tracker.
+func (p *MCPProxyServer) adoptWorkSession(id string, identity runtime.WorkSessionIdentity) {
+	if p.workSessionAdopter != nil {
+		p.workSessionAdopter(id, identity)
+		return
+	}
+	if p.mainServer == nil || p.mainServer.runtime == nil {
+		return
+	}
+	p.mainServer.runtime.AdoptWorkSession(id, identity)
 }
 
 // effectiveWorkSessionIdentity is the identity a session would be filed under,

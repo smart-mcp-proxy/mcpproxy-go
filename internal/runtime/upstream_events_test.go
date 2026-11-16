@@ -646,3 +646,40 @@ func TestActivityService_BackfilledSessionsAreClosedAtStart(t *testing.T) {
 	require.NotNil(t, sum, "the backfill built it")
 	assert.False(t, sum.EndedAt.IsZero(), "and it is closed: its process is gone")
 }
+
+// Review round 8: the classifier the state managers use agrees with the
+// event mapping; a login failure from before a recovery already processed is
+// history; and a requirement closed by a save does not take the next one
+// into its row, however soon it comes.
+func TestUpstreamEvent_LoginEpisodes(t *testing.T) {
+	loginErr := errors.New("OAuth authentication required")
+	tr := types.Transition{From: types.StateConnecting, To: types.StateError, At: evBase, TerminalCode: string(diagnostics.OAuthReauthRequired), Err: loginErr}
+	assert.True(t, transitionIsLoginError("srv", "http", tr))
+	ev, ok := transitionEvent("srv", "http", tr)
+	require.True(t, ok)
+	assert.Equal(t, UpstreamLoginRequired, ev.Kind)
+	assert.False(t, transitionIsLoginError("srv", "http", types.Transition{From: types.StateConnecting, To: types.StateError, Err: errors.New("connection refused")}))
+	assert.False(t, transitionIsLoginError("srv", "http", types.Transition{From: types.StateConnecting, To: types.StateReady}))
+
+	// A failure accepted at T1, a recovery at T2 processed first.
+	c := newUpstreamEventCollapser()
+	c.place(UpstreamEvent{Server: "srv", Kind: UpstreamConnectionRestored, At: evBase.Add(2 * time.Minute)}) // no row: nothing was down
+	row, _ := c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(time.Minute), Seq: 1})
+	require.NotNil(t, row, "it happened, so it is a row")
+	assert.Empty(t, c.loginOpen)
+	assert.False(t, c.down["srv"])
+
+	// Failure, save, failure inside one minute: two rows.
+	c2 := newUpstreamEventCollapser()
+	first, isNew := c2.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase, Seq: 2})
+	require.True(t, isNew)
+	c2.noteTokenSaved("srv", "", 3, evBase.Add(10*time.Second))
+	second, isNew := c2.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(20 * time.Second), Seq: 4})
+	require.True(t, isNew, "a new episode has its own row")
+	assert.NotEqual(t, first.id, second.id)
+	assert.Equal(t, evBase.Add(20*time.Second), second.firstAt)
+	// Inside an open episode repeats still collapse.
+	again, isNew := c2.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(30 * time.Second), Seq: 5})
+	assert.False(t, isNew)
+	assert.Equal(t, second.id, again.id)
+}

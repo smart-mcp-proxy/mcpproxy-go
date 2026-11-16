@@ -303,6 +303,33 @@ func (t *WorkSessionTracker) Touch(workSessionID string, id WorkSessionIdentity)
 	}
 }
 
+// Adopt files the identity under the given work session, replacing whatever
+// session the identity had. A legacy connection that keeps a session for an
+// identity uses it when a session was opened for that identity beside it
+// (Spec 124 FR-006): the one the connection writes to is the one that others
+// with the same identity must join.
+func (t *WorkSessionTracker) Adopt(workSessionID string, id WorkSessionIdentity) {
+	if workSessionID == "" || id.isEmpty() {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.now()
+	k := id.key()
+	if entry, ok := t.sessions[k]; ok && entry.id == workSessionID {
+		entry.lastActivity = now
+		return
+	}
+	started := now
+	for _, e := range t.sessions {
+		if e.id == workSessionID {
+			started = e.startedAt
+			break
+		}
+	}
+	t.sessions[k] = &workSessionEntry{id: workSessionID, lastActivity: now, startedAt: started}
+}
+
 // TouchID records activity on a work session known only by its id (a session
 // pinned on a request context, whose rows are stamped without resolving it
 // again). It refreshes the entry that holds the id; when none does (the

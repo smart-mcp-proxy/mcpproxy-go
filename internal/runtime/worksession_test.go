@@ -416,3 +416,19 @@ func TestWorkSession_TouchIDMovesTheIdleClock(t *testing.T) {
 	tr.TouchID("") // no-ops
 	tr.TouchID("unknown")
 }
+
+// Review round 8: Adopt files an identity under the session a connection
+// keeps, replacing one that was opened beside it.
+func TestWorkSession_AdoptReplacesACompetingSession(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC))
+	id := WorkSessionIdentity{Principal: "agent-1", ClientName: "ide", ClientVersion: "1.0"}
+	kept := tr.Resolve(id)
+	advance(time.Hour) // idle: the next resolve opens another
+	beside := tr.Resolve(id)
+	require.NotEqual(t, kept, beside)
+
+	tr.Adopt(kept, id)
+	assert.Equal(t, kept, tr.Resolve(id), "a reconnect joins the session the connection writes to")
+	tr.Adopt("", id) // no-ops
+	tr.Adopt(kept, WorkSessionIdentity{})
+}

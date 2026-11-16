@@ -45,6 +45,11 @@ type Transition struct {
 	// requirements, a login requirement came last: no recovery followed it,
 	// so it is still open after everything the record hid.
 	FoldedLoginLast bool
+	// Login marks a change into the error state whose error means "a login
+	// is required" (set by the login classifier at capture). Such a change
+	// is a login requirement exactly like a change into PendingAuth, and
+	// folding must not hide it uncounted.
+	Login bool
 }
 
 // lastLoginOrRecovery reports which came last among the record's hidden
@@ -73,7 +78,7 @@ func (t Transition) edges() (lost, restored, login int) {
 	if t.From != StateReady && t.To == StateReady {
 		restored = 1
 	}
-	if t.From != StatePendingAuth && t.To == StatePendingAuth {
+	if (t.From != StatePendingAuth && t.To == StatePendingAuth) || t.Login {
 		login = 1
 	}
 	return lost, restored, login
@@ -84,6 +89,9 @@ func foldPair(a, b Transition) (Transition, bool) {
 	f := Transition{
 		From: a.From, To: b.To, At: b.At, Err: b.Err, TerminalCode: b.TerminalCode,
 		Folded: a.Folded + b.Folded + 1,
+		// The folded record ends where b ends, with b's error: it shows a
+		// login requirement itself exactly when b does.
+		Login: b.Login,
 	}
 	al, ar, ag := a.edges()
 	bl, br, bg := b.edges()
@@ -109,6 +117,15 @@ type TransitionObserver func(Transition)
 // observer keeps it near empty; the bound only matters if the observer stalls.
 const maxQueuedTransitions = 256
 
+// SetTransitionLoginClassifier installs the function that says whether a
+// change into the error state is a login requirement. It is called under the
+// state lock and must not block or call back into the state manager.
+func (sm *StateManager) SetTransitionLoginClassifier(isLogin func(Transition) bool) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.loginClassifier = isLogin
+}
+
 // SetTransitionObserver installs the observer. Transitions recorded before an
 // observer is installed are not kept.
 func (sm *StateManager) SetTransitionObserver(observer TransitionObserver) {
@@ -129,13 +146,17 @@ func (sm *StateManager) captureLocked(oldState ConnectionState) {
 	if len(sm.transitions) >= maxQueuedTransitions {
 		sm.foldOldestLocked()
 	}
-	sm.transitions = append(sm.transitions, Transition{
+	tr := Transition{
 		From:         oldState,
 		To:           sm.currentState,
 		At:           time.Now(),
 		Err:          sm.lastError,
 		TerminalCode: sm.terminalCode,
-	})
+	}
+	if sm.loginClassifier != nil && tr.To == StateError {
+		tr.Login = sm.loginClassifier(tr)
+	}
+	sm.transitions = append(sm.transitions, tr)
 	if !sm.draining {
 		sm.draining = true
 		go sm.drainTransitions()

@@ -4329,6 +4329,11 @@ func (r *Runtime) TouchWorkSession(workSessionID string, id WorkSessionIdentity)
 	r.workSessionTracker().Touch(workSessionID, id)
 }
 
+// AdoptWorkSession files an identity under an existing work session.
+func (r *Runtime) AdoptWorkSession(workSessionID string, id WorkSessionIdentity) {
+	r.workSessionTracker().Adopt(workSessionID, id)
+}
+
 // TouchWorkSessionID refreshes the idle clock of a work session by its id.
 func (r *Runtime) TouchWorkSessionID(workSessionID string) {
 	r.workSessionTracker().TouchID(workSessionID)

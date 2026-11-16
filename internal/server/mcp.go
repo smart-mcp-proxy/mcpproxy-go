@@ -166,6 +166,8 @@ type MCPProxyServer struct {
 	// workSessionToucher replaces the runtime's idle-clock refresh in tests
 	// (Spec 124 FR-019). Nil in production.
 	workSessionToucher func(string, runtime.WorkSessionIdentity)
+	// workSessionAdopter replaces the runtime's AdoptWorkSession in tests.
+	workSessionAdopter func(string, runtime.WorkSessionIdentity)
 	// workSessionIDToucher is the same for a refresh by id alone.
 	workSessionIDToucher func(string)
 

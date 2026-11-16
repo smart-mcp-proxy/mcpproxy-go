@@ -483,3 +483,41 @@ func TestActivityAttribution_PinnedWorkSessionKeepsItsIdleClock(t *testing.T) {
 	assert.Equal(t, attr.WorkSessionID, p.requestWorkSession(ctx, ""),
 		"25 minutes after the pinned row, the next request joins the same session")
 }
+
+// Review round 8: when the identity changes between the question and the
+// resolution (the last named session of the day went to a concurrent
+// request), the session the connection already holds for the identity it
+// ended up with is the answer, and the tracker is told.
+func TestResolveKeyedWorkSession_CachedSessionWinsAQuotaRace(t *testing.T) {
+	p, _ := newWorkSessionProxy(t)
+	named := runtime.WorkSessionIdentity{Principal: "p", ClientName: "ide", RunName: "run-x"}
+	unnamed := named
+	unnamed.RunName = ""
+	// The question says the name is admitted; the resolution drops it and
+	// opens a session beside the connection's unnamed one.
+	p.workSessionEffectiveIdentity = func(id runtime.WorkSessionIdentity) runtime.WorkSessionIdentity { return id }
+	p.workSessionResolverEffective = func(runtime.WorkSessionIdentity) (string, runtime.WorkSessionIdentity) {
+		return "ws-beside", unnamed
+	}
+	var adoptedID string
+	var adoptedFor runtime.WorkSessionIdentity
+	p.workSessionAdopter = func(id string, identity runtime.WorkSessionIdentity) { adoptedID, adoptedFor = id, identity }
+
+	cached := func(k string) (string, bool) {
+		if k == workSessionKey("p", "") {
+			return "ws-kept", true
+		}
+		return "", false
+	}
+	id, filed := p.resolveKeyedWorkSession(named, cached)
+	assert.Equal(t, "ws-kept", id)
+	assert.Empty(t, filed.RunName)
+	assert.Equal(t, "ws-kept", adoptedID)
+	assert.Equal(t, unnamed, adoptedFor)
+
+	// No cached session for the identity it ended up with: the new one stands.
+	adoptedID = ""
+	id, _ = p.resolveKeyedWorkSession(named, func(string) (string, bool) { return "", false })
+	assert.Equal(t, "ws-beside", id)
+	assert.Empty(t, adoptedID)
+}
