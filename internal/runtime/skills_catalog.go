@@ -352,9 +352,11 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 		}
 		// A request that failed on a connection since retired or replaced
 		// says nothing about the server; the reconnect reads its skills again.
-		if errors.Is(lerr, managed.ErrInstanceRetired) ||
-			(capture.Client != nil && !capture.Client.CaptureIsCurrent(capture)) {
+		if errors.Is(lerr, managed.ErrInstanceRetired) {
 			return fmt.Errorf("%w: %v", errSkillsCaptureStale, lerr)
+		}
+		if serr := supersededIfStale(lerr, capture); serr != lerr {
+			return serr
 		}
 		if !errors.As(lerr, &tr) {
 			return fmt.Errorf("list skills: %w", lerr)
@@ -410,7 +412,7 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 		}
 		o, err := r.readSkill(ctx, serverName, inc, e, known[e.URI], budget)
 		if err != nil {
-			return err
+			return supersededIfStale(err, capture)
 		}
 		outcomes = append(outcomes, o)
 	}
@@ -576,6 +578,17 @@ func unusableOutcome(o skillOutcome, u *skills.UnusableError) skillOutcome {
 	o.usable = false
 	o.reason = u.Error()
 	return o
+}
+
+// supersededIfStale turns an error into a superseded refresh when the
+// connection the listing was captured on has been retired or replaced since:
+// what a request on that connection ran into, a deadline included, says
+// nothing about the server, and the reconnect reads its skills again.
+func supersededIfStale(err error, capture managed.InventoryCapture) error {
+	if err == nil || capture.Client == nil || capture.Client.CaptureIsCurrent(capture) {
+		return err
+	}
+	return fmt.Errorf("%w: %v", errSkillsCaptureStale, err)
 }
 
 // describeSkill is what a listing entry says about itself, before anything is

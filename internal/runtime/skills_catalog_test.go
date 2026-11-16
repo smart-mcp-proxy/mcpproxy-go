@@ -1025,3 +1025,22 @@ func TestSkillsRefresh_ListingErrorOnAReplacedConnectionIsSuperseded(t *testing.
 	assert.ErrorIs(t, err, ErrSkillsRefreshSuperseded)
 	assert.Empty(t, g.rt.SkillsStatus(skillsSrv).Error, "a superseded refresh is not a status error")
 }
+
+// An error met while reading files is a superseded refresh, and not a failure,
+// when the connection the listing came from has been replaced since.
+func TestSupersededIfStale(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf"})
+	_, _, capture, err := g.rt.upstreamManager.ListServerSkills(context.Background(), skillsSrv)
+	require.NoError(t, err)
+
+	readErr := context.DeadlineExceeded
+	assert.Equal(t, readErr, supersededIfStale(readErr, capture), "a current capture keeps its error")
+	assert.NoError(t, supersededIfStale(nil, capture))
+
+	c, _ := g.rt.upstreamManager.GetClient(skillsSrv)
+	c.Retire()
+	got := supersededIfStale(readErr, capture)
+	assert.ErrorIs(t, got, ErrSkillsRefreshSuperseded)
+	assert.NoError(t, supersededIfStale(nil, capture), "no error stays no error")
+}
