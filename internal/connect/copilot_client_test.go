@@ -65,3 +65,86 @@ func TestCopilotClientInfoNamesMatchWhatCopilotSends(t *testing.T) {
 		}
 	}
 }
+
+// Copilot CLI and VS Code read $COPILOT_HOME/mcp-config.json when COPILOT_HOME
+// is set and do not look at ~/.copilot as well, so connect has to follow it or
+// the entry lands in a file nothing reads.
+func TestConfigPathCopilotFollowsCopilotHome(t *testing.T) {
+	copilotHome := t.TempDir()
+	t.Setenv("COPILOT_HOME", copilotHome)
+
+	want := filepath.Join(copilotHome, "mcp-config.json")
+	if got := ConfigPath("copilot", ""); got != want {
+		t.Fatalf("ConfigPath = %s, want %s", got, want)
+	}
+}
+
+// An explicit home directory is the isolation seam every test and embedder
+// relies on: COPILOT_HOME from the developer's shell must not redirect a
+// write that was pointed at a temp home.
+func TestConfigPathCopilotExplicitHomeIgnoresCopilotHome(t *testing.T) {
+	t.Setenv("COPILOT_HOME", t.TempDir())
+	home := t.TempDir()
+
+	want := filepath.Join(home, ".copilot", "mcp-config.json")
+	if got := ConfigPath("copilot", home); got != want {
+		t.Fatalf("ConfigPath = %s, want %s", got, want)
+	}
+}
+
+// A relative COPILOT_HOME resolves against the working directory of whoever
+// reads it. The core does not share the client's working directory, so a
+// relative value falls back to the default instead of naming a wrong file.
+func TestConfigPathCopilotIgnoresRelativeCopilotHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("COPILOT_HOME", filepath.Join("relative", "copilot"))
+
+	want := filepath.Join(home, ".copilot", "mcp-config.json")
+	if got := ConfigPath("copilot", ""); got != want {
+		t.Fatalf("ConfigPath = %s, want %s", got, want)
+	}
+}
+
+// Disconnect removes only the mcpproxy entry: servers the user added to the
+// shared Copilot config by hand, and their "tools" lists, stay as written.
+func TestDisconnectCopilotKeepsOtherServers(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("copilot", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seed := `{"mcpServers":{"context7":{"type":"http","url":"https://mcp.context7.com/mcp","tools":["*"]}}}`
+	if err := os.WriteFile(cfgPath, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if res, err := svc.Connect("copilot", "", false); err != nil || !res.Success {
+		t.Fatalf("Connect: %v %+v", err, res)
+	}
+	if res, err := svc.Disconnect("copilot", ""); err != nil || !res.Success {
+		t.Fatalf("Disconnect: %v %+v", err, res)
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]map[string]map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatalf("config is not the expected JSON: %v (%s)", err, raw)
+	}
+	servers := data["mcpServers"]
+	if _, still := servers["mcpproxy"]; still {
+		t.Fatalf("mcpproxy entry was not removed: %s", raw)
+	}
+	other, ok := servers["context7"]
+	if !ok {
+		t.Fatalf("the user's own server was removed: %s", raw)
+	}
+	tools, _ := other["tools"].([]interface{})
+	if other["url"] != "https://mcp.context7.com/mcp" || len(tools) != 1 || tools[0] != "*" {
+		t.Fatalf("the user's own server was rewritten: %v", other)
+	}
+}
