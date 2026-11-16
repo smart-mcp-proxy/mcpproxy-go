@@ -19,6 +19,8 @@ type orderEmitter struct {
 	saved  []uint64
 	failed []uint64
 	failAt []time.Time
+	// failPrev is the previous number each failure carried.
+	failPrev []uint64
 }
 
 func (e *orderEmitter) EmitOAuthTokenSavedNumbered(_ string, seq uint64, _ time.Time) {
@@ -27,10 +29,11 @@ func (e *orderEmitter) EmitOAuthTokenSavedNumbered(_ string, seq uint64, _ time.
 	e.saved = append(e.saved, seq)
 }
 
-func (e *orderEmitter) EmitOAuthLoginRequiredNumbered(_ string, seq uint64, at time.Time) {
+func (e *orderEmitter) EmitOAuthLoginRequiredNumbered(_ string, seq, prev uint64, at time.Time) {
 	e.omu.Lock()
 	defer e.omu.Unlock()
 	e.failed = append(e.failed, seq)
+	e.failPrev = append(e.failPrev, prev)
 	e.failAt = append(e.failAt, at)
 }
 
@@ -72,6 +75,9 @@ func TestRefreshManager_NotificationsAreNumberedInDecisionOrder(t *testing.T) {
 	emitter.omu.Unlock()
 	assert.False(t, failedAt.IsZero())
 	assert.False(t, failedAt.After(afterFailure), "the failure time is taken when it is accepted")
+	emitter.omu.Lock()
+	assert.Equal(t, []uint64{1}, emitter.failPrev, "the failure names the save that installed its schedule")
+	emitter.omu.Unlock()
 }
 
 // Review finding: the numbered save notification is sent after the manager's

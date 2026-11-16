@@ -701,3 +701,32 @@ func TestUpstreamEvent_StaleFailureRowIsNotAMergeTarget(t *testing.T) {
 	assert.Equal(t, evBase.Add(20*time.Second), fresh.firstAt)
 	assert.Same(t, fresh, c.loginOpen[upstreamOwnerKey{"srv", ""}])
 }
+
+// Review round 10: failure 1 opens a requirement; a login saves a token
+// (2) whose notification stalls; the new grant fails (3) and that arrives
+// first. The second failure is a new episode with its own row, and the late
+// save changes nothing.
+func TestUpstreamEvent_FailureDeliveredBeforeItsSaveIsANewEpisode(t *testing.T) {
+	c := newUpstreamEventCollapser()
+	first, isNew := c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase, Seq: 1})
+	require.True(t, isNew)
+
+	second, isNew := c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(20 * time.Second), Seq: 3, PrevSeq: 2})
+	require.True(t, isNew, "the save in between is known to exist: a new episode")
+	assert.NotEqual(t, first.id, second.id)
+	assert.Equal(t, evBase.Add(20*time.Second), second.firstAt)
+
+	c.noteTokenSaved("srv", "", 2, evBase.Add(10*time.Second)) // the late save
+	assert.Same(t, second, c.loginOpen[upstreamOwnerKey{"srv", ""}], "it is older than the open requirement")
+
+	// In order, nothing changes: the save was applied, so the failure after
+	// it opens its row the usual way and a repeat of it merges.
+	c2 := newUpstreamEventCollapser()
+	c2.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase, Seq: 1})
+	c2.noteTokenSaved("srv", "", 2, evBase.Add(10*time.Second))
+	a, isNew := c2.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(20 * time.Second), Seq: 3, PrevSeq: 2})
+	require.True(t, isNew)
+	b, isNew := c2.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(30 * time.Second)})
+	assert.False(t, isNew, "the connection state reporting the same condition merges")
+	assert.Equal(t, a.id, b.id)
+}

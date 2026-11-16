@@ -67,6 +67,10 @@ type UpstreamEvent struct {
 	// its token saves (see NoteUpstreamTokenSaved). Zero for events derived
 	// from the connection state.
 	Seq uint64
+	// PrevSeq is the number of the notification the same server had before
+	// Seq (zero when unknown). If it has not been applied yet, a
+	// notification of the server, a token save, is still on its way.
+	PrevSeq uint64
 	// Count is how many occurrences the event stands for; zero means one.
 	// Only the replay of a folded transition sets it.
 	Count int
@@ -375,6 +379,15 @@ func (c *upstreamEventCollapser) place(e UpstreamEvent) (row *upstreamRow, isNew
 		}
 		if !stale {
 			c.down[e.Server] = true
+			if e.Seq != 0 && e.PrevSeq > c.loginSeq[owner] {
+				// The save before this failure has not arrived yet (the two
+				// notifications were delivered out of order). The failure is
+				// of the grant that save installed, so it starts a new
+				// episode: the open requirement, of the grant before, ends
+				// here. The late save is then older than this failure and
+				// changes nothing.
+				c.closeLogin(owner)
+			}
 			if e.Seq > c.loginSeq[owner] {
 				c.loginSeq[owner] = e.Seq
 			}
@@ -650,7 +663,7 @@ func (r *Runtime) EmitOAuthTokenSavedNumbered(serverName string, seq uint64, at 
 // expired too long), so the server needs a new login. The connection state
 // does not change for this, which is why the state observer alone would miss
 // it while the server is still connected.
-func (r *Runtime) EmitOAuthLoginRequiredNumbered(serverName string, seq uint64, at time.Time) {
+func (r *Runtime) EmitOAuthLoginRequiredNumbered(serverName string, seq, prev uint64, at time.Time) {
 	if r == nil || r.activityService == nil {
 		return
 	}
@@ -659,9 +672,10 @@ func (r *Runtime) EmitOAuthLoginRequiredNumbered(serverName string, seq uint64, 
 		Kind:   UpstreamLoginRequired,
 		// The time the failure was accepted, not the time this notification
 		// was delivered: a token save and later calls can come in between.
-		At:   at.UTC(),
-		Code: string(diagnostics.OAuthReauthRequired),
-		Seq:  seq,
+		At:      at.UTC(),
+		Code:    string(diagnostics.OAuthReauthRequired),
+		Seq:     seq,
+		PrevSeq: prev,
 	})
 }
 
