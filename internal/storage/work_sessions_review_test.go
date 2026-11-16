@@ -657,3 +657,77 @@ func TestWorkSessionRepair_LargeSessionAndLateRows(t *testing.T) {
 	assert.Equal(t, before.StartedAt, after.StartedAt)
 	assert.Equal(t, before.LastActivityAt, after.LastActivityAt)
 }
+
+// Review round 2 (doors): the timeline walk merges a session's rows with the
+// upstream events of its servers from cursors, in one read transaction.
+func TestWalkWorkSessionTimeline_MergesEventsInTimeOrder(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	event := func(server string, d time.Duration) {
+		require.NoError(t, m.SaveActivity(&ActivityRecord{
+			Type: ActivityTypeUpstreamEvent, Status: ActivityStatusError, ServerName: server, Timestamp: wsBase.Add(d),
+		}))
+	}
+	for i := 0; i < 4; i++ {
+		require.NoError(t, m.SaveActivity(wsRow("ws-t", time.Duration(i)*10*time.Second, nil)))
+	}
+	event("github", -time.Hour)     // before the span
+	event("github", 5*time.Second)  // between rows 0 and 1
+	event("slack", 5*time.Second)   // same time, another server
+	event("slack", 10*time.Second)  // the time of row 1: not before it, so after
+	event("github", 25*time.Second) // between rows 2 and 3
+	event("github", 40*time.Second) // after the last row, inside the span
+	event("github", 2*time.Hour)    // after the span
+	event("other", 5*time.Second)   // a server that was not asked for
+	event("a\x00b", 5*time.Second)  // not indexable
+
+	type seen struct {
+		event  bool
+		server string
+		at     time.Duration
+	}
+	var got []seen
+	walk := func(stopAfter int) {
+		got = got[:0]
+		require.NoError(t, m.WalkWorkSessionTimeline("ws-t", []string{"github", "slack", "a\x00b", "none"},
+			wsBase, wsBase.Add(time.Hour), func(r WorkSessionRowRef) bool {
+				require.GreaterOrEqual(t, len(r.ActivityKey), 22)
+				got = append(got, seen{r.Event, r.Server, r.Timestamp.Sub(wsBase)})
+				return stopAfter == 0 || len(got) < stopAfter
+			}))
+	}
+	walk(0)
+	var order []string
+	for _, g := range got {
+		kind := "row"
+		if g.event {
+			kind = "ev:" + g.server
+		}
+		order = append(order, fmt.Sprintf("%s@%d", kind, int(g.at/time.Second)))
+	}
+	require.Len(t, got, 9, "%v", order)
+	assert.Equal(t, "row@0", order[0])
+	assert.ElementsMatch(t, []string{"ev:github@5", "ev:slack@5"}, order[1:3])
+	assert.Equal(t, []string{"row@10", "ev:slack@10", "row@20", "ev:github@25", "row@30", "ev:github@40"}, order[3:])
+
+	// The same order on every walk, and fn can stop it.
+	first := append([]string(nil), order...)
+	walk(0)
+	for i, g := range got {
+		assert.Equal(t, strings.HasPrefix(first[i], "ev:"), g.event)
+	}
+	walk(2)
+	assert.Len(t, got, 2)
+
+	// No servers: the session's rows only. No session: the events only.
+	n := 0
+	require.NoError(t, m.WalkWorkSessionTimeline("ws-t", nil, wsBase, wsBase.Add(time.Hour), func(WorkSessionRowRef) bool { n++; return true }))
+	assert.Equal(t, 4, n)
+	n = 0
+	require.NoError(t, m.WalkWorkSessionTimeline("ws-none", []string{"github"}, wsBase, wsBase.Add(time.Hour), func(r WorkSessionRowRef) bool {
+		assert.True(t, r.Event)
+		n++
+		return true
+	}))
+	assert.Equal(t, 3, n)
+}

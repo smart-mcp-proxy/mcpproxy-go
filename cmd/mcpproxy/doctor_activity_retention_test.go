@@ -26,7 +26,7 @@ func TestActivityRetentionLines(t *testing.T) {
 	assert.Contains(t, out, "7 days")
 	assert.Contains(t, out, "the size cap was reached")
 	assert.Contains(t, out, "activity_max_size_mb")
-	assert.Contains(t, out, "Complete history starts at")
+	assert.Contains(t, out, "Oldest complete session started at")
 
 	_, ok = activityRetentionReport(map[string]interface{}{})
 	assert.False(t, ok, "an older daemon or a scoped caller reports no section")

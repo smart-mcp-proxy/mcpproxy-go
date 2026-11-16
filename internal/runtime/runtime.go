@@ -4296,14 +4296,10 @@ func (r *Runtime) WorkSessionRowRefs(id string) ([]storage.WorkSessionRowRef, er
 	return r.storageManager.WorkSessionRowRefs(id)
 }
 
-// WalkWorkSessionRefs visits a session's index entries in time order.
-func (r *Runtime) WalkWorkSessionRefs(id string, fn func(storage.WorkSessionRowRef) bool) error {
-	return r.storageManager.WalkWorkSessionRefs(id, fn)
-}
-
-// UpstreamEventRefs returns one server's upstream events in a time span.
-func (r *Runtime) UpstreamEventRefs(server string, from, to time.Time) ([]storage.WorkSessionRowRef, error) {
-	return r.storageManager.UpstreamEventRefs(server, from, to)
+// WalkWorkSessionTimeline visits a work session's index entries merged with
+// the upstream events of the given servers, in time order.
+func (r *Runtime) WalkWorkSessionTimeline(id string, servers []string, from, to time.Time, fn func(storage.WorkSessionRowRef) bool) error {
+	return r.storageManager.WalkWorkSessionTimeline(id, servers, from, to, fn)
 }
 
 // GetActivitiesByKeys loads activity rows by key.

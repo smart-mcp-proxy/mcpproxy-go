@@ -918,7 +918,7 @@ func activityRetentionLines(rep contracts.ActivityRetentionReport) []string {
 		"     A session inside the window lost rows; its counts are still exact.",
 	}
 	if rep.OldestCompleteSessionAt != nil {
-		lines = append(lines, "     Complete history starts at "+rep.OldestCompleteSessionAt.Local().Format("2006-01-02 15:04")+".")
+		lines = append(lines, "     Oldest complete session started at "+rep.OldestCompleteSessionAt.Local().Format("2006-01-02 15:04")+".")
 	}
 	if len(rep.Raise) > 0 {
 		lines = append(lines, "     To keep the whole window, raise: "+strings.Join(rep.Raise, ", ")+".")

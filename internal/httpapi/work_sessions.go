@@ -46,8 +46,7 @@ const (
 type workSessionController interface {
 	ListWorkSessionSummaries() ([]*storage.WorkSessionSummary, error)
 	GetWorkSessionSummary(id string) (*storage.WorkSessionSummary, error)
-	WalkWorkSessionRefs(id string, fn func(storage.WorkSessionRowRef) bool) error
-	UpstreamEventRefs(server string, from, to time.Time) ([]storage.WorkSessionRowRef, error)
+	WalkWorkSessionTimeline(id string, servers []string, from, to time.Time, fn func(storage.WorkSessionRowRef) bool) error
 	GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error)
 }
 
@@ -69,11 +68,8 @@ func (noWorkSessions) ListWorkSessionSummaries() ([]*storage.WorkSessionSummary,
 func (noWorkSessions) GetWorkSessionSummary(string) (*storage.WorkSessionSummary, error) {
 	return nil, nil
 }
-func (noWorkSessions) WalkWorkSessionRefs(string, func(storage.WorkSessionRowRef) bool) error {
+func (noWorkSessions) WalkWorkSessionTimeline(string, []string, time.Time, time.Time, func(storage.WorkSessionRowRef) bool) error {
 	return nil
-}
-func (noWorkSessions) UpstreamEventRefs(string, time.Time, time.Time) ([]storage.WorkSessionRowRef, error) {
-	return nil, nil
 }
 func (noWorkSessions) GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error) {
 	return make([]*storage.ActivityRecord, len(keys)), nil
@@ -249,7 +245,7 @@ func parseTimeParam(v string) (time.Time, bool) {
 // @Param sort query string false "last_activity (default) or last_failure" Enums(last_activity, last_failure)
 // @Param limit query int false "Page size (default 25, max 100)"
 // @Param offset query int false "Page offset"
-// @Success 200 {object} contracts.SuccessResponse{data=contracts.WorkSessionListResponse}
+// @Success 200 {object} contracts.WorkSessionListEnvelope
 // @Failure 400 {object} contracts.ErrorResponse
 // @Router /api/v1/work-sessions [get]
 func (s *Server) handleListWorkSessions(w http.ResponseWriter, r *http.Request) {
@@ -380,7 +376,7 @@ func (s *Server) handleListWorkSessions(w http.ResponseWriter, r *http.Request) 
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
 // @Param id path string true "Work session id"
-// @Success 200 {object} contracts.SuccessResponse{data=contracts.WorkSession}
+// @Success 200 {object} contracts.WorkSessionEnvelope
 // @Failure 404 {object} contracts.ErrorResponse
 // @Router /api/v1/work-sessions/{id} [get]
 func (s *Server) handleGetWorkSession(w http.ResponseWriter, r *http.Request) {
@@ -436,7 +432,7 @@ func activityKeyID(key []byte) string {
 // @Param before query int false "Rows before the position (default 20, max 250)"
 // @Param after query int false "Rows after the position (default 20, max 250)"
 // @Param include_bodies query bool false "Include argument and response bodies"
-// @Success 200 {object} contracts.SuccessResponse{data=contracts.WorkSessionTimelineResponse}
+// @Success 200 {object} contracts.WorkSessionTimelineEnvelope
 // @Failure 400 {object} contracts.ErrorResponse
 // @Failure 404 {object} contracts.ErrorResponse
 // @Router /api/v1/work-sessions/{id}/timeline [get]
@@ -485,30 +481,20 @@ func (s *Server) handleWorkSessionTimeline(w http.ResponseWriter, r *http.Reques
 
 	// Upstream events of the servers the session called, inside the span the
 	// caller sees (FR-023), and only those the caller may read (FR-025).
-	// Their number is bounded by the collapser (120 an hour per server).
+	// They are merged in by the storage walk below, from cursors, so a small
+	// page of a session that spans weeks of reconnect trouble does not load
+	// the event history.
 	spanEnd := now
 	if session.EndedAt != nil {
 		spanEnd = *session.EndedAt
 	}
 	viewer := activityEventViewer(ctx)
-	var events []storage.WorkSessionRowRef
+	var eventServers []string
 	for server := range sum.Servers {
-		if server == "" || !reach.allows(server) {
-			continue
-		}
-		evs, err := c.UpstreamEventRefs(server, session.StartedAt, spanEnd)
-		if err != nil {
-			s.writeError(w, r, http.StatusInternalServerError, "Failed to read upstream events")
-			return
-		}
-		for _, ev := range evs {
-			if ev.Owner != "" && viewer != nil && viewer.UserID != ev.Owner {
-				continue
-			}
-			events = append(events, ev)
+		if server != "" && reach.allows(server) {
+			eventServers = append(eventServers, server)
 		}
 	}
-	events = storage.MergeTimelineRefs(nil, events)
 
 	at := q.Get("at")
 	col, okAt := newTimelineCollector(at, before, after)
@@ -522,18 +508,18 @@ func (s *Server) handleWorkSessionTimeline(w http.ResponseWriter, r *http.Reques
 	// finds the position, so a page of one row of a very long session costs
 	// index keys, not memory.
 	col.add(timelineEntry{kind: contracts.TimelineKindSessionStart, at: session.StartedAt})
-	nextEvent, scanned := 0, 0
-	walkErr := c.WalkWorkSessionRefs(id, func(ref storage.WorkSessionRowRef) bool {
+	scanned := 0
+	walkErr := c.WalkWorkSessionTimeline(id, eventServers, session.StartedAt, spanEnd, func(ref storage.WorkSessionRowRef) bool {
 		scanned++
 		if scanned%4096 == 0 && ctx.Err() != nil {
 			return false
 		}
-		if !reach.allows(ref.Server) {
+		if ref.Event {
+			if ref.Owner != "" && viewer != nil && viewer.UserID != ref.Owner {
+				return true // another user's credential (FR-025)
+			}
+		} else if !reach.allows(ref.Server) {
 			return true // outside reach: never seen, counted or positioned on
-		}
-		for nextEvent < len(events) && events[nextEvent].Timestamp.Before(ref.Timestamp) {
-			col.add(timelineEntry{ref: events[nextEvent]})
-			nextEvent++
 		}
 		col.add(timelineEntry{ref: ref})
 		return true
@@ -544,9 +530,6 @@ func (s *Server) handleWorkSessionTimeline(w http.ResponseWriter, r *http.Reques
 	}
 	if ctx.Err() != nil {
 		return
-	}
-	for ; nextEvent < len(events); nextEvent++ {
-		col.add(timelineEntry{ref: events[nextEvent]})
 	}
 	if session.EndedAt != nil {
 		col.add(timelineEntry{kind: contracts.TimelineKindSessionEnd, at: *session.EndedAt})

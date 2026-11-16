@@ -3971,6 +3971,13 @@ components:
         truncated_start_at:
           type: string
       type: object
+    contracts.WorkSessionEnvelope:
+      properties:
+        data:
+          $ref: '#/components/schemas/contracts.WorkSession'
+        success:
+          type: boolean
+      type: object
     contracts.WorkSessionFailure:
       properties:
         at:
@@ -3993,6 +4000,13 @@ components:
         tool:
           type: string
       type: object
+    contracts.WorkSessionListEnvelope:
+      properties:
+        data:
+          $ref: '#/components/schemas/contracts.WorkSessionListResponse'
+        success:
+          type: boolean
+      type: object
     contracts.WorkSessionListResponse:
       properties:
         limit:
@@ -4006,6 +4020,13 @@ components:
           uniqueItems: false
         total:
           type: integer
+      type: object
+    contracts.WorkSessionTimelineEnvelope:
+      properties:
+        data:
+          $ref: '#/components/schemas/contracts.WorkSessionTimelineResponse'
+        success:
+          type: boolean
       type: object
     contracts.WorkSessionTimelineResponse:
       properties:
@@ -4071,7 +4092,7 @@ components:
     data:
       properties:
         data:
-          $ref: '#/components/schemas/contracts.WorkSessionTimelineResponse'
+          $ref: '#/components/schemas/contracts.InfoResponse'
       type: object
     httpapi.AccessExplanationData:
       properties:
@@ -12035,14 +12056,7 @@ paths:
           content:
             application/json:
               schema:
-                allOf:
-                - $ref: '#/components/schemas/data'
-                properties:
-                  data:
-                    type: object
-                  success:
-                    type: boolean
-                type: object
+                $ref: '#/components/schemas/contracts.WorkSessionListEnvelope'
           description: OK
         "400":
           content:
@@ -12070,14 +12084,7 @@ paths:
           content:
             application/json:
               schema:
-                allOf:
-                - $ref: '#/components/schemas/data'
-                properties:
-                  data:
-                    type: object
-                  success:
-                    type: boolean
-                type: object
+                $ref: '#/components/schemas/contracts.WorkSessionEnvelope'
           description: OK
         "404":
           content:
@@ -12128,14 +12135,7 @@ paths:
           content:
             application/json:
               schema:
-                allOf:
-                - $ref: '#/components/schemas/data'
-                properties:
-                  data:
-                    type: object
-                  success:
-                    type: boolean
-                type: object
+                $ref: '#/components/schemas/contracts.WorkSessionTimelineEnvelope'
           description: OK
         "400":
           content:

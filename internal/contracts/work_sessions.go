@@ -124,3 +124,28 @@ type WorkSessionTimelineResponse struct {
 	HasBefore                bool `json:"has_before"`
 	HasAfter                 bool `json:"has_after"`
 }
+
+// The three types below describe the success envelope of the work-session
+// doors for the OpenAPI document only; the handlers write the same shape
+// through the shared success writer. They exist because the generator keeps
+// one shared schema for every inline `SuccessResponse{data=...}` annotation,
+// so such an annotation would give all of them the payload of the last one.
+
+// WorkSessionListEnvelope is the response of GET /api/v1/work-sessions.
+type WorkSessionListEnvelope struct {
+	Success bool                    `json:"success"`
+	Data    WorkSessionListResponse `json:"data"`
+}
+
+// WorkSessionEnvelope is the response of GET /api/v1/work-sessions/{id}.
+type WorkSessionEnvelope struct {
+	Success bool        `json:"success"`
+	Data    WorkSession `json:"data"`
+}
+
+// WorkSessionTimelineEnvelope is the response of
+// GET /api/v1/work-sessions/{id}/timeline.
+type WorkSessionTimelineEnvelope struct {
+	Success bool                        `json:"success"`
+	Data    WorkSessionTimelineResponse `json:"data"`
+}

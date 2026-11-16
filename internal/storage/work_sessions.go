@@ -736,6 +736,103 @@ func (m *Manager) WalkWorkSessionRefs(workSessionID string, fn func(WorkSessionR
 	})
 }
 
+// WalkWorkSessionTimeline calls fn for each index entry of a session merged
+// with the upstream events of the given servers inside [from, to], in time
+// order, until fn returns false. An event is placed before a session row of
+// the same time only if it is strictly earlier; events of the same time go by
+// activity key. Everything is read with cursors inside one read transaction,
+// so the cost in memory does not grow with the session or the event history,
+// and fn must not open another transaction. A ref's ActivityKey is valid only
+// during the call; copy it to keep it.
+func (m *Manager) WalkWorkSessionTimeline(workSessionID string, servers []string, from, to time.Time, fn func(WorkSessionRowRef) bool) error {
+	return m.db.db.View(func(tx *bbolt.Tx) error {
+		type eventCursor struct {
+			server string
+			prefix []byte
+			c      *bbolt.Cursor
+			ref    WorkSessionRowRef
+			ok     bool
+		}
+		// load moves an event cursor to its next valid entry in the span,
+		// starting at (k, v).
+		load := func(ec *eventCursor, k, v []byte) {
+			ec.ok = false
+			for ; k != nil && bytes.HasPrefix(k, ec.prefix); k, v = ec.c.Next() {
+				ak := k[len(ec.prefix):]
+				ts := activityKeyTime(ak)
+				if len(ak) < 22 || ts.IsZero() || ts.Before(from) {
+					continue // malformed, or before the span
+				}
+				if !to.IsZero() && ts.After(to) {
+					return
+				}
+				ec.ref = WorkSessionRowRef{ActivityKey: ak, Timestamp: ts, Server: ec.server, Event: true, Owner: string(v)}
+				ec.ok = true
+				return
+			}
+		}
+		var cursors []*eventCursor
+		if eb := tx.Bucket([]byte(UpstreamEventsByServerBucket)); eb != nil {
+			for _, server := range servers {
+				if !indexableServerName(server) {
+					continue
+				}
+				ec := &eventCursor{server: server, prefix: workSessionRowPrefix(server), c: eb.Cursor()}
+				k, v := ec.c.Seek(workSessionRowKey(server, activityKey(from, "")))
+				load(ec, k, v)
+				if ec.ok {
+					cursors = append(cursors, ec)
+				}
+			}
+		}
+		// emitEvents calls fn for the events before until (all when zero).
+		emitEvents := func(until time.Time) bool {
+			for {
+				var best *eventCursor
+				for _, ec := range cursors {
+					if !ec.ok {
+						continue
+					}
+					if best == nil || ec.ref.Timestamp.Before(best.ref.Timestamp) ||
+						(ec.ref.Timestamp.Equal(best.ref.Timestamp) && bytes.Compare(ec.ref.ActivityKey, best.ref.ActivityKey) < 0) {
+						best = ec
+					}
+				}
+				if best == nil || (!until.IsZero() && !best.ref.Timestamp.Before(until)) {
+					return true
+				}
+				if !fn(best.ref) {
+					return false
+				}
+				k, v := best.c.Next()
+				load(best, k, v)
+			}
+		}
+
+		if b := tx.Bucket([]byte(WorkSessionRowsBucket)); b != nil {
+			prefix := workSessionRowPrefix(workSessionID)
+			c := b.Cursor()
+			for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+				ak := k[len(prefix):]
+				ts := activityKeyTime(ak)
+				if !emitEvents(ts) {
+					return nil
+				}
+				flags, server := parseIndexValue(v)
+				role := flagsRole(flags)
+				if !fn(WorkSessionRowRef{
+					ActivityKey: ak, Timestamp: ts, Server: server,
+					Counted: role.Counted, Failed: role.Failed, Block: role.Block,
+				}) {
+					return nil
+				}
+			}
+		}
+		emitEvents(time.Time{})
+		return nil
+	})
+}
+
 // UpstreamEventRefs returns the upstream event rows of one server whose time
 // is within [from, to], in time order. A zero `to` means "until now".
 func (m *Manager) UpstreamEventRefs(server string, from, to time.Time) ([]WorkSessionRowRef, error) {
@@ -991,14 +1088,4 @@ func sortRefs(refs []WorkSessionRowRef) {
 		}
 		return bytes.Compare(refs[i].ActivityKey, refs[j].ActivityKey) < 0
 	})
-}
-
-// MergeTimelineRefs merges a session's row refs with upstream event refs into
-// one time-ordered list.
-func MergeTimelineRefs(rows, events []WorkSessionRowRef) []WorkSessionRowRef {
-	out := make([]WorkSessionRowRef, 0, len(rows)+len(events))
-	out = append(out, rows...)
-	out = append(out, events...)
-	sortRefs(out)
-	return out
 }

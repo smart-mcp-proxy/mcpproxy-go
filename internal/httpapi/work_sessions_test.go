@@ -35,11 +35,8 @@ func (c *wsController) ListWorkSessionSummaries() ([]*storage.WorkSessionSummary
 func (c *wsController) GetWorkSessionSummary(id string) (*storage.WorkSessionSummary, error) {
 	return c.store.GetWorkSessionSummary(id)
 }
-func (c *wsController) WalkWorkSessionRefs(id string, fn func(storage.WorkSessionRowRef) bool) error {
-	return c.store.WalkWorkSessionRefs(id, fn)
-}
-func (c *wsController) UpstreamEventRefs(server string, from, to time.Time) ([]storage.WorkSessionRowRef, error) {
-	return c.store.UpstreamEventRefs(server, from, to)
+func (c *wsController) WalkWorkSessionTimeline(id string, servers []string, from, to time.Time, fn func(storage.WorkSessionRowRef) bool) error {
+	return c.store.WalkWorkSessionTimeline(id, servers, from, to, fn)
 }
 func (c *wsController) GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error) {
 	return c.store.GetActivitiesByKeys(keys)
