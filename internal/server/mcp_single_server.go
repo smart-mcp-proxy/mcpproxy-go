@@ -2,7 +2,10 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -11,6 +14,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 )
 
 // Single-server surfaces: /mcp/s/<server>.
@@ -36,6 +40,11 @@ type singleServerSurface struct {
 	name    string
 	server  *mcpserver.MCPServer
 	toolsFP string
+	// routingFP is the routing state (tiers, hashes, schemas, annotations) of
+	// this server's catalog entries at the last registration. The listing can
+	// stay byte-identical while it moves, and the stamp and handler close over
+	// it, so a re-registration is skipped only when BOTH fingerprints match.
+	routingFP string
 }
 
 // SingleServerMCP returns the MCP server for /mcp/s/<name>, creating it on
@@ -95,11 +104,13 @@ func (p *MCPProxyServer) refreshSingleServerSurfacesLocked(cat *directCatalog) {
 func (p *MCPProxyServer) registerSingleServerTools(s *singleServerSurface, cat *directCatalog) {
 	tools := p.renderSingleServerTools(s.name, cat)
 	fp := toolSetFingerprint(tools)
-	if s.toolsFP != "" && fp == s.toolsFP {
+	routingFP := singleServerRoutingFingerprint(s.name, cat)
+	if directSurfaceUnchanged(s.toolsFP, s.routingFP, fp, routingFP) {
 		return
 	}
 	s.server.SetTools(tools...)
 	s.toolsFP = fp
+	s.routingFP = routingFP
 	p.logger.Debug("registered single-server surface tools",
 		zap.String("server", s.name),
 		zap.Int("tool_count", len(tools)))
@@ -109,6 +120,7 @@ func (p *MCPProxyServer) registerSingleServerTools(s *singleServerSurface, cat *
 // their bare names, plus the translated describe_tool.
 func (p *MCPProxyServer) renderSingleServerTools(name string, cat *directCatalog) []mcpserver.ServerTool {
 	var tools []mcpserver.ServerTool
+	upstreamDescribe := false
 	if cat != nil {
 		deferred := cat.Mode() == config.DirectToolResponseModeDeferred
 		for _, displayName := range cat.DisplayNames() {
@@ -126,16 +138,53 @@ func (p *MCPProxyServer) renderSingleServerTools(name string, cat *directCatalog
 			// The same identity stamp /mcp/all registers, so the shared filter
 			// chain authorizes this tool exactly as it would the prefixed one.
 			mcpTool = stampDirectTool(mcpTool, entry)
+			// The handler words its refusals and invalid_params results with
+			// entry.DisplayName; on this surface that is the bare name the
+			// caller used, not "<server>__<tool>". The stamp above keeps the
+			// original entry's identity; only the handler gets the copy.
+			bare := *entry
+			bare.DisplayName = entry.ToolName
 			tools = append(tools, mcpserver.ServerTool{
 				Tool:    mcpTool,
-				Handler: p.makeDirectModeHandler(entry),
+				Handler: p.makeDirectModeHandler(&bare),
 			})
+			if entry.ToolName == singleServerDescribeToolName {
+				upstreamDescribe = true
+			}
 		}
+	}
+	if upstreamDescribe {
+		// The upstream's own tool named describe_tool stands in for the
+		// built-in: the surface mirrors the upstream, so its tool wins.
+		return tools
 	}
 	return append(tools, mcpserver.ServerTool{
 		Tool:    singleServerDescribeTool(),
 		Handler: p.singleServerDescribeHandler(name),
 	})
+}
+
+const singleServerDescribeToolName = "describe_tool"
+
+// singleServerRoutingFingerprint hashes everything the registered stamps and
+// handlers of upstream `name` close over that the listing does not show: the
+// tier, hash, stored schema and annotations of each of its catalog entries.
+func singleServerRoutingFingerprint(name string, cat *directCatalog) string {
+	if cat == nil {
+		return "nil-catalog"
+	}
+	sum := sha256.New()
+	fmt.Fprintf(sum, "mode:%s\n", cat.Mode())
+	for _, displayName := range cat.DisplayNames() {
+		e, ok := cat.Lookup(displayName)
+		if !ok || e.ServerName != name || e.ToolName == "" {
+			continue
+		}
+		ann, _ := json.Marshal(e.Annotations)
+		fmt.Fprintf(sum, "entry:%s\x00%s\x00%s\x00%s\x00%s\x00%s\n",
+			e.DisplayName, e.ToolName, e.Hash, e.RequiredPermission, e.ParamsJSON, ann)
+	}
+	return hex.EncodeToString(sum.Sum(nil))
 }
 
 // singleServerNameFor reports whether srv is a single-server surface and, if
@@ -209,7 +258,44 @@ func (p *MCPProxyServer) upstreamInstructions(name string) string {
 	if info == nil {
 		return ""
 	}
-	return info.Instructions
+	return p.screenUpstreamInstructions(name, info.Instructions)
+}
+
+// maxUpstreamInstructionsBytes caps forwarded upstream instructions. Real
+// server instructions are a few paragraphs; a larger blob is withheld.
+const maxUpstreamInstructionsBytes = 8 * 1024
+
+// screenUpstreamInstructions applies to upstream instructions the same
+// in-process detect scan a changed tool definition gets in scan mode: text that
+// is oversized, flagged, or that the scan cannot fully cover is withheld.
+// Instructions have no approval hash, so they are screened on every use rather
+// than approved once; a change that makes them hostile stops being forwarded
+// the next time a client initializes.
+func (p *MCPProxyServer) screenUpstreamInstructions(name, text string) string {
+	if text == "" {
+		return ""
+	}
+	if len(text) > maxUpstreamInstructionsBytes {
+		p.logger.Warn("withholding upstream instructions: too large",
+			zap.String("server", name), zap.Int("bytes", len(text)))
+		return ""
+	}
+	verdict, findings, coverageOK := scanner.ScanToolMetadataVerdict(name, []*config.ToolMetadata{{
+		ServerName:  name,
+		Name:        "initialize_instructions",
+		Description: text,
+	}}, nil)
+	if !coverageOK || verdict != "clean" {
+		var signals []string
+		for _, f := range findings {
+			signals = append(signals, f.Signals...)
+		}
+		p.logger.Warn("withholding upstream instructions: scan was not clean",
+			zap.String("server", name), zap.String("verdict", verdict),
+			zap.Bool("coverage_ok", coverageOK), zap.Strings("tpa_signals", signals))
+		return ""
+	}
+	return text
 }
 
 // singleServerDescribeTool is describe_tool with its tool_ids description
@@ -245,7 +331,11 @@ func (p *MCPProxyServer) singleServerDescribeHandler(name string) mcpserver.Tool
 				qualified := make([]any, len(ids))
 				for i, id := range ids {
 					s, isString := id.(string)
-					if isString && !strings.Contains(s, ":") && !strings.HasPrefix(s, prefix) {
+					// Only this server's own qualifiers pass through. Anything else,
+					// including another server's "<other>:<tool>", is qualified as
+					// this server's tool and so resolves to not-found rather than
+					// to another server's definition.
+					if isString && !strings.HasPrefix(s, name+":") && !strings.HasPrefix(s, prefix) {
 						s = name + ":" + s
 					}
 					if isString {
@@ -279,36 +369,61 @@ func (p *MCPProxyServer) singleServerDescribeHandler(name string) mcpserver.Tool
 	}
 }
 
-// stripServerPrefixInJSON removes the "<server>__" prefix and "<server>:"
-// qualifier from every string value in a JSON document that starts with one,
-// and "[server] " from descriptions. Text that is not JSON is returned as is.
+// stripServerPrefixInJSON removes this server's qualifier from the identity
+// fields of a describe_tool response: "<server>__" / "<server>:" from the
+// "name" and "id" values and "did_you_mean" entries, and "[server] " from a
+// "description". Schemas (inputSchema, output_schema) and annotations are
+// never touched, so an enum or default that happens to start with the server
+// name keeps its value. Text that is not JSON is returned as is.
 func stripServerPrefixInJSON(text, server string) string {
 	var doc any
 	if err := json.Unmarshal([]byte(text), &doc); err != nil {
 		return text
 	}
 	underscore, colon, bracket := server+"__", server+":", "["+server+"] "
+	stripID := func(s string) string {
+		switch {
+		case strings.HasPrefix(s, underscore):
+			return strings.TrimPrefix(s, underscore)
+		case strings.HasPrefix(s, colon):
+			return strings.TrimPrefix(s, colon)
+		}
+		return s
+	}
 	var walk func(v any) any
 	walk = func(v any) any {
 		switch t := v.(type) {
 		case map[string]any:
 			for k, val := range t {
+				switch k {
+				case "inputSchema", "output_schema", "annotations":
+					continue
+				case "name", "id":
+					if str, ok := val.(string); ok {
+						t[k] = stripID(str)
+						continue
+					}
+				case "description":
+					if str, ok := val.(string); ok {
+						t[k] = strings.TrimPrefix(str, bracket)
+						continue
+					}
+				case "did_you_mean":
+					if list, ok := val.([]any); ok {
+						for i, item := range list {
+							if str, ok := item.(string); ok {
+								list[i] = stripID(str)
+							}
+						}
+						continue
+					}
+				}
 				t[k] = walk(val)
 			}
 			return t
 		case []any:
 			for i, val := range t {
 				t[i] = walk(val)
-			}
-			return t
-		case string:
-			switch {
-			case strings.HasPrefix(t, underscore):
-				return strings.TrimPrefix(t, underscore)
-			case strings.HasPrefix(t, colon):
-				return strings.TrimPrefix(t, colon)
-			case strings.HasPrefix(t, bracket):
-				return strings.TrimPrefix(t, bracket)
 			}
 			return t
 		default:
