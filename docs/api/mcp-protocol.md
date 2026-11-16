@@ -272,11 +272,14 @@ re-initialize. Two cases do not get a stream:
   extra held connection, which matters for scale-to-zero hosting. Its tool
   changes are picked up by the discovery poll (`tool_discovery_interval`).
 - An upstream that refuses the `GET` (`405`, `400`, `406`, `401`, `403` or
-  another 4xx, or an answer that is not an event stream) also falls back to the
-  discovery poll. MCPProxy does not retry the `GET` and logs one INFO line.
+  another 4xx, a redirect to another origin, or an answer that is not an event
+  stream) also falls back to the discovery poll. MCPProxy does not retry the
+  `GET` and logs one INFO line. A cross-origin redirect is never followed, so
+  the connection's static headers are not sent to another host.
 
 Network errors, `429`, `408` and `5xx` answers are retried with exponential
-backoff (1 s up to 2 minutes). A `404` means the upstream no longer knows the
+backoff (1 s up to 2 minutes, with ±25% jitter; `Retry-After` is honoured up
+to the cap). A `404` means the upstream no longer knows the
 session, so the stream waits until the session is re-initialized or the server
 reconnects. SSE upstreams (`protocol: sse`) always hold their event stream, so
 they need no extra connection.
