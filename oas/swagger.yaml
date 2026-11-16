@@ -8011,8 +8011,8 @@ paths:
         Creates a backup of the existing config before modifying.
         Also revokes the client's credential (it stops authenticating at once); the result names it in credential_revoked, or reports credential_revoke_error when the revoke failed after the entry was removed. Undoing a disconnect does not restore the credential: a later connect mints a new one.
       parameters:
-      - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode, zcode)
+      - description: Client ID (claude-code, claude-desktop, copilot, cursor, windsurf,
+          vscode, codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
@@ -8073,8 +8073,8 @@ paths:
         key), none, revoked (a rotated-away or revoked credential) or expired. The
         credential value is classified and never echoed.
       parameters:
-      - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode, zcode)
+      - description: Client ID (claude-code, claude-desktop, copilot, cursor, windsurf,
+          vscode, codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
@@ -8133,8 +8133,8 @@ paths:
         (nothing minted or written); a token named client-<id> held by a regular agent
         token is refused with 409 conflicting_token.
       parameters:
-      - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode, zcode)
+      - description: Client ID (claude-code, claude-desktop, copilot, cursor, windsurf,
+          vscode, codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
@@ -8219,8 +8219,8 @@ paths:
         refuse regardless of intent, e.g. a non-create-capable client with no config —
         treat its presence as "Connect unavailable").
       parameters:
-      - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode, zcode)
+      - description: Client ID (claude-code, claude-desktop, copilot, cursor, windsurf,
+          vscode, codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
@@ -8307,8 +8307,8 @@ paths:
         client credential the connect minted or rotated is revoked unless the restored
         config still holds it, and the result names it in credential_revoked.
       parameters:
-      - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode, zcode)
+      - description: Client ID (claude-code, claude-desktop, copilot, cursor, windsurf,
+          vscode, codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
