@@ -543,3 +543,39 @@ func TestWorkSessions_HiddenActivityDoesNotChangeTheProject(t *testing.T) {
 	admin := scopeGet(t, f.srv, "/api/v1/work-sessions/ws-proj", scopeAdminAPIKey)
 	assert.Contains(t, admin.Body.String(), "hidden-project", "an administrator reads the session's latest project")
 }
+
+// Review round 5 (FR-046): a server-edition user reaches the three doors and
+// reads their own sessions; everything else under the prefix stays refused,
+// and another user's session reads as not found.
+func TestWorkSessions_UserPrincipal(t *testing.T) {
+	for path, want := range map[string]bool{
+		"/api/v1/work-sessions":                 true,
+		"/api/v1/work-sessions/ws-1":            true,
+		"/api/v1/work-sessions/ws-1/timeline":   true,
+		"/api/v1/work-sessions/":                false,
+		"/api/v1/work-sessions/ws-1/other":      false,
+		"/api/v1/work-sessions/ws-1/timeline/x": false,
+		"/api/v1/work-sessions-export":          false,
+	} {
+		assert.Equal(t, want, tenantSessionAllowlist(http.MethodGet, path), path)
+		assert.False(t, tenantSessionAllowlist(http.MethodPost, path), "POST "+path)
+	}
+
+	user := func(id string) workSessionReach {
+		return newWorkSessionReach(auth.WithAuthContext(context.Background(), &auth.AuthContext{
+			Type: auth.AuthTypeUser, UserID: id, AllowedServers: []string{"alpha"},
+		}))
+	}
+	sum := &storage.WorkSessionSummary{
+		ID: "ws-1", UserID: "u-alice",
+		Servers: map[string]*storage.WorkSessionPartition{"alpha": {Attempts: 2, Failures: 1, LastActivityAt: time.Now().UTC()}},
+	}
+	ws, ok := user("u-alice").project(sum, time.Now().UTC())
+	require.True(t, ok)
+	assert.Equal(t, 2, ws.Attempts)
+	_, ok = user("u-bob").project(sum, time.Now().UTC())
+	assert.False(t, ok, "another user's session is not found")
+	sum.Ownerless = true
+	_, ok = user("u-alice").project(sum, time.Now().UTC())
+	assert.False(t, ok)
+}

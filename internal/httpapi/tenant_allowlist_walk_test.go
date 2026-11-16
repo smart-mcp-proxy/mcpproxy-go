@@ -133,6 +133,11 @@ var tenantAllowlist = []tenantAllowlistedRoute{
 	{http.MethodPost, "/api/v1/preflight"},
 	{http.MethodGet, "/api/v1/profiles"},
 	{http.MethodGet, "/api/v1/profiles/active"},
+	// Spec 124 FR-046: a user reads their own work sessions; the doors
+	// themselves answer 404 for a session that is not theirs.
+	{http.MethodGet, "/api/v1/work-sessions"},
+	{http.MethodGet, "/api/v1/work-sessions/{id}"},
+	{http.MethodGet, "/api/v1/work-sessions/{id}/timeline"},
 }
 
 // tenantNamedMustRefuse is the explicit "must return the fixed 403" list from

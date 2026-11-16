@@ -41,6 +41,27 @@ type Transition struct {
 	FoldedLost     int
 	FoldedRestored int
 	FoldedLogin    int
+	// FoldedLoginLast says that, of the hidden recoveries and login
+	// requirements, a login requirement came last: no recovery followed it,
+	// so it is still open after everything the record hid.
+	FoldedLoginLast bool
+}
+
+// lastLoginOrRecovery reports which came last among the record's hidden
+// recoveries and login requirements and its own edge: 'L', 'R' or 0.
+func (t Transition) lastLoginOrRecovery() byte {
+	_, restored, login := t.edges()
+	switch {
+	case login > 0:
+		return 'L'
+	case restored > 0:
+		return 'R'
+	case t.FoldedLogin > 0 && (t.FoldedLoginLast || t.FoldedRestored == 0):
+		return 'L'
+	case t.FoldedRestored > 0:
+		return 'R'
+	}
+	return 0
 }
 
 // edges reports which of the three recorded kinds of change the record shows
@@ -71,6 +92,11 @@ func foldPair(a, b Transition) (Transition, bool) {
 	f.FoldedLost = a.FoldedLost + b.FoldedLost + hl
 	f.FoldedRestored = a.FoldedRestored + b.FoldedRestored + hr
 	f.FoldedLogin = a.FoldedLogin + b.FoldedLogin + hg
+	last := b.lastLoginOrRecovery()
+	if last == 0 {
+		last = a.lastLoginOrRecovery()
+	}
+	f.FoldedLoginLast = last == 'L' && f.FoldedLogin > 0
 	return f, hl+hr+hg > 0
 }
 

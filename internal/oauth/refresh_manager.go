@@ -515,19 +515,19 @@ func (m *RefreshManager) installScheduleForSavedToken(serverName string, expires
 	// Schedule refresh for new token
 	replaced := m.schedules[serverName]
 	m.scheduleRefreshLocked(serverName, expiresAt, binding)
-	if replaced != nil && m.schedules[serverName] == replaced {
+	if m.schedules[serverName] == replaced {
 		// Nothing was scheduled for the new token (no expiry, or too close
-		// to it). The server keeps a schedule record, as before, but it is
-		// now the record of the grant just saved: a new identity, so a
-		// failure of the replaced grant that is still in flight is no
-		// longer "current" and is not reported after this save (Spec 124
-		// D5), and the new grant's expiry and binding with the failure
-		// state cleared, so a later terminal failure of the new grant is
-		// matched and reported.
+		// to it). The server still gets a record, and it is the record of
+		// the grant just saved: its expiry and binding, no timer, no failure
+		// state. A new identity means a failure of the replaced grant that
+		// is still in flight is no longer "current" and is not reported
+		// after this save (Spec 124 D5); having a record at all means a
+		// later terminal failure of the new grant is matched and reported,
+		// also when this is the server's first save.
 		m.schedules[serverName] = &RefreshSchedule{
 			ServerName:   serverName,
 			ExpiresAt:    expiresAt,
-			MaxBackoff:   replaced.MaxBackoff,
+			MaxBackoff:   MaxRetryBackoff,
 			RefreshState: RefreshStateIdle,
 			Binding:      binding,
 		}

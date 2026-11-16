@@ -67,6 +67,17 @@ type UpstreamEvent struct {
 	// its token saves (see NoteUpstreamTokenSaved). Zero for events derived
 	// from the connection state.
 	Seq uint64
+	// Count is how many occurrences the event stands for; zero means one.
+	// Only the replay of a folded transition sets it.
+	Count int
+}
+
+// occurrences is the event's count, at least one.
+func (e UpstreamEvent) occurrences() int {
+	if e.Count > 1 {
+		return e.Count
+	}
+	return 1
 }
 
 // fixedUpstreamMessages are the row texts for events with no diagnostics code.
@@ -145,58 +156,46 @@ func transitionEvent(server, transport string, t types.Transition) (UpstreamEven
 	return UpstreamEvent{}, false
 }
 
-// maxFoldedEventsPerKind bounds the rows' counts replayed for one folded
-// transition; the collapser merges them into one row per minute anyway.
-const maxFoldedEventsPerKind = 64
-
 // transitionEvents is transitionEvent plus the changes a folded transition
-// hid (the observer had stalled and the queue was full): each hidden loss,
-// recovery and login requirement is replayed as an event at the record's
-// time, in the order they must have happened, before the change the record
-// itself shows. Hidden events carry no error code: the error of each was
-// folded away with it.
+// hid (the observer had stalled and the queue was full). The hidden losses,
+// recoveries and login requirements are replayed as one event per kind, each
+// carrying how many there were, at the record's time and before the change
+// the record itself shows. Hidden events carry no error code: the error of
+// each was folded away with it.
+//
+// Their order is the one that leaves the right state behind. Losses and
+// recoveries alternated, so which of the two came last follows from where
+// the record starts and how many there were. A login requirement is replayed
+// last when no recovery followed it (it is still open), and first otherwise,
+// so that the recovery closes it.
 func transitionEvents(server, transport string, t types.Transition) []UpstreamEvent {
 	var out []UpstreamEvent
 	at := t.At.UTC()
-	add := func(kind UpstreamEventKind, code string) {
-		out = append(out, UpstreamEvent{Server: server, Kind: kind, At: at, Code: code})
-	}
-	lost, restored, login := min(t.FoldedLost, maxFoldedEventsPerKind), min(t.FoldedRestored, maxFoldedEventsPerKind), min(t.FoldedLogin, maxFoldedEventsPerKind)
-	// Losses and recoveries alternate. A record that starts in Ready hid a
-	// loss first; any other hid a recovery first. Hidden login requirements
-	// are replayed before the first recovery: where exactly they happened is
-	// not known, and a recovery must be able to close them, so that a record
-	// that ends in Ready never leaves a login requirement open.
-	lossNext := t.From == types.StateReady
-	if lossNext && lost > 0 {
-		add(UpstreamConnectionLost, "")
-		lost--
-		lossNext = false
-	}
-	// A record that ends waiting for a login keeps one hidden login
-	// requirement for the end: it is the state the server is left in, and no
-	// recovery replayed before it may close it.
-	loginAtEnd := 0
-	if t.To == types.StatePendingAuth && login > 0 {
-		loginAtEnd = 1
-		login--
-	}
-	for ; login > 0; login-- {
-		add(UpstreamLoginRequired, string(diagnostics.OAuthLoginRequired))
-	}
-	for lost > 0 || restored > 0 {
-		switch {
-		case (lossNext && lost > 0) || restored == 0:
-			add(UpstreamConnectionLost, "")
-			lost--
-		default:
-			add(UpstreamConnectionRestored, "")
-			restored--
+	add := func(kind UpstreamEventKind, code string, count int) {
+		if count > 0 {
+			out = append(out, UpstreamEvent{Server: server, Kind: kind, At: at, Code: code, Count: count})
 		}
-		lossNext = !lossNext
 	}
-	if loginAtEnd > 0 {
-		add(UpstreamLoginRequired, string(diagnostics.OAuthLoginRequired))
+	lost, restored, login := t.FoldedLost, t.FoldedRestored, t.FoldedLogin
+	loginLast := login > 0 && (t.FoldedLoginLast || restored == 0)
+	// Starting in Ready the hidden sequence is loss, recovery, loss, ...;
+	// otherwise recovery, loss, recovery, ...
+	recoveryLast := restored > lost
+	if t.From == types.StateReady {
+		recoveryLast = restored >= lost
+	}
+	if !loginLast {
+		add(UpstreamLoginRequired, string(diagnostics.OAuthLoginRequired), login)
+	}
+	if recoveryLast {
+		add(UpstreamConnectionLost, "", lost)
+		add(UpstreamConnectionRestored, "", restored)
+	} else {
+		add(UpstreamConnectionRestored, "", restored)
+		add(UpstreamConnectionLost, "", lost)
+	}
+	if loginLast {
+		add(UpstreamLoginRequired, string(diagnostics.OAuthLoginRequired), login)
 	}
 	if ev, ok := transitionEvent(server, transport, t); ok {
 		out = append(out, ev)
@@ -305,7 +304,7 @@ func (c *upstreamEventCollapser) place(e UpstreamEvent) (row *upstreamRow, isNew
 			}
 			if open := c.loginOpen[owner]; open != nil {
 				// The same condition, seen again or from the other source.
-				open.count++
+				open.count += e.occurrences()
 				if e.At.After(open.lastAt) {
 					open.lastAt = e.At
 				}
@@ -352,7 +351,7 @@ func (c *upstreamEventCollapser) rowFor(key upstreamRowKey, e UpstreamEvent) (*u
 	last := c.latest[key]
 	if last != nil && !e.At.Before(last.firstAt) &&
 		(e.At.Sub(last.firstAt) < upstreamEventCollapseWindow || used >= upstreamMergeAt) {
-		last.count++
+		last.count += e.occurrences()
 		if e.At.After(last.lastAt) {
 			last.lastAt = e.At
 		}
@@ -373,7 +372,7 @@ func (c *upstreamEventCollapser) rowFor(key upstreamRowKey, e UpstreamEvent) (*u
 		c.suppressed++
 		return nil, false
 	}
-	row := &upstreamRow{id: ulid.Make().String(), firstAt: e.At, lastAt: e.At, count: 1, code: e.Code}
+	row := &upstreamRow{id: ulid.Make().String(), firstAt: e.At, lastAt: e.At, count: e.occurrences(), code: e.Code}
 	c.latest[key] = row
 	hours[hour] = used + 1
 	return row, true

@@ -378,7 +378,7 @@ func TestTransitionEvents_FoldedLoginIsClosedByTheRecovery(t *testing.T) {
 		From: types.StateReady, To: types.StateReady, At: evBase, Folded: 2, FoldedLost: 1, FoldedRestored: 1, FoldedLogin: 1,
 	})
 	require.Len(t, evs, 3)
-	assert.Equal(t, []UpstreamEventKind{UpstreamConnectionLost, UpstreamLoginRequired, UpstreamConnectionRestored},
+	assert.Equal(t, []UpstreamEventKind{UpstreamLoginRequired, UpstreamConnectionLost, UpstreamConnectionRestored},
 		[]UpstreamEventKind{evs[0].Kind, evs[1].Kind, evs[2].Kind})
 	for _, ev := range evs {
 		c.place(ev)
@@ -490,10 +490,48 @@ func TestTransitionEvents_FoldedRecordEndingInPendingAuthKeepsTheLoginOpen(t *te
 	c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(-time.Hour), Code: string(diagnostics.OAuthLoginRequired)})
 	evs := transitionEvents("srv", "http", types.Transition{
 		From: types.StatePendingAuth, To: types.StatePendingAuth, At: evBase,
-		Folded: 2, FoldedLost: 1, FoldedRestored: 1, FoldedLogin: 1,
+		Folded: 2, FoldedLost: 1, FoldedRestored: 1, FoldedLogin: 1, FoldedLoginLast: true,
 	})
 	require.NotEmpty(t, evs)
 	assert.Equal(t, UpstreamLoginRequired, evs[len(evs)-1].Kind, "the login requirement is replayed last")
+	for _, ev := range evs {
+		c.place(ev)
+	}
+	assert.Len(t, c.loginOpen, 1)
+	assert.True(t, c.down["srv"])
+}
+
+// Review round 5: hidden counts are carried as weights, not clamped, and a
+// login requirement that no recovery followed stays open when the record
+// ends in another state.
+func TestTransitionEvents_WeightsAndTheLastLogin(t *testing.T) {
+	svc, store := eventService(t)
+	svc.RecordUpstreamEvent(UpstreamEvent{Server: "srv", Kind: UpstreamConnectionLost, At: evBase.Add(-time.Hour)})
+	for _, ev := range transitionEvents("srv", "http", types.Transition{
+		From: types.StateError, To: types.StateError, At: evBase, Folded: 200, FoldedLost: 100, FoldedRestored: 100,
+	}) {
+		svc.RecordUpstreamEvent(ev)
+	}
+	total := map[string]int{}
+	for _, r := range upstreamEventRows(t, store, "srv") {
+		kind, _ := r.Metadata[UpstreamEventMetaKind].(string)
+		switch n := r.Metadata[UpstreamEventMetaCount].(type) {
+		case int:
+			total[kind] += n
+		case float64:
+			total[kind] += int(n)
+		}
+	}
+	assert.Equal(t, 101, total[string(UpstreamConnectionLost)], "the earlier loss and all one hundred hidden ones")
+	assert.Equal(t, 100, total[string(UpstreamConnectionRestored)])
+
+	// PendingAuth, Connecting, Ready, Error, PendingAuth, Connecting, Error
+	// folded into one record: the second login requirement is still open.
+	c := newUpstreamEventCollapser()
+	evs := transitionEvents("srv", "http", types.Transition{
+		From: types.StatePendingAuth, To: types.StateError, At: evBase,
+		Folded: 5, FoldedLost: 1, FoldedRestored: 1, FoldedLogin: 1, FoldedLoginLast: true,
+	})
 	for _, ev := range evs {
 		c.place(ev)
 	}

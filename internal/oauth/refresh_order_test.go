@@ -168,3 +168,26 @@ func TestRefreshManager_UnschedulableSaveLeavesAFreshRecord(t *testing.T) {
 	_, failures := emitter.snapshot()
 	assert.Len(t, failures, 1)
 }
+
+// Review round 5: the first save of a server that installs no schedule still
+// leaves a record, so a terminal failure of that grant is matched and
+// reported.
+func TestRefreshManager_FirstUnschedulableSaveLeavesARecord(t *testing.T) {
+	emitter := &orderEmitter{}
+	manager := NewRefreshManager(newMockTokenStore(), nil, nil, zaptest.NewLogger(t))
+	manager.SetEventEmitter(emitter)
+	require.NoError(t, manager.Start(context.Background()))
+	defer manager.Stop()
+
+	manager.OnTokenSaved("srv", time.Time{}) // no expiry
+	manager.mu.RLock()
+	cur := manager.schedules["srv"]
+	manager.mu.RUnlock()
+	require.NotNil(t, cur)
+	assert.Equal(t, RefreshStateIdle, cur.RefreshState)
+	assert.Nil(t, cur.Timer)
+
+	manager.failScheduleAndNotify("srv", cur, "invalid_grant", true, errors.New("invalid_grant"))
+	_, failures := emitter.snapshot()
+	assert.Len(t, failures, 1)
+}

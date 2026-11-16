@@ -257,3 +257,28 @@ func TestTransitionCapture_FoldingCountsAHiddenLoginRequirement(t *testing.T) {
 	assert.True(t, hides)
 	assert.Equal(t, 1, f.FoldedLogin)
 }
+
+// Review round 5: folding remembers whether a login requirement came after
+// the last recovery it hid.
+func TestTransitionCapture_FoldingRemembersTheLastLogin(t *testing.T) {
+	seq := []ConnectionState{StatePendingAuth, StateConnecting, StateReady, StateError, StatePendingAuth, StateConnecting, StateError}
+	f := Transition{From: seq[0], To: seq[1]}
+	for i := 2; i < len(seq); i++ {
+		f, _ = foldPair(f, Transition{From: seq[i-1], To: seq[i]})
+	}
+	assert.Equal(t, StatePendingAuth, f.From)
+	assert.Equal(t, StateError, f.To)
+	assert.Equal(t, 1, f.FoldedLost)
+	assert.Equal(t, 1, f.FoldedRestored)
+	assert.Equal(t, 1, f.FoldedLogin)
+	assert.True(t, f.FoldedLoginLast, "the login requirement came after the recovery")
+
+	// The other way round: a login requirement, then a recovery.
+	seq = []ConnectionState{StateError, StatePendingAuth, StateConnecting, StateReady, StateError}
+	f = Transition{From: seq[0], To: seq[1]}
+	for i := 2; i < len(seq); i++ {
+		f, _ = foldPair(f, Transition{From: seq[i-1], To: seq[i]})
+	}
+	assert.Equal(t, 1, f.FoldedLogin)
+	assert.False(t, f.FoldedLoginLast, "a recovery followed it")
+}
