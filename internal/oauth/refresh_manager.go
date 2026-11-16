@@ -852,10 +852,13 @@ func (m *RefreshManager) handleRefreshFailureFor(serverName string, err error, m
 		m.mu.Unlock()
 		return
 	}
-	// A terminal failure is reported once: the coordinator hook (reactive
-	// flight) and a proactive attempt answered by the coordinator's latch
-	// carry the same outcome.
-	if cls.IsTerminal() && schedule.RefreshState == RefreshStateFailed {
+	// A schedule that was given up is failed once: the coordinator hook
+	// (reactive flight) and a proactive attempt answered by the coordinator's
+	// latch carry the same terminal outcome, and a transient failure of an
+	// attempt that was still running when the schedule was given up must not
+	// put it back to retrying or overwrite the error that says what to do.
+	// Only a new token save starts over.
+	if schedule.RefreshState == RefreshStateFailed {
 		m.mu.Unlock()
 		return
 	}
@@ -945,6 +948,12 @@ func (m *RefreshManager) failScheduleIfCurrentSeq(serverName string, expected *R
 	defer m.mu.Unlock()
 	schedule := m.schedules[serverName]
 	if schedule == nil || schedule != expected {
+		return 0, 0, time.Time{}, time.Time{}, false
+	}
+	if schedule.RefreshState == RefreshStateFailed {
+		// Already given up, and its one notification is out. A second
+		// number for the same failure would look to the receiver like a
+		// failure of a new grant.
 		return 0, 0, time.Time{}, time.Time{}, false
 	}
 	schedule.RefreshState = RefreshStateFailed

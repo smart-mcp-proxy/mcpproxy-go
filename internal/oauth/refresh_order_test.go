@@ -197,3 +197,32 @@ func TestRefreshManager_FirstUnschedulableSaveLeavesARecord(t *testing.T) {
 	_, failures := emitter.snapshot()
 	assert.Len(t, failures, 1)
 }
+
+// Review round 13: a schedule is failed once. A second failure of the same
+// schedule (a proactive give-up that overlaps a reactive terminal rejection)
+// takes no number, sends no notification and keeps the first error; and a
+// transient failure does not put a failed schedule back to retrying.
+func TestRefreshManager_AScheduleFailsOnce(t *testing.T) {
+	emitter := &orderEmitter{}
+	manager := NewRefreshManager(newMockTokenStore(), nil, nil, zaptest.NewLogger(t))
+	manager.SetEventEmitter(emitter)
+	require.NoError(t, manager.Start(context.Background()))
+	defer manager.Stop()
+
+	manager.OnTokenSaved("srv", time.Now().Add(time.Hour))
+	manager.mu.RLock()
+	sched := manager.schedules["srv"]
+	manager.mu.RUnlock()
+
+	manager.failScheduleAndNotify("srv", sched, "invalid_grant: sign in again", true, errors.New("invalid_grant"))
+	manager.failScheduleAndNotify("srv", sched, "retries exhausted", true, errors.New("timeout"))
+	_, failures := emitter.snapshot()
+	require.Len(t, failures, 1, "one notification for one given-up schedule")
+	assert.Equal(t, 1, emitter.GetFailedEvents())
+
+	manager.handleRefreshFailureFor("srv", errors.New("connection reset by peer"), nil)
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	assert.Equal(t, RefreshStateFailed, sched.RefreshState)
+	assert.Equal(t, "invalid_grant: sign in again", sched.LastError, "the actionable error is kept")
+}
