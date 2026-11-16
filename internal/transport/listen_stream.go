@@ -106,7 +106,8 @@ const (
 	defaultListenMinBackoff   = time.Second
 	defaultListenMaxBackoff   = 2 * time.Minute
 	defaultListenHealthyAfter = 30 * time.Second
-	// listenMaxEventBytes bounds one SSE line; a notification is tiny.
+	// listenMaxEventBytes bounds one SSE event (and so one line); a
+	// notification is tiny. A larger event is dropped whole.
 	listenMaxEventBytes = 1 << 20
 	// listenResponseTimeout bounds the POST answering a request on the stream.
 	listenResponseTimeout = 10 * time.Second
@@ -147,8 +148,20 @@ func (cfg *HTTPTransportConfig) listenHTTPClient(logger *zap.Logger) (client *ht
 	noRecorder.RetryAfter = nil
 	return &http.Client{
 		Transport:     noRecorder.upstreamRoundTripper(base, logger),
-		CheckRedirect: forwardedRedirectFilter,
+		CheckRedirect: listenRedirectPolicy,
 	}, closeIdle
+}
+
+// listenRedirectPolicy follows a same-origin redirect only. Go strips just
+// Authorization and Cookie on a cross-origin hop, so the transport's static
+// headers (an API key, say) would reach the other origin; the GET stream is
+// optional, so a cross-origin redirect ends it (the 3xx reads as a refusal)
+// and polling covers the server.
+func listenRedirectPolicy(req *http.Request, via []*http.Request) error {
+	if len(via) > 0 && !sameOrigin(req, via[0]) {
+		return http.ErrUseLastResponse
+	}
+	return forwardedRedirectFilter(req, via)
 }
 
 func defaultHTTPTransport() *http.Transport {
@@ -261,7 +274,10 @@ func (s *ListenStream) attempt(ctx context.Context) (attemptOutcome, ListenEnd, 
 	if err != nil {
 		return attemptFinal, ListenEnd{Reason: ListenUnsupported, Detail: "invalid upstream URL"}, 0
 	}
-	if err := s.setHeaders(ctx, req.Header, "text/event-stream"); err != nil {
+	// The session this stream belongs to: a request received on it is
+	// answered on the same session even if the transport re-initializes.
+	sid := s.sessionID()
+	if err := s.setHeaders(ctx, req.Header, "text/event-stream", sid); err != nil {
 		if ctx.Err() != nil {
 			return attemptFinal, ListenEnd{Reason: ListenStopped}, 0
 		}
@@ -281,10 +297,9 @@ func (s *ListenStream) attempt(ctx context.Context) (attemptOutcome, ListenEnd, 
 		s.logger.Debug("Upstream GET stream request failed, retrying", zap.String("error", scrubErr(err)))
 		return attemptTransient, ListenEnd{}, 0
 	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		resp.Body.Close()
-	}()
+	// Close without draining: a refusal whose body never finishes must not
+	// hold the listener, and the connection is not reused (closeIdle).
+	defer resp.Body.Close()
 
 	switch code := resp.StatusCode; {
 	case code == http.StatusOK:
@@ -305,7 +320,7 @@ func (s *ListenStream) attempt(ctx context.Context) (attemptOutcome, ListenEnd, 
 	}
 
 	s.logger.Debug("Upstream GET stream open")
-	s.read(ctx, resp.Body)
+	s.read(ctx, resp.Body, sid)
 	if ctx.Err() != nil {
 		return attemptFinal, ListenEnd{Reason: ListenStopped}, 0
 	}
@@ -317,9 +332,9 @@ func (s *ListenStream) attempt(ctx context.Context) (attemptOutcome, ListenEnd, 
 
 // setHeaders applies the transport's session, protocol, static and OAuth
 // headers, in the order mcp-go's sendHTTP applies them.
-func (s *ListenStream) setHeaders(ctx context.Context, h http.Header, accept string) error {
+func (s *ListenStream) setHeaders(ctx context.Context, h http.Header, accept, sid string) error {
 	h.Set("Accept", accept)
-	if sid := s.sessionID(); sid != "" {
+	if sid != "" {
 		h.Set(mcptransport.HeaderKeySessionID, sid)
 	}
 	if s.protocolVersion != "" {
@@ -340,29 +355,38 @@ func (s *ListenStream) setHeaders(ctx context.Context, h http.Header, accept str
 
 // read parses the SSE stream until it ends or ctx is cancelled (the request
 // context: cancelling it fails the pending read).
-func (s *ListenStream) read(ctx context.Context, body io.Reader) {
+func (s *ListenStream) read(ctx context.Context, body io.Reader, sid string) {
 	sc := bufio.NewScanner(body)
 	sc.Buffer(make([]byte, 0, 4096), listenMaxEventBytes)
 	var data strings.Builder
+	oversized := false // the current event passed listenMaxEventBytes: drop it
 	for sc.Scan() {
 		line := strings.TrimRight(sc.Text(), "\r")
 		if line == "" {
-			if data.Len() > 0 {
-				s.handle(ctx, []byte(data.String()))
-				data.Reset()
+			if data.Len() > 0 && !oversized {
+				s.handle(ctx, []byte(data.String()), sid)
 			}
+			data.Reset()
+			oversized = false
 			continue
 		}
-		if v, ok := strings.CutPrefix(line, "data:"); ok {
+		if v, ok := strings.CutPrefix(line, "data:"); ok && !oversized {
+			v = strings.TrimPrefix(v, " ")
+			if data.Len()+1+len(v) > listenMaxEventBytes {
+				s.logger.Debug("Upstream GET stream: dropping an oversized event")
+				data.Reset()
+				oversized = true
+				continue
+			}
 			if data.Len() > 0 {
 				data.WriteByte('\n')
 			}
-			data.WriteString(strings.TrimPrefix(v, " "))
+			data.WriteString(v)
 		}
 		// event:, id:, retry: and comments carry nothing the handler needs.
 	}
-	if data.Len() > 0 && sc.Err() == nil {
-		s.handle(ctx, []byte(data.String()))
+	if data.Len() > 0 && !oversized && sc.Err() == nil {
+		s.handle(ctx, []byte(data.String()), sid)
 	}
 	if err := sc.Err(); err != nil && ctx.Err() == nil {
 		s.logger.Debug("Upstream GET stream ended with a read error", zap.String("error", scrubErr(err)))
@@ -372,7 +396,7 @@ func (s *ListenStream) read(ctx context.Context, body io.Reader) {
 // handle dispatches one JSON-RPC message from the stream: a notification goes
 // to OnNotification, a request is answered, a response is ignored (nothing is
 // sent on this stream, so nothing can be answered on it).
-func (s *ListenStream) handle(ctx context.Context, raw []byte) {
+func (s *ListenStream) handle(ctx context.Context, raw []byte, sid string) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -394,14 +418,15 @@ func (s *ListenStream) handle(ctx context.Context, raw []byte) {
 		}
 		return
 	}
-	s.answer(ctx, head.ID, head.Method)
+	s.answer(ctx, head.ID, head.Method, sid)
 }
 
-// answer replies to a server-to-client request received on the stream.
+// answer replies to a server-to-client request received on the stream, on the
+// session that opened the stream (sid).
 // mcpproxy declares no client capabilities on the upstream hop, so ping is
 // the only request it serves; anything else gets method-not-found rather than
 // leaving the server waiting.
-func (s *ListenStream) answer(ctx context.Context, id json.RawMessage, method string) {
+func (s *ListenStream) answer(ctx context.Context, id json.RawMessage, method, sid string) {
 	msg := map[string]any{"jsonrpc": "2.0", "id": id}
 	if method == string(mcp.MethodPing) {
 		msg["result"] = map[string]any{}
@@ -419,7 +444,7 @@ func (s *ListenStream) answer(ctx context.Context, id json.RawMessage, method st
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if err := s.setHeaders(rctx, req.Header, "application/json, text/event-stream"); err != nil {
+	if err := s.setHeaders(rctx, req.Header, "application/json, text/event-stream", sid); err != nil {
 		return
 	}
 	resp, err := s.client.Do(req)
