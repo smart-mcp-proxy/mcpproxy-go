@@ -387,9 +387,19 @@ func (c *upstreamEventCollapser) place(e UpstreamEvent) (row *upstreamRow, isNew
 				return open, false
 			}
 		}
+		prev, hadPrev := c.latest[key]
 		row, isNew = c.rowFor(key, e)
 		if !stale && row != nil {
 			c.loginOpen[owner] = row
+		}
+		if stale && isNew {
+			// A historical row is not one a later requirement may be merged
+			// into: the next live requirement is a new episode.
+			if hadPrev {
+				c.latest[key] = prev
+			} else {
+				delete(c.latest, key)
+			}
 		}
 		return row, isNew
 	}

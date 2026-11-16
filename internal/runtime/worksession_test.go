@@ -432,3 +432,20 @@ func TestWorkSession_AdoptReplacesACompetingSession(t *testing.T) {
 	tr.Adopt("", id) // no-ops
 	tr.Adopt(kept, WorkSessionIdentity{})
 }
+
+// Review round 9: TouchID refreshes every identity the session is filed under.
+func TestWorkSession_TouchIDRefreshesEveryAlias(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC))
+	early := WorkSessionIdentity{Principal: "agent-1", ClientName: "ide", ClientVersion: "1.0"}
+	full := early
+	full.WorkspaceRoot = "/repos/project"
+	w := tr.Resolve(early)
+	tr.Touch(w, full) // the workspace arrived: the same session under the full identity too
+
+	for i := 0; i < 3; i++ {
+		advance(25 * time.Minute)
+		tr.TouchID(w)
+	}
+	assert.Equal(t, w, tr.Resolve(full))
+	assert.Equal(t, w, tr.Resolve(early))
+}

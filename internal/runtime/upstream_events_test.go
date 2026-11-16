@@ -683,3 +683,21 @@ func TestUpstreamEvent_LoginEpisodes(t *testing.T) {
 	assert.False(t, isNew)
 	assert.Equal(t, second.id, again.id)
 }
+
+// Review round 9: a stale login failure delivered after the save that closed
+// it gets its row, but the next requirement, inside the same minute, is a new
+// episode with its own row and time.
+func TestUpstreamEvent_StaleFailureRowIsNotAMergeTarget(t *testing.T) {
+	c := newUpstreamEventCollapser()
+	c.noteTokenSaved("srv", "", 2, evBase.Add(10*time.Second))
+	stale, isNew := c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase, Seq: 1})
+	require.NotNil(t, stale)
+	require.True(t, isNew)
+	assert.Empty(t, c.loginOpen)
+
+	fresh, isNew := c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(20 * time.Second), Seq: 3})
+	require.True(t, isNew)
+	assert.NotEqual(t, stale.id, fresh.id)
+	assert.Equal(t, evBase.Add(20*time.Second), fresh.firstAt)
+	assert.Same(t, fresh, c.loginOpen[upstreamOwnerKey{"srv", ""}])
+}

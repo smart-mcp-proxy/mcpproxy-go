@@ -332,7 +332,7 @@ func (t *WorkSessionTracker) Adopt(workSessionID string, id WorkSessionIdentity)
 
 // TouchID records activity on a work session known only by its id (a session
 // pinned on a request context, whose rows are stamped without resolving it
-// again). It refreshes the entry that holds the id; when none does (the
+// again). It refreshes every entry that holds the id; when none does (the
 // session was reaped), nothing happens.
 func (t *WorkSessionTracker) TouchID(workSessionID string) {
 	if workSessionID == "" {
@@ -340,10 +340,13 @@ func (t *WorkSessionTracker) TouchID(workSessionID string) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// Every entry that holds the id: a session can be filed under more than
+	// one identity (resolved before the connection's workspace was known,
+	// touched after), and each of them must stay alive.
+	now := t.now()
 	for _, e := range t.sessions {
 		if e.id == workSessionID {
-			e.lastActivity = t.now()
-			return
+			e.lastActivity = now
 		}
 	}
 }
