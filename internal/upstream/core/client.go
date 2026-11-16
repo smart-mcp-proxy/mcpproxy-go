@@ -248,6 +248,7 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 		),
 	}
 	c.exposePrompts.Store(resolvedServerConfig.ExposePrompts)
+	c.exposeSkills.Store(resolvedServerConfig.ExposeSkills)
 	c.retryAfter.Store(proxytransport.NewRetryAfterRecorder())
 	g := dialgate.New()
 	g.SetLogger(logger, serverConfig.Name)

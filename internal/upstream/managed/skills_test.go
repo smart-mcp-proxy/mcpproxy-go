@@ -90,3 +90,29 @@ func TestManagedListSkillsNoRequestWithoutSupport(t *testing.T) {
 	assert.Empty(t, entries)
 	assert.Zero(t, fx.Count("skills/list"))
 }
+
+// A hot-reloaded expose_skills: false must stop skill requests on the live
+// connection, and removing it must allow them again, without a reconnect.
+func TestManagedSetConfigPushesExposeSkills(t *testing.T) {
+	fx := skillstest.New(t)
+	fx.AddSkill(skillstest.Skill{Path: "pdf"})
+	mc := connectedManagedTestClient(t, fx.URL())
+
+	off := false
+	excluded := *mc.GetConfig()
+	excluded.ExposeSkills = &off
+	mc.SetConfig(&excluded)
+
+	entries, _, _, err := mc.ListSkillsCaptured(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+	assert.Zero(t, fx.Count("skills/list"), "an excluded server is not asked for skills")
+
+	included := excluded
+	included.ExposeSkills = nil
+	mc.SetConfig(&included)
+
+	entries, _, _, err = mc.ListSkillsCaptured(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, entries, 1)
+}
