@@ -47,9 +47,12 @@ type Client struct {
 	// connection was created even after a config hot-reload. Updated via
 	// SetExposePrompts, mirroring managed.Client's cfg pointer swap.
 	exposePrompts atomic.Pointer[bool]
-	globalConfig  *config.Config
-	storage       *storage.BoltDB
-	logger        *zap.Logger
+	// exposeSkills is the live per-server expose_skills value (Spec 125),
+	// pushed with SetExposeSkills like exposePrompts.
+	exposeSkills atomic.Pointer[bool]
+	globalConfig *config.Config
+	storage      *storage.BoltDB
+	logger       *zap.Logger
 
 	// Upstream server specific logger for debugging
 	upstreamLogger *zap.Logger
