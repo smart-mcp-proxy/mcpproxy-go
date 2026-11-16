@@ -464,3 +464,60 @@ func TestWorkSessionTimeline_UnattributedRowsAreNotServedToAToken(t *testing.T) 
 	assert.True(t, reach.ownsRow(&storage.ActivityRecord{Type: storage.ActivityTypeToolCall, TokenName: "scoped-ci", TokenPrefix: f.prefix}))
 	assert.True(t, reach.ownsRow(&storage.ActivityRecord{Type: storage.ActivityTypeUpstreamEvent}), "events are judged by their own rule")
 }
+
+// Review round 3: a row that names the token but carries no prefix (written
+// before the prefix was recorded) does not prove which generation of the
+// token wrote it. Mixed with a row that carries a prefix, in either order,
+// the session is not the token's: its counts and failure facts would include
+// a row the token may not read.
+func TestWorkSessions_NameOnlyLegacyRowIsNotClaimedByAToken(t *testing.T) {
+	f := newWSFixture(t)
+	const secret = "NAME_ONLY_FAILURE_TOOL"
+	failed := func(r *storage.ActivityRecord) {
+		r.Status, r.ErrorMessage, r.ToolName = storage.ActivityStatusError, "boom", secret
+	}
+	f.row("ws-name-first", "scoped-ci", "", 0, failed)
+	f.row("ws-name-first", "scoped-ci", f.prefix, time.Minute, nil)
+	f.row("ws-name-last", "scoped-ci", f.prefix, 0, nil)
+	f.row("ws-name-last", "scoped-ci", "", time.Minute, failed)
+
+	for _, id := range []string{"ws-name-first", "ws-name-last"} {
+		for _, suffix := range []string{"", "/timeline?at=first_failure"} {
+			rec := scopeGet(t, f.srv, "/api/v1/work-sessions/"+id+suffix, f.token)
+			assert.Equal(t, http.StatusNotFound, rec.Code, id+suffix)
+			assert.NotContains(t, rec.Body.String(), secret)
+		}
+		admin := scopeGet(t, f.srv, "/api/v1/work-sessions/"+id, scopeAdminAPIKey)
+		require.Equal(t, http.StatusOK, admin.Code)
+	}
+	list := scopeGet(t, f.srv, "/api/v1/work-sessions", f.token)
+	require.Equal(t, http.StatusOK, list.Code)
+	assert.NotContains(t, list.Body.String(), "ws-name-")
+	assert.NotContains(t, list.Body.String(), secret)
+}
+
+// Review round 3 (FR-048): whether a scoped caller sees a session as ended
+// depends on the part in reach only. A session that was closed and is then
+// reopened by a call on a hidden server reads the same before and after.
+func TestWorkSessions_HiddenActivityDoesNotReopenAScopedSession(t *testing.T) {
+	f := newWSFixture(t)
+	closed, err := f.store.MarkWorkSessionsEnded(time.Now().UTC())
+	require.NoError(t, err)
+	require.NotZero(t, closed)
+	read := func() (string, string) {
+		return wsNormalize(scopeGet(t, f.srv, "/api/v1/work-sessions/ws-mine", f.token)),
+			wsNormalize(scopeGet(t, f.srv, "/api/v1/work-sessions/ws-mine/timeline?at=end", f.token))
+	}
+	s1, t1 := read()
+
+	// A call on the hidden server clears the summary's end.
+	f.row("ws-mine", "scoped-ci", f.prefix, 5*time.Minute, func(r *storage.ActivityRecord) {
+		r.ServerName, r.ToolName = "beta", "beta_tool"
+	})
+	sum, _ := f.store.GetWorkSessionSummary("ws-mine")
+	require.True(t, sum.EndedAt.IsZero(), "precondition: the session was reopened")
+
+	s2, t2 := read()
+	assert.Equal(t, s1, s2)
+	assert.Equal(t, t1, t2)
+}

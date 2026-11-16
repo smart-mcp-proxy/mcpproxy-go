@@ -169,7 +169,9 @@ func (v workSessionReach) project(s *storage.WorkSessionSummary, now time.Time) 
 		// Start, end and status come from the part in reach only, so that
 		// activity on a hidden server changes nothing the caller reads.
 		out.StartedAt, out.LastActivityAt = t.FirstActivityAt, t.LastActivityAt
-		if !s.EndedAt.IsZero() || now.Sub(t.LastActivityAt) > workSessionIdleWindow {
+		// The summary's own end is not consulted: a call on a hidden server
+		// clears it, and that must not reopen what this caller sees.
+		if now.Sub(t.LastActivityAt) > workSessionIdleWindow {
 			end := t.LastActivityAt
 			out.EndedAt = &end
 		}

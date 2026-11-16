@@ -151,6 +151,11 @@ type WorkSessionSummary struct {
 	// in while the session had no owner yet, so that a later attributed row
 	// makes the session ownerless instead of claiming it.
 	Unattributed bool `json:"unattributed,omitempty"`
+	// NameOnly records that a request row with a token name but no token
+	// prefix (and no user) was folded in: a row from before the prefix was
+	// recorded. A name does not prove which generation of the token wrote
+	// it, so such a row and a row with a prefix never share an owner.
+	NameOnly bool `json:"name_only,omitempty"`
 }
 
 // UnattributedRows reports whether the session holds a request row that
@@ -403,6 +408,15 @@ func (s *WorkSessionSummary) applyRow(r *ActivityRecord, role AttemptRole) {
 	// can do that, and the session then belongs to no credential.
 	requestRow := r.Type == ActivityTypeToolCall || r.Type == ActivityTypeInternalToolCall ||
 		r.Type == ActivityTypePolicyDecision || r.Type == ActivityTypePromptGet
+	nameOnlyRow := requestRow && rowName != "" && rowPrefix == "" && r.UserID == ""
+	if nameOnlyRow {
+		s.NameOnly = true
+	}
+	if s.NameOnly && (rowPrefix != "" || s.TokenPrefix != "") {
+		// A name-only row and a proven token generation in one session, in
+		// either order: no agent token may claim the name-only row's facts.
+		s.Ownerless = true
+	}
 	switch {
 	case !rowHasIdentity:
 		if requestRow {
