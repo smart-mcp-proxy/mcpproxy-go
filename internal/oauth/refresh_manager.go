@@ -136,7 +136,7 @@ type RefreshOrderEmitter interface {
 	EmitOAuthTokenSavedNumbered(serverName string, seq uint64)
 	// EmitOAuthLoginRequiredNumbered: the refresh schedule was given up, so
 	// the server needs a new login even if its connection is still up.
-	EmitOAuthLoginRequiredNumbered(serverName string, seq uint64)
+	EmitOAuthLoginRequiredNumbered(serverName string, seq uint64, at time.Time)
 }
 
 // RefreshMetricsRecorder defines metrics recording methods for OAuth refresh operations.
@@ -163,9 +163,9 @@ type RefreshManager struct {
 	eventEmitter    RefreshEventEmitter
 	metricsRecorder RefreshMetricsRecorder
 	schedules       map[string]*RefreshSchedule
-	// notifySeq numbers schedule installs and accepted failures per server
+	// notifySeq numbers schedule installs and accepted failures
 	// (RefreshOrderEmitter). Guarded by mu.
-	notifySeq  map[string]uint64
+	notifySeq  uint64
 	threshold  float64
 	maxRetries int
 	mu         sync.RWMutex
@@ -517,32 +517,31 @@ func (m *RefreshManager) installScheduleForSavedToken(serverName string, expires
 
 	// Spec 124 D5: number the save under the lock, so it is ordered against
 	// any failure the manager accepts for this server.
-	seq := m.nextNotifySeqLocked(serverName)
+	seq := m.nextNotifySeqLocked()
 	ordered, _ := m.eventEmitter.(RefreshOrderEmitter)
 	return seq, ordered
 }
 
-// nextNotifySeqLocked returns the next notification number of a server.
-// Caller holds m.mu.
-func (m *RefreshManager) nextNotifySeqLocked(serverName string) uint64 {
-	if m.notifySeq == nil {
-		m.notifySeq = make(map[string]uint64)
-	}
-	m.notifySeq[serverName]++
-	return m.notifySeq[serverName]
+// nextNotifySeqLocked returns the next notification number. One counter
+// serves every server: the numbers of one server still rise in the order the
+// manager accepted its saves and failures, and nothing is kept per server
+// name after its schedule is gone. Caller holds m.mu.
+func (m *RefreshManager) nextNotifySeqLocked() uint64 {
+	m.notifySeq++
+	return m.notifySeq
 }
 
 // failScheduleAndNotify fails the schedule if it is still current and, when it
 // was, tells the subscribers. The failure takes its notification number under
 // the same lock that accepted it.
 func (m *RefreshManager) failScheduleAndNotify(serverName string, expected *RefreshSchedule, lastError string, stopTimer bool, cause error) {
-	seq, ok := m.failScheduleIfCurrentSeq(serverName, expected, lastError, stopTimer)
+	seq, at, ok := m.failScheduleIfCurrentSeq(serverName, expected, lastError, stopTimer)
 	if !ok || m.eventEmitter == nil {
 		return
 	}
 	m.eventEmitter.EmitOAuthRefreshFailed(serverName, cause.Error())
 	if ordered, isOrdered := m.eventEmitter.(RefreshOrderEmitter); isOrdered {
-		ordered.EmitOAuthLoginRequiredNumbered(serverName, seq)
+		ordered.EmitOAuthLoginRequiredNumbered(serverName, seq, at)
 	}
 }
 
@@ -906,18 +905,19 @@ func (m *RefreshManager) handleRefreshFailureFor(serverName string, err error, m
 // failure (Spec 113 FR-006a): the new grant's schedule keeps running and no
 // stale failure event is emitted. lastError "" keeps the current LastError.
 func (m *RefreshManager) failScheduleIfCurrent(serverName string, expected *RefreshSchedule, lastError string, stopTimer bool) bool {
-	_, ok := m.failScheduleIfCurrentSeq(serverName, expected, lastError, stopTimer)
+	_, _, ok := m.failScheduleIfCurrentSeq(serverName, expected, lastError, stopTimer)
 	return ok
 }
 
 // failScheduleIfCurrentSeq is failScheduleIfCurrent that also returns the
-// notification number taken for the accepted failure.
-func (m *RefreshManager) failScheduleIfCurrentSeq(serverName string, expected *RefreshSchedule, lastError string, stopTimer bool) (uint64, bool) {
+// notification number taken for the accepted failure and the time it was
+// accepted, both under the lock.
+func (m *RefreshManager) failScheduleIfCurrentSeq(serverName string, expected *RefreshSchedule, lastError string, stopTimer bool) (uint64, time.Time, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	schedule := m.schedules[serverName]
 	if schedule == nil || schedule != expected {
-		return 0, false
+		return 0, time.Time{}, false
 	}
 	schedule.RefreshState = RefreshStateFailed
 	if lastError != "" {
@@ -926,7 +926,7 @@ func (m *RefreshManager) failScheduleIfCurrentSeq(serverName string, expected *R
 	if stopTimer && schedule.Timer != nil {
 		schedule.Timer.Stop()
 	}
-	return m.nextNotifySeqLocked(serverName), true
+	return m.nextNotifySeqLocked(), time.Now(), true
 }
 
 // onRefreshOutcome is the RefreshCoordinator completion hook. Proactive

@@ -119,10 +119,12 @@ func (c *Client) refreshWithStoredCredentials(ctx context.Context, handler *tran
 
 	metadata, err := handler.GetServerMetadata(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get server metadata for %s: %w", c.config.Name, err)
+		// No token request was sent: the activity log must not show this as
+		// a failed refresh request (Spec 124 D5).
+		return nil, oauth.MarkRefreshNotSent(fmt.Errorf("failed to get server metadata for %s: %w", c.config.Name, err))
 	}
 	if metadata.TokenEndpoint == "" {
-		return nil, fmt.Errorf("token endpoint not found in server metadata for %s", c.config.Name)
+		return nil, oauth.MarkRefreshNotSent(fmt.Errorf("token endpoint not found in server metadata for %s", c.config.Name))
 	}
 
 	newToken, err := c.refreshTokenWithStoredCredentials(ctx, metadata.TokenEndpoint, rec)

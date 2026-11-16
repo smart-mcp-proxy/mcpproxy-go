@@ -221,3 +221,39 @@ func TestTransitionCapture_NoObserverNoQueue(t *testing.T) {
 	assert.Empty(t, sm.transitions)
 	assert.False(t, sm.draining)
 }
+
+// Review round 2: folding must not erase an outage. An outage and its
+// recovery fold to Ready -> Ready only when no other pair is left, and then
+// the record says what it hid.
+func TestTransitionCapture_FoldingNeverErasesAnOutage(t *testing.T) {
+	sm := NewStateManager()
+	sm.mu.Lock()
+	sm.transitions = []Transition{
+		{From: StateReady, To: StateError},
+		{From: StateError, To: StateConnecting},
+		{From: StateConnecting, To: StateReady},
+	}
+	sm.foldOldestLocked()
+	require.Len(t, sm.transitions, 2)
+	assert.Equal(t, Transition{From: StateReady, To: StateConnecting, Folded: 1}, sm.transitions[0],
+		"the loss is still a loss")
+	sm.foldOldestLocked()
+	q := append([]Transition(nil), sm.transitions...)
+	sm.mu.Unlock()
+
+	require.Len(t, q, 1)
+	assert.Equal(t, StateReady, q[0].From)
+	assert.Equal(t, StateReady, q[0].To)
+	assert.Equal(t, 1, q[0].FoldedLost, "the hidden loss is counted")
+	assert.Equal(t, 1, q[0].FoldedRestored, "the hidden recovery is counted")
+}
+
+// A login requirement hidden by a fold is counted too.
+func TestTransitionCapture_FoldingCountsAHiddenLoginRequirement(t *testing.T) {
+	f, hides := foldPair(
+		Transition{From: StateConnecting, To: StatePendingAuth},
+		Transition{From: StatePendingAuth, To: StateConnecting},
+	)
+	assert.True(t, hides)
+	assert.Equal(t, 1, f.FoldedLogin)
+}

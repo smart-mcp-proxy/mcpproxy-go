@@ -115,3 +115,29 @@ func TestRefreshAudit_RetiredInstanceIsNotAnAttempt(t *testing.T) {
 	require.Error(t, err)
 	assert.Zero(t, sink.count())
 }
+
+// Review round 2: a refresh that fails before any token request is sent (no
+// client id, no token endpoint) is not a failed refresh request.
+func TestRefreshAudit_FailureBeforeTheRequestIsNotAnAttempt(t *testing.T) {
+	for name, err := range map[string]error{
+		"no client credentials": ErrNoClientCredentials,
+		"metadata discovery":    MarkRefreshNotSent(fmt.Errorf("failed to get server metadata for srv: %w", context.DeadlineExceeded)),
+		"wrapped":               fmt.Errorf("refresh: %w", MarkRefreshNotSent(fmt.Errorf("token endpoint not found"))),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newCoordFixture(t, "cid")
+			f.failErr = err
+			c := newTestCoordinator()
+			sink := &auditSink{}
+			c.SetAuditObserver(sink.observe)
+
+			_, _, doErr := c.Do(context.Background(), f.req(RefreshTriggerProactive, "rt-0"))
+			require.Error(t, doErr)
+			assert.Zero(t, sink.count())
+		})
+	}
+	marked := MarkRefreshNotSent(context.DeadlineExceeded)
+	assert.Equal(t, context.DeadlineExceeded.Error(), marked.Error(), "the mark changes no text")
+	assert.ErrorIs(t, marked, context.DeadlineExceeded, "and no chain")
+	assert.NoError(t, MarkRefreshNotSent(nil))
+}

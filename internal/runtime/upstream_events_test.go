@@ -315,3 +315,56 @@ func TestUpstreamEvent_RefreshFailureKeepsItsCode(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, entry.UserMessage, rows[0].ErrorMessage, "the fixed catalogue message of the code")
 }
+
+// Review round 2: a folded transition that hid an outage and its recovery
+// still produces both events, in order, before the change the record shows.
+func TestTransitionEvents_ReplaysWhatAFoldHid(t *testing.T) {
+	got := transitionEvents("srv", "http", types.Transition{
+		From: types.StateReady, To: types.StateReady, At: evBase, Folded: 2, FoldedLost: 1, FoldedRestored: 1,
+	})
+	require.Len(t, got, 2)
+	assert.Equal(t, UpstreamConnectionLost, got[0].Kind)
+	assert.Equal(t, UpstreamConnectionRestored, got[1].Kind)
+	assert.Equal(t, evBase, got[0].At)
+
+	got = transitionEvents("srv", "http", types.Transition{
+		From: types.StateError, To: types.StateError, At: evBase, Folded: 1, FoldedLost: 1, FoldedRestored: 1,
+		Err: errors.New("x"),
+	})
+	require.Len(t, got, 2)
+	assert.Equal(t, UpstreamConnectionRestored, got[0].Kind, "a record that starts outside Ready hid a recovery first")
+	assert.Equal(t, UpstreamConnectionLost, got[1].Kind)
+
+	got = transitionEvents("srv", "http", types.Transition{
+		From: types.StateConnecting, To: types.StateConnecting, At: evBase, Folded: 1, FoldedLogin: 1,
+	})
+	require.Len(t, got, 1)
+	assert.Equal(t, UpstreamLoginRequired, got[0].Kind)
+
+	// An unfolded record is exactly what transitionEvent says.
+	got = transitionEvents("srv", "http", types.Transition{From: types.StateReady, To: types.StateError, At: evBase, Err: errors.New("x")})
+	require.Len(t, got, 1)
+	assert.Equal(t, UpstreamConnectionLost, got[0].Kind)
+
+	// Through the collapser: both rows are written.
+	svc, store := eventService(t)
+	for _, ev := range transitionEvents("srv", "http", types.Transition{
+		From: types.StateReady, To: types.StateReady, At: evBase, Folded: 2, FoldedLost: 1, FoldedRestored: 1,
+	}) {
+		svc.RecordUpstreamEvent(ev)
+	}
+	rows := upstreamEventRows(t, store, "srv")
+	require.Len(t, rows, 2)
+}
+
+// Review round 2: a server that only ever had token saves is forgotten too.
+func TestUpstreamEvent_CollapserForgetsSaveOnlyServers(t *testing.T) {
+	c := newUpstreamEventCollapser()
+	for i := 0; i < 50; i++ {
+		c.noteTokenSaved(fmt.Sprintf("healthy-%02d", i), "", uint64(i+1))
+	}
+	require.Len(t, c.loginSeq, 50)
+	c.place(UpstreamEvent{Server: "alive", Kind: UpstreamConnectionLost, At: time.Now().Add(collapserServerIdle + time.Hour)})
+	assert.Empty(t, c.loginSeq)
+	assert.Len(t, c.seen, 1)
+}

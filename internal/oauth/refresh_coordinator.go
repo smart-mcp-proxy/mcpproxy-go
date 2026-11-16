@@ -473,10 +473,12 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 	// Spec 124 D5: a token request was sent and failed. Reported here, past
 	// the returns that sent nothing, and before supersession can turn this
 	// flight's failure into a successful return of a newer grant.
+	// A refresh that failed before it sent anything (no client id, no token
+	// endpoint) is not a failed token request and is not reported.
 	c.mu.Lock()
 	audit := c.audit
 	c.mu.Unlock()
-	if audit != nil {
+	if audit != nil && !RefreshWasNotSent(refreshErr) {
 		audit(RefreshAttemptFailure{
 			ServerName: req.ServerName, Class: cls, Trigger: req.Trigger, At: c.now(),
 			Code: refreshFailureCode(req.ServerName, refreshErr),

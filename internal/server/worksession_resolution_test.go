@@ -367,3 +367,34 @@ func TestRequestWorkSession_RejectedNameDoesNotOpenACompetingSession(t *testing.
 	})
 	assert.Equal(t, unnamed, reconnect)
 }
+
+// FR-005: a code_execution sub-call is recorded in its parent's work session.
+// The sandbox hands the parent request's context to the sub-call emit, so the
+// row is stamped from the same principal, surface and run name.
+func TestCodeExecutionSubCall_InheritsTheParentWorkSession(t *testing.T) {
+	proxy, rt := newTruncatingRetrieveToolsProxy(t, 1024)
+	ctx := reqcontext.WithRunHeader(reqcontext.WithClientSurface(
+		tokenCtx(context.Background(), "ci", "mcp_agt_aaaa"), "rest"), "nightly-7")
+	parent := proxy.requestWorkSession(ctx, "")
+	require.NotEmpty(t, parent)
+
+	caller := &upstreamToolCaller{proxy: proxy, parentCallID: "parent"}
+	caller.emitSubCallActivity(ctx, "github", "echo", "req-sub", nil, nil, assert.AnError, time.Now(), time.Millisecond)
+
+	var row *storage.ActivityRecord
+	require.Eventually(t, func() bool {
+		rows, _, err := rt.StorageManager().ListActivities(storage.ActivityFilter{Limit: 50})
+		if err != nil {
+			return false
+		}
+		for _, r := range rows {
+			if r.Type == storage.ActivityTypeToolCall && r.ToolName == "echo" {
+				row = r
+				return true
+			}
+		}
+		return false
+	}, attributionWait, 10*time.Millisecond)
+	assert.Equal(t, parent, row.WorkSessionID, "the sub-call belongs to the parent's work session")
+	assert.Equal(t, "nightly-7", row.RunName)
+}

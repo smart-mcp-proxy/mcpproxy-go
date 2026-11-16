@@ -145,6 +145,46 @@ func transitionEvent(server, transport string, t types.Transition) (UpstreamEven
 	return UpstreamEvent{}, false
 }
 
+// maxFoldedEventsPerKind bounds the rows' counts replayed for one folded
+// transition; the collapser merges them into one row per minute anyway.
+const maxFoldedEventsPerKind = 64
+
+// transitionEvents is transitionEvent plus the changes a folded transition
+// hid (the observer had stalled and the queue was full): each hidden loss,
+// recovery and login requirement is replayed as an event at the record's
+// time, in the order they must have happened, before the change the record
+// itself shows. Hidden events carry no error code: the error of each was
+// folded away with it.
+func transitionEvents(server, transport string, t types.Transition) []UpstreamEvent {
+	var out []UpstreamEvent
+	at := t.At.UTC()
+	add := func(kind UpstreamEventKind, code string) {
+		out = append(out, UpstreamEvent{Server: server, Kind: kind, At: at, Code: code})
+	}
+	lost, restored, login := min(t.FoldedLost, maxFoldedEventsPerKind), min(t.FoldedRestored, maxFoldedEventsPerKind), min(t.FoldedLogin, maxFoldedEventsPerKind)
+	// Losses and recoveries alternate. A record that starts in Ready hid a
+	// loss first; any other hid a recovery first.
+	lossNext := t.From == types.StateReady
+	for lost > 0 || restored > 0 {
+		switch {
+		case (lossNext && lost > 0) || restored == 0:
+			add(UpstreamConnectionLost, "")
+			lost--
+		default:
+			add(UpstreamConnectionRestored, "")
+			restored--
+		}
+		lossNext = !lossNext
+	}
+	for ; login > 0; login-- {
+		add(UpstreamLoginRequired, string(diagnostics.OAuthLoginRequired))
+	}
+	if ev, ok := transitionEvent(server, transport, t); ok {
+		out = append(out, ev)
+	}
+	return out
+}
+
 type upstreamRowKey struct {
 	server string
 	kind   UpstreamEventKind
@@ -355,6 +395,11 @@ func (c *upstreamEventCollapser) noteTokenSaved(server, owner string, seq uint64
 			return
 		}
 		c.loginSeq[k] = seq
+		// A save is activity of the server for cleanup: without this the
+		// number of a server that never had an event would be kept forever.
+		if _, ok := c.seen[server]; !ok {
+			c.seen[server] = time.Now()
+		}
 	}
 	delete(c.loginOpen, k)
 }
@@ -444,16 +489,18 @@ func (r *Runtime) EmitOAuthTokenSavedNumbered(serverName string, seq uint64) {
 // expired too long), so the server needs a new login. The connection state
 // does not change for this, which is why the state observer alone would miss
 // it while the server is still connected.
-func (r *Runtime) EmitOAuthLoginRequiredNumbered(serverName string, seq uint64) {
+func (r *Runtime) EmitOAuthLoginRequiredNumbered(serverName string, seq uint64, at time.Time) {
 	if r == nil || r.activityService == nil {
 		return
 	}
 	r.activityService.RecordUpstreamEvent(UpstreamEvent{
 		Server: serverName,
 		Kind:   UpstreamLoginRequired,
-		At:     time.Now().UTC(),
-		Code:   string(diagnostics.OAuthReauthRequired),
-		Seq:    seq,
+		// The time the failure was accepted, not the time this notification
+		// was delivered: a token save and later calls can come in between.
+		At:   at.UTC(),
+		Code: string(diagnostics.OAuthReauthRequired),
+		Seq:  seq,
 	})
 }
 
@@ -464,7 +511,7 @@ func (r *Runtime) installUpstreamEventObserver() {
 		return
 	}
 	r.upstreamManager.SetTransitionObserver(func(server, transport string, t types.Transition) {
-		if ev, ok := transitionEvent(server, transport, t); ok {
+		for _, ev := range transitionEvents(server, transport, t) {
 			r.activityService.RecordUpstreamEvent(ev)
 		}
 	})

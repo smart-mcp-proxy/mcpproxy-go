@@ -33,6 +33,45 @@ type Transition struct {
 	// left in; what it loses is the intermediate states, and it is told how
 	// many.
 	Folded int
+	// FoldedLost, FoldedRestored and FoldedLogin count the changes that folding
+	// hid inside this record: a move out of Ready, a move into Ready and a
+	// move into PendingAuth that From and To no longer show. Folding avoids
+	// hiding one while any other pair can be folded, and counts it when it
+	// cannot, so an outage is never erased by a stalled observer.
+	FoldedLost     int
+	FoldedRestored int
+	FoldedLogin    int
+}
+
+// edges reports which of the three recorded kinds of change the record shows
+// by its own From and To.
+func (t Transition) edges() (lost, restored, login int) {
+	if t.From == StateReady && t.To != StateReady {
+		lost = 1
+	}
+	if t.From != StateReady && t.To == StateReady {
+		restored = 1
+	}
+	if t.From != StatePendingAuth && t.To == StatePendingAuth {
+		login = 1
+	}
+	return lost, restored, login
+}
+
+// foldPair returns a and b as one record and whether folding hid a change.
+func foldPair(a, b Transition) (Transition, bool) {
+	f := Transition{
+		From: a.From, To: b.To, At: b.At, Err: b.Err, TerminalCode: b.TerminalCode,
+		Folded: a.Folded + b.Folded + 1,
+	}
+	al, ar, ag := a.edges()
+	bl, br, bg := b.edges()
+	fl, fr, fg := f.edges()
+	hl, hr, hg := al+bl-fl, ar+br-fr, ag+bg-fg
+	f.FoldedLost = a.FoldedLost + b.FoldedLost + hl
+	f.FoldedRestored = a.FoldedRestored + b.FoldedRestored + hr
+	f.FoldedLogin = a.FoldedLogin + b.FoldedLogin + hg
+	return f, hl+hr+hg > 0
 }
 
 // TransitionObserver receives transitions in the order they happened, one at
@@ -80,25 +119,21 @@ func (sm *StateManager) captureLocked(oldState ConnectionState) {
 // foldOldestLocked makes room in a full queue by folding two adjacent
 // transitions into one, never by dropping one: the folded record goes from
 // the first one's start to the second one's end and keeps the later time and
-// error. It prefers a pair whose middle state is not Ready, so that a loss and
-// a recovery stay two records for as long as any other pair can be folded.
-// Caller holds sm.mu.
+// error. It takes the oldest pair whose folding hides no loss, recovery or
+// login requirement; when every pair hides one, it folds the oldest pair and
+// the record counts what it hid. Caller holds sm.mu.
 func (sm *StateManager) foldOldestLocked() {
 	q := sm.transitions
 	if len(q) < 2 {
 		return
 	}
 	at := 0
+	folded, _ := foldPair(q[0], q[1])
 	for i := 0; i+1 < len(q); i++ {
-		if q[i].To != StateReady {
-			at = i
+		if f, hides := foldPair(q[i], q[i+1]); !hides {
+			at, folded = i, f
 			break
 		}
-	}
-	a, b := q[at], q[at+1]
-	folded := Transition{
-		From: a.From, To: b.To, At: b.At, Err: b.Err, TerminalCode: b.TerminalCode,
-		Folded: a.Folded + b.Folded + 1,
 	}
 	q[at] = folded
 	copy(q[at+1:], q[at+2:])
