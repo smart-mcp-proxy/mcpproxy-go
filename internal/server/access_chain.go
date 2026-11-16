@@ -246,7 +246,8 @@ func credentialStateOf(t *auth.AgentToken, now time.Time) profile.CredentialStat
 		return profile.CredentialStateNone
 	case t.Revoked:
 		return profile.CredentialStateRevoked
-	case !t.ExpiresAt.After(now):
+	case (t.Kind == auth.KindClient || !t.ExpiresAt.IsZero()) && !t.ExpiresAt.After(now):
+		// A zero ExpiresAt on a regular agent token means it never expires.
 		return profile.CredentialStateExpired
 	default:
 		return profile.CredentialStateClient

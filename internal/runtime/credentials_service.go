@@ -187,7 +187,9 @@ func CredentialStateOf(t *auth.AgentToken, now time.Time) string {
 	switch {
 	case t.Revoked:
 		return CredentialStateRevoked
-	case !t.ExpiresAt.IsZero() && !t.ExpiresAt.After(now):
+	case (t.Kind == auth.KindClient || !t.ExpiresAt.IsZero()) && !t.ExpiresAt.After(now):
+		// A zero ExpiresAt means "never expires" only for a regular agent token;
+		// a client credential must carry an expiry, so a zero one is expired.
 		return CredentialStateExpired
 	default:
 		return CredentialStateActive
@@ -616,7 +618,18 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 	if mcp {
 		def = ExpiryRequired
 	}
-	expiresAt, err := parseIssueExpiry(req.ExpiresIn, def, now, mcp)
+	var expiresAt time.Time
+	var err error
+	if def == ExpiryTokenDefault && req.ExpiresIn == auth.TokenExpiryNever {
+		// An admin minting an agent token over REST/CLI may opt out of expiry.
+		// A zero ExpiresAt already means "never expires" for kind=agent tokens
+		// (AgentToken.IsExpired). The MCP door (def=ExpiryRequired) and client
+		// credentials (ExpiryClientCap, capped at 365 days on every
+		// authentication) never reach this branch.
+		expiresAt = time.Time{}
+	} else {
+		expiresAt, err = parseIssueExpiry(req.ExpiresIn, def, now, mcp)
+	}
 	if err != nil {
 		if !mcp && req.ExpiresIn == "" && def == ExpiryRequired {
 			return nil, err
