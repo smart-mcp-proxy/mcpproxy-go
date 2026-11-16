@@ -102,3 +102,34 @@ func TestRefreshManager_SaveNotificationIsSentOutsideTheLock(t *testing.T) {
 		t.Fatal("the emitter could not read the manager: the notification was sent under the lock")
 	}
 }
+
+// Review round 3: a save that needs no proactive schedule (no expiry) still
+// replaces the old grant's schedule, so a failure of the old grant that
+// arrives afterwards is not current and is not reported.
+func TestRefreshManager_SaveWithoutExpiryRetiresTheOldSchedule(t *testing.T) {
+	emitter := &orderEmitter{}
+	manager := NewRefreshManager(newMockTokenStore(), nil, nil, zaptest.NewLogger(t))
+	manager.SetEventEmitter(emitter)
+	require.NoError(t, manager.Start(context.Background()))
+	defer manager.Stop()
+
+	manager.OnTokenSaved("srv", time.Now().Add(time.Hour))
+	old := manager.GetSchedule("srv")
+	require.NotNil(t, old)
+	manager.mu.RLock()
+	oldPtr := manager.schedules["srv"]
+	manager.mu.RUnlock()
+
+	manager.OnTokenSaved("srv", time.Time{}) // a new login, token without expiry
+	manager.mu.RLock()
+	_, still := manager.schedules["srv"]
+	manager.mu.RUnlock()
+	assert.False(t, still, "the old grant's schedule is gone")
+
+	// The old grant's terminal failure lands now.
+	manager.failScheduleAndNotify("srv", oldPtr, "invalid_grant", true, errors.New("invalid_grant"))
+	saved, failed := emitter.snapshot()
+	assert.Len(t, saved, 2)
+	assert.Empty(t, failed, "a superseded failure reports no login requirement")
+	assert.Zero(t, emitter.GetFailedEvents())
+}

@@ -421,3 +421,34 @@ func TestUpstreamEvent_VeryLateEventCannotRestartTheHourlyBound(t *testing.T) {
 	row, _ = c.place(UpstreamEvent{Server: "srv", Kind: UpstreamConnectionLost, At: evBase.Add(5*time.Hour + time.Minute)})
 	assert.NotNil(t, row)
 }
+
+// Review round 3: token saves keep the ordering number of a server that is
+// still saving, and cleanup runs from saves alone.
+func TestUpstreamEvent_SavesMaintainTheWatermark(t *testing.T) {
+	c := newUpstreamEventCollapser()
+	now := evBase
+	c.now = func() time.Time { return now }
+
+	// A server that saves a token every day for two weeks keeps its number,
+	// whatever other servers do.
+	for day := 0; day < 14; day++ {
+		now = evBase.Add(time.Duration(day) * 24 * time.Hour)
+		c.noteTokenSaved("busy", "", uint64(day+1))
+		c.place(UpstreamEvent{Server: "other", Kind: UpstreamConnectionLost, At: now})
+	}
+	require.Equal(t, uint64(14), c.loginSeq[upstreamOwnerKey{"busy", ""}])
+	// A failure delivered late, numbered before the last save, opens nothing.
+	c.place(UpstreamEvent{Server: "busy", Kind: UpstreamLoginRequired, At: now, Seq: 13})
+	assert.Empty(t, c.loginOpen)
+
+	// Save-only churn of server names, with no events at all, is cleaned up.
+	c2 := newUpstreamEventCollapser()
+	c2.now = func() time.Time { return now }
+	for i := 0; i < 100; i++ {
+		c2.noteTokenSaved(fmt.Sprintf("gone-%03d", i), "", uint64(i+1))
+	}
+	now = now.Add(collapserServerIdle + time.Hour)
+	c2.noteTokenSaved("fresh", "", 1000)
+	assert.Len(t, c2.loginSeq, 1)
+	assert.Len(t, c2.seen, 1)
+}

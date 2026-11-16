@@ -225,6 +225,10 @@ type upstreamEventCollapser struct {
 	// seen is when each server last had an event, for cleanup.
 	seen   map[string]time.Time
 	lastGC time.Time
+	// lastSaveGC is when a token save last ran the idle-server cleanup.
+	lastSaveGC time.Time
+	// now is the clock of token-save notifications, which carry no time.
+	now func() time.Time
 	// forgottenBefore is the first hour (unix) whose row counters are still
 	// kept; cleanup dropped the counters of every hour before it.
 	forgottenBefore int64
@@ -250,6 +254,7 @@ func newUpstreamEventCollapser() *upstreamEventCollapser {
 		down:      make(map[string]bool),
 		loginOpen: make(map[upstreamOwnerKey]*upstreamRow),
 		loginSeq:  make(map[upstreamOwnerKey]uint64),
+		now:       time.Now,
 	}
 }
 
@@ -390,6 +395,14 @@ func (c *upstreamEventCollapser) gc(now time.Time) {
 			delete(c.hourRows, server)
 		}
 	}
+	c.forgetIdleServers(now)
+}
+
+// forgetIdleServers drops everything about a server that has had neither an
+// event nor a token save for a long time (a removed server). It is separate
+// from the hour counters so that a token save, which has no event time of its
+// own, can run it without touching them.
+func (c *upstreamEventCollapser) forgetIdleServers(now time.Time) {
 	for server, at := range c.seen {
 		if now.Sub(at) <= collapserServerIdle {
 			continue
@@ -420,10 +433,16 @@ func (c *upstreamEventCollapser) noteTokenSaved(server, owner string, seq uint64
 			return
 		}
 		c.loginSeq[k] = seq
-		// A save is activity of the server for cleanup: without this the
-		// number of a server that never had an event would be kept forever.
-		if _, ok := c.seen[server]; !ok {
-			c.seen[server] = time.Now()
+		// A save is activity of the server for cleanup: it keeps the number
+		// of a server that is saving tokens, and lets cleanup run (and
+		// forget servers that are gone) when there are saves and no events.
+		now := c.now()
+		if now.After(c.seen[server]) {
+			c.seen[server] = now
+		}
+		if now.Sub(c.lastSaveGC) >= collapserGCInterval {
+			c.lastSaveGC = now
+			c.forgetIdleServers(now)
 		}
 	}
 	delete(c.loginOpen, k)

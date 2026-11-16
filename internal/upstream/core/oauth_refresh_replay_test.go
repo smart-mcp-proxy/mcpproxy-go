@@ -460,3 +460,25 @@ func TestRefreshReplay_TruncatedErrorStatusHasNoRetry(t *testing.T) {
 		}
 	}
 }
+
+// Spec 124 D5 (review round 3): when the endpoint lookup uses up the budget,
+// no token request was sent, and the error says so for the audit observer
+// while staying the deadline error it was.
+func TestRefreshReplay_LookupTimeoutIsMarkedNotSent(t *testing.T) {
+	c, rec := newRefreshReplayClient(t)
+	calls := 0
+	fn := c.withRefreshReplay(func(context.Context, *storage.OAuthTokenRecord) (*client.Token, error) {
+		calls++
+		return nil, nil
+	}, func(ctx context.Context) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := fn(ctx, rec)
+	require.Error(t, err)
+	require.Zero(t, calls)
+	require.True(t, oauth.RefreshWasNotSent(err))
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}

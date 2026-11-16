@@ -34,7 +34,9 @@ func (c *Client) withRefreshReplay(refresh oauth.RefreshFunc, endpoint func(cont
 		}
 		target, lookupErr := endpoint(budget)
 		if budget.Err() != nil {
-			return nil, budget.Err()
+			// The endpoint lookup used up the budget: no token request was
+			// sent (Spec 124 D5).
+			return nil, oauth.MarkRefreshNotSent(budget.Err())
 		}
 		if lookupErr != nil || target != tokenEndpoint {
 			// An unverified AS retains the original deadline and one-shot
