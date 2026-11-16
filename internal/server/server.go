@@ -110,6 +110,9 @@ func (s *Server) setSecurityScanner(svc securityScannerService) {
 type Server struct {
 	logger  *zap.Logger
 	runtime *runtime.Runtime
+	// singleServerHTTP maps each /mcp/s/<server> MCP server to its Streamable
+	// HTTP transport, created on first use (serveSingleServer).
+	singleServerHTTP sync.Map // *server.MCPServer -> *server.StreamableHTTPServer
 	// bundleDegradedLogged is the last degraded-coverage reason already logged
 	// by bundleAdmissionSuspended (Spec 101 FR-007), so the suspension is
 	// logged once per reason rather than once per settle event.
@@ -3257,8 +3260,8 @@ func (s *Server) streamingNoDeadline(next http.Handler) http.Handler {
 
 // clientFacingStreamableOptions returns the options every client-facing
 // Streamable HTTP transport must be built with. It exists so the set cannot
-// drift between the five Streamable HTTP endpoints (/mcp, /mcp/all, /mcp/code,
-// /mcp/call and /mcp/p/<slug>) — a pin applied to four of five would leave one
+// drift between the six Streamable HTTP endpoints (/mcp, /mcp/all, /mcp/code,
+// /mcp/call, /mcp/p/<slug> and /mcp/s/<server>) — a pin applied to five of six would leave one
 // door open on a different protocol era.
 //
 // SCOPE, precisely: this covers the Streamable HTTP surfaces. mcp-go offers no
@@ -3421,9 +3424,15 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux.Handle("/mcp/p/", profileHandler)
 	mux.Handle("/mcp/p", profileHandler)
 
+	// /mcp/s/<server> → one upstream's tools under their own names, with the
+	// upstream's own instructions (mcp_single_server.go). The same auth,
+	// host-validation and streaming wrappers as every other MCP route.
+	singleServerHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(http.HandlerFunc(s.serveSingleServer))))))
+	mux.Handle("/mcp/s/", singleServerHandler)
+
 	s.logger.Info("Registered routing mode MCP endpoints",
 		zap.String("default_mode", cfg.RoutingMode),
-		zap.Strings("endpoints", []string{"/mcp/all", "/mcp/code", "/mcp/call", "/mcp/p/<slug>"}))
+		zap.Strings("endpoints", []string{"/mcp/all", "/mcp/code", "/mcp/call", "/mcp/p/<slug>", "/mcp/s/<server>"}))
 
 	// Legacy endpoints for backward compatibility
 	mux.Handle("/v1/tool_code", mcpHandler)
@@ -5667,4 +5676,29 @@ func (s *Server) ServerIncarnation(serverName string) (int64, bool) {
 		return 0, false
 	}
 	return s.runtime.ServerIncarnation(serverName)
+}
+
+// serveSingleServer serves /mcp/s/<server>. An unknown server, or one the
+// caller's credential may not use, gets the same 404, so the route cannot be
+// used to probe which servers exist.
+func (s *Server) serveSingleServer(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/mcp/s/")
+	name = strings.TrimSuffix(name, "/")
+	if i := strings.Index(name, "/"); i >= 0 {
+		name = name[:i]
+	}
+	var srv *server.MCPServer
+	if s.mcpProxy != nil && s.mcpProxy.singleServerAdmits(r.Context(), name) {
+		srv = s.mcpProxy.SingleServerMCP(name)
+	}
+	if srv == nil {
+		http.Error(w, `{"error":"Server not found"}`, http.StatusNotFound)
+		return
+	}
+	transport, ok := s.singleServerHTTP.Load(srv)
+	if !ok {
+		transport, _ = s.singleServerHTTP.LoadOrStore(srv,
+			server.NewStreamableHTTPServer(srv, singleServerStreamableOptions(s.liveConfig, name)...))
+	}
+	singleServerSessionGuard(name, transport.(*server.StreamableHTTPServer)).ServeHTTP(w, r)
 }
