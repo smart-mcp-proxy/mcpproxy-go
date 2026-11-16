@@ -113,10 +113,14 @@ var allClients = []ClientDef{
 		ServerKey: "mcpServers",
 		Supported: true,
 		Icon:      "vscode",
-		// Current VS Code versions run agents on the Copilot SDK and read their
-		// MCP servers from ~/.copilot/mcp-config.json, the file the Copilot CLI
-		// reads as well, instead of their own Code/User/mcp.json (#1896).
-		ClientInfoNames: []string{"copilot"},
+		// VS Code's Copilot agent harness reads its MCP servers from
+		// ~/.copilot/mcp-config.json, the file the Copilot CLI reads as well,
+		// and not from Code/User/mcp.json. That file belongs to the older
+		// Local harness, which the "vscode" client above still serves (#1896).
+		//
+		// Presence is matched exactly against clientInfo.name: the Copilot CLI
+		// sends "copilot-cli", other Copilot hosts "github-copilot-developer".
+		ClientInfoNames: []string{"copilot-cli", "github-copilot-developer", "copilot"},
 		ReloadHint:      "Reload the VS Code window (or restart Copilot CLI) to load MCPProxy",
 	},
 	{

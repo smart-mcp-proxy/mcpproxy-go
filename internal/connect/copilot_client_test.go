@@ -45,3 +45,23 @@ func TestConnectCopilotWritesTheCopilotUserConfig(t *testing.T) {
 		t.Fatalf("entry is not an http one: %v", entry)
 	}
 }
+
+// Presence ("seen", calls in the last 24h) is matched exactly against the
+// clientInfo.name of the MCP initialize request. The Copilot CLI sends
+// "copilot-cli" and other Copilot hosts send "github-copilot-developer", so
+// both have to be aliases of this client or it never shows as connected.
+func TestCopilotClientInfoNamesMatchWhatCopilotSends(t *testing.T) {
+	def := FindClient("copilot")
+	if def == nil {
+		t.Fatal("copilot client is not registered")
+	}
+	have := make(map[string]bool, len(def.ClientInfoNames))
+	for _, name := range def.ClientInfoNames {
+		have[name] = true
+	}
+	for _, want := range []string{"copilot-cli", "github-copilot-developer"} {
+		if !have[want] {
+			t.Errorf("ClientInfoNames = %v, missing %q", def.ClientInfoNames, want)
+		}
+	}
+}
