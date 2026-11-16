@@ -746,3 +746,22 @@ func TestUpstreamEvent_StateRequirementBeforeItsNumberedFailureIsOneEpisode(t *t
 	assert.Equal(t, state.id, numbered.id)
 	assert.Equal(t, 2, numbered.count)
 }
+
+// Review round 12: failure 1 opens a row; save 2 is accepted but stalls; the
+// connection reports a requirement that merges into the old row; then the
+// save arrives. The old row began before the save, so it ends, and the new
+// grant's failure gets its own row.
+func TestUpstreamEvent_LateSaveEndsARequirementThatBeganBeforeIt(t *testing.T) {
+	c := newUpstreamEventCollapser()
+	old, _ := c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase, Seq: 1})
+	merged, isNew := c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(15 * time.Second)})
+	require.False(t, isNew)
+	require.Equal(t, old.id, merged.id)
+
+	c.noteTokenSaved("srv", "", 2, evBase.Add(10*time.Second))
+	assert.Empty(t, c.loginOpen, "it began before the save")
+
+	fresh, isNew := c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(20 * time.Second), Seq: 3, PrevSeq: 2, PrevAt: evBase.Add(10 * time.Second)})
+	require.True(t, isNew)
+	assert.NotEqual(t, old.id, fresh.id)
+}

@@ -567,9 +567,12 @@ func (c *upstreamEventCollapser) noteTokenSaved(server, owner string, seq uint64
 			c.forgetIdleServers(now)
 		}
 	}
-	// A requirement seen after the save was accepted is newer than the save
-	// (this notification was delivered late) and stays open.
-	if open := c.loginOpen[k]; open != nil && !at.IsZero() && open.lastAt.After(at) {
+	// A requirement that BEGAN after the save was accepted is newer than the
+	// save (this notification was delivered late) and stays open. One that
+	// began before it belongs to the grant the save replaced and ends here,
+	// even if later occurrences were merged into it meanwhile: the next
+	// occurrence then opens the new grant's own row.
+	if open := c.loginOpen[k]; open != nil && !at.IsZero() && open.firstAt.After(at) {
 		return
 	}
 	c.closeLogin(k)
