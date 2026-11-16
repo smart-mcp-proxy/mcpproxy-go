@@ -264,7 +264,8 @@ func (c *Client) ReadSkillFile(ctx context.Context, ref skills.FileRef) (content
 		return nil, false, "", fmt.Errorf("resources/read for %s returned an unsupported content type %T", ref.URI, res.Contents[0])
 	}
 	if int64(len(content)) != ref.Size {
-		return nil, false, "", fmt.Errorf("resources/read for %s returned %d bytes, listed size is %d", ref.URI, len(content), ref.Size)
+		// A typed error, so the caller reports size_mismatch, not a read failure.
+		return nil, false, "", &skills.UnusableError{Code: skills.ReasonSizeMismatch, Detail: fmt.Sprintf("resources/read for %s returned %d bytes, listed size is %d", ref.URI, len(content), ref.Size)}
 	}
 	return content, isText, mimeType, nil
 }
