@@ -242,6 +242,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(tuiCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(attentionCmd)
+	rootCmd.AddCommand(GetSkillsCommand()) // Spec 125: skills over MCP (administrator view)
 	rootCmd.AddCommand(tokenCmd)
 	rootCmd.AddCommand(telemetryCmd)
 	rootCmd.AddCommand(dbCmd)
