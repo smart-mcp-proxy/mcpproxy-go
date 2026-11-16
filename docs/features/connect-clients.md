@@ -4,13 +4,13 @@ title: Connect Clients
 sidebar_label: Connect Clients
 sidebar_position: 12
 description: Preview-before-write connect flow that registers mcpproxy in an MCP client's config file, with a sanitized disclosure of what is replaced and a precondition token that makes a stale preview unwritable
-keywords: [connect, client, preview, precondition, claude desktop, cursor, vs code, opencode]
+keywords: [connect, client, preview, precondition, claude desktop, cursor, vs code, copilot, opencode]
 ---
 
 # Connect Clients
 
 **Connect Clients** registers mcpproxy inside another MCP client's configuration
-file (Claude Desktop, Cursor, VS Code, Codex, Gemini, OpenCode, …) so that client
+file (Claude Desktop, Cursor, VS Code, GitHub Copilot, Codex, Gemini, OpenCode, …) so that client
 talks to the proxy instead of to each upstream server directly. It is available
 from the Web UI wizard, the macOS tray ("Connect Client…"), and the
 `mcpproxy connect` CLI.
@@ -57,6 +57,44 @@ The UI flows are **preview → confirm → write** (the CLI writes directly, wit
 Endpoint-level reference — request/response shapes, backup naming, undo
 semantics, and the macOS App Data privacy prompt — lives in the
 [REST API reference](../api/rest-api.md#connect-client-wizard).
+
+## VS Code and GitHub Copilot
+
+VS Code has two places it reads MCP servers from, and they use different files
+and different keys. MCPProxy has one connect client for each:
+
+| Client id | File | Key | Read by |
+|-----------|------|-----|---------|
+| `copilot` | `~/.copilot/mcp-config.json` | `mcpServers` | VS Code agents on the Copilot harness, and the Copilot CLI |
+| `vscode` | `Code/User/mcp.json` in the VS Code user profile | `servers` | VS Code on the older Local harness |
+
+```bash
+mcpproxy connect copilot
+mcpproxy connect vscode
+```
+
+Which one to use:
+
+- **Copilot CLI**: `copilot`.
+- **VS Code**: `copilot` on current versions. VS Code has deprecated the Local
+  harness and plans to remove it in February 2027; until then an installation
+  that still uses it reads only the `vscode` file.
+- **Not sure**: connect both. Each client gets its own credential, and the two
+  files do not overlap.
+
+After connecting, reload the VS Code window or restart the Copilot CLI.
+
+**`COPILOT_HOME`.** When this variable is set, Copilot and VS Code read
+`$COPILOT_HOME/mcp-config.json` and no longer look at `~/.copilot`. MCPProxy
+follows it when the value is an absolute path. The variable is read by the
+process that writes the file: the running MCPProxy core when there is one (the
+Web UI, the tray and `mcpproxy connect` all write through it), otherwise the
+`mcpproxy connect` command itself. A core started from the tray or as a service
+does not see variables exported in your shell profile; if the path shown in the
+preview is not the one you expect, start the core from a shell that has
+`COPILOT_HOME` set. `mcpproxy connect --list` is the exception: it inspects the
+files from the command's own environment, so it only agrees with what the core
+wrote when both see the same `COPILOT_HOME`.
 
 ## Client credentials (Spec 108)
 
