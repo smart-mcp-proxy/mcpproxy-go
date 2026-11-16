@@ -404,6 +404,12 @@ func TestTPAFetchLifecycle_ActivatesReprotectsAndRefusesBadReleases(t *testing.T
 	require.NotNil(t, info.LastActivatedAt)
 	assert.Equal(t, scanner.RefreshTriggerTimer, info.Refresh.LastTrigger, "the scheduler, not a manual refresh, fetched it")
 	require.NotNil(t, f.rt.TelemetryRegistry())
+	// The source flips inside the cycle's fetch leg; the cycle reports its
+	// outcome to the telemetry observer only after that leg returns (recordCycle,
+	// logOutcome, then notifyRefreshObserver), so the counter lags the status.
+	e2eEventually(t, "the activating cycle is counted", func() bool {
+		return f.rt.TelemetryRegistry().Snapshot().TPABundleRefreshActivations >= 1
+	})
 	assert.EqualValues(t, 1, f.rt.TelemetryRegistry().Snapshot().TPABundleRefreshActivations, "exactly one cycle reported activated")
 
 	// Later cycles see the asset's sequence at or below the watermark and skip
