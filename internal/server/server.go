@@ -5698,7 +5698,7 @@ func (s *Server) serveSingleServer(w http.ResponseWriter, r *http.Request) {
 	transport, ok := s.singleServerHTTP.Load(srv)
 	if !ok {
 		transport, _ = s.singleServerHTTP.LoadOrStore(srv,
-			server.NewStreamableHTTPServer(srv, clientFacingStreamableOptions(s.liveConfig)...))
+			server.NewStreamableHTTPServer(srv, singleServerStreamableOptions(s.liveConfig, name)...))
 	}
 	transport.(*server.StreamableHTTPServer).ServeHTTP(w, r)
 }

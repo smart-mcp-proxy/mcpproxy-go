@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"go.uber.org/zap"
@@ -298,6 +299,55 @@ func (p *MCPProxyServer) screenUpstreamInstructions(name, text string) string {
 	return text
 }
 
+// singleServerSessionIDs mints and checks the Mcp-Session-Id of ONE
+// /mcp/s/<server> surface. mcp-go's default manager accepts any well-formed
+// "mcp-session-<uuid>", so a session id minted on one surface (and the client
+// identity attributed to it) would be accepted on every other. Each surface's
+// ids carry a tag derived from its server name, and a surface accepts only its
+// own. Like the default manager it tracks nothing, so ids stay valid across a
+// restart of the same surface.
+type singleServerSessionIDs struct {
+	suffix string
+}
+
+const singleServerSessionPrefix = "mcp-session-"
+
+func newSingleServerSessionIDs(server string) *singleServerSessionIDs {
+	sum := sha256.Sum256([]byte("mcpproxy/single-server-session/" + server))
+	return &singleServerSessionIDs{suffix: "." + hex.EncodeToString(sum[:8])}
+}
+
+func (m *singleServerSessionIDs) Generate() string {
+	return singleServerSessionPrefix + uuid.NewString() + m.suffix
+}
+
+func (m *singleServerSessionIDs) Validate(sessionID string) (isTerminated bool, err error) {
+	rest, ok := strings.CutPrefix(sessionID, singleServerSessionPrefix)
+	if ok {
+		rest, ok = strings.CutSuffix(rest, m.suffix)
+	}
+	if ok {
+		_, perr := uuid.Parse(rest)
+		ok = perr == nil
+	}
+	if !ok {
+		return false, fmt.Errorf("invalid session id for this endpoint")
+	}
+	return false, nil
+}
+
+func (m *singleServerSessionIDs) Terminate(string) (isNotAllowed bool, err error) {
+	return false, nil
+}
+
+// singleServerStreamableOptions is the Streamable HTTP option set of a
+// /mcp/s/<server> transport: the shared client-facing options plus session ids
+// bound to that server.
+func singleServerStreamableOptions(cfgProvider func() *config.Config, server string) []mcpserver.StreamableHTTPOption {
+	return append(clientFacingStreamableOptions(cfgProvider),
+		mcpserver.WithSessionIdManager(newSingleServerSessionIDs(server)))
+}
+
 // singleServerDescribeTool is describe_tool with its tool_ids description
 // rewritten for a surface whose tools carry their bare names.
 func singleServerDescribeTool() mcp.Tool {
@@ -331,12 +381,21 @@ func (p *MCPProxyServer) singleServerDescribeHandler(name string) mcpserver.Tool
 				qualified := make([]any, len(ids))
 				for i, id := range ids {
 					s, isString := id.(string)
-					// Only this server's own qualifiers pass through. Anything else,
-					// including another server's "<other>:<tool>", is qualified as
-					// this server's tool and so resolves to not-found rather than
-					// to another server's definition.
-					if isString && !strings.HasPrefix(s, name+":") && !strings.HasPrefix(s, prefix) {
-						s = name + ":" + s
+					// Every id is resolved as this server's tool: this server's own
+					// qualifier ("<server>:" or "<server>__") is removed and the bare
+					// name is qualified again with the exact server name. Another
+					// server's id, including one whose name merely starts with
+					// "<server>__" (a server named "<server>__x"), therefore resolves
+					// to not-found rather than to that server's definition.
+					if isString {
+						bare := strings.TrimSpace(s)
+						switch {
+						case strings.HasPrefix(bare, name+":"):
+							bare = strings.TrimPrefix(bare, name+":")
+						case strings.HasPrefix(bare, prefix):
+							bare = strings.TrimPrefix(bare, prefix)
+						}
+						s = name + ":" + bare
 					}
 					if isString {
 						qualified[i] = s
@@ -409,12 +468,29 @@ func stripServerPrefixInJSON(text, server string) string {
 						continue
 					}
 				case "did_you_mean":
+					// Suggestions come from every tool the caller can see. Keep
+					// only this server's, by their exact "<server>:<tool>" form
+					// (the "<server>__<tool>" display form cannot tell server
+					// "a" from a server named "a__b"), as bare names.
 					if list, ok := val.([]any); ok {
-						for i, item := range list {
-							if str, ok := item.(string); ok {
-								list[i] = stripID(str)
+						kept := make([]any, 0, len(list))
+						seen := map[string]struct{}{}
+						for _, item := range list {
+							str, ok := item.(string)
+							if !ok {
+								continue
 							}
+							srv, tool, found := strings.Cut(str, ":")
+							if !found || srv != server || tool == "" {
+								continue
+							}
+							if _, dup := seen[tool]; dup {
+								continue
+							}
+							seen[tool] = struct{}{}
+							kept = append(kept, tool)
 						}
+						t[k] = kept
 						continue
 					}
 				}
