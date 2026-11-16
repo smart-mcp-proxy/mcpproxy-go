@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"go.uber.org/zap"
 
@@ -57,6 +58,8 @@ var (
 	// errSkillsSwitchedOff ends a refresh whose server stopped being eligible
 	// while it ran; like a stale capture it writes nothing and is not a failure.
 	errSkillsSwitchedOff = errors.New("skills were switched off for this server during the refresh")
+	// errSkillsClosed refuses a refresh once the runtime is shutting down.
+	errSkillsClosed = errors.New("the runtime is shutting down; skills are not refreshed")
 )
 
 // SkillsServerStatus is the in-memory state of a server's last skills refresh.
@@ -237,32 +240,54 @@ func nextSkillStatus(prev *storage.SkillApprovalRecord, usable bool, currentHash
 // single-flight per server: a call made while one runs joins it and gets its
 // result. It returns nil without any upstream request unless the feature is
 // on and the server may serve skills.
+//
+// The refresh belongs to the runtime, not to the caller that started it: it
+// runs on the runtime's lifetime context with its own timeout, and ctx only
+// bounds how long this caller waits. A caller that goes away (a closed HTTP
+// request) therefore cannot cancel the refresh under the others who joined.
 func (r *Runtime) RefreshServerSkills(ctx context.Context, serverName string) error {
 	st := &r.skills
 	st.mu.Lock()
 	st.init()
-	if f := st.flights[serverName]; f != nil {
+	f := st.flights[serverName]
+	switch {
+	case f != nil:
 		f.joiners++
+	case st.closed:
 		st.mu.Unlock()
-		select {
-		case <-f.done:
-			return f.err
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+		return errSkillsClosed
+	default:
+		f = &skillsFlight{done: make(chan struct{})}
+		st.flights[serverName] = f
+		st.wg.Add(1)
+		go r.runSkillsFlight(serverName, f)
 	}
-	f := &skillsFlight{done: make(chan struct{})}
-	st.flights[serverName] = f
 	st.mu.Unlock()
 
+	select {
+	case <-f.done:
+		return f.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// runSkillsFlight runs one shared refresh to its end and publishes the result
+// to everyone waiting on it.
+func (r *Runtime) runSkillsFlight(serverName string, f *skillsFlight) {
+	st := &r.skills
+	defer st.wg.Done()
 	defer func() {
 		st.mu.Lock()
 		delete(st.flights, serverName)
 		st.mu.Unlock()
 		close(f.done)
 	}()
+	ctx := r.lifetimeContext()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	f.err = r.refreshServerSkills(ctx, serverName)
-	return f.err
 }
 
 // skillOutcome is what one skill's read produced.
@@ -391,6 +416,19 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 	// (skill://x/pdf and https://x/pdf). Which of them the path would mean is
 	// not for the server to decide by listing order, so none of them is usable
 	// and each is addressed by its full address instead.
+	// An address too long to be one is not stored under: it would be the key
+	// of a record. It is counted with the entries that did not decode.
+	skipped := 0
+	kept := entries[:0:0]
+	for _, e := range entries {
+		if len(e.URI) > skills.MaxURIBytes {
+			skipped++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	entries = kept
+
 	pathUses := map[string]int{}
 	for _, e := range entries {
 		pathUses[skillPathOf(e.URI)]++
@@ -419,7 +457,7 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 	// A listing entry that did not decode but carried a URI is still a skill
 	// the person should see; without a URI there is nothing to key a record on.
 	for _, ee := range entryErrs {
-		if ee.URI == "" {
+		if ee.URI == "" || len(ee.URI) > skills.MaxURIBytes {
 			continue
 		}
 		path := skillPathOf(ee.URI)
@@ -428,7 +466,7 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 		}
 		outcomes = append(outcomes, skillOutcome{
 			uri: ee.URI, path: path,
-			reason: fmt.Sprintf("%s: %v", skills.ReasonInvalidURI, ee.Err),
+			reason: cutText(fmt.Sprintf("%s: %v", skills.ReasonInvalidURI, ee.Err), maxSkillReasonBytes),
 		})
 	}
 
@@ -506,7 +544,7 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 		s.LastRefresh = time.Now()
 		s.Error = ""
 		s.Truncated = truncated
-		s.EntryErrors = len(entryErrs)
+		s.EntryErrors = len(entryErrs) + skipped
 	})
 	if changed {
 		r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": serverName, "counts": counts}))
@@ -576,7 +614,7 @@ func mergeSkillRecord(serverName string, inc int64, seq uint64, now time.Time, p
 
 func unusableOutcome(o skillOutcome, u *skills.UnusableError) skillOutcome {
 	o.usable = false
-	o.reason = u.Error()
+	o.reason = cutText(u.Error(), maxSkillReasonBytes)
 	return o
 }
 
@@ -591,6 +629,29 @@ func supersededIfStale(err error, capture managed.InventoryCapture) error {
 	return fmt.Errorf("%w: %v", errSkillsCaptureStale, err)
 }
 
+// What a server says about a skill is stored for display, and a server can say
+// a lot. These bound it to a size worth showing; the verified content is not
+// affected, only what a person reads in a list.
+const (
+	maxSkillNameBytes        = 256
+	maxSkillDescriptionBytes = 4096
+	maxSkillReasonBytes      = 1024
+)
+
+// cutText shortens s to at most limit bytes without splitting a character,
+// and marks the cut.
+func cutText(s string, limit int) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	if len(s) <= limit {
+		return s
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
+}
+
 // describeSkill is what a listing entry says about itself, before anything is
 // read: identity, name, description, content hash and the listed files, so a
 // skill that turns out unusable still shows what it listed.
@@ -600,16 +661,26 @@ func describeSkill(e skills.Entry) skillOutcome {
 	if n, ok := e.Frontmatter["name"].(string); ok && n != "" {
 		o.name = n
 	}
-	o.description, _ = e.Frontmatter["description"].(string)
-	if fm, err := json.Marshal(e.Frontmatter); err == nil {
+	o.name = cutText(o.name, maxSkillNameBytes)
+	desc, _ := e.Frontmatter["description"].(string)
+	o.description = cutText(desc, maxSkillDescriptionBytes)
+	// An over-long frontmatter makes the skill unusable; it is not kept.
+	if fm, err := json.Marshal(e.Frontmatter); err == nil && len(fm) <= skills.MaxFrontmatterBytes {
 		o.frontmatter = fm
 	}
 	o.hash, _ = skills.ContentHash(e)
 
 	root, _, _, perr := skills.ParseSkillURI(e.URI)
 	// The listed files, so a skill that fails midway still shows what it listed.
-	o.files = make([]storage.SkillFile, 0, len(e.Files))
-	for _, f := range e.Files {
+	listed := e.Files
+	if len(listed) > skills.MaxFilesPerSkill { // such a skill is unusable; show the head of its list
+		listed = listed[:skills.MaxFilesPerSkill]
+	}
+	o.files = make([]storage.SkillFile, 0, len(listed))
+	for _, f := range listed {
+		if len(f.URI) > skills.MaxURIBytes {
+			continue
+		}
 		rel := f.URI
 		if perr == nil {
 			if p, err := skills.RelPath(root, f.URI); err == nil {
@@ -917,7 +988,8 @@ func (r *Runtime) triggerSkillsRefresh(serverName string) {
 	go func() {
 		defer r.skills.wg.Done()
 		err := r.RefreshServerSkills(ctx, serverName)
-		if err != nil && !errors.Is(err, errSkillsCaptureStale) && !errors.Is(err, errSkillsSwitchedOff) && ctx.Err() == nil {
+		if err != nil && !errors.Is(err, errSkillsCaptureStale) && !errors.Is(err, errSkillsSwitchedOff) &&
+			!errors.Is(err, errSkillsClosed) && ctx.Err() == nil {
 			r.logger.Warn("Skills refresh failed", zap.String("server", serverName), zap.Error(err))
 		}
 	}()

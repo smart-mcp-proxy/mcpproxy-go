@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1043,4 +1044,69 @@ func TestSupersededIfStale(t *testing.T) {
 	got := supersededIfStale(readErr, capture)
 	assert.ErrorIs(t, got, ErrSkillsRefreshSuperseded)
 	assert.NoError(t, supersededIfStale(nil, capture), "no error stays no error")
+}
+
+// A refresh is shared by everyone who asks while it runs, so it does not
+// belong to the caller who happened to start it: when that caller goes away,
+// the others still get a complete refresh.
+func TestSkillsRefresh_CallerCancellationDoesNotCancelTheSharedRefresh(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf", Files: map[string][]byte{"a.md": []byte("alpha")}})
+	g.fx.SetDelay(100 * time.Millisecond)
+
+	ctxA, cancelA := context.WithCancel(context.Background())
+	errA := make(chan error, 1)
+	go func() { errA <- g.rt.RefreshServerSkills(ctxA, skillsSrv) }()
+	require.Eventually(t, func() bool { return g.fx.Count("skills/list") == 1 }, 10*time.Second, time.Millisecond)
+
+	errB := make(chan error, 1)
+	go func() { errB <- g.rt.RefreshServerSkills(context.Background(), skillsSrv) }()
+	require.Eventually(t, func() bool { return g.rt.skills.joiners(skillsSrv) >= 1 }, 10*time.Second, time.Millisecond)
+
+	cancelA()
+	assert.ErrorIs(t, <-errA, context.Canceled, "the caller that left stops waiting")
+	assert.NoError(t, <-errB, "the caller that stayed gets the refresh")
+	assert.Equal(t, storage.SkillStatusPending, g.records(t)["pdf"].Status)
+	assert.Empty(t, g.rt.SkillsStatus(skillsSrv).Error)
+}
+
+// What a server says about a skill is kept for display, and a server can say
+// a lot. Names, descriptions, reasons and file lists are cut to a size worth
+// showing before they are stored, and an address too long to be one is not
+// stored at all.
+func TestSkillsRefresh_BoundsWhatIsStoredForDisplay(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	long := strings.Repeat("é", 20000) // two bytes each
+	g.fx.AddSkill(skillstest.Skill{Path: "wordy", ListedFrontmatter: map[string]any{"name": "wordy", "description": long}})
+
+	var files []string
+	for i := 0; i < skills.MaxFilesPerSkill+300; i++ {
+		files = append(files, fmt.Sprintf(`{"uri":"skill://many/f%04d.md","digest":"sha256:%s","size":1}`, i, strings.Repeat("0", 64)))
+	}
+	g.fx.AddRawEntry([]byte(`{"uri":"skill://many/SKILL.md","frontmatter":{"name":"many","description":"d"},"resources":[` + strings.Join(files, ",") + `]}`))
+
+	hugeURI := "skill://" + strings.Repeat("a", skills.MaxURIBytes) + "/SKILL.md"
+	g.fx.AddRawEntry([]byte(`{"uri":"` + hugeURI + `","frontmatter":{"name":"x","description":"d"},"resources":[{"uri":"` + hugeURI + `","digest":"sha256:` + strings.Repeat("0", 64) + `","size":1}]}`))
+
+	require.NoError(t, g.refresh(t))
+	recs := g.records(t)
+
+	wordy := recs["wordy"]
+	require.NotNil(t, wordy)
+	assert.LessOrEqual(t, len(wordy.Description), maxSkillDescriptionBytes+8)
+	assert.True(t, utf8.ValidString(wordy.Description), "a cut never splits a character")
+	assert.LessOrEqual(t, len(wordy.Current.Frontmatter), skills.MaxFrontmatterBytes)
+
+	many := recs["many"]
+	require.NotNil(t, many)
+	assert.Equal(t, storage.SkillStatusUnusable, many.Status)
+	assert.LessOrEqual(t, len(many.Current.Files), skills.MaxFilesPerSkill)
+
+	list, err := g.rt.ListSkillRecords(skillsSrv)
+	require.NoError(t, err)
+	for _, r := range list {
+		assert.LessOrEqual(t, len(r.SkillURI), skills.MaxURIBytes, "an over-long address is not stored")
+		assert.LessOrEqual(t, len(r.UnusableReason), maxSkillReasonBytes+8)
+	}
+	assert.Equal(t, 1, g.rt.SkillsStatus(skillsSrv).EntryErrors, "the over-long address is counted")
 }

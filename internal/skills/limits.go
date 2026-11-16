@@ -9,11 +9,13 @@ const ExtensionKey = "io.modelcontextprotocol/skills"
 // Bounds that keep one upstream from making mcpproxy read, store or scan
 // without limit. They are constants, not config, so every layer agrees.
 const (
-	MaxFilesPerSkill       = 512
-	MaxSkillBytes          = 16 << 20
-	MaxSkillsPerServer     = 200
-	MaxListPages           = 50
-	MaxListResponseBytes   = 4 << 20
+	MaxFilesPerSkill     = 512
+	MaxSkillBytes        = 16 << 20
+	MaxSkillsPerServer   = 200
+	MaxListPages         = 50
+	MaxListResponseBytes = 4 << 20
+	// MaxListBytes bounds all pages of one listing together.
+	MaxListBytes           = 16 << 20
 	MaxStoredTextPerServer = 64 << 20
 	MaxReadPerRefresh      = 256 << 20
 	MaxFrontmatterBytes    = 64 << 10

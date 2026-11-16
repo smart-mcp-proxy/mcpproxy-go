@@ -26,6 +26,9 @@ func nextSkillsRequestID() mcp.RequestId {
 	return mcp.NewRequestId(fmt.Sprintf("mcpproxy-skills-%d", skillsRequestSeq.Add(1)))
 }
 
+// maxSkillsListBytes is skills.MaxListBytes; a variable so a test can lower it.
+var maxSkillsListBytes int64 = skills.MaxListBytes
+
 // trimSkillListing cuts a listing to at most limit items in total, dropping
 // undecodable entries before decoded ones.
 func trimSkillListing(entries []skills.Entry, entryErrs []skills.EntryError, limit int) ([]skills.Entry, []skills.EntryError) {
@@ -137,6 +140,7 @@ func (c *Client) ListSkills(ctx context.Context) (entries []skills.Entry, entryE
 
 	cursor := ""
 	seen := 0
+	var listBytes int64
 	for page := 1; ; page++ {
 		if cerr := ctx.Err(); cerr != nil {
 			return nil, nil, fmt.Errorf("skills/list failed: %w", cerr)
@@ -151,6 +155,13 @@ func (c *Client) ListSkills(ctx context.Context) (entries []skills.Entry, entryE
 		raw, rerr := c.skillsRPC(ctx, "skills/list", params, skills.MaxListResponseBytes)
 		if rerr != nil {
 			return nil, nil, rerr
+		}
+		// All pages together have a budget too: what a listing says ends up
+		// in records, so its total size is what bounds them.
+		if listBytes += int64(len(raw)); listBytes > maxSkillsListBytes {
+			c.logger.Warn("upstream skills listing reached its byte budget; stopping",
+				zap.String("server", c.config.Name), zap.Int64("budget", maxSkillsListBytes))
+			return entries, entryErrs, &skills.TruncatedError{Bound: skills.BoundResponseBytes, Limit: maxSkillsListBytes}
 		}
 		decoded, derr := skills.DecodeListResult(raw)
 		if derr != nil {

@@ -442,3 +442,25 @@ func TestListSkillsAsksTheContinueCheckBeforeEveryPage(t *testing.T) {
 	assert.Empty(t, entries, "a stopped listing returns nothing to act on")
 	assert.Equal(t, 2, fx.Count("skills/list"))
 }
+
+// The pages of one listing share a byte budget, so fifty pages of four
+// megabytes each are not all read.
+func TestListSkillsStopsAtTheListingByteBudget(t *testing.T) {
+	old := maxSkillsListBytes
+	maxSkillsListBytes = 1500
+	t.Cleanup(func() { maxSkillsListBytes = old })
+
+	fx := skillstest.New(t, skillstest.WithPageSize(1))
+	for i := 0; i < 20; i++ {
+		fx.AddSkill(skillstest.Skill{Path: fmt.Sprintf("s%02d", i)})
+	}
+	c := connectSkillsClient(t, fx.URL())
+
+	entries, _, err := c.ListSkills(context.Background())
+	var tr *skills.TruncatedError
+	require.ErrorAs(t, err, &tr)
+	assert.Equal(t, skills.BoundResponseBytes, tr.Bound)
+	assert.NotEmpty(t, entries)
+	assert.Less(t, len(entries), 20)
+	assert.Less(t, fx.Count("skills/list"), 20)
+}

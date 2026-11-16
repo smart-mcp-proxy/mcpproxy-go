@@ -59,7 +59,11 @@ These limits are fixed and not configurable:
 | Files per skill | 512 |
 | Size of one skill | 16 MiB |
 | Skills per server | 200 |
+| Size of one listing (all pages) | 16 MiB |
 | Stored text per server | 64 MiB |
+| Name and description kept for display | 256 bytes and 4 KiB (longer text is cut and marked with …) |
+
+The `mcpproxy skills` commands show control characters in skill names, descriptions, paths and file text as visible escapes (`\x1b`, `\u202e`), because this text comes from the upstream server and is shown before anyone approved it. Use `-o json` or `-o yaml` for the exact text.
 
 A listing that hits a limit is marked `truncated`. The limit of 200 counts every listed entry, including ones MCPProxy cannot decode.
 

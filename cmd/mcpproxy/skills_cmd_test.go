@@ -277,3 +277,74 @@ func TestSkillsShow_PathSharedWithAnUnlistedRecord(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "more than one")
 }
+
+// Skill names, descriptions, paths and file text come from an upstream server
+// and are shown before anyone approved them. Printed raw, an escape sequence in
+// them would run in the administrator's terminal (clear the screen, write the
+// clipboard, reorder the text). Human-readable output shows control characters
+// as visible escapes; structured output stays exact.
+func TestSkillsShow_EscapesTerminalControls(t *testing.T) {
+	list := `{"enabled": true, "server": "alpha", "supported": true, "skills": [
+	 {"id": "alpha:evil", "uri": "skill://evil/SKILL.md", "path": "evil", "name": "evil\u001b[31m",
+	  "description": "copy\u001b]52;c;QUJD\u0007 me", "status": "unusable", "blocked": false, "listed": true,
+	  "available": false, "unusable_reason": "read_failed: a\u001b[2Jb", "current_hash": "sk1-x", "approved_hash": "",
+	  "files": [{"path": "a\rb.md", "size": 1, "digest": "sha256:aa", "text": true},
+	            {"path": "SKILL.md", "size": 1, "digest": "sha256:bb", "text": true}],
+	  "total_size": 2, "scan": {"verdict": "", "complete": false, "findings": []}}]}`
+	body := "line one\n\u001b[2Jhidden \u202egnp.exe\ttab\n"
+	bodyJSON, err := json.Marshal(body)
+	require.NoError(t, err)
+	responses := map[string]cannedResponse{
+		"GET /api/v1/servers":                      okResp(serversBody("alpha")),
+		"GET /api/v1/servers/alpha/skills":         okResp(list),
+		"GET /api/v1/servers/alpha/skills/content": okResp(`{"text":` + string(bodyJSON) + `,"offset":0,"size":40,"digest":"sha256:bb"}`),
+	}
+	raw := []string{"\x1b", "\x07", "\r", "\u202e"}
+
+	newRESTRecorder(t, responses)
+	out, _, err := runCLI(t, GetSkillsCommand, "table", "show", "alpha:evil")
+	require.NoError(t, err)
+	for _, c := range raw {
+		require.NotContains(t, out, c, "raw control character %q reached the terminal", c)
+	}
+	for _, want := range []string{`evil\x1b[31m`, `\x1b]52;c;QUJD\x07`, `a\x0db.md`, `\x1b[2Jhidden`, "\\u202e", "line one\n", "\ttab"} {
+		require.Contains(t, out, want)
+	}
+
+	newRESTRecorder(t, responses)
+	out, _, err = runCLI(t, GetSkillsCommand, "table", "list")
+	require.NoError(t, err)
+	for _, c := range raw {
+		require.NotContains(t, out, c)
+	}
+
+	newRESTRecorder(t, responses)
+	out, _, err = runCLI(t, GetSkillsCommand, "json", "show", "alpha:evil")
+	require.NoError(t, err)
+	var doc struct {
+		Name string `json:"name"`
+		Text string `json:"text"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &doc))
+	require.Equal(t, "evil\x1b[31m", doc.Name, "structured output is exact")
+	require.Equal(t, body, doc.Text)
+}
+
+// The chunks of one read must belong to one version of the file: a refresh
+// between two requests would otherwise be shown as text no version contains.
+func TestSkillsShow_RefusesAFileThatChangedBetweenChunks(t *testing.T) {
+	rec := newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/servers/alpha/skills": okResp(skillsListBody),
+	})
+	rec.mu.Lock()
+	rec.sequences = map[string][]cannedResponse{
+		"GET /api/v1/servers/alpha/skills/content": {
+			okResp(`{"text":"# Hello\n","offset":0,"next_offset":8,"size":14,"digest":"sha256:aa"}`),
+			okResp(`{"text":"other\n","offset":8,"size":14,"digest":"sha256:zz"}`),
+		},
+	}
+	rec.mu.Unlock()
+	_, _, err := runCLI(t, GetSkillsCommand, "table", "show", "alpha:hf-cli")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "changed while it was being read")
+}

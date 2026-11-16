@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -162,13 +163,13 @@ func printSkillsTable(lists []*contracts.SkillsListResponse) error {
 	var notes []string
 	for _, l := range lists {
 		for _, e := range l.Skills {
-			rows = append(rows, []string{l.Server, e.Path, skillStatusCell(e), strconv.Itoa(len(e.Files)), humanBytes(e.TotalSize)})
+			rows = append(rows, []string{termSafe(l.Server), termSafe(e.Path), termSafe(skillStatusCell(e)), strconv.Itoa(len(e.Files)), humanBytes(e.TotalSize)})
 		}
 		if l.Error != "" {
-			notes = append(notes, l.Server+": "+l.Error)
+			notes = append(notes, termSafe(l.Server+": "+l.Error))
 		}
 		if l.Truncated {
-			notes = append(notes, l.Server+": listing truncated (a skills limit was reached; some skills are missing)")
+			notes = append(notes, termSafe(l.Server)+": listing truncated (a skills limit was reached; some skills are missing)")
 		}
 	}
 	if len(rows) == 0 {
@@ -187,6 +188,66 @@ func skillStatusCell(e contracts.SkillEntry) string {
 		return "unusable (" + e.UnusableReason + ")"
 	}
 	return e.Status
+}
+
+// termSafe makes text that came from an upstream server safe to print on one
+// line of a terminal. Skill names, descriptions, paths and reasons are shown
+// before anyone approved them, and an escape sequence printed raw would be
+// carried out by the terminal: clear the screen, set the title, write the
+// clipboard, reverse the reading order. Control characters, the Unicode
+// direction and invisible-format characters, and bytes that are not UTF-8 are
+// shown as visible escapes instead. Structured output (-o json|yaml) does not
+// go through here: its encoder escapes on its own and stays exact.
+func termSafe(s string) string { return termEscape(s, false) }
+
+// termSafeText is termSafe for a block of text: line feeds and tabs stay.
+func termSafeText(s string) string { return termEscape(s, true) }
+
+func termEscape(s string, keepLayout bool) string {
+	clean := true
+	for _, r := range s {
+		if termUnsafe(r, keepLayout) {
+			clean = false
+			break
+		}
+	}
+	if clean && utf8.ValidString(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 16)
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && n == 1:
+			fmt.Fprintf(&b, `\x%02x`, s[i])
+		case !termUnsafe(r, keepLayout):
+			b.WriteRune(r)
+		case r < 0x100:
+			fmt.Fprintf(&b, `\x%02x`, r)
+		default:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		}
+		i += n
+	}
+	return b.String()
+}
+
+// termUnsafe reports whether a rune can change what a terminal shows beyond
+// its own glyph.
+func termUnsafe(r rune, keepLayout bool) bool {
+	switch {
+	case keepLayout && (r == '\n' || r == '\t'):
+		return false
+	case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f: // C0, DEL, C1
+		return true
+	case r == 0x061c, r == 0x200e, r == 0x200f, // direction marks
+		r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069, // embeddings, overrides, isolates
+		r == 0x2028, r == 0x2029, // line and paragraph separators
+		r == 0xfeff: // zero-width no-break space
+		return true
+	}
+	return false
 }
 
 // printJSONValue prints v through the -o json|yaml path.
@@ -269,10 +330,19 @@ func runSkillsShow(target, file string, approved bool) error {
 
 	var text strings.Builder
 	offset := int64(0)
-	for {
+	var digest string
+	var size int64
+	for first := true; ; first = false {
 		chunk, err := s.client.GetServerSkillContent(ctx, server, skill, file, approved, offset)
 		if err != nil {
 			return err
+		}
+		// Every chunk names the version it was cut from. A refresh between two
+		// requests would otherwise be shown as text no version contains.
+		if first {
+			digest, size = chunk.Digest, chunk.Size
+		} else if chunk.Digest != digest || chunk.Size != size {
+			return fmt.Errorf("%s changed while it was being read; run the command again", termSafe(file))
 		}
 		text.WriteString(chunk.Text)
 		if chunk.NextOffset == nil {
@@ -287,13 +357,13 @@ func runSkillsShow(target, file string, approved bool) error {
 	if structuredOutput() {
 		return printJSONValue(skillShowDoc{SkillEntry: *entry, File: file, Copy: copyName, Text: text.String()})
 	}
-	fmt.Printf("Skill:        %s\n", entry.ID)
-	fmt.Printf("Name:         %s\n", entry.Name)
-	fmt.Printf("Description:  %s\n", entry.Description)
-	fmt.Printf("Status:       %s\n", skillStatusCell(*entry))
-	fmt.Printf("Hash:         %s\n", dash(entry.CurrentHash))
+	fmt.Printf("Skill:        %s\n", termSafe(entry.ID))
+	fmt.Printf("Name:         %s\n", termSafe(entry.Name))
+	fmt.Printf("Description:  %s\n", termSafe(entry.Description))
+	fmt.Printf("Status:       %s\n", termSafe(skillStatusCell(*entry)))
+	fmt.Printf("Hash:         %s\n", termSafe(dash(entry.CurrentHash)))
 	if entry.ApprovedHash != "" {
-		fmt.Printf("Approved:     %s\n", entry.ApprovedHash)
+		fmt.Printf("Approved:     %s\n", termSafe(entry.ApprovedHash))
 	}
 	fmt.Printf("Available:    %t\n\n", entry.Available)
 	rows := make([][]string, 0, len(entry.Files))
@@ -302,12 +372,12 @@ func runSkillsShow(target, file string, approved bool) error {
 		if !f.Text {
 			kind = "binary"
 		}
-		rows = append(rows, []string{f.Path, humanBytes(f.Size), kind, f.Digest})
+		rows = append(rows, []string{termSafe(f.Path), humanBytes(f.Size), kind, termSafe(f.Digest)})
 	}
 	if err := printTable([]string{"FILE", "SIZE", "TYPE", "DIGEST"}, rows); err != nil {
 		return err
 	}
-	fmt.Printf("\n--- %s (%s copy) ---\n%s", file, copyName, text.String())
+	fmt.Printf("\n--- %s (%s copy) ---\n%s", termSafe(file), copyName, termSafeText(text.String()))
 	if !strings.HasSuffix(text.String(), "\n") {
 		fmt.Println()
 	}
@@ -348,12 +418,12 @@ func runSkillsRefresh(server string) error {
 	if len(resp.Skills) == 1 {
 		noun = "skill"
 	}
-	fmt.Printf("%s: refreshed, %d %s%s\n", resp.Server, len(resp.Skills), noun, summary)
+	fmt.Printf("%s: refreshed, %d %s%s\n", termSafe(resp.Server), len(resp.Skills), noun, summary)
 	if resp.Error != "" {
-		fmt.Printf("%s: %s\n", resp.Server, resp.Error)
+		fmt.Printf("%s: %s\n", termSafe(resp.Server), termSafe(resp.Error))
 	}
 	if resp.Truncated {
-		fmt.Printf("%s: listing truncated (a skills limit was reached; some skills are missing)\n", resp.Server)
+		fmt.Printf("%s: listing truncated (a skills limit was reached; some skills are missing)\n", termSafe(resp.Server))
 	}
 	return nil
 }
