@@ -137,8 +137,18 @@ type ListenStream struct {
 // (#1040). The transport is the stream's own, so closeIdle (run when Run
 // returns) leaves no idle connection behind.
 func (cfg *HTTPTransportConfig) listenHTTPClient(logger *zap.Logger) (client *http.Client, closeIdle func()) {
-	tuned := defaultHTTPTransport()
-	tuned.ResponseHeaderTimeout = 30 * time.Second
+	// A transport of its own (closeIdle must not touch the POST client's
+	// pool); baseTransport puts it behind the instance's dial gate (Spec 116
+	// FR-024a), like the POST client's.
+	tuned := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          4,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+	}
 	base := cfg.baseTransport(tuned)
 	closeIdle = func() {}
 	if t, ok := base.(*http.Transport); ok {
@@ -162,13 +172,6 @@ func listenRedirectPolicy(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
 	return forwardedRedirectFilter(req, via)
-}
-
-func defaultHTTPTransport() *http.Transport {
-	if t, ok := http.DefaultTransport.(*http.Transport); ok {
-		return t.Clone()
-	}
-	return &http.Transport{Proxy: http.ProxyFromEnvironment}
 }
 
 // NewListenStream builds the GET stream for sh, the mcp-go transport this

@@ -279,7 +279,17 @@ func TestListChangedStream_RefusedGETIsNotRetried(t *testing.T) {
 			c, _ := connectListenClient(t, srv.URL)
 			waitFor(t, "the GET", func() bool { return up.gets.Load() >= 1 })
 			time.Sleep(2500 * time.Millisecond)
-			assert.Equal(t, int32(1), up.gets.Load(), "a refused GET must not be retried")
+			// A retry would re-send the GET on the same session. Count per
+			// session: a slow CI host may connect twice (a new session, so a
+			// new stream attempt), which is not a retry.
+			perSession := map[string]int{}
+			for _, sid := range up.getSessionIDs() {
+				perSession[sid]++
+			}
+			require.NotEmpty(t, perSession)
+			for sid, n := range perSession {
+				assert.Equal(t, 1, n, "a refused GET must not be retried (session %q)", sid)
+			}
 			assert.False(t, c.listChangedStreamRunning(), "the listener ends after a refusal")
 		})
 	}
