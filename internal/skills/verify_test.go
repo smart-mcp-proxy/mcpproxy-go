@@ -3,6 +3,7 @@ package skills
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -106,4 +107,63 @@ func TestFrontmatterEqual(t *testing.T) {
 	assert.True(t, FrontmatterEqual(map[string]any{"a": 1}, map[string]any{"a": int64(1)}))
 	assert.False(t, FrontmatterEqual(map[string]any{"a": "1"}, map[string]any{"a": 1}))
 	assert.False(t, FrontmatterEqual(map[string]any{"a": func() {}}, map[string]any{"a": 1}), "unmarshalable values never compare equal")
+}
+
+// Numbers are compared exactly: a listing and a SKILL.md that differ only in a
+// large integer are different, while 1 and 1.0 are the same number.
+func TestFrontmatterNumbersAreComparedExactly(t *testing.T) {
+	listed, err := DecodeEntry([]byte(`{"uri":"skill://a/SKILL.md","frontmatter":{"name":"a","description":"d","count":9007199254740992},"resources":[{"uri":"skill://a/SKILL.md","digest":"sha256:` + strings.Repeat("0", 64) + `","size":1}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseFrontmatter([]byte("---\nname: a\ndescription: d\ncount: 9007199254740993\n---\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if FrontmatterEqual(listed.Frontmatter, parsed) {
+		t.Fatal("9007199254740992 and 9007199254740993 compared equal")
+	}
+	same, err := ParseFrontmatter([]byte("---\nname: a\ndescription: d\ncount: 9007199254740992\n---\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !FrontmatterEqual(listed.Frontmatter, same) {
+		t.Fatal("the same large integer compared different")
+	}
+
+	one := map[string]any{"v": json.Number("1")}
+	for _, y := range []string{"v: 1", "v: 1.0", "v: 1e0"} {
+		p, err := ParseFrontmatter([]byte("---\n" + y + "\n---\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !FrontmatterEqual(one, p) {
+			t.Errorf("1 and %q compared different", y)
+		}
+	}
+	if FrontmatterEqual(map[string]any{"v": json.Number("1")}, map[string]any{"v": "1"}) {
+		t.Error("the number 1 and the string \"1\" compared equal")
+	}
+}
+
+func TestContentHashSeesLargeIntegerDifference(t *testing.T) {
+	mk := func(n string) Entry {
+		e, err := DecodeEntry([]byte(`{"uri":"skill://a/SKILL.md","frontmatter":{"name":"a","description":"d","count":` + n + `},"resources":[{"uri":"skill://a/SKILL.md","digest":"sha256:` + strings.Repeat("0", 64) + `","size":1}]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	h1, err1 := ContentHash(mk("9007199254740992"))
+	h2, err2 := ContentHash(mk("9007199254740993"))
+	h3, err3 := ContentHash(mk("9007199254740992.0"))
+	if err1 != nil || err2 != nil || err3 != nil {
+		t.Fatal(err1, err2, err3)
+	}
+	if h1 == h2 {
+		t.Fatal("two different integers share a content hash")
+	}
+	if h1 != h3 {
+		t.Fatal("one number written two ways has two content hashes")
+	}
 }

@@ -391,3 +391,34 @@ func TestListSkillsConnectedRequired(t *testing.T) {
 	require.Error(t, err)
 	_ = methodsOf
 }
+
+// Entries that do not decode count toward the per-server cap like any other:
+// each one with an address becomes a record downstream, so a listing made of
+// thousands of malformed entries must be cut off at the same bound.
+func TestListSkillsEntryCapCountsMalformedEntries(t *testing.T) {
+	fx := skillstest.New(t, skillstest.WithPageSize(150))
+	for i := 0; i < 500; i++ {
+		fx.AddRawEntry(json.RawMessage(fmt.Sprintf(`{"uri":"skill://bad-%d/SKILL.md","resources":7}`, i)))
+	}
+	c := connectSkillsClient(t, fx.URL())
+
+	entries, entryErrs, err := c.ListSkills(context.Background())
+	var tr *skills.TruncatedError
+	require.ErrorAs(t, err, &tr)
+	assert.Equal(t, skills.BoundEntries, tr.Bound)
+	assert.LessOrEqual(t, len(entries)+len(entryErrs), skills.MaxSkillsPerServer)
+	assert.LessOrEqual(t, fx.Count("skills/list"), 2, "the listing stops at the page that reaches the cap")
+}
+
+func TestListSkillsEntryCapCountsMalformedEntriesOnTheLastPage(t *testing.T) {
+	fx := skillstest.New(t)
+	for i := 0; i < 250; i++ {
+		fx.AddRawEntry(json.RawMessage(fmt.Sprintf(`{"uri":"skill://bad-%d/SKILL.md","resources":7}`, i)))
+	}
+	c := connectSkillsClient(t, fx.URL())
+
+	entries, entryErrs, err := c.ListSkills(context.Background())
+	var tr *skills.TruncatedError
+	require.ErrorAs(t, err, &tr)
+	assert.Equal(t, skills.MaxSkillsPerServer, len(entries)+len(entryErrs))
+}

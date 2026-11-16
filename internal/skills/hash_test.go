@@ -28,7 +28,7 @@ func mustHash(t *testing.T, e Entry) string {
 // Pinned so an accidental change to the encoding (which would silently void
 // every stored approval) fails here instead of in the field.
 func TestContentHashGolden(t *testing.T) {
-	assert.Equal(t, "sk1-8195fa47721dc3a181011ce0d9944636df0265ca6ee91a1960a6d6c8fd0b966c", mustHash(t, hashEntry()))
+	assert.Equal(t, "sk1-30ff9f5be766fc8f4e3be020f68786801d95452be7a70bd9c6dabf0972ca0c58", mustHash(t, hashEntry()))
 }
 
 func TestContentHashStableUnderFileOrder(t *testing.T) {

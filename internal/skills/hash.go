@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"sort"
 )
@@ -15,7 +14,7 @@ const hashPrefix = "sk1-"
 
 // ContentHash returns the approval binding of a skill: sk1- plus the sha256 of
 // an unambiguous encoding of the skill URI, every file (sorted by URI) as
-// (URI, relative path, digest, size), and the canonical frontmatter JSON. Every
+// (URI, relative path, digest, size), and the canonical frontmatter encoding. Every
 // string is length-prefixed so two different inputs never share an encoding.
 func ContentHash(e Entry) (string, error) {
 	root, _, _, err := ParseSkillURI(e.URI)
@@ -37,13 +36,7 @@ func ContentHash(e Entry) (string, error) {
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ref.URI < rows[j].ref.URI })
 
-	// json.Marshal sorts map keys at every level; the round trip makes 1 and
-	// 1.0 the same number whichever side produced them.
-	norm, err := normalizeJSON(e.Frontmatter)
-	if err != nil {
-		return "", fmt.Errorf("canonicalise frontmatter: %w", err)
-	}
-	fm, err := json.Marshal(norm)
+	fm, err := canonicalFrontmatter(e.Frontmatter)
 	if err != nil {
 		return "", fmt.Errorf("canonicalise frontmatter: %w", err)
 	}

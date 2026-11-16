@@ -3,6 +3,7 @@ package skills
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -185,4 +186,22 @@ func TestEntryValidate(t *testing.T) {
 		}
 		assert.Nil(t, e.Validate())
 	})
+}
+
+// A size near the int64 limit must not wrap the running total back under the
+// per-skill bound.
+func TestValidateSizeSumDoesNotOverflow(t *testing.T) {
+	d := "sha256:" + strings.Repeat("0", 64)
+	e := Entry{
+		URI:         "skill://a/SKILL.md",
+		Frontmatter: map[string]any{"name": "a", "description": "d"},
+		Files: []FileRef{
+			{URI: "skill://a/SKILL.md", Digest: d, Size: 10},
+			{URI: "skill://a/big.bin", Digest: d, Size: math.MaxInt64},
+		},
+	}
+	u := e.Validate()
+	if u == nil || u.Code != ReasonTooLarge {
+		t.Fatalf("Validate = %v, want %s", u, ReasonTooLarge)
+	}
 }

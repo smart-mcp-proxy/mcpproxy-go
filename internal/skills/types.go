@@ -5,6 +5,7 @@
 package skills
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -84,8 +85,23 @@ type ListPage struct {
 
 type wireEntry struct {
 	URI         string          `json:"uri"`
-	Frontmatter map[string]any  `json:"frontmatter"`
+	Frontmatter json.RawMessage `json:"frontmatter"`
 	Resources   json.RawMessage `json:"resources"`
+}
+
+// decodeFrontmatter keeps numbers as written (json.Number): a float64 would
+// round large integers, and two different listings would then look the same.
+func decodeFrontmatter(raw json.RawMessage) (map[string]any, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var m map[string]any
+	if err := dec.Decode(&m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 // DecodeEntry decodes one wire entry. Unknown fields are ignored.
@@ -94,7 +110,11 @@ func DecodeEntry(raw json.RawMessage) (Entry, error) {
 	if err := json.Unmarshal(raw, &w); err != nil {
 		return Entry{}, fmt.Errorf("decode skill entry: %w", err)
 	}
-	e := Entry{URI: w.URI, Frontmatter: w.Frontmatter}
+	fm, err := decodeFrontmatter(w.Frontmatter)
+	if err != nil {
+		return Entry{}, fmt.Errorf("decode skill entry frontmatter: %w", err)
+	}
+	e := Entry{URI: w.URI, Frontmatter: fm}
 
 	trimmed := string(w.Resources)
 	if trimmed == "" || trimmed == "null" {
@@ -224,6 +244,11 @@ func (e Entry) Validate() *UnusableError {
 		}
 		if f.Size < 0 {
 			return unusable(ReasonTooLarge, "%s: negative size", rel)
+		}
+		// Compared by subtraction: adding a size near the int64 limit to the
+		// running total would wrap it back under the bound.
+		if f.Size > MaxSkillBytes-total {
+			return unusable(ReasonTooLarge, "files total more than %d bytes", MaxSkillBytes)
 		}
 		total += f.Size
 		if total > MaxSkillBytes {

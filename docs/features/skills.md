@@ -61,7 +61,9 @@ These limits are fixed and not configurable:
 | Skills per server | 200 |
 | Stored text per server | 64 MiB |
 
-A listing that hits a limit is marked `truncated`.
+A listing that hits a limit is marked `truncated`. The limit of 200 counts every listed entry, including ones MCPProxy cannot decode.
+
+A size in a listing is only what the server claims. For servers reached over streamable HTTP, MCPProxy also caps each response before it is buffered, at what the listed size allows, so a server that sends more than it listed is cut off. For stdio and SSE servers a response arrives on a stream shared with everything else the server sends and cannot be cut off per request: the length is checked after the response has arrived, which is the same exposure that already exists for any tool result from that server.
 
 ## Skill states in this release
 

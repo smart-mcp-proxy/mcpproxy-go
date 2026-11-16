@@ -853,3 +853,113 @@ func TestSkillsRefresh_CloseJoinsBackgroundRefresh(t *testing.T) {
 	// The test ends here with the refresh inside afterList; the rig's cleanup
 	// calls Close now.
 }
+
+// Two files of one skill with the same content share a digest, and the second
+// is taken from what the first just read. It is still checked against its own
+// listed size.
+func TestSkillsRefresh_SameDigestFileIsVerifiedAgainstItsOwnReference(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	same := []byte("the same bytes twice")
+	g.fx.AddSkill(skillstest.Skill{Path: "dup", Files: map[string][]byte{"a.md": same, "b.md": same}, WrongSize: []string{"b.md"}})
+	require.NoError(t, g.refresh(t))
+	rec := g.records(t)["dup"]
+	require.NotNil(t, rec)
+	assert.Equal(t, storage.SkillStatusUnusable, rec.Status)
+	assert.Contains(t, rec.UnusableReason, skills.ReasonSizeMismatch)
+}
+
+// One path, two addresses: skill://x/pdf and https://x/pdf both derive the path
+// x/pdf, which is what a skill is looked up by. Neither is usable, nothing is
+// read for either, and each keeps an identity of its own.
+func TestSkillsRefresh_TwoAddressesForOnePathAreBothUnusable(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	g.fx.AddSkill(skillstest.Skill{Path: "x/pdf"})
+	g.fx.AddSkill(skillstest.Skill{Path: "ok"})
+	g.fx.AddRawEntry([]byte(`{"uri":"https://x/pdf/SKILL.md","frontmatter":{"name":"pdf","description":"shadow"},` +
+		`"resources":[{"uri":"https://x/pdf/SKILL.md","digest":"sha256:` + strings.Repeat("ab", 32) + `","size":5}]}`))
+	require.NoError(t, g.refresh(t))
+
+	list, err := g.rt.ListSkillRecords(skillsSrv)
+	require.NoError(t, err)
+	byURI := map[string]*storage.SkillApprovalRecord{}
+	paths := map[string]int{}
+	for _, r := range list {
+		byURI[r.SkillURI] = r
+		paths[r.SkillPath]++
+	}
+	for _, uri := range []string{"skill://x/pdf/SKILL.md", "https://x/pdf/SKILL.md"} {
+		rec := byURI[uri]
+		require.NotNil(t, rec, uri)
+		assert.Equal(t, storage.SkillStatusUnusable, rec.Status, uri)
+		assert.Contains(t, rec.UnusableReason, skills.ReasonInvalidURI, uri)
+		assert.Equal(t, uri, rec.SkillPath, "a colliding skill is addressed by its full address")
+	}
+	for p, n := range paths {
+		assert.Equal(t, 1, n, "path %q is used by more than one record", p)
+	}
+	assert.Equal(t, storage.SkillStatusPending, byURI["skill://ok/SKILL.md"].Status)
+	for _, req := range g.fx.Requests() {
+		if req.Method == "resources/read" {
+			assert.NotContains(t, req.URI, "x/pdf", "no file of a colliding skill is read")
+		}
+	}
+	_, _, err = g.rt.SkillFileText(skillsSrv, "x/pdf", "SKILL.md", false)
+	assert.ErrorIs(t, err, ErrSkillNotFound)
+}
+
+// An earlier record that is no longer listed may share its path with a skill
+// the server lists now under another address. A lookup by path means the
+// listed one.
+func TestSkillFileText_PrefersTheListedRecordForAPath(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	old := "other://pdf/SKILL.md"
+	seedApprovedSkill(t, g, old, false)
+	rec, err := g.rt.storageManager.GetSkillApproval(skillsSrv, old)
+	require.NoError(t, err)
+	rec.SkillPath = "pdf"
+	require.NoError(t, g.rt.storageManager.SaveSkillApproval(rec))
+
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf", Files: map[string][]byte{"SKILL.md": []byte("---\nname: pdf\ndescription: current\n---\nlisted now\n")}})
+	require.NoError(t, g.refresh(t))
+
+	text, file, err := g.rt.SkillFileText(skillsSrv, "pdf", "SKILL.md", false)
+	require.NoError(t, err)
+	assert.Equal(t, "skill://pdf/SKILL.md", file.URI)
+	assert.Contains(t, string(text), "listed now")
+}
+
+// Turning the feature off, or excluding the server, while a refresh is
+// running stops it: no file is read afterwards and nothing is written.
+func TestSkillsRefresh_StopsWhenSwitchedOffMidway(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(c *config.Config)
+	}{
+		{"feature off", func(c *config.Config) { c.EnableSkills = false }},
+		{"server excluded", func(c *config.Config) {
+			no := false
+			for i, sc := range c.Servers {
+				if sc.Name == skillsSrv {
+					cp := *sc
+					cp.ExposeSkills = &no
+					c.Servers[i] = &cp
+				}
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newSkillsRig(t, skillsRigOpts{enable: true})
+			g.fx.AddSkill(skillstest.Skill{Path: "pdf", Files: map[string][]byte{"a.md": []byte("alpha")}})
+			g.rt.skills.afterList = func(string) {
+				next := *g.rt.Config()
+				next.Servers = append([]*config.ServerConfig(nil), next.Servers...)
+				tc.change(&next)
+				g.rt.UpdateConfig(&next, "")
+			}
+			_ = g.refresh(t)
+			assert.Zero(t, g.fx.Count("resources/read"), "no file is read once the switch is off")
+			assert.Empty(t, g.records(t), "nothing is written once the switch is off")
+			assert.Zero(t, g.blobCount(t))
+		})
+	}
+}

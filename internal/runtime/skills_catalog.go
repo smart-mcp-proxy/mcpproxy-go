@@ -49,6 +49,9 @@ var (
 	// errSkillsCaptureStale reports a listing dropped because a newer one was
 	// applied or its client was retired or reconnected. Not a status error.
 	errSkillsCaptureStale = errors.New("skills listing capture is stale")
+	// errSkillsSwitchedOff ends a refresh whose server stopped being eligible
+	// while it ran; like a stale capture it writes nothing and is not a failure.
+	errSkillsSwitchedOff = errors.New("skills were switched off for this server during the refresh")
 )
 
 // SkillsServerStatus is the in-memory state of a server's last skills refresh.
@@ -188,6 +191,15 @@ func skillAvailableIn(cfg *config.Config, serverName string, rec *storage.SkillA
 	return rec.Status == storage.SkillStatusApproved && !rec.Blocked && rec.Listed
 }
 
+// skillsEligible reports whether the server's skills may be read right now,
+// against the live config. A refresh asks again before every upstream request
+// and before it writes, so turning the feature off or excluding the server
+// stops a refresh that is already running.
+func (r *Runtime) skillsEligible(serverName string) bool {
+	cfg := r.Config()
+	return skillsServerExposed(cfg, skillsServerConfig(cfg, serverName))
+}
+
 // SkillAvailable is the only place that answers "may an agent have this
 // skill". It reads the live config at call time, so excluding a server or
 // turning the feature off withdraws its skills at once.
@@ -282,8 +294,8 @@ func (r *Runtime) refreshServerSkills(ctx context.Context, serverName string) er
 	defer cancel()
 
 	err := r.runSkillsRefresh(ctx, serverName)
-	if err != nil && !errors.Is(err, errSkillsCaptureStale) && !errors.Is(err, commitview.ErrServerReplaced) &&
-		!errors.Is(err, ErrServerNotFound) {
+	if err != nil && !errors.Is(err, errSkillsCaptureStale) && !errors.Is(err, errSkillsSwitchedOff) &&
+		!errors.Is(err, commitview.ErrServerReplaced) && !errors.Is(err, ErrServerNotFound) {
 		r.skills.setStatus(serverName, func(s *SkillsServerStatus) {
 			s.Supported = true
 			s.LastRefresh = time.Now()
@@ -343,8 +355,29 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 		}
 	}
 
+	// A skill is looked up by its path, and two addresses can derive one path
+	// (skill://x/pdf and https://x/pdf). Which of them the path would mean is
+	// not for the server to decide by listing order, so none of them is usable
+	// and each is addressed by its full address instead.
+	pathUses := map[string]int{}
+	for _, e := range entries {
+		pathUses[skillPathOf(e.URI)]++
+	}
+	for _, ee := range entryErrs {
+		if ee.URI != "" {
+			pathUses[skillPathOf(ee.URI)]++
+		}
+	}
+
 	var outcomes []skillOutcome
 	for _, e := range entries {
+		if p := skillPathOf(e.URI); pathUses[p] > 1 {
+			o := describeSkill(e)
+			o.path = e.URI
+			outcomes = append(outcomes, unusableOutcome(o, &skills.UnusableError{Code: skills.ReasonInvalidURI,
+				Detail: fmt.Sprintf("the path %q is used by more than one skill address in this listing", p)}))
+			continue
+		}
 		o, err := r.readSkill(ctx, serverName, inc, e, known[e.URI], budget)
 		if err != nil {
 			return err
@@ -357,8 +390,12 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 		if ee.URI == "" {
 			continue
 		}
+		path := skillPathOf(ee.URI)
+		if pathUses[path] > 1 {
+			path = ee.URI
+		}
 		outcomes = append(outcomes, skillOutcome{
-			uri: ee.URI, path: skillPathOf(ee.URI),
+			uri: ee.URI, path: path,
 			reason: fmt.Sprintf("%s: %v", skills.ReasonInvalidURI, ee.Err),
 		})
 	}
@@ -366,6 +403,9 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 	var counts map[string]int
 	var changed bool
 	err = r.WithServerApprovalLockAt(serverName, inc, func() error {
+		if !r.skillsEligible(serverName) {
+			return errSkillsSwitchedOff
+		}
 		if capture.Client != nil && !capture.Client.CaptureIsCurrent(capture) {
 			return fmt.Errorf("%w: its client was retired or reconnected", errSkillsCaptureStale)
 		}
@@ -508,11 +548,10 @@ func unusableOutcome(o skillOutcome, u *skills.UnusableError) skillOutcome {
 	return o
 }
 
-// readSkill reads one skill's files. A skill-level failure is an unusable
-// outcome and not an error; only a cancelled context or a replaced server
-// stops the whole refresh. At most one skill's file bytes are held at once.
-func (r *Runtime) readSkill(ctx context.Context, serverName string, inc int64, e skills.Entry, prev *storage.SkillApprovalRecord, b *skillsBudget) (skillOutcome, error) {
-	um, sm := r.upstreamManager, r.storageManager
+// describeSkill is what a listing entry says about itself, before anything is
+// read: identity, name, description, content hash and the listed files, so a
+// skill that turns out unusable still shows what it listed.
+func describeSkill(e skills.Entry) skillOutcome {
 	o := skillOutcome{uri: e.URI, path: skillPathOf(e.URI)}
 	o.name = o.path[strings.LastIndex(o.path, "/")+1:]
 	if n, ok := e.Frontmatter["name"].(string); ok && n != "" {
@@ -536,6 +575,15 @@ func (r *Runtime) readSkill(ctx context.Context, serverName string, inc int64, e
 		}
 		o.files = append(o.files, storage.SkillFile{RelPath: rel, URI: f.URI, Digest: f.Digest, Size: f.Size})
 	}
+	return o
+}
+
+// readSkill reads one skill's files. A skill-level failure is an unusable
+// outcome and not an error; only a cancelled context or a replaced server
+// stops the whole refresh. At most one skill's file bytes are held at once.
+func (r *Runtime) readSkill(ctx context.Context, serverName string, inc int64, e skills.Entry, prev *storage.SkillApprovalRecord, b *skillsBudget) (skillOutcome, error) {
+	um, sm := r.upstreamManager, r.storageManager
+	o := describeSkill(e)
 
 	if u := e.Validate(); u != nil {
 		return unusableOutcome(o, u), nil
@@ -550,6 +598,11 @@ func (r *Runtime) readSkill(ctx context.Context, serverName string, inc int64, e
 		have := false
 
 		if blob, dup := staged[digestHex]; dup {
+			// Same digest as a file this skill just read; still checked against
+			// this file's own listed size.
+			if u := skills.VerifyFile(ref, blob); u != nil {
+				return unusableOutcome(o, u), nil
+			}
 			content, have = blob, true
 			sf.Text = true
 		} else if ok, _ := sm.HasSkillFile(serverName, ref.Digest); ok {
@@ -566,11 +619,15 @@ func (r *Runtime) readSkill(ctx context.Context, serverName string, inc int64, e
 		}
 
 		if !have {
-			if b.read+ref.Size > b.readLimit {
+			if !r.skillsEligible(serverName) {
+				return o, errSkillsSwitchedOff
+			}
+			// Compared by subtraction so no sum of listed sizes can wrap.
+			if ref.Size > b.readLimit-b.read {
 				return unusableOutcome(o, &skills.UnusableError{Code: skills.ReasonServerBoundExceeded,
 					Detail: fmt.Sprintf("%s: the refresh read budget of %d bytes is used up", sf.RelPath, b.readLimit)}), nil
 			}
-			if b.stored+skillStored+ref.Size > b.storedLimit {
+			if ref.Size > b.storedLimit-b.stored-skillStored {
 				return unusableOutcome(o, &skills.UnusableError{Code: skills.ReasonServerBoundExceeded,
 					Detail: fmt.Sprintf("%s: the server's stored text budget of %d bytes is used up", sf.RelPath, b.storedLimit)}), nil
 			}
@@ -618,6 +675,9 @@ func (r *Runtime) readSkill(ctx context.Context, serverName string, inc int64, e
 
 	if len(staged) > 0 {
 		if err := r.WithServerApprovalLockAt(serverName, inc, func() error {
+			if !r.skillsEligible(serverName) {
+				return errSkillsSwitchedOff
+			}
 			for digestHex, blob := range staged {
 				if err := sm.PutSkillFile(serverName, digestHex, blob); err != nil {
 					return err
@@ -625,7 +685,7 @@ func (r *Runtime) readSkill(ctx context.Context, serverName string, inc int64, e
 			}
 			return nil
 		}); err != nil {
-			if errors.Is(err, commitview.ErrServerReplaced) {
+			if errors.Is(err, commitview.ErrServerReplaced) || errors.Is(err, errSkillsSwitchedOff) {
 				return o, err
 			}
 			return unusableOutcome(o, &skills.UnusableError{Code: skills.ReasonReadFailed, Detail: "store: " + err.Error()}), nil
@@ -688,13 +748,7 @@ func (r *Runtime) SkillFileText(serverName, skillPath, relPath string, approvedC
 	if err != nil {
 		return nil, storage.SkillFile{}, err
 	}
-	var rec *storage.SkillApprovalRecord
-	for _, c := range recs {
-		if c.SkillPath == skillPath {
-			rec = c
-			break
-		}
-	}
+	rec := skillByPath(recs, skillPath)
 	if rec == nil {
 		return nil, storage.SkillFile{}, fmt.Errorf("%w: %s:%s", ErrSkillNotFound, serverName, skillPath)
 	}
@@ -739,6 +793,30 @@ func (r *Runtime) SkillFileText(serverName, skillPath, relPath string, approvedC
 		return nil, *file, fmt.Errorf("%w: %s", ErrSkillStoredCopyDamaged, detail)
 	}
 	return data, *file, nil
+}
+
+// skillByPath finds the record a path means. One record with that path is the
+// answer. Several can exist when an earlier, no longer listed record shares
+// the path with a skill listed now under another address; then the path means
+// the listed one, and nothing when that is not unique.
+func skillByPath(recs []*storage.SkillApprovalRecord, path string) *storage.SkillApprovalRecord {
+	var all, listed []*storage.SkillApprovalRecord
+	for _, c := range recs {
+		if c.SkillPath != path {
+			continue
+		}
+		all = append(all, c)
+		if c.Listed {
+			listed = append(listed, c)
+		}
+	}
+	switch {
+	case len(all) == 1:
+		return all[0]
+	case len(listed) == 1:
+		return listed[0]
+	}
+	return nil
 }
 
 func (r *Runtime) markSkillStoredCopyDamaged(serverName, skillURI, detail string) {
@@ -796,7 +874,7 @@ func (r *Runtime) triggerSkillsRefresh(serverName string) {
 	go func() {
 		defer r.skills.wg.Done()
 		err := r.RefreshServerSkills(ctx, serverName)
-		if err != nil && !errors.Is(err, errSkillsCaptureStale) && ctx.Err() == nil {
+		if err != nil && !errors.Is(err, errSkillsCaptureStale) && !errors.Is(err, errSkillsSwitchedOff) && ctx.Err() == nil {
 			r.logger.Warn("Skills refresh failed", zap.String("server", serverName), zap.Error(err))
 		}
 	}()

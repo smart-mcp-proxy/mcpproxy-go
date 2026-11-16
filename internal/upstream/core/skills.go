@@ -26,6 +26,18 @@ func nextSkillsRequestID() mcp.RequestId {
 	return mcp.NewRequestId(fmt.Sprintf("mcpproxy-skills-%d", skillsRequestSeq.Add(1)))
 }
 
+// trimSkillListing cuts a listing to at most limit items in total, dropping
+// undecodable entries before decoded ones.
+func trimSkillListing(entries []skills.Entry, entryErrs []skills.EntryError, limit int) ([]skills.Entry, []skills.EntryError) {
+	if len(entries) > limit {
+		entries = entries[:limit]
+	}
+	if room := limit - len(entries); len(entryErrs) > room {
+		entryErrs = entryErrs[:room]
+	}
+	return entries, entryErrs
+}
+
 // SetExposeSkills pushes the per-server expose_skills value to a running
 // connection, like SetExposePrompts. nil means "not set" (exposed).
 func (c *Client) SetExposeSkills(expose *bool) {
@@ -65,6 +77,12 @@ func (c *Client) skillsGuard() (cl *client.Client, transportType string, err err
 
 // skillsRPC sends one raw JSON-RPC request and returns its result. A JSON-RPC
 // error becomes an error.
+//
+// maxBytes bounds the response before it is buffered on the streamable-HTTP
+// transport only, where each request has its own response body. On stdio and
+// SSE the response arrives on the stream every message shares and is not
+// bounded per request: that is the exposure any tool result from the same
+// server already has, and callers still check lengths after the fact.
 func (c *Client) skillsRPC(ctx context.Context, method string, params map[string]any, maxBytes int64) (json.RawMessage, error) {
 	cl, _, err := c.skillsGuard()
 	if err != nil {
@@ -143,18 +161,17 @@ func (c *Client) ListSkills(ctx context.Context) (entries []skills.Entry, entryE
 		seen += len(decoded.Entries) + len(decoded.Errors)
 		entries = append(entries, decoded.Entries...)
 
-		if decoded.NextCursor == "" {
-			if len(entries) > skills.MaxSkillsPerServer {
-				entries = entries[:skills.MaxSkillsPerServer]
-				return entries, entryErrs, &skills.TruncatedError{Bound: skills.BoundEntries, Limit: skills.MaxSkillsPerServer}
-			}
-			return entries, entryErrs, nil
-		}
-		if len(entries) >= skills.MaxSkillsPerServer {
-			entries = entries[:skills.MaxSkillsPerServer]
+		// The cap counts every listed item, decoded or not: a malformed entry
+		// with an address still becomes a record downstream.
+		consumed := len(entries) + len(entryErrs)
+		if consumed > skills.MaxSkillsPerServer || (consumed == skills.MaxSkillsPerServer && decoded.NextCursor != "") {
+			entries, entryErrs = trimSkillListing(entries, entryErrs, skills.MaxSkillsPerServer)
 			c.logger.Warn("upstream skills listing reached entry cap; stopping",
 				zap.String("server", c.config.Name), zap.Int("cap", skills.MaxSkillsPerServer))
 			return entries, entryErrs, &skills.TruncatedError{Bound: skills.BoundEntries, Limit: skills.MaxSkillsPerServer}
+		}
+		if decoded.NextCursor == "" {
+			return entries, entryErrs, nil
 		}
 		if page >= skills.MaxListPages {
 			c.logger.Warn("upstream skills listing reached page cap; stopping",

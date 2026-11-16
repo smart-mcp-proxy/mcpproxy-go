@@ -46,6 +46,8 @@ type Skill struct {
 	// Oversize serves the file with this many extra bytes while the listing
 	// keeps the original size.
 	Oversize map[string]int
+	// ListedSize lists this size for the file, whatever its real length.
+	ListedSize map[string]int64
 }
 
 // Request is one JSON-RPC message the fixture received.
@@ -79,6 +81,7 @@ type Fixture struct {
 
 	mu       sync.Mutex
 	skills   []*Skill
+	raw      []json.RawMessage
 	requests []Request
 	failList bool
 	delay    time.Duration
@@ -102,6 +105,16 @@ func (f *Fixture) URL() string { return f.srv.URL }
 // AddSkill registers a skill. Digests and sizes in the listing are computed
 // from the current bytes each time, so they are correct unless a knob says
 // otherwise.
+// AddRawEntry appends one listing entry exactly as given, after the skills
+// added with AddSkill. It is how a test lists something AddSkill cannot
+// express: a malformed entry, or a second address for a path already listed.
+// Nothing is served for it on skills/get or resources/read.
+func (f *Fixture) AddRawEntry(entry json.RawMessage) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.raw = append(f.raw, append(json.RawMessage(nil), entry...))
+}
+
 func (f *Fixture) AddSkill(s Skill) {
 	cp := s
 	cp.Files = make(map[string][]byte, len(s.Files)+1)
@@ -220,6 +233,9 @@ func (s *Skill) entry() map[string]any {
 			if contains(s.WrongSize, rel) {
 				size++
 			}
+			if v, ok := s.ListedSize[rel]; ok {
+				size = v
+			}
 			refs = append(refs, map[string]any{"uri": s.uri(rel), "digest": d, "size": size})
 		}
 		resources = refs
@@ -315,25 +331,28 @@ func (f *Fixture) serveList(w http.ResponseWriter, req rpcRequest) {
 		writeError(w, req.ID, -32603, "skills/list failed on purpose")
 		return
 	}
+	all := make([]any, 0, len(f.skills)+len(f.raw))
+	for _, s := range f.skills {
+		all = append(all, s.entry())
+	}
+	for _, r := range f.raw {
+		all = append(all, r)
+	}
 	start := 0
 	if req.Params.Cursor != "" {
 		n, err := strconv.Atoi(req.Params.Cursor)
-		if err != nil || n < 0 || n > len(f.skills) {
+		if err != nil || n < 0 || n > len(all) {
 			writeError(w, req.ID, -32602, "bad cursor")
 			return
 		}
 		start = n
 	}
-	end := len(f.skills)
+	end := len(all)
 	if f.pageSize > 0 && start+f.pageSize < end {
 		end = start + f.pageSize
 	}
-	entries := make([]map[string]any, 0, end-start)
-	for _, s := range f.skills[start:end] {
-		entries = append(entries, s.entry())
-	}
-	result := map[string]any{"skills": entries}
-	if end < len(f.skills) {
+	result := map[string]any{"skills": all[start:end]}
+	if end < len(all) {
 		result["nextCursor"] = strconv.Itoa(end)
 	}
 	writeResult(w, req.ID, result)

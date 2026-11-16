@@ -3,11 +3,15 @@ package skills
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
+	"math"
+	"math/big"
+	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -71,33 +75,120 @@ func ParseFrontmatter(skillMD []byte) (map[string]any, error) {
 	return m, nil
 }
 
-func normalizeJSON(m map[string]any) (any, error) {
+// maxNumberExponent bounds the exponent of a number that is compared by value.
+// A larger one is compared by its spelling instead: expanding 1e999999 into an
+// exact value would cost memory for no benefit.
+const maxNumberExponent = 400
+
+// canonicalNumber returns one spelling per numeric value, so 1, 1.0 and 1e0
+// are the same and two integers that differ only beyond float64 precision are
+// not. ok is false for a value that is not a finite number.
+func canonicalNumber(v any) (string, bool) {
+	r := new(big.Rat)
+	switch n := v.(type) {
+	case json.Number:
+		lit := string(n)
+		if i := strings.IndexAny(lit, "eE"); i >= 0 {
+			exp, err := strconv.Atoi(lit[i+1:])
+			if err != nil || exp > maxNumberExponent || exp < -maxNumberExponent {
+				return "lit:" + strings.ToLower(lit), true
+			}
+		}
+		if _, ok := r.SetString(lit); !ok {
+			return "", false
+		}
+	case int:
+		r.SetInt64(int64(n))
+	case int64:
+		r.SetInt64(n)
+	case uint64:
+		r.SetInt(new(big.Int).SetUint64(n))
+	case float64:
+		if math.IsNaN(n) || math.IsInf(n, 0) {
+			return "", false
+		}
+		r.SetFloat64(n)
+	default:
+		return "", false
+	}
+	return r.RatString(), true
+}
+
+// appendCanonical writes an unambiguous encoding of a frontmatter value: every
+// value starts with a type tag, strings and numbers carry their length, maps
+// are written in key order. It is only ever hashed or compared, never parsed,
+// so it does not need to be JSON; what it needs is that two values share an
+// encoding exactly when they are the same value.
+func appendCanonical(b []byte, v any) ([]byte, error) {
+	str := func(b []byte, tag byte, s string) []byte {
+		b = append(b, tag)
+		b = binary.BigEndian.AppendUint64(b, uint64(len(s)))
+		return append(b, s...)
+	}
+	switch t := v.(type) {
+	case nil:
+		return append(b, 'z'), nil
+	case bool:
+		if t {
+			return append(b, 't'), nil
+		}
+		return append(b, 'f'), nil
+	case string:
+		return str(b, 's', t), nil
+	case []any:
+		b = append(b, 'a')
+		b = binary.BigEndian.AppendUint64(b, uint64(len(t)))
+		for _, el := range t {
+			var err error
+			if b, err = appendCanonical(b, el); err != nil {
+				return nil, err
+			}
+		}
+		return b, nil
+	case map[string]any:
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		b = append(b, 'm')
+		b = binary.BigEndian.AppendUint64(b, uint64(len(keys)))
+		for _, k := range keys {
+			b = str(b, 'k', k)
+			var err error
+			if b, err = appendCanonical(b, t[k]); err != nil {
+				return nil, err
+			}
+		}
+		return b, nil
+	}
+	if n, ok := canonicalNumber(v); ok {
+		return str(b, 'n', n), nil
+	}
+	return nil, fmt.Errorf("frontmatter value of type %T has no canonical form", v)
+}
+
+// canonicalFrontmatter is the canonical encoding of a frontmatter mapping; a
+// nil mapping is the empty one.
+func canonicalFrontmatter(m map[string]any) ([]byte, error) {
 	if m == nil {
 		m = map[string]any{}
 	}
-	b, err := json.Marshal(m)
-	if err != nil {
-		return nil, err
-	}
-	var out any
-	if err := json.Unmarshal(b, &out); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return appendCanonical(nil, m)
 }
 
 // FrontmatterEqual compares the listed frontmatter with the one parsed from
-// SKILL.md after passing both through JSON, so YAML integers and JSON numbers,
-// and nested maps of either origin, compare equal. A value that cannot be
-// represented in JSON never compares equal.
+// SKILL.md by value: YAML and JSON numbers compare by their exact numeric
+// value, nested maps of either origin compare key by key. A value with no
+// canonical form never compares equal.
 func FrontmatterEqual(listed, parsed map[string]any) bool {
-	a, err := normalizeJSON(listed)
+	a, err := canonicalFrontmatter(listed)
 	if err != nil {
 		return false
 	}
-	b, err := normalizeJSON(parsed)
+	b, err := canonicalFrontmatter(parsed)
 	if err != nil {
 		return false
 	}
-	return reflect.DeepEqual(a, b)
+	return bytes.Equal(a, b)
 }
