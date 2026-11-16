@@ -1047,3 +1047,73 @@ func TestRetention_ContinuationsDoNotRescanTheLog(t *testing.T) {
 	assert.Equal(t, n, countRows(t, m), "stripping was enough")
 	assert.LessOrEqual(t, res.RowsScanned, 2*n+n/2, "the log is measured once and its tail is read once more, not once per list")
 }
+
+// Review round 6: rows that share the timestamp of the boundary a cancelled
+// expiry left are still reachable by the caps.
+func TestRetention_CancelledExpiryWithEqualTimestampsAtTheBoundary(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	for i := 0; i < 6; i++ {
+		retRow(t, m, "ws-1", 9*24*time.Hour, nil) // all at one timestamp
+	}
+	expireFirstEntries(t, m, "ws-1", 4)
+	retRow(t, m, "ws-1", time.Minute, nil)
+	require.Equal(t, 7, countRows(t, m))
+
+	p := retPolicy()
+	p.MaxRecords = 4
+	res, err := m.RunActivityRetention(p)
+	require.NoError(t, err)
+	assert.Equal(t, 4, res.RowsOutsideWindow, "the four unindexed rows, not the two indexed ones beside them")
+	assert.Equal(t, 3, countRows(t, m))
+	left, _ := m.WorkSessionRowRefs("ws-1")
+	assert.Len(t, left, 3)
+}
+
+// Review round 6: trimming is for the last session left; when another one
+// exists the trim does nothing and says so.
+func TestRetention_TrimStopsWhenAnotherSessionExists(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	for i := 0; i < 5; i++ {
+		retRow(t, m, "ws-1", time.Hour-time.Duration(i)*time.Second, nil)
+	}
+	retRow(t, m, "ws-2", 2*time.Hour, nil) // appeared after ws-1 was selected
+	scan, err := m.scanLog()
+	require.NoError(t, err)
+	st := scan.st
+	n, another, err := m.trimSession("ws-1", &st, func() bool { return st.rows > 1 })
+	require.NoError(t, err)
+	assert.True(t, another)
+	assert.Zero(t, n)
+	assert.Equal(t, 6, countRows(t, m))
+
+	// The whole pass still reaches the cap: the older session goes first.
+	p := retPolicy()
+	p.MaxRecords = 5
+	res, err := m.RunActivityRetention(p)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.SessionsRemoved)
+	gone, _ := m.GetWorkSessionSummary("ws-2")
+	assert.Nil(t, gone)
+}
+
+// Review round 6: a pass that could remove nothing from the last session
+// reports no shortfall: no session lost a row.
+func TestRetention_NoShortfallWhenNothingCouldBeRemoved(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	retRow(t, m, "ws-1", time.Minute, func(r *ActivityRecord) {
+		r.Status, r.ErrorMessage = ActivityStatusError, strings.Repeat("e", 4000) // not a body: stripping keeps it
+	})
+	p := retPolicy()
+	p.MaxBytes = 1000
+	res, err := m.RunActivityRetention(p)
+	require.NoError(t, err)
+	assert.Zero(t, res.SessionsRemoved+res.RowsTrimmed)
+	assert.Empty(t, res.ShortfallCause)
+	sf, err := m.GetRetentionShortfall()
+	require.NoError(t, err)
+	assert.Nil(t, sf)
+	assert.Equal(t, 1, countRows(t, m))
+}

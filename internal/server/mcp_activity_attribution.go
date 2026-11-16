@@ -131,6 +131,10 @@ func (p *MCPProxyServer) activityAttribution(ctx context.Context, sessionID stri
 		// daily allowance refused is not stamped on the unnamed session's
 		// rows.
 		attr.WorkSessionID, attr.RunName = p.requestWorkSessionRun(ctx, sessionID)
+	} else {
+		// A session pinned by the caller (code_execution and its sub-calls):
+		// the row is activity of that session and moves its idle clock.
+		p.touchWorkSessionID(attr.WorkSessionID)
 	}
 	if ac := auth.AuthContextFromContext(ctx); ac != nil && attr.UserID == "" {
 		attr.UserID = ac.UserID

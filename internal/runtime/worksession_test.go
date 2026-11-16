@@ -399,3 +399,20 @@ func TestWorkSession_TouchRefreshesASessionFiledUnderAnEarlierIdentity(t *testin
 	assert.Equal(t, w1, tr.Resolve(early), "the earlier session was kept alive under its own identity")
 	assert.Zero(t, tr.Reap(30*time.Minute))
 }
+
+// Review round 6 (Spec 124 FR-019): a session known only by its id (pinned on
+// a request) has its idle clock moved by TouchID, so a later request of the
+// same identity inside the idle window joins it.
+func TestWorkSession_TouchIDMovesTheIdleClock(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC))
+	id := WorkSessionIdentity{Principal: "agent-1", ClientName: "rest", RunName: "nightly"}
+	ws := tr.Resolve(id)
+
+	advance(25 * time.Minute)
+	tr.TouchID(ws) // a late sub-call's row
+	advance(25 * time.Minute)
+	assert.Equal(t, ws, tr.Resolve(id), "50 minutes after the start, 25 after the last row: the same session")
+
+	tr.TouchID("") // no-ops
+	tr.TouchID("unknown")
+}

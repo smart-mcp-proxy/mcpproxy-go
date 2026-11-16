@@ -626,7 +626,8 @@ func indexActivityTx(tx *bbolt.Tx, r *ActivityRecord, key []byte, role AttemptRo
 		// back under the same id) are stored without an index entry;
 		// retention treats them as rows outside the window. For a session
 		// that really is new there are none.
-		s = &WorkSessionSummary{ID: r.WorkSessionID, UnindexedBefore: activityKeyTime(key)}
+		// The boundary is just before this first row, which is indexed.
+		s = &WorkSessionSummary{ID: r.WorkSessionID, UnindexedBefore: activityKeyTime(key).Add(-time.Nanosecond)}
 	}
 	if s.Removal != "" {
 		// Retention was removing this session and a new row has arrived for

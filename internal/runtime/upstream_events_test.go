@@ -187,6 +187,8 @@ func TestUpstreamEvent_CollapsedPerOwner(t *testing.T) {
 // condition updates the row; a saved token or a recovery closes it.
 func TestUpstreamEvent_OneOpenLoginRequired(t *testing.T) {
 	svc, store := eventService(t)
+	// Token saves carry no time of their own; they are applied "now".
+	svc.upstreamEvents.now = func() time.Time { return evBase.Add(-time.Minute) }
 	login := func(at time.Duration, seq uint64) {
 		svc.RecordUpstreamEvent(UpstreamEvent{Server: "github", Kind: UpstreamLoginRequired, At: evBase.Add(at), Seq: seq})
 	}
@@ -537,4 +539,47 @@ func TestTransitionEvents_WeightsAndTheLastLogin(t *testing.T) {
 	}
 	assert.Len(t, c.loginOpen, 1)
 	assert.True(t, c.down["srv"])
+}
+
+// Review round 6: a recovery that followed a real loss inside a folded record
+// is recorded even when no loss was recorded before the record.
+func TestTransitionEvents_LeadingConnectDoesNotSwallowLaterRecoveries(t *testing.T) {
+	svc, store := eventService(t)
+	for _, ev := range transitionEvents("srv", "http", types.Transition{
+		From: types.StateConnecting, To: types.StateError, At: evBase, Err: errors.New("x"),
+		Folded: 4, FoldedLost: 2, FoldedRestored: 2,
+	}) {
+		svc.RecordUpstreamEvent(ev)
+	}
+	total := map[string]int{}
+	for _, r := range upstreamEventRows(t, store, "srv") {
+		kind, _ := r.Metadata[UpstreamEventMetaKind].(string)
+		switch n := r.Metadata[UpstreamEventMetaCount].(type) {
+		case int:
+			total[kind] += n
+		case float64:
+			total[kind] += int(n)
+		}
+	}
+	assert.Equal(t, 1, total[string(UpstreamConnectionRestored)], "the first connect is not a recovery; the second one is")
+	assert.Equal(t, 2, total[string(UpstreamConnectionLost)])
+}
+
+// Review round 6: a login requirement read from the connection state before a
+// token save, and delivered after it, does not reopen the requirement.
+func TestUpstreamEvent_StateLoginCapturedBeforeASaveIsStale(t *testing.T) {
+	c := newUpstreamEventCollapser()
+	now := evBase.Add(10 * time.Minute)
+	c.now = func() time.Time { return now }
+	c.noteTokenSaved("srv", "", 5)
+
+	row, _ := c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase}) // captured earlier, delivered late
+	require.NotNil(t, row, "it happened, so it is a row")
+	assert.Empty(t, c.loginOpen)
+	assert.False(t, c.down["srv"])
+
+	// One captured after the save is a new requirement.
+	row, _ = c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(20 * time.Minute)})
+	require.NotNil(t, row)
+	assert.Len(t, c.loginOpen, 1)
 }

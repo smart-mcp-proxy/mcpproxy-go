@@ -903,7 +903,7 @@ func activityRetentionReport(diag map[string]interface{}) (contracts.ActivityRet
 // activityRetentionLines renders a shortfall for a terminal.
 func activityRetentionLines(rep contracts.ActivityRetentionReport) []string {
 	causes := map[string]string{
-		"age_cap":    "the age cap is shorter than the window",
+		"age_cap":    "the age cap removed older rows from a session that is still kept",
 		"record_cap": "the record cap was reached",
 		"size_cap":   "the size cap was reached",
 	}

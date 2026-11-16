@@ -162,6 +162,20 @@ func (p *MCPProxyServer) touchWorkSession(id string, identity runtime.WorkSessio
 	p.mainServer.runtime.TouchWorkSession(id, identity)
 }
 
+// touchWorkSessionID moves the idle clock of a work session pinned on the
+// request context (Spec 124 FR-019): its rows are stamped without resolving
+// the session again, so nothing else would.
+func (p *MCPProxyServer) touchWorkSessionID(id string) {
+	if p.workSessionIDToucher != nil {
+		p.workSessionIDToucher(id)
+		return
+	}
+	if p.mainServer == nil || p.mainServer.runtime == nil {
+		return
+	}
+	p.mainServer.runtime.TouchWorkSessionID(id)
+}
+
 // requestSessionFacts is the attribution the runtime stamps on a row it
 // writes on its own (a limiter rejection), from the request context it was
 // handed: the same attribution the dispatch gives that request's other rows.

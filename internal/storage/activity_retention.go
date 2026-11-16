@@ -131,12 +131,6 @@ type logScan struct {
 	outsideTruncated bool
 }
 
-// maxRetentionContinuations bounds how often one stage of a pass continues
-// its nominations because a candidate list was cut. Each continuation handles
-// maxRetentionCandidates more rows, so the bound covers a log far larger than
-// the record cap allows.
-const maxRetentionContinuations = 32
-
 const sniffAuthArgument = "_auth_"
 
 // sniffRow reads three facts out of a stored row without decoding it: its
@@ -413,7 +407,7 @@ func (m *Manager) scanLogFrom(what scanWhat, after []byte) (logScan, error) {
 					}
 				}
 				unindexedBefore, isLive := live[ws]
-				if what != scanStripOnly && (ws == "" || !isLive || (!unindexedBefore.IsZero() && activityKeyTime(k).Before(unindexedBefore))) {
+				if what != scanStripOnly && (ws == "" || !isLive || (!unindexedBefore.IsZero() && !activityKeyTime(k).After(unindexedBefore))) {
 					if len(scan.outside) < maxRetentionCandidates {
 						scan.outside = append(scan.outside, append([]byte(nil), k...))
 					} else {
@@ -607,15 +601,19 @@ func (m *Manager) RunActivityRetention(p RetentionPolicy) (RetentionResult, erro
 			return ShortfallRecordCap
 		}
 
+		// A stage goes on until its rows are used up or the caps hold; the
+		// pass never moves to a more destructive stage while a less
+		// destructive one still has rows. Each continuation starts behind
+		// the last key of the list before it, so the loops end.
 		// 3a. Bodies. Only the size cap is helped by this.
 		strip, truncated := scan.strip, scan.stripTruncated
-		for round := 0; p.MaxBytes > 0 && st.bytes > p.MaxBytes; round++ {
+		for p.MaxBytes > 0 && st.bytes > p.MaxBytes {
 			n, err := m.stripBodies(&st, p.MaxBytes, strip)
 			if err != nil {
 				return res, err
 			}
 			res.BodiesStripped += n
-			if !truncated || len(strip) == 0 || st.bytes <= p.MaxBytes || round >= maxRetentionContinuations {
+			if !truncated || len(strip) == 0 || st.bytes <= p.MaxBytes {
 				break
 			}
 			// More bodies remain than were nominated: nominate the next
@@ -629,13 +627,13 @@ func (m *Manager) RunActivityRetention(p RetentionPolicy) (RetentionResult, erro
 		}
 		// 3b. Rows outside the window.
 		outside, truncated := scan.outside, scan.outsideTruncated
-		for round := 0; over(); round++ {
+		for over() {
 			n, err := m.pruneOutsideWindow(&st, over, outside, newest)
 			if err != nil {
 				return res, err
 			}
 			res.RowsOutsideWindow += n
-			if !truncated || len(outside) == 0 || !over() || round >= maxRetentionContinuations {
+			if !truncated || len(outside) == 0 || !over() {
 				break
 			}
 			more, err := m.scanLogFrom(scanOutsideOnly, outside[len(outside)-1])
@@ -650,6 +648,10 @@ func (m *Manager) RunActivityRetention(p RetentionPolicy) (RetentionResult, erro
 			c := cause()
 			// Recorded before the first row goes: a pass that is interrupted
 			// midway has still told the operator.
+			before, err := m.rawShortfall()
+			if err != nil {
+				return res, err
+			}
 			if err := m.updateShortfall(p, c); err != nil {
 				return res, err
 			}
@@ -660,6 +662,11 @@ func (m *Manager) RunActivityRetention(p RetentionPolicy) (RetentionResult, erro
 			res.SessionsRemoved, res.RowsTrimmed = removed, trimmed
 			if removed > 0 || trimmed > 0 {
 				res.ShortfallCause = c
+			} else if err := m.restoreShortfall(before); err != nil {
+				// Nothing could be removed (one row larger than the size cap
+				// is all that is left): no session lost a row, so the record
+				// goes back to what it was.
+				return res, err
 			}
 		}
 	}
@@ -1143,7 +1150,9 @@ func (m *Manager) pruneOutsideWindow(st *retentionState, over func() bool, candi
 // index entry. Such a row is in no timeline and no count, so it is removed
 // like a row outside the window.
 func unindexedRow(tx *bbolt.Tx, sum *WorkSessionSummary, id string, key []byte) bool {
-	if sum.UnindexedBefore.IsZero() || !activityKeyTime(key).Before(sum.UnindexedBefore) {
+	// "At or before": rows that share the boundary's timestamp can be on
+	// either side of it, and the index lookup below tells them apart.
+	if sum.UnindexedBefore.IsZero() || activityKeyTime(key).After(sum.UnindexedBefore) {
 		return false
 	}
 	rows := tx.Bucket([]byte(WorkSessionRowsBucket))
@@ -1180,9 +1189,14 @@ func (m *Manager) pruneSessions(st *retentionState, over func() bool) (removed, 
 		}
 		if len(sums) <= 1 {
 			if len(sums) == 1 {
-				trimmed, err = m.trimSession(sums[0].ID, st, over)
+				n, another, err := m.trimSession(sums[0].ID, st, over)
+				trimmed += n
+				if err == nil && another {
+					continue // a session appeared meanwhile: select again
+				}
+				return removed, trimmed, err
 			}
-			return removed, trimmed, err
+			return removed, trimmed, nil
 		}
 		sort.Slice(sums, func(i, j int) bool {
 			if !sums[i].LastActivityAt.Equal(sums[j].LastActivityAt) {
@@ -1330,8 +1344,8 @@ func (m *Manager) removeSession(id string, expectLast time.Time, st *retentionSt
 
 // trimSession deletes the oldest rows of one session until the caps hold. The
 // newest row always stays.
-func (m *Manager) trimSession(id string, st *retentionState, over func() bool) (int, error) {
-	trimmed := 0
+// another reports that trimming stopped because a second session exists.
+func (m *Manager) trimSession(id string, st *retentionState, over func() bool) (trimmed int, another bool, err error) {
 	prefix := workSessionRowPrefix(id)
 	for over() {
 		batch := 0
@@ -1340,6 +1354,20 @@ func (m *Manager) trimSession(id string, st *retentionState, over func() bool) (
 			acts := tx.Bucket([]byte(ActivityRecordsBucket))
 			if idx == nil || acts == nil {
 				return nil
+			}
+			// Trimming is for the last session left. A writer may have
+			// created another one since the selection, or since the batch
+			// before this one: then whole sessions come first again.
+			if sb := tx.Bucket([]byte(WorkSessionsBucket)); sb != nil {
+				n := 0
+				sc := sb.Cursor()
+				for k, _ := sc.First(); k != nil && n < 2; k, _ = sc.Next() {
+					n++
+				}
+				if n > 1 {
+					another = true
+					return nil
+				}
 			}
 			sums := newTxSummaries(tx)
 			var keys [][]byte
@@ -1398,14 +1426,14 @@ func (m *Manager) trimSession(id string, st *retentionState, over func() bool) (
 			return err
 		})
 		if err != nil {
-			return trimmed, err
+			return trimmed, another, err
 		}
 		trimmed += batch
-		if batch == 0 {
+		if batch == 0 || another {
 			break
 		}
 	}
-	return trimmed, nil
+	return trimmed, another, nil
 }
 
 // updateShortfall records a shortfall observed by this pass, and clears the
@@ -1445,6 +1473,34 @@ func putShortfallTx(tx *bbolt.Tx, p RetentionPolicy, cause string) error {
 		}
 		return meta.Put([]byte(retentionShortfallKey), data)
 	}
+}
+
+// rawShortfall returns the stored shortfall record as it is, or nil.
+func (m *Manager) rawShortfall() ([]byte, error) {
+	var out []byte
+	err := m.db.db.View(func(tx *bbolt.Tx) error {
+		if meta := tx.Bucket([]byte(MetaBucket)); meta != nil {
+			if data := meta.Get([]byte(retentionShortfallKey)); data != nil {
+				out = append([]byte(nil), data...)
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
+// restoreShortfall puts back a record read by rawShortfall (nil removes it).
+func (m *Manager) restoreShortfall(data []byte) error {
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		meta, err := tx.CreateBucketIfNotExists([]byte(MetaBucket))
+		if err != nil {
+			return err
+		}
+		if data == nil {
+			return meta.Delete([]byte(retentionShortfallKey))
+		}
+		return meta.Put([]byte(retentionShortfallKey), data)
+	})
 }
 
 // oldestCompleteSession is the start of the oldest session whose rows have not

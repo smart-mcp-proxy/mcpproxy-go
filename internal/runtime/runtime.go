@@ -4329,6 +4329,11 @@ func (r *Runtime) TouchWorkSession(workSessionID string, id WorkSessionIdentity)
 	r.workSessionTracker().Touch(workSessionID, id)
 }
 
+// TouchWorkSessionID refreshes the idle clock of a work session by its id.
+func (r *Runtime) TouchWorkSessionID(workSessionID string) {
+	r.workSessionTracker().TouchID(workSessionID)
+}
+
 // ReapWorkSessions drops work sessions idle past maxIdle, so a long-lived daemon
 // does not accumulate one map entry per identity forever.
 func (r *Runtime) ReapWorkSessions(maxIdle time.Duration) int {

@@ -29,6 +29,7 @@ func trackerProxy(t *testing.T) (*MCPProxyServer, *SessionStore, *runtime.WorkSe
 	p.workSessionResolverEffective = tr.ResolveEffective
 	p.workSessionEffectiveIdentity = tr.EffectiveIdentity
 	p.workSessionToucher = tr.Touch
+	p.workSessionIDToucher = tr.TouchID
 	return p, store, tr
 }
 
@@ -453,9 +454,30 @@ func TestActivityAttribution_PinnedWorkSessionOutlivesTheIdleWindow(t *testing.T
 	pinned := withActivityAttribution(ctx, attr)
 
 	now = now.Add(2 * time.Hour) // a sub-call that ignored its cancellation
+	// Precondition, checked first: unpinned, the same request resolves a new
+	// session by now.
+	assert.NotEqual(t, attr.WorkSessionID, p.activityAttribution(ctx, "").WorkSessionID)
 	late := p.activityAttribution(pinned, "")
 	assert.Equal(t, attr.WorkSessionID, late.WorkSessionID)
 	assert.Equal(t, "nightly-7", late.RunName)
-	assert.NotEqual(t, attr.WorkSessionID, p.activityAttribution(ctx, "").WorkSessionID,
-		"precondition: unpinned, the same request resolves a new session by now")
+}
+
+// Review round 6 (FR-019): a row stamped with a pinned session moves that
+// session's idle clock, so the next request of the same identity inside the
+// idle window of that row joins it.
+func TestActivityAttribution_PinnedWorkSessionKeepsItsIdleClock(t *testing.T) {
+	p, _, tr := trackerProxy(t)
+	now := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
+	tr.SetNowForTest(func() time.Time { return now })
+	ctx := reqcontext.WithClientSurface(tokenCtx(context.Background(), "ci", "mcp_agt_aaaa"), "rest")
+
+	attr, _ := activityAttributionFromContext(ctx)
+	attr.WorkSessionID, attr.RunName = p.requestWorkSessionRun(ctx, "")
+	pinned := withActivityAttribution(ctx, attr)
+
+	now = now.Add(25 * time.Minute)
+	require.Equal(t, attr.WorkSessionID, p.activityAttribution(pinned, "").WorkSessionID) // a late sub-call
+	now = now.Add(25 * time.Minute)
+	assert.Equal(t, attr.WorkSessionID, p.requestWorkSession(ctx, ""),
+		"25 minutes after the pinned row, the next request joins the same session")
 }

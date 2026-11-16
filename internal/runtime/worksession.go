@@ -303,6 +303,24 @@ func (t *WorkSessionTracker) Touch(workSessionID string, id WorkSessionIdentity)
 	}
 }
 
+// TouchID records activity on a work session known only by its id (a session
+// pinned on a request context, whose rows are stamped without resolving it
+// again). It refreshes the entry that holds the id; when none does (the
+// session was reaped), nothing happens.
+func (t *WorkSessionTracker) TouchID(workSessionID string) {
+	if workSessionID == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, e := range t.sessions {
+		if e.id == workSessionID {
+			e.lastActivity = t.now()
+			return
+		}
+	}
+}
+
 // StartedAt returns when the given work session began, and whether it is known.
 func (t *WorkSessionTracker) StartedAt(workSessionID string) (time.Time, bool) {
 	t.mu.Lock()

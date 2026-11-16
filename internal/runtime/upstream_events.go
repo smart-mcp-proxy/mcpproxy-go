@@ -187,6 +187,29 @@ func transitionEvents(server, transport string, t types.Transition) []UpstreamEv
 	if !loginLast {
 		add(UpstreamLoginRequired, string(diagnostics.OAuthLoginRequired), login)
 	}
+	// The first change of each kind is replayed on its own, in the order the
+	// two happened, and the rest as weights. A leading recovery with no loss
+	// before it is the first connect, which the collapser does not record;
+	// replayed apart, it takes none of the later recoveries with it.
+	if t.From == types.StateReady {
+		if lost > 0 {
+			add(UpstreamConnectionLost, "", 1)
+			lost--
+		}
+		if restored > 0 {
+			add(UpstreamConnectionRestored, "", 1)
+			restored--
+		}
+	} else {
+		if restored > 0 {
+			add(UpstreamConnectionRestored, "", 1)
+			restored--
+		}
+		if lost > 0 {
+			add(UpstreamConnectionLost, "", 1)
+			lost--
+		}
+	}
 	if recoveryLast {
 		add(UpstreamConnectionLost, "", lost)
 		add(UpstreamConnectionRestored, "", restored)
@@ -235,6 +258,9 @@ type upstreamEventCollapser struct {
 	// seen is when each server last had an event, for cleanup.
 	seen   map[string]time.Time
 	lastGC time.Time
+	// loginSavedAt is when the latest numbered token save of each (server,
+	// owner) was applied, to order unnumbered login requirements against it.
+	loginSavedAt map[upstreamOwnerKey]time.Time
 	// lastSaveGC is when a token save last ran the idle-server cleanup.
 	lastSaveGC time.Time
 	// now is the clock of token-save notifications, which carry no time.
@@ -258,13 +284,14 @@ type upstreamEventCollapser struct {
 
 func newUpstreamEventCollapser() *upstreamEventCollapser {
 	return &upstreamEventCollapser{
-		latest:    make(map[upstreamRowKey]*upstreamRow),
-		hourRows:  make(map[string]map[int64]int),
-		seen:      make(map[string]time.Time),
-		down:      make(map[string]bool),
-		loginOpen: make(map[upstreamOwnerKey]*upstreamRow),
-		loginSeq:  make(map[upstreamOwnerKey]uint64),
-		now:       time.Now,
+		latest:       make(map[upstreamRowKey]*upstreamRow),
+		hourRows:     make(map[string]map[int64]int),
+		seen:         make(map[string]time.Time),
+		down:         make(map[string]bool),
+		loginOpen:    make(map[upstreamOwnerKey]*upstreamRow),
+		loginSeq:     make(map[upstreamOwnerKey]uint64),
+		loginSavedAt: make(map[upstreamOwnerKey]time.Time),
+		now:          time.Now,
 	}
 }
 
@@ -297,6 +324,13 @@ func (c *upstreamEventCollapser) place(e UpstreamEvent) (row *upstreamRow, isNew
 		// a row, but it says nothing about the server now: it neither opens
 		// a login requirement nor marks the server down.
 		stale := e.Seq != 0 && e.Seq < c.loginSeq[owner]
+		// A requirement read from the connection state carries no number.
+		// It is ordered against token saves by time: one captured before a
+		// save that has already been applied (its delivery stalled) is as
+		// stale as an older numbered failure.
+		if saved, ok := c.loginSavedAt[owner]; ok && e.Seq == 0 && e.At.Before(saved) {
+			stale = true
+		}
 		if !stale {
 			c.down[e.Server] = true
 			if e.Seq > c.loginSeq[owner] {
@@ -427,6 +461,7 @@ func (c *upstreamEventCollapser) forgetIdleServers(now time.Time) {
 		for k := range c.loginSeq {
 			if k.server == server {
 				delete(c.loginSeq, k)
+				delete(c.loginSavedAt, k)
 			}
 		}
 	}
@@ -443,6 +478,7 @@ func (c *upstreamEventCollapser) noteTokenSaved(server, owner string, seq uint64
 			return
 		}
 		c.loginSeq[k] = seq
+		c.loginSavedAt[k] = c.now()
 		// A save is activity of the server for cleanup: it keeps the number
 		// of a server that is saving tokens, and lets cleanup run (and
 		// forget servers that are gone) when there are saves and no events.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/stretchr/testify/assert"
@@ -140,4 +141,31 @@ func TestRefreshAudit_FailureBeforeTheRequestIsNotAnAttempt(t *testing.T) {
 	assert.Equal(t, context.DeadlineExceeded.Error(), marked.Error(), "the mark changes no text")
 	assert.ErrorIs(t, marked, context.DeadlineExceeded, "and no chain")
 	assert.NoError(t, MarkRefreshNotSent(nil))
+}
+
+// Review round 6: the audit time is the time the refresh returned, not the
+// time after the storage reads that follow it.
+func TestRefreshAudit_TimeIsTakenWhenTheRefreshReturns(t *testing.T) {
+	f := newCoordFixture(t, "cid")
+	f.failErr = transientRefreshErr()
+	c := newTestCoordinator()
+	var mu sync.Mutex
+	tick := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
+	var afterRefresh time.Time
+	c.now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		tick = tick.Add(time.Minute)
+		if f.calls.Load() > 0 && afterRefresh.IsZero() {
+			afterRefresh = tick // the first reading after the refresh ran
+		}
+		return tick
+	}
+	sink := &auditSink{}
+	c.SetAuditObserver(sink.observe)
+
+	_, _, err := c.Do(context.Background(), f.req(RefreshTriggerProactive, "rt-0"))
+	require.Error(t, err)
+	require.Equal(t, 1, sink.count())
+	assert.Equal(t, afterRefresh, sink.got[0].At)
 }

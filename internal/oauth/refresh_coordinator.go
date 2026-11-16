@@ -428,6 +428,9 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 
 	saved := &atomic.Uint64{}
 	tok, refreshErr := req.Refresh(withFlightSavedRevision(withFlightGeneration(ctx, gen), saved), rec)
+	// The time of the outcome, before the storage reads below: an audit row
+	// must not be placed after calls that only waited for those reads.
+	refreshedAt := c.now()
 	cur, loadErr := req.Load()
 	if loadErr != nil {
 		cur = nil
@@ -480,7 +483,7 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 	c.mu.Unlock()
 	if audit != nil && !RefreshWasNotSent(refreshErr) {
 		audit(RefreshAttemptFailure{
-			ServerName: req.ServerName, Class: cls, Trigger: req.Trigger, At: c.now(),
+			ServerName: req.ServerName, Class: cls, Trigger: req.Trigger, At: refreshedAt,
 			Code: refreshFailureCode(req.ServerName, refreshErr),
 		})
 	}
