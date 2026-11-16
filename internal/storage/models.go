@@ -31,6 +31,8 @@ const (
 	ToolHashBucket        = "toolhash"
 	ToolApprovalBucket    = "tool_approvals"
 	PromptApprovalBucket  = "prompt_approvals" // spec 100: per-prompt rug-pull baseline
+	SkillApprovalBucket   = "skill_approvals"  // spec 125: per-skill review records
+	SkillFileBucket       = "skill_files"      // spec 125: content-addressed text files of skills
 	OAuthTokenBucket      = "oauth_tokens"     //nolint:gosec // bucket name, not a credential
 	OAuthCompletionBucket = "oauth_completion"
 	MetaBucket            = "meta"
