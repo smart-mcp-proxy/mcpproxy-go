@@ -444,14 +444,21 @@ func TestNotificationQueue_CoalescesPerMethod(t *testing.T) {
 		q.push(tools)
 	}
 	q.push(prompts)
-	for i := range 2 * maxQueuedNotificationMethods {
-		q.push(mcp.JSONRPCNotification{Notification: mcp.Notification{Method: fmt.Sprintf("x/%d", i)}})
-	}
 	got := q.take()
-	require.Len(t, got, maxQueuedNotificationMethods)
+	require.Len(t, got, 2)
 	assert.Equal(t, tools.Method, got[0].Method)
 	assert.Equal(t, prompts.Method, got[1].Method)
 	assert.Empty(t, q.take())
+
+	// Notifications the dispatcher ignores are never queued, so any number of
+	// them cannot crowd out a later list_changed.
+	for i := range 4 * maxQueuedNotificationMethods {
+		q.push(mcp.JSONRPCNotification{Notification: mcp.Notification{Method: fmt.Sprintf("notifications/x/%d", i)}})
+	}
+	q.push(tools)
+	got = q.take()
+	require.Len(t, got, 1)
+	assert.Equal(t, tools.Method, got[0].Method)
 	select {
 	case <-q.wake:
 	default:

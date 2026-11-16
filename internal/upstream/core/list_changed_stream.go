@@ -64,8 +64,13 @@ func newNotificationQueue() *notificationQueue {
 	return &notificationQueue{wake: make(chan struct{}, 1)}
 }
 
-// push queues n. It never blocks.
+// push queues n. It never blocks. Only the methods dispatchNotification acts
+// on are queued, so notifications it would ignore (logging, progress,
+// resources, ...) can never fill the queue and crowd out a list_changed one.
 func (q *notificationQueue) push(n mcp.JSONRPCNotification) {
+	if !dispatchedNotification(n.Method) {
+		return
+	}
 	q.mu.Lock()
 	queued := false
 	for _, p := range q.pending {
@@ -81,6 +86,16 @@ func (q *notificationQueue) push(n mcp.JSONRPCNotification) {
 	select {
 	case q.wake <- struct{}{}:
 	default:
+	}
+}
+
+// dispatchedNotification reports whether dispatchNotification acts on method.
+func dispatchedNotification(method string) bool {
+	switch method {
+	case string(mcp.MethodNotificationToolsListChanged), string(mcp.MethodNotificationPromptsListChanged):
+		return true
+	default:
+		return false
 	}
 }
 
