@@ -25,10 +25,10 @@ type responseLimitTransport struct {
 	next http.RoundTripper
 }
 
+// newResponseLimitTransport wraps next, which upstreamRoundTripper always
+// supplies. There is no fallback to a process-default transport here: that
+// would be a way around the instance's dial gate (Spec 116 FR-024a).
 func newResponseLimitTransport(next http.RoundTripper) http.RoundTripper {
-	if next == nil {
-		next = http.DefaultTransport
-	}
 	return &responseLimitTransport{next: next}
 }
 

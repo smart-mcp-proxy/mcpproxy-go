@@ -37,7 +37,7 @@ To keep one server out, set `expose_skills` to `false` on it:
 }
 ```
 
-Both fields hot-reload. See [Configuration](../configuration.md) for the full field list. A server is read only while it is enabled and not quarantined, and only if it announces the skills extension.
+Both fields hot-reload. Both are also listed under [Configuration File: Skills](/configuration/config-file#skills). A server is read only while it is enabled and not quarantined, and only if it announces the skills extension.
 
 ## What MCPProxy reads and verifies
 

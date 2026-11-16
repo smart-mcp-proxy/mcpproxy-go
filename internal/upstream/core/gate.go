@@ -58,6 +58,15 @@ func innerTransport(cl *client.Client) transport.Interface {
 	return dialgate.Unwrap(cl.GetTransport())
 }
 
+// sendOnGatedTransport sends a JSON-RPC request the mcp-go client has no
+// method for (the skills extension, Spec 125). It goes out on the transport
+// the client holds, which is the dialgate wrapper core installed, so a retired
+// instance sends nothing (FR-024a). It never touches the unwrapped transport;
+// that one is reached only through innerTransport, and only to ask what it is.
+func sendOnGatedTransport(ctx context.Context, cl *client.Client, req transport.JSONRPCRequest) (*transport.JSONRPCResponse, error) {
+	return cl.GetTransport().SendRequest(ctx, req)
+}
+
 // oauthEnv is the OAuth environment of this instance (FR-024a): every OAuth
 // preflight, resource auto-detection, metadata discovery and cache fetch, and
 // the OAuth HTTP client mcp-go uses for registration, code exchange and

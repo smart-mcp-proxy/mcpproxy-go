@@ -94,7 +94,7 @@ func (c *Client) skillsRPC(ctx context.Context, method string, params map[string
 	if maxBytes > 0 {
 		ctx = mptransport.WithResponseLimit(ctx, maxBytes)
 	}
-	resp, err := cl.GetTransport().SendRequest(ctx, mcpclienttransport.JSONRPCRequest{
+	resp, err := sendOnGatedTransport(ctx, cl, mcpclienttransport.JSONRPCRequest{
 		JSONRPC: "2.0",
 		ID:      nextSkillsRequestID(),
 		Method:  method,
