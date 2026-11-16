@@ -167,3 +167,38 @@ func TestContentHashSeesLargeIntegerDifference(t *testing.T) {
 		t.Fatal("one number written two ways has two content hashes")
 	}
 }
+
+// Ordinary decimals written the same way in the listing and in SKILL.md are
+// the same number, and every spelling of one value has one canonical form.
+func TestFrontmatterDecimalsAndSpellings(t *testing.T) {
+	yamlOf := func(lit string) map[string]any {
+		p, err := ParseFrontmatter([]byte("---\nv: " + lit + "\n---\n"))
+		if err != nil {
+			t.Fatalf("yaml %q: %v", lit, err)
+		}
+		return p
+	}
+	jsonOf := func(lit string) map[string]any { return map[string]any{"v": json.Number(lit)} }
+
+	equal := [][2]string{ // JSON literal, YAML literal
+		{"0.1", "0.1"}, {"3.14", "3.14"}, {"0.10", "0.1"}, {"1E2", "100"}, {"-0", "0"},
+		{"0e401", "0"}, {"-0e999999", "0"}, {"10000000000000000000", "1e19"}, {"2.5e-3", "0.0025"},
+		{"9007199254740993", "9007199254740993"}, {"-7", "-7"},
+	}
+	for _, c := range equal {
+		if !FrontmatterEqual(jsonOf(c[0]), yamlOf(c[1])) {
+			t.Errorf("JSON %s and YAML %s compared different", c[0], c[1])
+		}
+	}
+	different := [][2]string{{"0.1", "0.2"}, {"1", "-1"}, {"9007199254740993", "9007199254740992"}}
+	for _, c := range different {
+		if FrontmatterEqual(jsonOf(c[0]), yamlOf(c[1])) {
+			t.Errorf("JSON %s and YAML %s compared equal", c[0], c[1])
+		}
+	}
+	// A number too large to hold has no canonical form: it equals nothing,
+	// itself included, so such a skill cannot be verified.
+	if FrontmatterEqual(jsonOf("1e401"), jsonOf("1e401")) {
+		t.Error("an out-of-range number compared equal")
+	}
+}

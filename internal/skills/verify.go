@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"math/big"
 	"sort"
 	"strconv"
 	"strings"
@@ -75,43 +74,60 @@ func ParseFrontmatter(skillMD []byte) (map[string]any, error) {
 	return m, nil
 }
 
-// maxNumberExponent bounds the exponent of a number that is compared by value.
-// A larger one is compared by its spelling instead: expanding 1e999999 into an
-// exact value would cost memory for no benefit.
-const maxNumberExponent = 400
-
-// canonicalNumber returns one spelling per numeric value, so 1, 1.0 and 1e0
-// are the same and two integers that differ only beyond float64 precision are
-// not. ok is false for a value that is not a finite number.
+// canonicalNumber returns one spelling per numeric value. ok is false for a
+// value that is not a finite number.
+//
+// A whole number that fits 64 bits is exact, so two integers that differ only
+// beyond float64 precision stay different. Everything else is compared as a
+// float64, on both sides: YAML hands decimals over as float64 already, and
+// reading the listing's decimals the same way makes 0.1 equal 0.1, 1 equal
+// 1.0 and 1e2 equal 100. A number too large for a float64 has no canonical
+// form and so equals nothing.
 func canonicalNumber(v any) (string, bool) {
-	r := new(big.Rat)
 	switch n := v.(type) {
 	case json.Number:
 		lit := string(n)
-		if i := strings.IndexAny(lit, "eE"); i >= 0 {
-			exp, err := strconv.Atoi(lit[i+1:])
-			if err != nil || exp > maxNumberExponent || exp < -maxNumberExponent {
-				return "lit:" + strings.ToLower(lit), true
+		if !strings.ContainsAny(lit, ".eE") {
+			if i, err := strconv.ParseInt(lit, 10, 64); err == nil {
+				return strconv.FormatInt(i, 10), true
+			}
+			if u, err := strconv.ParseUint(lit, 10, 64); err == nil {
+				return strconv.FormatUint(u, 10), true
 			}
 		}
-		if _, ok := r.SetString(lit); !ok {
+		f, err := strconv.ParseFloat(lit, 64)
+		if err != nil {
 			return "", false
 		}
+		return canonicalFloat(f)
 	case int:
-		r.SetInt64(int64(n))
+		return strconv.FormatInt(int64(n), 10), true
 	case int64:
-		r.SetInt64(n)
+		return strconv.FormatInt(n, 10), true
 	case uint64:
-		r.SetInt(new(big.Int).SetUint64(n))
+		return strconv.FormatUint(n, 10), true
 	case float64:
-		if math.IsNaN(n) || math.IsInf(n, 0) {
-			return "", false
-		}
-		r.SetFloat64(n)
-	default:
+		return canonicalFloat(n)
+	}
+	return "", false
+}
+
+// canonicalFloat writes a whole float the way the same integer is written, so
+// 100.0 and 100 share a form, and any other float in its shortest form that
+// reads back as the same float64.
+func canonicalFloat(f float64) (string, bool) {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
 		return "", false
 	}
-	return r.RatString(), true
+	if f == math.Trunc(f) {
+		switch {
+		case f >= -(1<<63) && f < 1<<63:
+			return strconv.FormatInt(int64(f), 10), true // also turns -0 into 0
+		case f >= 1<<63 && f < 1<<64:
+			return strconv.FormatUint(uint64(f), 10), true
+		}
+	}
+	return strconv.FormatFloat(f, 'g', -1, 64), true
 }
 
 // appendCanonical writes an unambiguous encoding of a frontmatter value: every

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -237,4 +238,42 @@ func TestSkillsHelpJSON(t *testing.T) {
 			require.Equal(t, target[strings.LastIndex(target, " ")+1:], payload["name"])
 		})
 	}
+}
+
+// An earlier record that is no longer listed can share its path with the skill
+// the server lists now under another address. `show` describes the listed one,
+// the record the content endpoint also reads, and refuses a path that names
+// more than one listed or more than one unlisted record.
+func TestSkillsShow_PathSharedWithAnUnlistedRecord(t *testing.T) {
+	entry := func(uri, status, hash string, listed bool) string {
+		return fmt.Sprintf(`{"id": "alpha:pdf", "uri": %q, "path": "pdf", "name": "pdf", "description": "d",
+		 "status": %q, "blocked": false, "listed": %t, "available": false, "unusable_reason": "",
+		 "current_hash": %q, "approved_hash": "", "files": [{"path": "SKILL.md", "size": 1, "digest": "sha256:aa", "text": true}],
+		 "total_size": 1, "scan": {"verdict": "", "complete": false, "findings": []}}`, uri, status, listed, hash)
+	}
+	body := func(entries ...string) string {
+		return `{"enabled": true, "server": "alpha", "supported": true, "skills": [` + strings.Join(entries, ",") + `]}`
+	}
+	content := okResp(`{"text":"x","offset":0,"size":1,"digest":"sha256:aa"}`)
+
+	newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/servers/alpha/skills": okResp(body(
+			entry("https://pdf/SKILL.md", "approved", "sk1-old", false),
+			entry("skill://pdf/SKILL.md", "pending", "sk1-new", true))),
+		"GET /api/v1/servers/alpha/skills/content": content,
+	})
+	out, _, err := runCLI(t, GetSkillsCommand, "table", "show", "alpha:pdf")
+	require.NoError(t, err)
+	require.Contains(t, out, "sk1-new")
+	require.NotContains(t, out, "sk1-old")
+
+	newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/servers/alpha/skills": okResp(body(
+			entry("https://pdf/SKILL.md", "approved", "sk1-a", false),
+			entry("other://pdf/SKILL.md", "approved", "sk1-b", false))),
+		"GET /api/v1/servers/alpha/skills/content": content,
+	})
+	_, _, err = runCLI(t, GetSkillsCommand, "table", "show", "alpha:pdf")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "more than one")
 }

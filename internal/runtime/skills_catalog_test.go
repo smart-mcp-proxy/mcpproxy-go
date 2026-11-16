@@ -963,3 +963,26 @@ func TestSkillsRefresh_StopsWhenSwitchedOffMidway(t *testing.T) {
 		})
 	}
 }
+
+// The switch is also honoured while the listing itself is still paging.
+func TestSkillsRefresh_StopsPagingWhenSwitchedOff(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true, fixture: []skillstest.Option{skillstest.WithPageSize(1)}})
+	for i := 0; i < 4; i++ {
+		g.fx.AddSkill(skillstest.Skill{Path: fmt.Sprintf("s%d", i)})
+	}
+	g.fx.SetDelay(150 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() { done <- g.refresh(t) }()
+	require.Eventually(t, func() bool { return g.fx.Count("skills/list") == 1 }, 10*time.Second, time.Millisecond)
+
+	off := *g.rt.Config()
+	off.EnableSkills = false
+	g.rt.UpdateConfig(&off, "")
+	<-done
+
+	assert.Equal(t, 1, g.fx.Count("skills/list"), "no further page is requested once the switch is off")
+	assert.Zero(t, g.fx.Count("resources/read"))
+	assert.Empty(t, g.records(t))
+	assert.Empty(t, g.rt.SkillsStatus(skillsSrv).Error, "being switched off is not a failure")
+}

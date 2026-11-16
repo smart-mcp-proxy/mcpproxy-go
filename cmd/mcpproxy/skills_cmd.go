@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -207,6 +208,32 @@ type skillShowDoc struct {
 	Text string `json:"text"`
 }
 
+// skillEntryByPath picks the record a path means, by the rule the core's
+// content endpoint uses: the only record with that path, or, when an earlier
+// record that is no longer listed shares it with one listed now, the listed
+// one. Any other overlap is refused rather than guessed.
+func skillEntryByPath(entries []contracts.SkillEntry, path string) (*contracts.SkillEntry, error) {
+	var all, listed []*contracts.SkillEntry
+	for i := range entries {
+		if entries[i].Path != path {
+			continue
+		}
+		all = append(all, &entries[i])
+		if entries[i].Listed {
+			listed = append(listed, &entries[i])
+		}
+	}
+	switch {
+	case len(all) == 0:
+		return nil, errors.New("skill not found")
+	case len(all) == 1:
+		return all[0], nil
+	case len(listed) == 1:
+		return listed[0], nil
+	}
+	return nil, errors.New("more than one skill record has this path; run `mcpproxy skills list` to see them")
+}
+
 func runSkillsShow(target, file string, approved bool) error {
 	idx := strings.Index(target, ":")
 	if idx <= 0 || idx == len(target)-1 {
@@ -235,15 +262,9 @@ func runSkillsShow(target, file string, approved bool) error {
 	if !list.Enabled {
 		return fmt.Errorf("%s", skillsDisabledLine)
 	}
-	var entry *contracts.SkillEntry
-	for i := range list.Skills {
-		if list.Skills[i].Path == skill {
-			entry = &list.Skills[i]
-			break
-		}
-	}
-	if entry == nil {
-		return fmt.Errorf("skill not found: %s", target)
+	entry, err := skillEntryByPath(list.Skills, skill)
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, target)
 	}
 
 	var text strings.Builder

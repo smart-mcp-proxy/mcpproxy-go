@@ -141,6 +141,9 @@ func (c *Client) ListSkills(ctx context.Context) (entries []skills.Entry, entryE
 		if cerr := ctx.Err(); cerr != nil {
 			return nil, nil, fmt.Errorf("skills/list failed: %w", cerr)
 		}
+		if !skills.ShouldContinue(ctx) {
+			return nil, nil, skills.ErrStopped
+		}
 		params := map[string]any{}
 		if cursor != "" {
 			params["cursor"] = cursor

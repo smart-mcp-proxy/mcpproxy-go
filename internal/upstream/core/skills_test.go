@@ -422,3 +422,23 @@ func TestListSkillsEntryCapCountsMalformedEntriesOnTheLastPage(t *testing.T) {
 	require.ErrorAs(t, err, &tr)
 	assert.Equal(t, skills.MaxSkillsPerServer, len(entries)+len(entryErrs))
 }
+
+// The caller can stop a listing between pages: the check it put on the context
+// is asked before every page request.
+func TestListSkillsAsksTheContinueCheckBeforeEveryPage(t *testing.T) {
+	fx := skillstest.New(t, skillstest.WithPageSize(1))
+	for i := 0; i < 5; i++ {
+		fx.AddSkill(skillstest.Skill{Path: fmt.Sprintf("s%d", i)})
+	}
+	c := connectSkillsClient(t, fx.URL())
+
+	asked := 0
+	ctx := skills.WithContinueCheck(context.Background(), func() bool {
+		asked++
+		return asked <= 2 // allow two pages, refuse the third
+	})
+	entries, _, err := c.ListSkills(ctx)
+	require.ErrorIs(t, err, skills.ErrStopped)
+	assert.Empty(t, entries, "a stopped listing returns nothing to act on")
+	assert.Equal(t, 2, fx.Count("skills/list"))
+}

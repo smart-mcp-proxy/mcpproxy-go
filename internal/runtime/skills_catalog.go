@@ -322,10 +322,20 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 		return err
 	}
 
-	entries, entryErrs, capture, lerr := um.ListServerSkills(ctx, serverName)
+	// The collection above may have waited for the lock, and the listing may
+	// take many pages: the switches are asked again before the first request
+	// and before every further page.
+	eligible := func() bool { return r.skillsEligible(serverName) }
+	if !eligible() {
+		return errSkillsSwitchedOff
+	}
+	entries, entryErrs, capture, lerr := um.ListServerSkills(skills.WithContinueCheck(ctx, eligible), serverName)
 	truncated := false
 	var tr *skills.TruncatedError
 	if lerr != nil {
+		if errors.Is(lerr, skills.ErrStopped) {
+			return errSkillsSwitchedOff
+		}
 		if !errors.As(lerr, &tr) {
 			return fmt.Errorf("list skills: %w", lerr)
 		}
