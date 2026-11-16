@@ -129,7 +129,8 @@ func TestHealthCheck_ResetOnConnect(t *testing.T) {
 // TestHealthCheck_ThresholdPinnedAtFive pins the loaded-host tolerance (#1909)
 // with literal numbers: five consecutive timeouts mark Error, four do not,
 // and a hard failure (refused, DNS, auth) marks Error on the first miss.
-// The probe cadence is the 30s config default, so five misses is ~2.5 minutes.
+// The probe cadence is the 30s config default, so five misses is ~2.5 minutes
+// plus up to 15s per probe (the timer restarts after each probe returns).
 func TestHealthCheck_ThresholdPinnedAtFive(t *testing.T) {
 	require.Equal(t, 5, healthCheckFailureThreshold)
 	require.Equal(t, 15*time.Second, healthCheckProbeTimeout)

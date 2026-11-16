@@ -397,8 +397,9 @@ const ambiguousProbeTimeout = 5 * time.Second
 
 // healthCheckFailureThreshold is the number of consecutive transient
 // health-check failures (timeouts) we tolerate before marking the server
-// Error. With a 30-second tick this is about two and a half minutes of
-// timeouts. Hard failures (connection refused, DNS gone) still mark Error at
+// Error. The loop is serial (the 30-second timer restarts after each probe
+// returns), so a server that times out every probe takes about 2.5 minutes
+// plus up to healthCheckProbeTimeout per probe (roughly 3.75 minutes). Hard failures (connection refused, DNS gone) still mark Error at
 // once. Three misses (90s) was too few on a heavily loaded machine: when a
 // few dozen agent sessions start at once, the whole host is CPU-starved for
 // minutes, every upstream's ping misses its window together, and each server
