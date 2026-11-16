@@ -258,6 +258,10 @@ type ActivityRecord struct {
 	// RunName is the validated X-MCPProxy-Run label the caller sent with the
 	// request (Spec 124 FR-003). A label only, never a credential.
 	RunName string `json:"run_name,omitempty"`
+	// Surface is the REST client surface of a request that had no MCP
+	// connection (webui, tray, cli, rest). It names the session's origin in
+	// the work-session summary; Source stays the coarse "api".
+	Surface string `json:"surface,omitempty"`
 
 	// ProjectName is the display name of the project the client works in (the
 	// basename of its workspace root), when the client disclosed one. Never

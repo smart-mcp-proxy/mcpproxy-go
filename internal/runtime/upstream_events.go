@@ -163,6 +163,12 @@ func transitionEvent(server, transport string, t types.Transition) (UpstreamEven
 // the record itself shows. Hidden events carry no error code: the error of
 // each was folded away with it.
 //
+// A folded record keeps the counts and the state it ends in, not the exact
+// interleaving of what it hid: where a hidden login requirement fell among
+// several hidden losses and recoveries is not known, so a count can be off by
+// one in a sequence that mixes all three. This only happens after the
+// observer stalled for a whole queue of transitions.
+//
 // Their order is the one that leaves the right state behind. Losses and
 // recoveries alternated, so which of the two came last follows from where
 // the record starts and how many there were. A login requirement is replayed
@@ -310,13 +316,21 @@ func (c *upstreamEventCollapser) place(e UpstreamEvent) (row *upstreamRow, isNew
 		if !c.down[e.Server] {
 			return nil, false // the first connect, or a recovery nobody saw fail
 		}
-		c.down[e.Server] = false
-		// A reconnect ends every open login requirement of the server.
-		for k := range c.loginOpen {
-			if k.server == e.Server {
-				delete(c.loginOpen, k)
+		// A reconnect ends the open login requirements of the server that
+		// precede it. One seen after this recovery happened (the recovery
+		// was delivered late) stays open, and the server stays down for it.
+		stillOpen := false
+		for k, open := range c.loginOpen {
+			if k.server != e.Server {
+				continue
 			}
+			if open.lastAt.After(e.At) {
+				stillOpen = true
+				continue
+			}
+			delete(c.loginOpen, k)
 		}
+		c.down[e.Server] = stillOpen
 	case UpstreamConnectionLost, UpstreamProcessExited:
 		c.down[e.Server] = true
 	case UpstreamLoginRequired:
@@ -469,7 +483,7 @@ func (c *upstreamEventCollapser) forgetIdleServers(now time.Time) {
 
 // noteTokenSaved clears the open login requirement of (server, owner), unless
 // the save is older than a failure already applied.
-func (c *upstreamEventCollapser) noteTokenSaved(server, owner string, seq uint64) {
+func (c *upstreamEventCollapser) noteTokenSaved(server, owner string, seq uint64, at time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	k := upstreamOwnerKey{server, owner}
@@ -478,7 +492,12 @@ func (c *upstreamEventCollapser) noteTokenSaved(server, owner string, seq uint64
 			return
 		}
 		c.loginSeq[k] = seq
-		c.loginSavedAt[k] = c.now()
+		if at.IsZero() {
+			at = c.now()
+		}
+		if at.After(c.loginSavedAt[k]) {
+			c.loginSavedAt[k] = at
+		}
 		// A save is activity of the server for cleanup: it keeps the number
 		// of a server that is saving tokens, and lets cleanup run (and
 		// forget servers that are gone) when there are saves and no events.
@@ -490,6 +509,11 @@ func (c *upstreamEventCollapser) noteTokenSaved(server, owner string, seq uint64
 			c.lastSaveGC = now
 			c.forgetIdleServers(now)
 		}
+	}
+	// A requirement seen after the save was accepted is newer than the save
+	// (this notification was delivered late) and stays open.
+	if open := c.loginOpen[k]; open != nil && !at.IsZero() && open.lastAt.After(at) {
+		return
 	}
 	delete(c.loginOpen, k)
 }
@@ -558,20 +582,20 @@ func (s *ActivityService) RecordUpstreamEvent(e UpstreamEvent) {
 // NoteUpstreamTokenSaved tells the collapser that a new OAuth token was saved
 // for (server, owner), which ends an open login requirement. seq is the
 // refresh manager's notification number for the save, or zero.
-func (s *ActivityService) NoteUpstreamTokenSaved(server, owner string, seq uint64) {
+func (s *ActivityService) NoteUpstreamTokenSaved(server, owner string, seq uint64, at time.Time) {
 	if s == nil || s.upstreamEvents == nil {
 		return
 	}
-	s.upstreamEvents.noteTokenSaved(server, owner, seq)
+	s.upstreamEvents.noteTokenSaved(server, owner, seq, at)
 }
 
 // EmitOAuthTokenSavedNumbered implements oauth.RefreshOrderEmitter: a saved
 // token ends an open login requirement of the server.
-func (r *Runtime) EmitOAuthTokenSavedNumbered(serverName string, seq uint64) {
+func (r *Runtime) EmitOAuthTokenSavedNumbered(serverName string, seq uint64, at time.Time) {
 	if r == nil || r.activityService == nil {
 		return
 	}
-	r.activityService.NoteUpstreamTokenSaved(serverName, "", seq)
+	r.activityService.NoteUpstreamTokenSaved(serverName, "", seq, at)
 }
 
 // EmitOAuthLoginRequiredNumbered implements oauth.RefreshOrderEmitter: the

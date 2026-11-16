@@ -486,6 +486,9 @@ func (s *WorkSessionSummary) applyRow(r *ActivityRecord, role AttemptRole) {
 	if r.ClientName != "" {
 		s.ClientName = r.ClientName
 	}
+	if r.Surface != "" {
+		s.Surface = r.Surface
+	}
 	if s.Surface == "" && r.Source != "" && r.Source != ActivitySourceInternal {
 		s.Surface = string(r.Source)
 	}

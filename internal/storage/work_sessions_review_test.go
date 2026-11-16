@@ -1117,3 +1117,47 @@ func TestRetention_NoShortfallWhenNothingCouldBeRemoved(t *testing.T) {
 	assert.Nil(t, sf)
 	assert.Equal(t, 1, countRows(t, m))
 }
+
+// Review round 7: the summary records the REST surface of its rows, and a
+// session with no rows left does not hold the log above the size cap.
+func TestWorkSessionSummary_SurfaceAndEmptyLastSession(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	retRow(t, m, "ws-web", time.Hour, func(r *ActivityRecord) { r.Source, r.Surface = ActivitySourceAPI, "webui" })
+	retRow(t, m, "ws-mcp", time.Hour, func(r *ActivityRecord) { r.Source = ActivitySourceMCP })
+	web, _ := m.GetWorkSessionSummary("ws-web")
+	mcp, _ := m.GetWorkSessionSummary("ws-mcp")
+	assert.Equal(t, "webui", web.Surface)
+	assert.Equal(t, string(ActivitySourceMCP), mcp.Surface)
+
+	m2, cleanup2 := setupTestStorageForActivity(t)
+	defer cleanup2()
+	retRow(t, m2, "ws-1", time.Hour, nil)
+	// Its only row goes (as age pruning would take it); the summary stays.
+	refs, _ := m2.WorkSessionRowRefs("ws-1")
+	require.NoError(t, m2.db.db.Update(func(tx *bbolt.Tx) error {
+		sums := newTxSummaries(tx)
+		acts := tx.Bucket([]byte(ActivityRecordsBucket))
+		if _, _, err := deleteRowTx(tx, sums, refs[0].ActivityKey, append([]byte(nil), acts.Get(refs[0].ActivityKey)...)); err != nil {
+			return err
+		}
+		_, err := sums.flush()
+		return err
+	}))
+	require.NoError(t, m2.SaveActivity(&ActivityRecord{
+		Type: ActivityTypeUpstreamEvent, Status: ActivityStatusError, ServerName: "github", Timestamp: retNow.Add(-time.Minute),
+	}))
+	s, _ := m2.GetWorkSessionSummary("ws-1")
+	require.NotNil(t, s)
+	scan, err := m2.scanLog()
+	require.NoError(t, err)
+	p := retPolicy()
+	p.MaxBytes = scan.st.bytes - 50 // over, by less than the summary's size
+	_, err = m2.RunActivityRetention(p)
+	require.NoError(t, err)
+	gone, _ := m2.GetWorkSessionSummary("ws-1")
+	assert.Nil(t, gone, "the empty summary was removed under size pressure")
+	assert.Equal(t, 1, countRows(t, m2), "the newest row of the log stays")
+	after, _ := m2.scanLog()
+	assert.LessOrEqual(t, after.st.bytes, p.MaxBytes)
+}

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
@@ -138,6 +139,9 @@ func (p *MCPProxyServer) activityAttribution(ctx context.Context, sessionID stri
 	}
 	if ac := auth.AuthContextFromContext(ctx); ac != nil && attr.UserID == "" {
 		attr.UserID = ac.UserID
+	}
+	if attr.Surface == "" {
+		attr.Surface = reqcontext.ClientSurface(ctx)
 	}
 	attr.PolicyRefusal = isPolicyRefusal(ctx)
 	return attr

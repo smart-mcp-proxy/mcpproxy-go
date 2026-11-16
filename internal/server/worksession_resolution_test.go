@@ -167,6 +167,8 @@ func TestActivityAttribution_CarriesTheRequestWorkSession(t *testing.T) {
 	assert.NotEmpty(t, attr.WorkSessionID)
 	assert.Equal(t, "u-1", attr.UserID)
 	assert.Equal(t, "nightly-7", attr.RunName)
+	assert.Equal(t, "rest", attr.Surface, "the REST client surface names the session's origin (FR-040)")
+	assert.Empty(t, p.activityAttribution(context.Background(), "").Surface, "no surface without one on the request")
 }
 
 // End to end through the REST door: the persisted tool_call row of a REST call

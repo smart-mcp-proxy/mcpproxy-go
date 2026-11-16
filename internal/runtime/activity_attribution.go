@@ -49,6 +49,9 @@ type ActivityAttribution struct {
 	RunName string
 	// ProjectName is the basename of the client's workspace root, when known.
 	ProjectName string
+	// Surface is where a request with no MCP connection came from: the REST
+	// client surface (webui, tray, cli, rest). Empty for an MCP connection.
+	Surface string
 
 	// Companion marks a blocking policy decision emitted next to a tool_call
 	// row of the same attempt (Spec 124 D2); it is not counted again.
@@ -86,6 +89,7 @@ func (a ActivityAttribution) payload() map[string]any {
 	set("_user_id", a.UserID)
 	set("run_name", a.RunName)
 	set("project_name", a.ProjectName)
+	set("_surface", a.Surface)
 	if a.Companion {
 		out["_companion"] = true
 	}
@@ -114,6 +118,7 @@ func attributionFromPayload(payload map[string]any) ActivityAttribution {
 		UserID:        getStringPayload(m, "_user_id"),
 		RunName:       getStringPayload(m, "run_name"),
 		ProjectName:   getStringPayload(m, "project_name"),
+		Surface:       getStringPayload(m, "_surface"),
 		Companion:     m["_companion"] == true,
 		PolicyRefusal: m["_policy_refusal"] == true,
 	}
@@ -142,6 +147,7 @@ func applyAttribution(rec *storage.ActivityRecord, a ActivityAttribution) {
 	}
 	rec.RunName = a.RunName
 	rec.ProjectName = a.ProjectName
+	rec.Surface = a.Surface
 	rec.Companion = a.Companion && rec.Type == storage.ActivityTypePolicyDecision
 	if a.PolicyRefusal && rec.ErrorClass == "" && rec.Status != storage.ActivityStatusSuccess {
 		rec.ErrorClass = storage.ErrorClassProxyPolicy

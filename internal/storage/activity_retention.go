@@ -1347,6 +1347,7 @@ func (m *Manager) removeSession(id string, expectLast time.Time, st *retentionSt
 // another reports that trimming stopped because a second session exists.
 func (m *Manager) trimSession(id string, st *retentionState, over func() bool) (trimmed int, another bool, err error) {
 	prefix := workSessionRowPrefix(id)
+	emptied := false
 	for over() {
 		batch := 0
 		err := m.db.db.Update(func(tx *bbolt.Tx) error {
@@ -1376,6 +1377,17 @@ func (m *Manager) trimSession(id string, st *retentionState, over func() bool) (
 				keys = append(keys, append([]byte(nil), k[len(prefix):]...))
 			}
 			if len(keys) == 0 {
+				// No row of the session is left (age pruning took them, or
+				// an earlier trim). Its summary is all that remains and the
+				// log is still over: the summary goes, so that it cannot
+				// hold the log above the cap until it expires.
+				if sb := tx.Bucket([]byte(WorkSessionsBucket)); sb != nil {
+					if v := sb.Get([]byte(id)); v != nil {
+						st.bytes -= int64(len(id) + len(v))
+						emptied = true
+						return sb.Delete([]byte(id))
+					}
+				}
 				return nil
 			}
 			// The session's newest row is kept when it is the newest row of
@@ -1429,6 +1441,10 @@ func (m *Manager) trimSession(id string, st *retentionState, over func() bool) (
 			return trimmed, another, err
 		}
 		trimmed += batch
+		if emptied {
+			// Reported as one trimmed unit so the pass records the loss.
+			return trimmed + 1, another, nil
+		}
 		if batch == 0 || another {
 			break
 		}

@@ -442,6 +442,11 @@ func (s *ActivityService) prepareWorkSessions(ctx context.Context) {
 	if _, err := s.storage.BackfillWorkSessions(ctx.Done()); err != nil {
 		s.logger.Warn("Failed to build work-session summaries for existing rows", zap.Error(err))
 	}
+	// The summaries the repair and the backfill just built belong to the
+	// previous process too, and were not there for the first closing.
+	if _, err := s.storage.CloseOpenWorkSessionsAtStart(s.createdAt); err != nil {
+		s.logger.Warn("Failed to close rebuilt work sessions at start", zap.Error(err))
+	}
 }
 
 // runRetentionCleanup performs the actual retention cleanup.

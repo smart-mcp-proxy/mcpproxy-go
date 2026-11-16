@@ -21,7 +21,7 @@ type orderEmitter struct {
 	failAt []time.Time
 }
 
-func (e *orderEmitter) EmitOAuthTokenSavedNumbered(_ string, seq uint64) {
+func (e *orderEmitter) EmitOAuthTokenSavedNumbered(_ string, seq uint64, _ time.Time) {
 	e.omu.Lock()
 	defer e.omu.Unlock()
 	e.saved = append(e.saved, seq)
@@ -82,9 +82,9 @@ type readingEmitter struct {
 	read    chan struct{}
 }
 
-func (e *readingEmitter) EmitOAuthTokenSavedNumbered(serverName string, seq uint64) {
+func (e *readingEmitter) EmitOAuthTokenSavedNumbered(serverName string, seq uint64, at time.Time) {
 	_ = e.manager.GetSchedule(serverName) // would deadlock under the lock
-	e.orderEmitter.EmitOAuthTokenSavedNumbered(serverName, seq)
+	e.orderEmitter.EmitOAuthTokenSavedNumbered(serverName, seq, at)
 	close(e.read)
 }
 

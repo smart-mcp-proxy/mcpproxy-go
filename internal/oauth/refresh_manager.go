@@ -133,7 +133,7 @@ type RefreshEventEmitter interface {
 // lower number in both directions.
 type RefreshOrderEmitter interface {
 	// EmitOAuthTokenSavedNumbered: a new token was saved and scheduled.
-	EmitOAuthTokenSavedNumbered(serverName string, seq uint64)
+	EmitOAuthTokenSavedNumbered(serverName string, seq uint64, at time.Time)
 	// EmitOAuthLoginRequiredNumbered: the refresh schedule was given up, so
 	// the server needs a new login even if its connection is still up.
 	EmitOAuthLoginRequiredNumbered(serverName string, seq uint64, at time.Time)
@@ -476,20 +476,20 @@ func (m *RefreshManager) OnTokenSaved(serverName string, expiresAt time.Time) {
 func (m *RefreshManager) OnTokenSavedFor(serverName string, expiresAt time.Time, binding commitview.CredentialBinding) {
 	// The notification is sent after the lock is released: an emitter may
 	// read the manager back (GetSchedule, GetRefreshState).
-	if seq, ordered := m.installScheduleForSavedToken(serverName, expiresAt, binding); ordered != nil {
-		ordered.EmitOAuthTokenSavedNumbered(serverName, seq)
+	if seq, at, ordered := m.installScheduleForSavedToken(serverName, expiresAt, binding); ordered != nil {
+		ordered.EmitOAuthTokenSavedNumbered(serverName, seq, at)
 	}
 }
 
 // installScheduleForSavedToken does the work of OnTokenSavedFor under the
 // lock. It returns the notification number of the save and the emitter to
 // tell, or a nil emitter when there is nothing to send.
-func (m *RefreshManager) installScheduleForSavedToken(serverName string, expiresAt time.Time, binding commitview.CredentialBinding) (uint64, RefreshOrderEmitter) {
+func (m *RefreshManager) installScheduleForSavedToken(serverName string, expiresAt time.Time, binding commitview.CredentialBinding) (uint64, time.Time, RefreshOrderEmitter) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if !m.started {
-		return 0, nil
+		return 0, time.Time{}, nil
 	}
 
 	// A late notification from a superseded binding (Sol r3 on #1621): a
@@ -504,7 +504,7 @@ func (m *RefreshManager) installScheduleForSavedToken(serverName string, expires
 			zap.String("server", serverName),
 			zap.String("save_binding", binding.String()),
 			zap.String("schedule_binding", existing.Binding.String()))
-		return 0, nil
+		return 0, time.Time{}, nil
 	}
 
 	// Cancel existing schedule if any
@@ -537,7 +537,9 @@ func (m *RefreshManager) installScheduleForSavedToken(serverName string, expires
 	// any failure the manager accepts for this server.
 	seq := m.nextNotifySeqLocked()
 	ordered, _ := m.eventEmitter.(RefreshOrderEmitter)
-	return seq, ordered
+	// The time the save was accepted, under the lock: its notification can
+	// be delivered late, and what happened meanwhile must not be undone.
+	return seq, time.Now(), ordered
 }
 
 // nextNotifySeqLocked returns the next notification number. One counter
