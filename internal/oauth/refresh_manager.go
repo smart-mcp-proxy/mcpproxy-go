@@ -97,6 +97,8 @@ type RefreshSchedule struct {
 	// lastNotifySeq is the number of the latest notification sent for this
 	// server's schedule: the save that installed it, or its failure.
 	lastNotifySeq uint64
+	// lastNotifyAt is when that notification was accepted.
+	lastNotifyAt time.Time
 }
 
 // RefreshTokenStore defines storage operations needed by RefreshManager.
@@ -141,9 +143,10 @@ type RefreshOrderEmitter interface {
 	// the server needs a new login even if its connection is still up.
 	//
 	// prev is the number of the notification this server had before this
-	// one (zero when unknown). A receiver that has not applied prev yet
-	// knows a notification of this server is still on its way.
-	EmitOAuthLoginRequiredNumbered(serverName string, seq, prev uint64, at time.Time)
+	// one (zero when unknown) and prevAt the time it was accepted. A
+	// receiver that has not applied prev yet knows a notification of this
+	// server is still on its way, and since when.
+	EmitOAuthLoginRequiredNumbered(serverName string, seq, prev uint64, prevAt, at time.Time)
 }
 
 // RefreshMetricsRecorder defines metrics recording methods for OAuth refresh operations.
@@ -543,13 +546,14 @@ func (m *RefreshManager) installScheduleForSavedToken(serverName string, expires
 	// Spec 124 D5: number the save under the lock, so it is ordered against
 	// any failure the manager accepts for this server.
 	seq := m.nextNotifySeqLocked()
-	if cur := m.schedules[serverName]; cur != nil {
-		cur.lastNotifySeq = seq
-	}
-	ordered, _ := m.eventEmitter.(RefreshOrderEmitter)
 	// The time the save was accepted, under the lock: its notification can
 	// be delivered late, and what happened meanwhile must not be undone.
-	return seq, time.Now(), ordered
+	now := time.Now()
+	if cur := m.schedules[serverName]; cur != nil {
+		cur.lastNotifySeq, cur.lastNotifyAt = seq, now
+	}
+	ordered, _ := m.eventEmitter.(RefreshOrderEmitter)
+	return seq, now, ordered
 }
 
 // nextNotifySeqLocked returns the next notification number. One counter
@@ -565,13 +569,13 @@ func (m *RefreshManager) nextNotifySeqLocked() uint64 {
 // was, tells the subscribers. The failure takes its notification number under
 // the same lock that accepted it.
 func (m *RefreshManager) failScheduleAndNotify(serverName string, expected *RefreshSchedule, lastError string, stopTimer bool, cause error) {
-	seq, prev, at, ok := m.failScheduleIfCurrentSeq(serverName, expected, lastError, stopTimer)
+	seq, prev, prevAt, at, ok := m.failScheduleIfCurrentSeq(serverName, expected, lastError, stopTimer)
 	if !ok || m.eventEmitter == nil {
 		return
 	}
 	m.eventEmitter.EmitOAuthRefreshFailed(serverName, cause.Error())
 	if ordered, isOrdered := m.eventEmitter.(RefreshOrderEmitter); isOrdered {
-		ordered.EmitOAuthLoginRequiredNumbered(serverName, seq, prev, at)
+		ordered.EmitOAuthLoginRequiredNumbered(serverName, seq, prev, prevAt, at)
 	}
 }
 
@@ -936,12 +940,12 @@ func (m *RefreshManager) handleRefreshFailureFor(serverName string, err error, m
 // stale failure event is emitted. lastError "" keeps the current LastError.
 // It returns the notification number taken for the accepted failure and the
 // time it was accepted, both under the lock.
-func (m *RefreshManager) failScheduleIfCurrentSeq(serverName string, expected *RefreshSchedule, lastError string, stopTimer bool) (seq, prev uint64, at time.Time, ok bool) {
+func (m *RefreshManager) failScheduleIfCurrentSeq(serverName string, expected *RefreshSchedule, lastError string, stopTimer bool) (seq, prev uint64, prevAt, at time.Time, ok bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	schedule := m.schedules[serverName]
 	if schedule == nil || schedule != expected {
-		return 0, 0, time.Time{}, false
+		return 0, 0, time.Time{}, time.Time{}, false
 	}
 	schedule.RefreshState = RefreshStateFailed
 	if lastError != "" {
@@ -950,10 +954,10 @@ func (m *RefreshManager) failScheduleIfCurrentSeq(serverName string, expected *R
 	if stopTimer && schedule.Timer != nil {
 		schedule.Timer.Stop()
 	}
-	prev = schedule.lastNotifySeq
-	seq = m.nextNotifySeqLocked()
-	schedule.lastNotifySeq = seq
-	return seq, prev, time.Now(), true
+	prev, prevAt = schedule.lastNotifySeq, schedule.lastNotifyAt
+	seq, at = m.nextNotifySeqLocked(), time.Now()
+	schedule.lastNotifySeq, schedule.lastNotifyAt = seq, at
+	return seq, prev, prevAt, at, true
 }
 
 // onRefreshOutcome is the RefreshCoordinator completion hook. Proactive

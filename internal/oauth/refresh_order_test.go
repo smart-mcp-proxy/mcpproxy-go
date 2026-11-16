@@ -29,7 +29,7 @@ func (e *orderEmitter) EmitOAuthTokenSavedNumbered(_ string, seq uint64, _ time.
 	e.saved = append(e.saved, seq)
 }
 
-func (e *orderEmitter) EmitOAuthLoginRequiredNumbered(_ string, seq, prev uint64, at time.Time) {
+func (e *orderEmitter) EmitOAuthLoginRequiredNumbered(_ string, seq, prev uint64, _, at time.Time) {
 	e.omu.Lock()
 	defer e.omu.Unlock()
 	e.failed = append(e.failed, seq)

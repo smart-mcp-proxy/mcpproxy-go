@@ -711,7 +711,7 @@ func TestUpstreamEvent_FailureDeliveredBeforeItsSaveIsANewEpisode(t *testing.T) 
 	first, isNew := c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase, Seq: 1})
 	require.True(t, isNew)
 
-	second, isNew := c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(20 * time.Second), Seq: 3, PrevSeq: 2})
+	second, isNew := c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(20 * time.Second), Seq: 3, PrevSeq: 2, PrevAt: evBase.Add(10 * time.Second)})
 	require.True(t, isNew, "the save in between is known to exist: a new episode")
 	assert.NotEqual(t, first.id, second.id)
 	assert.Equal(t, evBase.Add(20*time.Second), second.firstAt)
@@ -724,9 +724,25 @@ func TestUpstreamEvent_FailureDeliveredBeforeItsSaveIsANewEpisode(t *testing.T) 
 	c2 := newUpstreamEventCollapser()
 	c2.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase, Seq: 1})
 	c2.noteTokenSaved("srv", "", 2, evBase.Add(10*time.Second))
-	a, isNew := c2.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(20 * time.Second), Seq: 3, PrevSeq: 2})
+	a, isNew := c2.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(20 * time.Second), Seq: 3, PrevSeq: 2, PrevAt: evBase.Add(10 * time.Second)})
 	require.True(t, isNew)
 	b, isNew := c2.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(30 * time.Second)})
 	assert.False(t, isNew, "the connection state reporting the same condition merges")
 	assert.Equal(t, a.id, b.id)
+}
+
+// Review round 11: the connection reports the new grant's login requirement
+// before the numbered failure, while the grant's save is still on its way.
+// The requirement began after that save, so it is this same episode: the
+// failure merges into it and no second row is written.
+func TestUpstreamEvent_StateRequirementBeforeItsNumberedFailureIsOneEpisode(t *testing.T) {
+	c := newUpstreamEventCollapser()
+	c.noteTokenSaved("srv", "", 1, evBase)
+	saved2 := evBase.Add(10 * time.Second) // save 2 accepted; its notification stalls
+	state, isNew := c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(15 * time.Second)})
+	require.True(t, isNew)
+	numbered, isNew := c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(20 * time.Second), Seq: 3, PrevSeq: 2, PrevAt: saved2})
+	assert.False(t, isNew)
+	assert.Equal(t, state.id, numbered.id)
+	assert.Equal(t, 2, numbered.count)
 }
