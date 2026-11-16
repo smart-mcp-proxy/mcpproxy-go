@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/client"
@@ -23,18 +24,74 @@ import (
 // release the connection (listenClient), so nothing can start another one for
 // that connection afterwards; a session re-initialize replaces it with one on
 // the new session, waiting for the old one first, so it never ends with two.
+//
+// The listener never runs the notification handlers itself: it queues each
+// notification for a separate dispatch goroutine and goes back to reading. The
+// managed layer holds its own lock across core Disconnect, and its
+// tools/prompts-changed callbacks take that lock, so a stop that waited on a
+// dispatch could block on its own caller until the stop timeout. A stop waits
+// only for the reader; the dispatcher exits on the same context, once any
+// handler call already under way returns.
 
 // listChangedStream is one running listener.
 type listChangedStream struct {
 	cancel context.CancelFunc
-	done   chan struct{}
+	done   chan struct{} // closed once the reader goroutine has exited
 	run    func(context.Context) proxytransport.ListenEnd
 	ctx    context.Context
+	queue  *notificationQueue
 }
 
 // listChangedStreamStopTimeout bounds how long a stop waits for the listener
 // goroutine (it only has to see its context cancelled).
 const listChangedStreamStopTimeout = 5 * time.Second
+
+// maxQueuedNotificationMethods bounds the dispatch queue: notifications are
+// coalesced per method, so it holds at most this many distinct methods.
+const maxQueuedNotificationMethods = 8
+
+// notificationQueue hands the listener's notifications to the dispatch
+// goroutine without blocking the listener. A notification whose method is
+// already queued is coalesced into it: a list_changed notification carries no
+// payload, and one re-list answers any number of them.
+type notificationQueue struct {
+	mu      sync.Mutex
+	pending []mcp.JSONRPCNotification
+	wake    chan struct{}
+}
+
+func newNotificationQueue() *notificationQueue {
+	return &notificationQueue{wake: make(chan struct{}, 1)}
+}
+
+// push queues n. It never blocks.
+func (q *notificationQueue) push(n mcp.JSONRPCNotification) {
+	q.mu.Lock()
+	queued := false
+	for _, p := range q.pending {
+		if p.Method == n.Method {
+			queued = true
+			break
+		}
+	}
+	if !queued && len(q.pending) < maxQueuedNotificationMethods {
+		q.pending = append(q.pending, n)
+	}
+	q.mu.Unlock()
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+}
+
+// take removes and returns everything queued, oldest first.
+func (q *notificationQueue) take() []mcp.JSONRPCNotification {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	out := q.pending
+	q.pending = nil
+	return out
+}
 
 // listChangedStreamOptions is a test seam for the backoff timings.
 var listChangedStreamOptions = proxytransport.ListenStreamOptions{}
@@ -108,10 +165,16 @@ func (c *Client) stopListChangedStream(wait bool) {
 	}
 }
 
-// endListChangedStream ends the running listener but keeps the connection
-// claimed: a failed re-initialize leaves the next one free to restart it.
-func (c *Client) endListChangedStream() {
+// endListChangedStream ends cl's running listener but keeps the connection
+// claimed: a failed re-initialize leaves the next one free to restart it. It
+// does nothing once cl's connection was released, so a late failure on an old
+// connection cannot end the stream of the connection that replaced it.
+func (c *Client) endListChangedStream(cl *client.Client) {
 	c.listenMu.Lock()
+	if cl == nil || c.listenClient != cl {
+		c.listenMu.Unlock()
+		return
+	}
 	s := c.listen
 	c.listen = nil
 	c.listenMu.Unlock()
@@ -132,14 +195,15 @@ func (c *Client) newListChangedStream(cl *client.Client, info *mcp.InitializeRes
 	if c.AuthStrategy() == "no-auth" {
 		cfg.Headers = nil
 	}
+	queue := newNotificationQueue()
 	opts := listChangedStreamOptions
 	opts.ProtocolVersion = info.ProtocolVersion
 	opts.Logger = c.logger
-	opts.OnNotification = c.dispatchNotification
+	opts.OnNotification = queue.push
 	ls := cfg.NewListenStream(sh, opts)
 
 	ctx, cancel := context.WithCancel(c.Gate().Context())
-	return &listChangedStream{cancel: cancel, done: make(chan struct{}), run: ls.Run, ctx: ctx}
+	return &listChangedStream{cancel: cancel, done: make(chan struct{}), run: ls.Run, ctx: ctx, queue: queue}
 }
 
 // runListChangedStream starts s's goroutine. A nil s is a no-op.
@@ -150,6 +214,7 @@ func (c *Client) runListChangedStream(s *listChangedStream) {
 	serverName := c.config.Name
 	c.logger.Debug("Opening the upstream's standalone GET stream for tools/list_changed",
 		zap.String("server", serverName))
+	go c.dispatchListChangedNotifications(s)
 	go func() {
 		defer close(s.done)
 		defer s.cancel()
@@ -168,6 +233,24 @@ func (c *Client) runListChangedStream(s *listChangedStream) {
 		}
 		c.listenMu.Unlock()
 	}()
+}
+
+// dispatchListChangedNotifications runs the handlers for what s's listener
+// queued, until s's context ends. Nothing waits for it (see the file comment).
+func (c *Client) dispatchListChangedNotifications(s *listChangedStream) {
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-s.queue.wake:
+		}
+		for _, n := range s.queue.take() {
+			if s.ctx.Err() != nil {
+				return
+			}
+			c.dispatchNotification(n)
+		}
+	}
 }
 
 // awaitListChangedStream cancels s and waits (bounded) for its goroutine.

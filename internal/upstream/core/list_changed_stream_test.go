@@ -393,3 +393,105 @@ func TestListChangedStream_SessionLostWaitsForReinit(t *testing.T) {
 	require.NoError(t, c.ReinitializeSession(ctx))
 	waitFor(t, "a GET on the new session", func() bool { return up.open.Load() == 1 })
 }
+
+// A managed caller holds its own lock across core Disconnect, and the
+// tools-changed callback takes that lock. A notification whose dispatch is
+// blocked on it must not hold Disconnect for the listener stop timeout.
+func TestListChangedStream_DisconnectDoesNotWaitOnBlockedDispatch(t *testing.T) {
+	up := newListenUpstream(true, 0)
+	srv := httptest.NewServer(up.handler())
+	t.Cleanup(srv.Close)
+
+	c, _ := connectListenClient(t, srv.URL)
+	waitFor(t, "the GET stream", func() bool { return up.open.Load() == 1 })
+
+	var managedMu sync.RWMutex // stands in for managed.Client.mu
+	entered := make(chan struct{}, 8)
+	c.SetOnToolsChangedCallback(func(string) {
+		entered <- struct{}{}
+		managedMu.RLock()
+		defer managedMu.RUnlock()
+	})
+
+	managedMu.Lock()
+	var unlockOnce sync.Once
+	unlock := func() { unlockOnce.Do(managedMu.Unlock) }
+	defer unlock()
+
+	up.push(string(mcp.MethodNotificationToolsListChanged))
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("notification did not reach the callback")
+	}
+
+	start := time.Now()
+	require.NoError(t, c.Disconnect())
+	elapsed := time.Since(start)
+	unlock()
+	assert.Less(t, elapsed, 2*time.Second,
+		"Disconnect waited on a dispatch blocked behind the caller's lock")
+	waitFor(t, "the stream to close", func() bool { return up.open.Load() == 0 })
+}
+
+// The dispatch queue never blocks the listener and coalesces per method, so a
+// flood while a handler is stuck holds a bounded amount.
+func TestNotificationQueue_CoalescesPerMethod(t *testing.T) {
+	q := newNotificationQueue()
+	tools := mcp.JSONRPCNotification{Notification: mcp.Notification{Method: string(mcp.MethodNotificationToolsListChanged)}}
+	prompts := mcp.JSONRPCNotification{Notification: mcp.Notification{Method: string(mcp.MethodNotificationPromptsListChanged)}}
+	for range 100 {
+		q.push(tools)
+	}
+	q.push(prompts)
+	for i := range 2 * maxQueuedNotificationMethods {
+		q.push(mcp.JSONRPCNotification{Notification: mcp.Notification{Method: fmt.Sprintf("x/%d", i)}})
+	}
+	got := q.take()
+	require.Len(t, got, maxQueuedNotificationMethods)
+	assert.Equal(t, tools.Method, got[0].Method)
+	assert.Equal(t, prompts.Method, got[1].Method)
+	assert.Empty(t, q.take())
+	select {
+	case <-q.wake:
+	default:
+		t.Fatal("push did not wake the dispatcher")
+	}
+}
+
+// A re-initialize of an old connection that fails after a reconnect opened a
+// newer connection's stream leaves that newer stream running.
+func TestListChangedStream_LateReinitFailureKeepsNewerStream(t *testing.T) {
+	up := newListenUpstream(true, 0)
+	srv := httptest.NewServer(up.handler())
+	t.Cleanup(srv.Close)
+
+	c, _ := connectListenClient(t, srv.URL)
+	waitFor(t, "the GET stream", func() bool { return up.open.Load() == 1 })
+	c.mu.RLock()
+	oldCl := c.client
+	c.mu.RUnlock()
+
+	// Reconnect: the old connection is closed, a new one holds the stream.
+	require.NoError(t, c.Disconnect())
+	waitFor(t, "the old stream to close", func() bool { return up.open.Load() == 0 })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, c.Connect(ctx))
+	waitFor(t, "the new GET stream", func() bool { return up.open.Load() == 1 })
+
+	// A re-initialize that captured the old connection fails late.
+	c.mu.Lock()
+	newCl := c.client
+	c.client = oldCl
+	c.mu.Unlock()
+	err := c.ReinitializeSession(ctx)
+	c.mu.Lock()
+	c.client = newCl
+	c.mu.Unlock()
+	require.Error(t, err, "a re-initialize on the closed connection fails")
+
+	time.Sleep(300 * time.Millisecond)
+	assert.True(t, c.listChangedStreamRunning(), "the newer connection's listener was stopped")
+	assert.Equal(t, int32(1), up.open.Load(), "the newer connection's GET stream was closed")
+}

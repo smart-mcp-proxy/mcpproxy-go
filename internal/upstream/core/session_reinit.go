@@ -159,12 +159,13 @@ func (c *Client) ReinitializeSession(ctx context.Context) error {
 	release()
 	if err != nil {
 		// GH #1910: the old session's GET stream is useless; a later
-		// re-initialize or reconnect opens the next one.
-		c.endListChangedStream()
+		// re-initialize or reconnect opens the next one. Only cl's stream:
+		// a reconnect may already have given a newer connection its own.
+		c.endListChangedStream(cl)
 		return fmt.Errorf("session re-initialize failed: %w", err)
 	}
 	if mcp.IsModernProtocol(res.ProtocolVersion) {
-		c.endListChangedStream()
+		c.endListChangedStream(cl)
 		return fmt.Errorf("upstream answered MCP protocol version %s on session re-initialize (spec 058 FR-027)", res.ProtocolVersion)
 	}
 
