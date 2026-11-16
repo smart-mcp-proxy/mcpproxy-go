@@ -980,6 +980,16 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Spec 124: an upstream event stores "error"/"success" in Status for a
+		// lost or restored connection. That is not the outcome of a call and
+		// not traffic to the server, and Usage never counts it, so it stays out
+		// of the call tiles and the top lists (Usage errors = errors + blocked
+		// here, F1).
+		if a.Type == storage.ActivityTypeUpstreamEvent {
+			otherCount++
+			continue
+		}
+
 		switch a.Status {
 		case storage.ActivityStatusSuccess:
 			successCount++
