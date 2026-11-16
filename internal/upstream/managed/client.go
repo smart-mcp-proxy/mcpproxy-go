@@ -392,15 +392,24 @@ type toolCaller interface {
 }
 
 // ambiguousProbeTimeout bounds the liveness probe fired after an ambiguous
-// tools/call cancellation. Matches the background health-check probe budget.
+// tools/call cancellation.
 const ambiguousProbeTimeout = 5 * time.Second
 
 // healthCheckFailureThreshold is the number of consecutive transient
-// health-check failures we tolerate before marking the server Error.
-// With a 30-second tick this is ~90s of unreachability — long enough that a
-// real outage still surfaces promptly, short enough that one slow upstream
-// request doesn't paint the UI red and clear the tools list.
-const healthCheckFailureThreshold = 3
+// health-check failures (timeouts) we tolerate before marking the server
+// Error. The loop is serial (the 30-second timer restarts after each probe
+// returns), so a server that times out every probe takes about 2.5 minutes
+// plus up to healthCheckProbeTimeout per probe (roughly 3.75 minutes). Hard failures (connection refused, DNS gone) still mark Error at
+// once. Three misses (90s) was too few on a heavily loaded machine: when a
+// few dozen agent sessions start at once, the whole host is CPU-starved for
+// minutes, every upstream's ping misses its window together, and each server
+// was torn down and reconnected while the clients were mid-request.
+const healthCheckFailureThreshold = 5
+
+// healthCheckProbeTimeout bounds one health-check ping. A ping is tiny, but
+// on a CPU-starved host the TLS handshake and scheduling alone can take
+// several seconds, so 5s produced timeouts for upstreams that were fine.
+const healthCheckProbeTimeout = 15 * time.Second
 
 // NewClient creates a new managed client with state management. The instance
 // holds no commit generation (0); the daemon builds instances with
@@ -2201,8 +2210,7 @@ func (mc *Client) performHealthCheckFor(stop <-chan struct{}) {
 		return
 	}
 
-	// Create a short timeout for health check
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), healthCheckProbeTimeout)
 	defer cancel()
 
 	// Probe liveness with the MCP-standard lightweight `ping` rather than
@@ -2319,7 +2327,7 @@ func (mc *Client) performHealthCheckFor(stop <-chan struct{}) {
 // Transient errors (timeout, deadline exceeded, context canceled) need
 // healthCheckFailureThreshold consecutive misses before they're considered a
 // real outage — slow upstreams (e.g. hf.co/mcp under load) routinely miss a
-// single 5-second health-check window without actually being down. Hard
+// single 15-second health-check window without actually being down. Hard
 // failures (connection refused, host unreachable, DNS gone) trigger Error
 // immediately because waiting buys nothing — the server is genuinely
 // unreachable and the user should see that.
