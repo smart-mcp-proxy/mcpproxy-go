@@ -50,7 +50,7 @@ func TestParseFrontmatter(t *testing.T) {
 		fm, err := ParseFrontmatter([]byte("---\nname: pdf\ndescription: Work with PDFs\nversion: 2\nmeta:\n  k: v\n---\n# Body\n"))
 		require.NoError(t, err)
 		assert.Equal(t, "pdf", fm["name"])
-		assert.Equal(t, 2, fm["version"])
+		assert.Equal(t, json.Number("2"), fm["version"], "a number keeps its digits")
 	})
 	t.Run("crlf and BOM", func(t *testing.T) {
 		fm, err := ParseFrontmatter([]byte("\xef\xbb\xbf---\r\nname: pdf\r\n---\r\nbody"))
@@ -184,21 +184,70 @@ func TestFrontmatterDecimalsAndSpellings(t *testing.T) {
 		{"0.1", "0.1"}, {"3.14", "3.14"}, {"0.10", "0.1"}, {"1E2", "100"}, {"-0", "0"},
 		{"0e401", "0"}, {"-0e999999", "0"}, {"10000000000000000000", "1e19"}, {"2.5e-3", "0.0025"},
 		{"9007199254740993", "9007199254740993"}, {"-7", "-7"},
+		// One value, written as an integer on one side and with a decimal
+		// point on the other, beyond what a float64 holds exactly.
+		{"9007199254740993.0", "9007199254740993"}, {"9007199254740993", "9007199254740993.0"},
+		{"18446744073709551615", "18446744073709551615.0"}, {"16", "0x10"}, {"0.5", ".5"}, {"5", "+5"},
+		{"1e300", "1e300"}, {"1.5e300", "15e299"}, {"123456789012345678901234567890", "123456789012345678901234567890"},
 	}
 	for _, c := range equal {
 		if !FrontmatterEqual(jsonOf(c[0]), yamlOf(c[1])) {
 			t.Errorf("JSON %s and YAML %s compared different", c[0], c[1])
 		}
 	}
-	different := [][2]string{{"0.1", "0.2"}, {"1", "-1"}, {"9007199254740993", "9007199254740992"}}
+	different := [][2]string{
+		{"0.1", "0.2"}, {"1", "-1"}, {"9007199254740993", "9007199254740992"},
+		{"9007199254740992", "9007199254740993.0"}, {"1e300", "1e301"}, {"0.1", "0.10000000000000001"},
+	}
 	for _, c := range different {
 		if FrontmatterEqual(jsonOf(c[0]), yamlOf(c[1])) {
 			t.Errorf("JSON %s and YAML %s compared equal", c[0], c[1])
 		}
 	}
-	// A number too large to hold has no canonical form: it equals nothing,
-	// itself included, so such a skill cannot be verified.
-	if FrontmatterEqual(jsonOf("1e401"), jsonOf("1e401")) {
-		t.Error("an out-of-range number compared equal")
+	// What YAML reads as infinity or not-a-number is not a value a listing can
+	// carry: such a frontmatter is refused.
+	for _, lit := range []string{".inf", "-.inf", ".nan"} {
+		if _, err := ParseFrontmatter([]byte("---\nv: " + lit + "\n---\n")); err == nil {
+			t.Errorf("%s accepted", lit)
+		}
+	}
+}
+
+// The YAML block is read node by node, so the rules a careless reader would
+// get wrong are pinned: aliases are followed within a budget, duplicate and
+// merge keys are refused, a number-looking string stays a string.
+func TestParseFrontmatterStructure(t *testing.T) {
+	p, err := ParseFrontmatter([]byte("---\nname: a\nbase: &b {k: 1}\ncopy: *b\nlist: [1, two, 3.5]\nquoted: \"12\"\nflag: true\nnothing: null\n---\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"name": "a", "base": map[string]any{"k": json.Number("1")}, "copy": map[string]any{"k": json.Number("1")},
+		"list": []any{json.Number("1"), "two", json.Number("3.5")}, "quoted": "12", "flag": true, "nothing": nil,
+	}
+	if !FrontmatterEqual(want, p) {
+		t.Fatalf("parsed %#v", p)
+	}
+	if FrontmatterEqual(map[string]any{"quoted": json.Number("12")}, map[string]any{"quoted": p["quoted"]}) {
+		t.Error("the string \"12\" equals the number 12")
+	}
+	for name, src := range map[string]string{
+		"duplicate key": "---\na: 1\na: 2\n---\n",
+		"merge key":     "---\nbase: &b {k: 1}\nuse:\n  <<: *b\n---\n",
+		"not a mapping": "---\n- a\n- b\n---\n",
+	} {
+		if _, err := ParseFrontmatter([]byte(src)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// Aliases that multiply (a "billion laughs" shape) stop at the node budget.
+	bomb := "---\na: &a [x, x, x, x, x, x, x, x, x, x]\n"
+	prev := "a"
+	for _, n := range []string{"b", "c", "d", "e", "f", "g"} {
+		bomb += n + ": &" + n + " [*" + prev + ", *" + prev + ", *" + prev + ", *" + prev + ", *" + prev + ", *" + prev + ", *" + prev + ", *" + prev + ", *" + prev + ", *" + prev + "]\n"
+		prev = n
+	}
+	if _, err := ParseFrontmatter([]byte(bomb + "---\n")); err == nil {
+		t.Error("multiplying aliases were expanded without a bound")
 	}
 }

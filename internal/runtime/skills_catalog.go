@@ -49,6 +49,10 @@ var (
 	// errSkillsCaptureStale reports a listing dropped because a newer one was
 	// applied or its client was retired or reconnected. Not a status error.
 	errSkillsCaptureStale = errors.New("skills listing capture is stale")
+	// ErrSkillsRefreshSuperseded is what a caller of RefreshServerSkills sees
+	// when its refresh wrote nothing because the connection it listed from was
+	// replaced while it ran. The reconnect starts a refresh of its own.
+	ErrSkillsRefreshSuperseded = errSkillsCaptureStale
 	// errSkillsSwitchedOff ends a refresh whose server stopped being eligible
 	// while it ran; like a stale capture it writes nothing and is not a failure.
 	errSkillsSwitchedOff = errors.New("skills were switched off for this server during the refresh")
@@ -294,6 +298,10 @@ func (r *Runtime) refreshServerSkills(ctx context.Context, serverName string) er
 	defer cancel()
 
 	err := r.runSkillsRefresh(ctx, serverName)
+	if errors.Is(err, errSkillsSwitchedOff) {
+		// The same answer as when the refresh finds skills off at its start.
+		return nil
+	}
 	if err != nil && !errors.Is(err, errSkillsCaptureStale) && !errors.Is(err, errSkillsSwitchedOff) &&
 		!errors.Is(err, commitview.ErrServerReplaced) && !errors.Is(err, ErrServerNotFound) {
 		r.skills.setStatus(serverName, func(s *SkillsServerStatus) {
@@ -333,7 +341,9 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 	truncated := false
 	var tr *skills.TruncatedError
 	if lerr != nil {
-		if errors.Is(lerr, skills.ErrStopped) {
+		// Asked again here as well: a listing that fails or times out after
+		// skills were switched off is not a failure anyone needs to hear of.
+		if errors.Is(lerr, skills.ErrStopped) || !eligible() {
 			return errSkillsSwitchedOff
 		}
 		if !errors.As(lerr, &tr) {

@@ -979,10 +979,29 @@ func TestSkillsRefresh_StopsPagingWhenSwitchedOff(t *testing.T) {
 	off := *g.rt.Config()
 	off.EnableSkills = false
 	g.rt.UpdateConfig(&off, "")
-	<-done
+	assert.NoError(t, <-done, "a refresh that stops because skills were switched off did not fail")
 
 	assert.Equal(t, 1, g.fx.Count("skills/list"), "no further page is requested once the switch is off")
 	assert.Zero(t, g.fx.Count("resources/read"))
 	assert.Empty(t, g.records(t))
 	assert.Empty(t, g.rt.SkillsStatus(skillsSrv).Error, "being switched off is not a failure")
+}
+
+// A listing that fails after skills were switched off is not reported as a
+// failed refresh: nobody asked for those skills any more.
+func TestSkillsRefresh_ListingErrorAfterSwitchOffIsNotAFailure(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf"})
+	g.fx.SetListFailure(true)
+	g.fx.SetDelay(150 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() { done <- g.refresh(t) }()
+	require.Eventually(t, func() bool { return g.fx.Count("skills/list") == 1 }, 10*time.Second, time.Millisecond)
+	off := *g.rt.Config()
+	off.EnableSkills = false
+	g.rt.UpdateConfig(&off, "")
+
+	assert.NoError(t, <-done)
+	assert.Empty(t, g.rt.SkillsStatus(skillsSrv).Error)
 }

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -344,6 +345,14 @@ func TestSkillsRefresh(t *testing.T) {
 		require.Equal(t, true, d["supported"])
 		require.Len(t, d["skills"], 1)
 		require.Contains(t, ctrl.recorded(), "RefreshServerSkills")
+	})
+	t.Run("superseded by a reconnect is a conflict, not a server error", func(t *testing.T) {
+		_, srv, _ := skillsServer(t, true, func(c *skillsTestController) {
+			c.refreshErr = fmt.Errorf("apply: %w", internalRuntime.ErrSkillsRefreshSuperseded)
+		})
+		rec := skillsDo(t, srv, http.MethodPost, "/api/v1/servers/alpha/skills/refresh", scopeAdminAPIKey)
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		require.Contains(t, rec.Body.String(), "refresh_superseded")
 	})
 	t.Run("not supported", func(t *testing.T) {
 		_, srv, _ := skillsServer(t, true, nil)

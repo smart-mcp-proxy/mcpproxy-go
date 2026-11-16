@@ -157,7 +157,7 @@ func (s *Server) handleGetServerSkills(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} contracts.SkillsListResponse "Skills of the server after the refresh"
 // @Failure 403 {object} contracts.ErrorResponse "Administrator credentials required"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
-// @Failure 409 {object} contracts.SkillsErrorResponse "skills_disabled or skills_not_supported"
+// @Failure 409 {object} contracts.SkillsErrorResponse "skills_disabled, skills_not_supported or refresh_superseded"
 // @Failure 500 {object} contracts.ErrorResponse "Refresh failed"
 // @Router /api/v1/servers/{id}/skills/refresh [post]
 func (s *Server) handleRefreshServerSkills(w http.ResponseWriter, r *http.Request) {
@@ -177,8 +177,17 @@ func (s *Server) handleRefreshServerSkills(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err := s.controller.RefreshServerSkills(r.Context(), serverID); err != nil {
+		if errors.Is(err, internalRuntime.ErrSkillsRefreshSuperseded) {
+			s.writeSkillsError(w, r, http.StatusConflict, "refresh_superseded", fmt.Sprintf("server %s reconnected during the refresh; its skills are read again after the reconnect", serverID))
+			return
+		}
 		s.logger.Errorw("Skills refresh failed", "server", serverID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Skills refresh failed: %v", err))
+		return
+	}
+	// The refresh ends quietly when skills are switched off while it runs.
+	if cfg, sc = s.skillsServerConfig(serverID); sc == nil || !cfg.EnableSkills {
+		s.writeSkillsError(w, r, http.StatusConflict, "skills_disabled", "enable_skills was turned off during the refresh")
 		return
 	}
 	if !s.controller.SkillsStatus(serverID).Supported {

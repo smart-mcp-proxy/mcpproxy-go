@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,9 +61,14 @@ func ParseFrontmatter(skillMD []byte) (map[string]any, error) {
 		return nil, errors.New("frontmatter block is not closed")
 	}
 
-	var v any
-	if err := yaml.Unmarshal(block, &v); err != nil {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(block, &doc); err != nil {
 		return nil, fmt.Errorf("frontmatter is not valid YAML: %w", err)
+	}
+	budget := maxFrontmatterNodes
+	v, err := yamlValue(&doc, &budget)
+	if err != nil {
+		return nil, fmt.Errorf("frontmatter is not usable: %w", err)
 	}
 	m, ok := v.(map[string]any)
 	if !ok {
@@ -74,60 +80,173 @@ func ParseFrontmatter(skillMD []byte) (map[string]any, error) {
 	return m, nil
 }
 
-// canonicalNumber returns one spelling per numeric value. ok is false for a
-// value that is not a finite number.
-//
-// A whole number that fits 64 bits is exact, so two integers that differ only
-// beyond float64 precision stay different. Everything else is compared as a
-// float64, on both sides: YAML hands decimals over as float64 already, and
-// reading the listing's decimals the same way makes 0.1 equal 0.1, 1 equal
-// 1.0 and 1e2 equal 100. A number too large for a float64 has no canonical
-// form and so equals nothing.
-func canonicalNumber(v any) (string, bool) {
-	switch n := v.(type) {
-	case json.Number:
-		lit := string(n)
-		if !strings.ContainsAny(lit, ".eE") {
-			if i, err := strconv.ParseInt(lit, 10, 64); err == nil {
-				return strconv.FormatInt(i, 10), true
-			}
-			if u, err := strconv.ParseUint(lit, 10, 64); err == nil {
-				return strconv.FormatUint(u, 10), true
-			}
+// maxFrontmatterNodes bounds how many YAML nodes one frontmatter may amount to
+// once aliases are followed, so a block of nested aliases cannot expand without
+// end. Real frontmatter has a few dozen.
+const maxFrontmatterNodes = 10000
+
+// plainDecimal matches a number written in plain decimal notation, the only
+// notation JSON has. YAML's other forms (hex, octal, underscores, .inf) are
+// left to the YAML library.
+var plainDecimal = regexp.MustCompile(`^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$`)
+
+// yamlValue turns a YAML node into the value a JSON listing would hold for it.
+// The block is read node by node, and not through the library's own decoding
+// into Go values, for one reason: a decimal number keeps its digits. Decoded
+// to a float64 it would lose them, and a number written the same way in the
+// listing and in SKILL.md could then compare different, or two different ones
+// equal.
+func yamlValue(n *yaml.Node, budget *int) (any, error) {
+	if *budget--; *budget < 0 {
+		return nil, errors.New("too many values (aliases that repeat?)")
+	}
+	switch n.Kind {
+	case yaml.DocumentNode:
+		if len(n.Content) == 0 {
+			return nil, nil
 		}
-		f, err := strconv.ParseFloat(lit, 64)
+		return yamlValue(n.Content[0], budget)
+	case yaml.AliasNode:
+		return yamlValue(n.Alias, budget)
+	case yaml.MappingNode:
+		m := make(map[string]any, len(n.Content)/2)
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k := n.Content[i]
+			if k.Kind == yaml.AliasNode {
+				k = k.Alias
+			}
+			if k.Kind == yaml.ScalarNode && k.ShortTag() == "!!merge" {
+				return nil, errors.New("merge keys (<<) are not supported")
+			}
+			if k.Kind != yaml.ScalarNode || k.ShortTag() != "!!str" {
+				return nil, errors.New("a mapping key is not a string")
+			}
+			if _, dup := m[k.Value]; dup {
+				return nil, fmt.Errorf("key %q appears twice", k.Value)
+			}
+			v, err := yamlValue(n.Content[i+1], budget)
+			if err != nil {
+				return nil, err
+			}
+			m[k.Value] = v
+		}
+		return m, nil
+	case yaml.SequenceNode:
+		out := make([]any, 0, len(n.Content))
+		for _, c := range n.Content {
+			v, err := yamlValue(c, budget)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, v)
+		}
+		return out, nil
+	case yaml.ScalarNode:
+		switch n.ShortTag() {
+		case "!!null":
+			return nil, nil
+		case "!!bool":
+			var b bool
+			if err := n.Decode(&b); err != nil {
+				return nil, err
+			}
+			return b, nil
+		case "!!int", "!!float":
+			if plainDecimal.MatchString(n.Value) {
+				if c, ok := canonicalDecimal(n.Value); ok {
+					return json.Number(c), nil
+				}
+			}
+			var v any
+			if err := n.Decode(&v); err != nil {
+				return nil, err
+			}
+			return v, nil
+		}
+		return n.Value, nil // strings, and anything else by its text
+	}
+	return nil, errors.New("unsupported YAML node")
+}
+
+// canonicalDecimal gives a plain decimal literal the one spelling its value
+// has: an optional minus, the significant digits with no zero at either end,
+// and a power of ten when it is not zero ("-125e-2", "1e2", "0"). It is exact
+// for any number of digits and never expands an exponent. The result is also a
+// valid JSON number. ok is false for text that is not a plain decimal, or whose
+// exponent does not fit an int64.
+func canonicalDecimal(lit string) (string, bool) {
+	neg := false
+	switch {
+	case strings.HasPrefix(lit, "-"):
+		neg, lit = true, lit[1:]
+	case strings.HasPrefix(lit, "+"):
+		lit = lit[1:]
+	}
+	var exp int64
+	if i := strings.IndexAny(lit, "eE"); i >= 0 {
+		e, err := strconv.ParseInt(lit[i+1:], 10, 64)
 		if err != nil {
 			return "", false
 		}
-		return canonicalFloat(f)
-	case int:
-		return strconv.FormatInt(int64(n), 10), true
-	case int64:
-		return strconv.FormatInt(n, 10), true
-	case uint64:
-		return strconv.FormatUint(n, 10), true
-	case float64:
-		return canonicalFloat(n)
+		exp, lit = e, lit[:i]
 	}
-	return "", false
-}
-
-// canonicalFloat writes a whole float the way the same integer is written, so
-// 100.0 and 100 share a form, and any other float in its shortest form that
-// reads back as the same float64.
-func canonicalFloat(f float64) (string, bool) {
-	if math.IsNaN(f) || math.IsInf(f, 0) {
+	intPart, frac, _ := strings.Cut(lit, ".")
+	if intPart == "" && frac == "" {
 		return "", false
 	}
-	if f == math.Trunc(f) {
-		switch {
-		case f >= -(1<<63) && f < 1<<63:
-			return strconv.FormatInt(int64(f), 10), true // also turns -0 into 0
-		case f >= 1<<63 && f < 1<<64:
-			return strconv.FormatUint(uint64(f), 10), true
+	digits := intPart + frac
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return "", false
 		}
 	}
-	return strconv.FormatFloat(f, 'g', -1, 64), true
+	// A literal is at most a few KiB (the frontmatter bound), so these length
+	// adjustments cannot overflow unless the exponent itself is at the edge.
+	if exp < math.MinInt64+int64(len(frac)) {
+		return "", false
+	}
+	exp -= int64(len(frac))
+	digits = strings.TrimLeft(digits, "0")
+	trimmed := strings.TrimRight(digits, "0")
+	if trimmed == "" {
+		return "0", true
+	}
+	if exp > math.MaxInt64-int64(len(digits)-len(trimmed)) {
+		return "", false
+	}
+	exp += int64(len(digits) - len(trimmed))
+	out := trimmed
+	if neg {
+		out = "-" + out
+	}
+	if exp != 0 {
+		out += "e" + strconv.FormatInt(exp, 10)
+	}
+	return out, true
+}
+
+// canonicalNumber returns one spelling per numeric value, exactly: 1, 1.0 and
+// 1e0 are the same, and two numbers that differ in any digit are not. ok is
+// false for a value that is not a finite number.
+func canonicalNumber(v any) (string, bool) {
+	switch n := v.(type) {
+	case json.Number:
+		return canonicalDecimal(string(n))
+	case int:
+		return canonicalDecimal(strconv.FormatInt(int64(n), 10))
+	case int64:
+		return canonicalDecimal(strconv.FormatInt(n, 10))
+	case uint64:
+		return canonicalDecimal(strconv.FormatUint(n, 10))
+	case float64:
+		// Reached only for YAML's non-decimal forms; the shortest text that
+		// reads back as this float is its value as far as anyone wrote it.
+		if math.IsNaN(n) || math.IsInf(n, 0) {
+			return "", false
+		}
+		return canonicalDecimal(strconv.FormatFloat(n, 'e', -1, 64))
+	}
+	return "", false
 }
 
 // appendCanonical writes an unambiguous encoding of a frontmatter value: every

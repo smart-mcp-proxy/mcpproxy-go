@@ -1763,7 +1763,7 @@ Query: `skill` (required, the skill path), `file` (default `SKILL.md`), `copy` (
 
 #### POST /api/v1/servers/{id}/skills/refresh
 
-Reads the server's skills again, verifies every file and returns the same payload as the list endpoint. A refresh already running for the server is joined. `409` with `error_code` `skills_disabled` when `enable_skills` is off, and `409` `skills_not_supported` when the server does not announce the skills extension.
+Reads the server's skills again, verifies every file and returns the same payload as the list endpoint. A refresh already running for the server is joined. `409` with `error_code` `skills_disabled` when `enable_skills` is off (or is turned off while the refresh runs), `409` `skills_not_supported` when the server does not announce the skills extension, and `409` `refresh_superseded` when the server reconnected during the refresh, in which case its skills are read again after the reconnect.
 
 ### Real-time Updates
 

@@ -10874,7 +10874,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.SkillsErrorResponse'
-          description: skills_disabled or skills_not_supported
+          description: skills_disabled, skills_not_supported or refresh_superseded
         "500":
           content:
             application/json:
