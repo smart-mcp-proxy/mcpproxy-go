@@ -2326,7 +2326,7 @@ func (mc *Client) performHealthCheckFor(stop <-chan struct{}) {
 // Transient errors (timeout, deadline exceeded, context canceled) need
 // healthCheckFailureThreshold consecutive misses before they're considered a
 // real outage — slow upstreams (e.g. hf.co/mcp under load) routinely miss a
-// single 5-second health-check window without actually being down. Hard
+// single 15-second health-check window without actually being down. Hard
 // failures (connection refused, host unreachable, DNS gone) trigger Error
 // immediately because waiting buys nothing — the server is genuinely
 // unreachable and the user should see that.
