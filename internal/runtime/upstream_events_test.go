@@ -368,3 +368,56 @@ func TestUpstreamEvent_CollapserForgetsSaveOnlyServers(t *testing.T) {
 	assert.Empty(t, c.loginSeq)
 	assert.Len(t, c.seen, 1)
 }
+
+// Review round 3: a folded record that passed through a login requirement and
+// ends in Ready leaves the server up with no login requirement open.
+func TestTransitionEvents_FoldedLoginIsClosedByTheRecovery(t *testing.T) {
+	c := newUpstreamEventCollapser()
+	evs := transitionEvents("srv", "http", types.Transition{
+		From: types.StateReady, To: types.StateReady, At: evBase, Folded: 2, FoldedLost: 1, FoldedRestored: 1, FoldedLogin: 1,
+	})
+	require.Len(t, evs, 3)
+	assert.Equal(t, []UpstreamEventKind{UpstreamConnectionLost, UpstreamLoginRequired, UpstreamConnectionRestored},
+		[]UpstreamEventKind{evs[0].Kind, evs[1].Kind, evs[2].Kind})
+	for _, ev := range evs {
+		c.place(ev)
+	}
+	assert.False(t, c.down["srv"])
+	assert.Empty(t, c.loginOpen)
+}
+
+// Review round 3: a login failure older than a token save already applied is
+// recorded but does not mark the server down again.
+func TestUpstreamEvent_StaleLoginFailureDoesNotMarkTheServerDown(t *testing.T) {
+	c := newUpstreamEventCollapser()
+	c.noteTokenSaved("srv", "", 2)
+	row, isNew := c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase, Seq: 1})
+	require.NotNil(t, row, "the historical failure still has its row")
+	assert.True(t, isNew)
+	assert.False(t, c.down["srv"])
+	assert.Empty(t, c.loginOpen)
+	// So a later Ready is not reported as a recovery from it.
+	restored, _ := c.place(UpstreamEvent{Server: "srv", Kind: UpstreamConnectionRestored, At: evBase.Add(time.Minute)})
+	assert.Nil(t, restored)
+}
+
+// Review round 3: an event of an hour whose counter cleanup already dropped
+// gets no new row, so a very late delivery cannot restart the hourly bound.
+func TestUpstreamEvent_VeryLateEventCannotRestartTheHourlyBound(t *testing.T) {
+	c := newUpstreamEventCollapser()
+	for i := 0; i < MaxUpstreamEventRowsPerHour+10; i++ {
+		c.place(UpstreamEvent{Server: "srv", Kind: UpstreamConnectionLost, At: evBase.Add(time.Duration(i) * 20 * time.Second), Owner: fmt.Sprintf("u%d", i)})
+	}
+	require.Equal(t, MaxUpstreamEventRowsPerHour, c.hourRows["srv"][evBase.Truncate(time.Hour).Unix()])
+	// Hours later the counter of that hour is gone.
+	c.place(UpstreamEvent{Server: "srv", Kind: UpstreamConnectionRestored, At: evBase.Add(5 * time.Hour)})
+	require.NotContains(t, c.hourRows["srv"], evBase.Truncate(time.Hour).Unix())
+
+	before := c.suppressed
+	row, _ := c.place(UpstreamEvent{Server: "srv", Kind: UpstreamConnectionLost, At: evBase.Add(30 * time.Minute), Owner: "late"})
+	assert.Nil(t, row)
+	assert.Equal(t, before+1, c.suppressed)
+	// A current event is recorded as usual.
+	row, _ = c.place(UpstreamEvent{Server: "srv", Kind: UpstreamConnectionLost, At: evBase.Add(5*time.Hour + time.Minute)})
+	assert.NotNil(t, row)
+}

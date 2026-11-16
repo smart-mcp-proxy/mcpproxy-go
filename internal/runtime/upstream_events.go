@@ -163,8 +163,19 @@ func transitionEvents(server, transport string, t types.Transition) []UpstreamEv
 	}
 	lost, restored, login := min(t.FoldedLost, maxFoldedEventsPerKind), min(t.FoldedRestored, maxFoldedEventsPerKind), min(t.FoldedLogin, maxFoldedEventsPerKind)
 	// Losses and recoveries alternate. A record that starts in Ready hid a
-	// loss first; any other hid a recovery first.
+	// loss first; any other hid a recovery first. Hidden login requirements
+	// are replayed before the first recovery: where exactly they happened is
+	// not known, and a recovery must be able to close them, so that a record
+	// that ends in Ready never leaves a login requirement open.
 	lossNext := t.From == types.StateReady
+	if lossNext && lost > 0 {
+		add(UpstreamConnectionLost, "")
+		lost--
+		lossNext = false
+	}
+	for ; login > 0; login-- {
+		add(UpstreamLoginRequired, string(diagnostics.OAuthLoginRequired))
+	}
 	for lost > 0 || restored > 0 {
 		switch {
 		case (lossNext && lost > 0) || restored == 0:
@@ -175,9 +186,6 @@ func transitionEvents(server, transport string, t types.Transition) []UpstreamEv
 			restored--
 		}
 		lossNext = !lossNext
-	}
-	for ; login > 0; login-- {
-		add(UpstreamLoginRequired, string(diagnostics.OAuthLoginRequired))
 	}
 	if ev, ok := transitionEvent(server, transport, t); ok {
 		out = append(out, ev)
@@ -217,6 +225,9 @@ type upstreamEventCollapser struct {
 	// seen is when each server last had an event, for cleanup.
 	seen   map[string]time.Time
 	lastGC time.Time
+	// forgottenBefore is the first hour (unix) whose row counters are still
+	// kept; cleanup dropped the counters of every hour before it.
+	forgottenBefore int64
 	// suppressed counts events not recorded because their server was at the
 	// hourly bound and had no row of their kind to merge into.
 	suppressed int
@@ -267,9 +278,12 @@ func (c *upstreamEventCollapser) place(e UpstreamEvent) (row *upstreamRow, isNew
 	case UpstreamConnectionLost, UpstreamProcessExited:
 		c.down[e.Server] = true
 	case UpstreamLoginRequired:
-		c.down[e.Server] = true
+		// A failure older than a save already applied is still recorded as
+		// a row, but it says nothing about the server now: it neither opens
+		// a login requirement nor marks the server down.
 		stale := e.Seq != 0 && e.Seq < c.loginSeq[owner]
 		if !stale {
+			c.down[e.Server] = true
 			if e.Seq > c.loginSeq[owner] {
 				c.loginSeq[owner] = e.Seq
 			}
@@ -328,6 +342,14 @@ func (c *upstreamEventCollapser) rowFor(key upstreamRowKey, e UpstreamEvent) (*u
 		}
 		return last, false
 	}
+	if hour < c.forgottenBefore {
+		// The counter of this hour was dropped by cleanup, so how many rows
+		// the hour already has is not known. An event this late (its source
+		// stalled for hours) is not given a new row, or the hourly bound
+		// would start again from zero.
+		c.suppressed++
+		return nil, false
+	}
 	if used >= MaxUpstreamEventRowsPerHour {
 		// The hard limit, and nothing of this kind and owner to merge into.
 		// Merging into another owner's row would mix two users (FR-025), so
@@ -355,6 +377,9 @@ func (c *upstreamEventCollapser) gc(now time.Time) {
 		}
 	}
 	oldestHour := now.Add(-2 * time.Hour).Truncate(time.Hour).Unix()
+	if oldestHour > c.forgottenBefore {
+		c.forgottenBefore = oldestHour
+	}
 	for server, hours := range c.hourRows {
 		for h := range hours {
 			if h < oldestHour {
