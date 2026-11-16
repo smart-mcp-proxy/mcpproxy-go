@@ -3,12 +3,16 @@ package jsruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"runtime"
+	"runtime/metrics"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/dlclark/regexp2"
 	"github.com/dop251/goja"
 	"github.com/google/uuid"
 
@@ -24,6 +28,7 @@ type ExecutionOptions struct {
 	ExecutionID    string                 // Unique execution ID for logging (auto-generated if empty)
 	Language       string                 // Source language: "javascript" (default) or "typescript"
 	MaxParallel    int                    // Default concurrency for call_tools() batches (0 = built-in default; per-batch options override this)
+	MaxMemoryBytes int64                  // Heap growth budget for the execution (0 = DefaultMaxMemoryBytes, <0 = no budget)
 
 	// RestrictToAllowed enforces AllowedServers even when it is empty. Set by the
 	// Spec 057 profile path: an active profile with an empty effective server set
@@ -220,7 +225,11 @@ type ExecutionContext struct {
 	authInfo           *AuthInfo
 	toolAnnotationFunc ToolAnnotationLookup
 	toolGateFunc       ToolGateLookup // gate-capturing lookup; takes precedence over toolAnnotationFunc
-	maxPermissionLevel string         // Tracks highest permission used: read < write < destructive
+
+	// guard bounds native recursion in the VM (stack_guard.go); values cross
+	// between the VM and Go through its export and toJS.
+	guard              *nativeGuard
+	maxPermissionLevel string // Tracks highest permission used: read < write < destructive
 
 	// Spec 107 T104: the host's authorization-decision observer and the
 	// parent_id it installed (see ExecutionOptions.AuthzObserver).
@@ -298,6 +307,15 @@ func execute(ctx context.Context, caller ToolCaller, code string, opts Execution
 		return NewErrorResult(langErr), execCtx
 	}
 
+	// Refuse source the parser could not take without overflowing the Go
+	// stack (source_guard.go). TypeScript is checked, by a stricter count, in
+	// TranspileTypeScript before esbuild parses it.
+	if opts.Language != "typescript" {
+		if err := checkSourceSize(code); err != nil {
+			return sourceTooLargeResult(err), execCtx
+		}
+	}
+
 	// Transpile TypeScript to JavaScript if needed
 	if opts.Language == "typescript" {
 		transpiled, transpileErr := TranspileTypeScript(code)
@@ -307,17 +325,21 @@ func execute(ctx context.Context, caller ToolCaller, code string, opts Execution
 		code = transpiled
 	}
 
-	// Initialize Goja VM
-	vm := goja.New()
-
-	// Set up sandbox restrictions
-	setupSandbox(vm)
+	// A sandboxed VM whose JS and native recursion are bounded, so a script
+	// cannot overflow the Go stack (a fatal, unrecoverable error that would
+	// take the whole process down).
+	vm, guard, err := newGuardedVM()
+	if err != nil {
+		return NewErrorResult(NewJsError(ErrorCodeRuntimeError, err.Error())), execCtx
+	}
+	execCtx.guard = guard
 
 	// Bind input global variable
 	if opts.Input == nil {
 		opts.Input = make(map[string]interface{})
 	}
-	if err := vm.Set("input", opts.Input); err != nil {
+	// As plain JS data: writes into a Go-backed map would export natively.
+	if err := vm.Set("input", guard.toJS(opts.Input)); err != nil {
 		return NewErrorResult(NewJsError(ErrorCodeRuntimeError, fmt.Sprintf("failed to set input: %v", err))), execCtx
 	}
 
@@ -344,11 +366,25 @@ func execute(ctx context.Context, caller ToolCaller, code string, opts Execution
 
 	// Batch workers dispatch under the execution's timeout context. Assigned
 	// before the script goroutine starts, so nothing reads it concurrently.
-	execCtx.ctx = timeoutCtx
+	//
+	// The memory watchdog cancels it too, so an upstream call that an
+	// over-budget script is waiting on returns instead of holding the
+	// script's heap until the call or the timeout ends.
+	runCtx, cancelRun := context.WithCancelCause(timeoutCtx)
+	defer cancelRun(nil)
+	execCtx.ctx = runCtx
 
 	// Run JavaScript with timeout enforcement
 	resultChan := make(chan *Result, 1)
 	execCtx.scriptDone = make(chan struct{})
+
+	// The watchdog outlives a timeout: it stops only when the script
+	// goroutine does, so a runaway script that keeps allocating after
+	// Execute has answered is still stopped.
+	if budget := resolveMemoryBudget(opts.MaxMemoryBytes); budget > 0 {
+		go watchMemory(vm, budget, memoryBaseline(), execCtx.scriptDone, cancelRun)
+	}
+
 	go func() {
 		defer close(execCtx.scriptDone)
 		resultChan <- executeWithVM(vm, code, execCtx)
@@ -405,13 +441,31 @@ func (ec *ExecutionContext) executionCtx() context.Context {
 func executeWithVM(vm *goja.Runtime, code string, execCtx *ExecutionContext) (result *Result) {
 	defer func() {
 		if r := recover(); r != nil {
-			if _, ok := r.(*goja.InterruptedError); ok {
-				result = NewErrorResult(NewJsError(ErrorCodeTimeout, "JavaScript execution timed out"))
+			if ie, ok := r.(*goja.InterruptedError); ok {
+				result = interruptedResult(ie)
+				return
+			}
+			// The stack guards also fire while Export runs script code (a
+			// getter), outside any goja try frame.
+			switch v := r.(type) {
+			case *goja.StackOverflowError:
+				result = stackOverflowResult(v)
+				return
+			case *goja.Exception:
+				result = NewErrorResult(NewJsErrorWithStack(ErrorCodeRuntimeError, v.Error(), v.String()))
+				return
+			case *goja.Object:
+				// Not v.String(): that would run script code again.
+				result = NewErrorResult(NewJsError(ErrorCodeRuntimeError, "uncaught "+v.ClassName()))
 				return
 			}
 			result = NewErrorResult(NewJsError(ErrorCodeRuntimeError, fmt.Sprintf("script panicked: %v", r)))
 		}
 	}()
+	// The transpiled form of a TypeScript script is checked again.
+	if err := checkSourceSize(code); err != nil {
+		return sourceTooLargeResult(err)
+	}
 	// Compile the code first to catch syntax errors
 	_, err := goja.Compile("", code, false)
 	if err != nil {
@@ -429,6 +483,14 @@ func executeWithVM(vm *goja.Runtime, code string, execCtx *ExecutionContext) (re
 	// Execute the code
 	value, err := vm.RunString(code)
 	if err != nil {
+		var ie *goja.InterruptedError
+		if errors.As(err, &ie) {
+			return interruptedResult(ie)
+		}
+		var so *goja.StackOverflowError
+		if errors.As(err, &so) {
+			return stackOverflowResult(so)
+		}
 		// Extract runtime error details
 		if exception, ok := err.(*goja.Exception); ok {
 			stack := exception.String() // Stack trace is included in the exception string
@@ -441,8 +503,18 @@ func executeWithVM(vm *goja.Runtime, code string, execCtx *ExecutionContext) (re
 		return NewErrorResult(NewJsError(ErrorCodeRuntimeError, err.Error()))
 	}
 
-	// Export the result to Go value
-	exported := value.Export()
+	// Export the result to Go value, within the native depth budget.
+	exported, err := execCtx.guard.exportResult(value)
+	switch {
+	case errors.Is(err, errExportCycle):
+		return NewErrorResult(NewJsError(ErrorCodeSerializationError,
+			"result must be JSON-serializable: it "+errExportCycle.Error()))
+	case errors.Is(err, errExportTooLarge):
+		return NewErrorResult(NewJsError(ErrorCodeSerializationError, "result is "+errExportTooLarge.Error()))
+	case err != nil:
+		return NewErrorResult(NewJsError(ErrorCodeSerializationError,
+			fmt.Sprintf("result is nested too deeply to export: RangeError: %s", stackOverflowMessage)))
+	}
 
 	// Validate JSON serializability
 	if err := validateSerializable(exported); err != nil {
@@ -450,6 +522,159 @@ func executeWithVM(vm *goja.Runtime, code string, execCtx *ExecutionContext) (re
 	}
 
 	return NewSuccessResult(exported)
+}
+
+// stackOverflowResult reports a script stopped by the JS call-depth limit
+// (maxCallStackDepth). goja raises it as an uncatchable error whose own
+// message is empty, so the message is given here.
+func stackOverflowResult(so *goja.StackOverflowError) *Result {
+	return NewErrorResult(NewJsErrorWithStack(ErrorCodeRuntimeError,
+		fmt.Sprintf("RangeError: %s (call depth limit %d)", stackOverflowMessage, maxCallStackDepth),
+		so.String()))
+}
+
+// regexMatchTimeout bounds a single regexp2 match. vm.Interrupt is only
+// checked by goja's interpreter loop, never inside a native call, so without
+// it a catastrophically backtracking regex (goja hands any pattern RE2 cannot
+// run, e.g. one with a backreference, to regexp2) ignores the execution
+// timeout and keeps a core busy for practically ever after Execute has
+// answered. A timed-out match reads as "no match" to the script (goja drops
+// regexp2's timeout error), so a legitimate pattern that needs more than a
+// second on its input also answers false; the interrupt then lands at the
+// next instruction.
+//
+// The deadline is per match. A global regex (replace, match, matchAll, split)
+// runs all its matches from one native loop that never checks the interrupt,
+// so a pattern whose every match stays under the deadline can still outlive
+// the execution timeout. Routing those loops through the interpreter (by
+// redefining RegExp.prototype.exec) closes that, but goja's generic regex
+// path is quadratic for split and mis-reports some captures, so it is not
+// used; closing it needs interrupt checks inside goja.
+//
+// regexp2 reads DefaultMatchTimeout when a pattern is compiled and the knob is
+// process-wide, so it also bounds the tokenizer's patterns (tiktoken), whose
+// per-match work is tiny next to a second.
+const regexMatchTimeout = time.Second
+
+func init() {
+	regexp2.DefaultMatchTimeout = regexMatchTimeout
+}
+
+// DefaultMaxMemoryBytes is the heap growth an execution may cause when
+// ExecutionOptions.MaxMemoryBytes is 0. goja has no heap limit of its own.
+const DefaultMaxMemoryBytes int64 = 256 << 20
+
+// memoryCheckInterval is how often the watchdog samples the heap.
+const memoryCheckInterval = 10 * time.Millisecond
+
+// forcedGCInterval is the shortest gap between two collections one watchdog
+// forces to tell live memory from garbage.
+const forcedGCInterval = 100 * time.Millisecond
+
+const heapObjectsMetric = "/memory/classes/heap/objects:bytes"
+
+var errMemoryLimit = errors.New("memory budget exceeded")
+
+func resolveMemoryBudget(opt int64) int64 {
+	if opt == 0 {
+		return DefaultMaxMemoryBytes
+	}
+	return opt
+}
+
+// heapObjectBytes is the process heap held by objects, live or not yet swept.
+func heapObjectBytes() uint64 {
+	sample := []metrics.Sample{{Name: heapObjectsMetric}}
+	metrics.Read(sample)
+	if sample[0].Value.Kind() != metrics.KindUint64 {
+		return 0
+	}
+	return sample[0].Value.Uint64()
+}
+
+// memoryBaseline is the heap an execution's budget is measured from, taken
+// right after a collection. Neither the current object bytes (which hold
+// garbage from earlier work until it is swept) nor the live figure of the last
+// collection (which may still count an execution that has since finished) is
+// a fair start: either hands the script extra headroom once that memory is
+// collected. The collection costs a few milliseconds per execution.
+func memoryBaseline() uint64 {
+	runtime.GC()
+	return heapObjectBytes()
+}
+
+// watchMemory interrupts vm once the heap has grown more than budget past
+// baseline, and returns when done closes.
+//
+// This is a best-effort guard, not an exact per-script cap. goja keeps no
+// per-VM accounting, so the measure is the process heap: an execution running
+// beside another that allocates heavily can be stopped for memory it did not
+// take. vm.Interrupt cannot abort a native call either, so one built-in
+// that allocates a lot in a single step (a huge String.prototype.repeat or
+// ArrayBuffer) completes before the script is stopped at its next
+// instruction. What it does guarantee is that a script cannot keep growing
+// the heap, step after step, until the timeout.
+func watchMemory(vm *goja.Runtime, budget int64, baseline uint64, done <-chan struct{}, cancelRun context.CancelCauseFunc) {
+	limit := baseline + uint64(budget)
+	ticker := time.NewTicker(memoryCheckInterval)
+	defer ticker.Stop()
+	var lastGC time.Time
+	overAfterGC := 0
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+		}
+		if heapObjectBytes() <= limit {
+			overAfterGC = 0
+			continue
+		}
+		// The sample counts garbage not yet swept; only a collection says
+		// what is live. It runs only on this suspicion path, and at most once
+		// per forcedGCInterval, so a script that churns through short-lived
+		// values is neither mistaken for one that keeps them nor able to make
+		// the whole process collect every tick.
+		if time.Since(lastGC) < forcedGCInterval {
+			continue
+		}
+		runtime.GC()
+		lastGC = time.Now()
+		if heapObjectBytes() <= limit {
+			overAfterGC = 0
+			continue
+		}
+		// Values allocated while a collection is marking survive it even if
+		// already dropped, so one post-GC sample over the limit can still be
+		// churn. Two consecutive collections over it, at least
+		// forcedGCInterval apart, are taken as memory being kept: a heuristic,
+		// since floating garbage per collection is bounded only by what the
+		// script allocates during one mark phase.
+		overAfterGC++
+		if overAfterGC < 2 {
+			continue
+		}
+		// Interrupt first: the cancelled call then returns into a script
+		// whose next instruction already stops it, so the script cannot see
+		// the call fail and finish before the interrupt is installed.
+		vm.Interrupt(errMemoryLimit)
+		cancelRun(errMemoryLimit)
+		return
+	}
+}
+
+// interruptedResult reports why the VM was interrupted: the memory watchdog
+// names itself through the interrupt value; anything else is Execute's
+// timeout. Keying on the value, not on a flag the watchdog sets, means a
+// script that finished before the interrupt reached it keeps its result.
+func interruptedResult(ie *goja.InterruptedError) *Result {
+	if ie.Value() == errMemoryLimit {
+		return NewErrorResult(NewJsError(ErrorCodeMemoryLimit, "JavaScript execution exceeded its memory budget"))
+	}
+	if ie.Value() == errProtoCycleUnbroken {
+		return NewErrorResult(NewJsError(ErrorCodeRuntimeError, "JavaScript execution stopped: "+errProtoCycleUnbroken.Error()))
+	}
+	return NewErrorResult(NewJsError(ErrorCodeTimeout, "JavaScript execution timed out"))
 }
 
 // setupSandbox configures the VM to prevent access to restricted APIs
@@ -671,28 +896,28 @@ func (ec *ExecutionContext) makeCallToolFunction(vm *goja.Runtime) func(goja.Fun
 	return func(call goja.FunctionCall) goja.Value {
 		// Extract arguments: call_tool(serverName, toolName, args)
 		if len(call.Arguments) < 3 {
-			return vm.ToValue(errorEnvelope(ErrorCodeInvalidArgs, "call_tool requires 3 arguments: serverName, toolName, args"))
+			return ec.guard.toJS(errorEnvelope(ErrorCodeInvalidArgs, "call_tool requires 3 arguments: serverName, toolName, args"))
 		}
 
 		serverName := call.Arguments[0].String()
 		toolName := call.Arguments[1].String()
 
 		// Parse args (must be an object)
-		argsValue := call.Arguments[2].Export()
+		argsValue := ec.guard.exportArgs(call.Arguments[2])
 		args, ok := argsValue.(map[string]interface{})
 		if !ok {
-			return vm.ToValue(errorEnvelope(ErrorCodeInvalidArgs, "args must be an object"))
+			return ec.guard.toJS(errorEnvelope(ErrorCodeInvalidArgs, "args must be an object"))
 		}
 
 		// Check max_tool_calls limit
 		if ec.maxToolCalls > 0 && len(ec.ToolCalls) >= ec.maxToolCalls {
-			return vm.ToValue(errorEnvelope(ErrorCodeMaxToolCallsExceeded,
+			return ec.guard.toJS(errorEnvelope(ErrorCodeMaxToolCallsExceeded,
 				fmt.Sprintf("exceeded max tool calls limit: %d", ec.maxToolCalls)))
 		}
 
 		gateErr, requiredPerm, gate := ec.resolveDispatchGates(serverName, toolName, args)
 		if gateErr != nil {
-			return vm.ToValue(gateErr)
+			return ec.guard.toJS(gateErr)
 		}
 		if requiredPerm != "" {
 			// Track highest permission level
@@ -723,7 +948,7 @@ func (ec *ExecutionContext) makeCallToolFunction(vm *goja.Runtime) func(goja.Fun
 			record.ErrorDetail = err.Error()
 			ec.ToolCalls = append(ec.ToolCalls, record)
 
-			return vm.ToValue(errorEnvelope(ErrorCodeUpstreamError, err.Error()))
+			return ec.guard.toJS(errorEnvelope(ErrorCodeUpstreamError, err.Error()))
 		}
 
 		// Tool call succeeded
@@ -737,14 +962,14 @@ func (ec *ExecutionContext) makeCallToolFunction(vm *goja.Runtime) func(goja.Fun
 			record.ErrorDetail = nerr.Error()
 			ec.ToolCalls = append(ec.ToolCalls, record)
 
-			return vm.ToValue(errorEnvelope(ErrorCodeSerializationError,
+			return ec.guard.toJS(errorEnvelope(ErrorCodeSerializationError,
 				"tool result is not JSON-serializable: "+nerr.Error()))
 		}
 
 		record.Result = plain
 		ec.ToolCalls = append(ec.ToolCalls, record)
 
-		return vm.ToValue(successEnvelope(plain))
+		return ec.guard.toJS(successEnvelope(plain))
 	}
 }
 
@@ -779,15 +1004,15 @@ type batchRequest struct {
 // workers have joined — the VM is owned by this goroutine alone.
 func (ec *ExecutionContext) makeCallToolsFunction(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
-		requests, maxParallel, err := parseBatchCall(call)
+		requests, maxParallel, err := parseBatchCall(ec.guard, call)
 		if err != nil {
 			// A malformed batch is a single envelope, never a throw: scripts
 			// handle call_tools failures the same way they handle call_tool
 			// failures.
-			return vm.ToValue(errorEnvelope(ErrorCodeInvalidArgs, err.Error()))
+			return ec.guard.toJS(errorEnvelope(ErrorCodeInvalidArgs, err.Error()))
 		}
 
-		return vm.ToValue(ec.runBatch(requests, maxParallel))
+		return ec.guard.toJS(ec.runBatch(requests, maxParallel))
 	}
 }
 
@@ -796,12 +1021,12 @@ func (ec *ExecutionContext) makeCallToolsFunction(vm *goja.Runtime) func(goja.Fu
 // override (0 when absent). Any problem invalidates the WHOLE call — nothing
 // is dispatched and no budget is consumed — and names the first offending
 // element.
-func parseBatchCall(call goja.FunctionCall) (requests []batchRequest, maxParallel int, err error) {
+func parseBatchCall(guard *nativeGuard, call goja.FunctionCall) (requests []batchRequest, maxParallel int, err error) {
 	if len(call.Arguments) < 1 {
 		return nil, 0, fmt.Errorf("call_tools requires 1 argument: requests (an array of {server, tool, args})")
 	}
 
-	rawRequests, ok := call.Arguments[0].Export().([]interface{})
+	rawRequests, ok := guard.exportArgs(call.Arguments[0]).([]interface{})
 	if !ok {
 		return nil, 0, fmt.Errorf("call_tools: requests must be an array of {server, tool, args}")
 	}
@@ -809,7 +1034,7 @@ func parseBatchCall(call goja.FunctionCall) (requests []batchRequest, maxParalle
 		return nil, 0, fmt.Errorf("call_tools: batch of %d exceeds the maximum of %d requests", len(rawRequests), batchMaxRequests)
 	}
 
-	maxParallel, err = parseBatchOptions(call)
+	maxParallel, err = parseBatchOptions(guard, call)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -847,26 +1072,47 @@ func parseBatchCall(call goja.FunctionCall) (requests []batchRequest, maxParalle
 
 // parseBatchOptions reads the optional second argument of call_tools().
 // Returns 0 when no override was supplied. Unknown keys are ignored.
-func parseBatchOptions(call goja.FunctionCall) (int, error) {
+func parseBatchOptions(guard *nativeGuard, call goja.FunctionCall) (int, error) {
 	if len(call.Arguments) < 2 {
 		return 0, nil
 	}
 
 	// Passing undefined/null for a trailing optional argument means "no
 	// options", the way JavaScript callers expect.
-	raw := call.Arguments[1].Export()
-	if raw == nil {
+	arg := call.Arguments[1]
+	if arg == nil || goja.IsUndefined(arg) || goja.IsNull(arg) {
 		return 0, nil
 	}
 
-	options, ok := raw.(map[string]interface{})
-	if !ok {
+	// Only max_parallel is read (an own enumerable property, as an export of
+	// the object would name it); the other keys are ignored without being
+	// exported, so an option the script made huge costs nothing here.
+	options, ok := arg.(*goja.Object)
+	if !ok || !exportsAsMap(options) {
 		return 0, fmt.Errorf("call_tools: options must be an object")
 	}
-
-	value, present := options["max_parallel"]
+	names, _ := guard.ownKeys(options)
+	present := false
+	for _, k := range names {
+		if k == "max_parallel" {
+			present = true
+			break
+		}
+	}
 	if !present {
 		return 0, nil
+	}
+	// A number, or a Number object; anything else is rejected without being
+	// exported (an array of any length would be).
+	var value interface{}
+	switch v := options.Get("max_parallel").(type) {
+	case *goja.Object:
+		if objectKind(v) == "primitiveValueObject" {
+			value = v.Export()
+		}
+	case nil:
+	default:
+		value = v.Export()
 	}
 
 	maxParallel, ok := batchOptionInt(value)

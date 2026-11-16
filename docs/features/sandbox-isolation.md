@@ -17,7 +17,7 @@ Ubuntu 23.10+).
 
 :::caution The sandbox confines writes, not identity
 A stdio server under `sandbox` (or `none`) still runs as the proxy's user. It can
-read `mcp_config.json` and `config.db`, and while `enable_socket` is on it can
+read `mcp_config.json` and `config.db` (its OAuth tokens are encrypted only when `oauth_token_encryption_key` is set, and the same user can read that key too), and while `enable_socket` is on it can
 connect to the admin socket **without a key and mint itself an agent token**, in
 both modes. If you run stdio servers you do not fully trust outside `docker`
 isolation, **`enable_socket: false` is the setting that matters**. Details and
@@ -92,7 +92,8 @@ it does not hide files or sockets the proxy's user can reach. Two things in
 the data directory matter here:
 
 - `mcp_config.json` holds `api_key`; `config.db` holds the upstream OAuth
-  tokens. The directory is `0700` and the files `0600`, but the child runs as
+  tokens, in readable form unless `oauth_token_encryption_key` is set (and the same user can read that key too). On macOS and Linux the directory is created `0700` and the files `0600`
+  (creation modes; tightening existing files is best-effort; on Windows protection is the ACL the data directory inherits from its parent), but the child runs as
   the same user, so that does not help.
 - `mcpproxy.sock` (on by default, `enable_socket: true`) is the local admin
   endpoint. Connections to it are trusted **without an API key**, because the
@@ -106,7 +107,7 @@ child ran a probe script:
 | | `none` | `sandbox` (Landlock) | `docker` (rootless Podman) |
 |---|---|---|---|
 | Read `mcp_config.json` (has `api_key`) | read | read | not visible (data dir not mounted) |
-| Read `config.db` (OAuth tokens) | read | read | not visible |
+| Read `config.db` (OAuth tokens, readable JSON unless encrypted) | read | read | not visible |
 | `api_key` in the child's environment | no | no | no |
 | Connect to `<data-dir>/mcpproxy.sock` with no key | **yes**, `GET /api/v1/status` returns data | **yes**, same | the socket is not visible |
 | Mint a token over the socket (`POST /api/v1/tokens`, read+write+destructive, all servers) | same socket | **201, `mcp_agt_…` returned** | n/a |
@@ -122,7 +123,12 @@ What to do:
 
 - **Set `enable_socket: false`** unless you use the tray. This is the one
   setting that closes the token-minting path in both `none` and `sandbox`; the
-  tray is the only socket client, so a headless service loses nothing.
+  tray uses the socket, and the CLI also prefers it but falls back to
+  authenticated TCP when an API key is available, so a headless service
+  keeps working. The automatic fallback speaks plain HTTP: with `tls.enabled` it
+  does not connect, so without the socket CLI commands that need the daemon
+  fail unless `MCPPROXY_TRAY_ENDPOINT` names a reachable `https://` endpoint
+  whose certificate the CLI trusts.
 - **Servers you do not trust**: use `docker` isolation
   (`docker_isolation.mode: "docker"`, or per-server `isolation.mode`). The
   container does not mount the data directory, so neither the files nor the

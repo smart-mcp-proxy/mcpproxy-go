@@ -25,6 +25,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpx"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/launch"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
@@ -780,15 +781,16 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 	// requested profile (preflight.ResolveScope), so a dropped pin silently
 	// widened what a pinned token could resolve there.
 	//
-	// That intersection is preflight's, not this package's ENUMERATION
-	// boundary. Every read door under /api/v1 answers from
-	// auth.CanEnumerateServer — token scope alone. The profile terms are
-	// ergonomic filters and one of them (the requested profile) is
-	// caller-selectable, so folding them into the enumeration boundary would
-	// let a caller change what it is authorized to see by switching profiles.
-	// The three notions of scope, and why only one of them is a boundary, are
-	// laid out at the top of scope_subtree.go.
-	authCtx := agentToken.AuthContext()
+	// Spec 118 (#1686): the pin is then BOUND into the context's AllowedServers
+	// (bindCallerToPin, pin_boundary.go) — grant ∩ the pinned profile's reach,
+	// resolved from the live configuration for this one request — so every
+	// read door under /api/v1, which answers from auth.CanEnumerateServer,
+	// and every grant-as-filter seam see the pinned token's visible set and
+	// not the raw "*" a --profile token is minted with. The requested
+	// ?profile= stays an ergonomic filter on top (a pinned caller may name only
+	// its own pin). The boundary and the ergonomic filters are laid out at the
+	// top of scope_subtree.go.
+	authCtx := s.bindCallerToPin(agentToken.AuthContext())
 	ctx := auth.WithAuthContext(r.Context(), authCtx)
 
 	s.logger.Debugw("Agent token authenticated",
@@ -1047,6 +1049,9 @@ func (s *Server) setupRoutes() {
 		// forwarded IP believed only from a trusted proxy (live list).
 		r.Use(TagRequestMeta(reqcontext.MountAPI, s.trustedProxiesProvider()))
 		r.Use(s.apiKeyAuthMiddleware())
+		// Issue #1698: the authenticated caller rides in the context so the
+		// runtime names them on config_change / quarantine_change rows.
+		r.Use(s.actorContextMiddleware())
 		// Spec 042: Tier 2 telemetry middlewares. Both fetch the registry via
 		// a closure so the registry can be installed after route setup.
 		r.Use(SurfaceClassifierMiddleware(func() *telemetry.CounterRegistry { return s.telemetryRegistry }))
@@ -1290,7 +1295,7 @@ func (s *Server) setupRoutes() {
 		})
 
 		// Feedback submission (Spec 036)
-		r.Post("/feedback", s.handleFeedback)
+		r.With(s.requireAdminReadMiddleware("Admin credentials required to submit feedback")).Post("/feedback", s.handleFeedback)
 
 		// Client connect/disconnect. Config reads disclose local paths and
 		// connection state; writes can modify user-owned client files or embed
@@ -1483,7 +1488,7 @@ func (s *Server) writeSuccess(w http.ResponseWriter, data interface{}) {
 
 // handleGetStatus godoc
 // @Summary Get server status
-// @Description Get comprehensive server status including running state, listen address, upstream statistics, and timestamp
+// @Description Get comprehensive server status including running state, listen address, upstream statistics, and timestamp. For a scoped caller (an agent token; for a profile-pinned token, its allowed_servers intersected with the pin) upstream_stats lists only the servers it may enumerate and every counter is recomputed over them.
 // @Description telemetry (admin only): effective telemetry state {enabled, source: env|config|default, disabled_by}
 // @Tags status
 // @Produce json
@@ -3310,7 +3315,7 @@ func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fallback to legacy async path
-	async, err := s.toggleServerAsync(serverID, true)
+	async, err := s.toggleServerAsync(r.Context(), serverID, true)
 	if err != nil {
 		s.logger.Errorw("Failed to enable server", "server", serverID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to enable server: %v", err))
@@ -3375,7 +3380,7 @@ func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fallback to legacy async path
-	async, err := s.toggleServerAsync(serverID, false)
+	async, err := s.toggleServerAsync(r.Context(), serverID, false)
 	if err != nil {
 		s.logger.Errorw("Failed to disable server", "server", serverID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to disable server: %v", err))
@@ -3588,8 +3593,9 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 	// Fallback to legacy path
 	// Use the new synchronous RestartServer method
 	done := make(chan error, 1)
+	restartCtx := context.WithoutCancel(r.Context())
 	go func() {
-		done <- s.controller.RestartServer(serverID)
+		done <- s.restartServer(restartCtx, serverID)
 	}()
 
 	select {
@@ -3740,10 +3746,13 @@ func (s *Server) handleRefreshServer(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
-func (s *Server) toggleServerAsync(serverID string, enabled bool) (bool, error) {
+func (s *Server) toggleServerAsync(ctx context.Context, serverID string, enabled bool) (bool, error) {
 	errCh := make(chan error, 1)
+	// The toggle may outlive the request (the handler answers 202 on a slow
+	// one), so the caller's identity is kept and the cancellation dropped.
+	toggleCtx := context.WithoutCancel(ctx)
 	go func() {
-		errCh <- s.controller.EnableServer(serverID, enabled)
+		errCh <- s.enableServer(toggleCtx, serverID, enabled)
 	}()
 
 	select {
@@ -3812,6 +3821,13 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 			if encErr := json.NewEncoder(w).Encode(oauthValidationErr); encErr != nil {
 				s.logger.Errorw("Failed to encode OAuth validation error response", "error", encErr)
 			}
+			return
+		}
+
+		// Spec 123: the stored OAuth row cannot be decrypted; no login can
+		// help until the key is restored or the row is deleted.
+		if oauth.IsTokenUndecryptable(err) {
+			s.writeError(w, r, http.StatusConflict, fmt.Sprintf("%s: %v", diagnostics.OAuthTokenUndecryptable, err))
 			return
 		}
 
@@ -3937,7 +3953,7 @@ func (s *Server) handleQuarantineServer(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if err := s.controller.QuarantineServer(serverID, true); err != nil {
+	if err := s.quarantineServer(r.Context(), serverID, true); err != nil {
 		s.logger.Errorw("Failed to quarantine server", "server", serverID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to quarantine server: %v", err))
 		return
@@ -3982,10 +3998,10 @@ func (s *Server) handleUnquarantineServer(w http.ResponseWriter, r *http.Request
 		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
 		return
 	}
-	if ic := s.incarnationController(); ic != nil && expected > 0 {
-		err = ic.QuarantineServerAt(serverID, false, expected)
+	if expected > 0 && s.incarnationController() != nil {
+		err = s.quarantineServerAt(r.Context(), serverID, false, expected)
 	} else {
-		err = s.controller.QuarantineServer(serverID, false)
+		err = s.quarantineServer(r.Context(), serverID, false)
 	}
 	if err != nil {
 		s.logger.Errorw("Failed to unquarantine server", "server", serverID, "error", err)
@@ -4714,6 +4730,9 @@ func (s *Server) renderEventPayloadForCaller(ctx context.Context, evt internalRu
 	if evt.Type == internalRuntime.EventTypeAttentionChanged {
 		return renderAttentionChangedForCaller(ctx, payload)
 	}
+	if evt.Type == internalRuntime.EventTypeActiveProfileChanged {
+		return s.renderActiveProfileChangedForCaller(ctx, payload)
+	}
 	if evt.Type != internalRuntime.EventTypeServersChanged || len(payload) == 0 {
 		return payload
 	}
@@ -4739,9 +4758,25 @@ func (s *Server) renderEventPayloadForCaller(ctx context.Context, evt internalRu
 	// upstream, so there is no embed) that extra was the WHOLE payload. The
 	// copy is unconditional now for that reason: there is always something to
 	// scope, embed or not.
-	out := make(map[string]interface{}, len(payload))
+	//
+	// Spec 118 review: the extras that travel WITH a hidden identity describe
+	// that hidden server's change — `added` / `modified` / `removed`
+	// (tools_changed), `approved_count`, `changed`, `blocked_count`,
+	// `approved_by` and the like — so withholding the name alone left "a
+	// server you cannot see just gained 3 tools" on the wire, the same count
+	// oracle the embed narrowing exists to close. When an identity is
+	// withheld, every extra goes with it; only the renderable state (`servers`,
+	// `stats`) and the coalescer's `reason` survive.
+	hiddenIdentity := false
 	for k, v := range payload {
 		if isOutOfScopeIdentityField(ctx, k, v) {
+			hiddenIdentity = true
+			break
+		}
+	}
+	out := make(map[string]interface{}, len(payload))
+	for k, v := range payload {
+		if hiddenIdentity && k != "servers" && k != "stats" && k != "reason" {
 			continue
 		}
 		out[k] = v
@@ -4759,6 +4794,34 @@ func (s *Server) renderEventPayloadForCaller(ctx context.Context, evt internalRu
 		recomputed := recomputeServerStats(ctx, scoped, *stats)
 		out["stats"] = &recomputed
 	}
+	return out
+}
+
+// renderActiveProfileChangedForCaller is the SSE twin of GET /profiles/active
+// (Spec 118 FR-009, cross-review round 1): the event carries the server-level
+// slug that door withholds from a scoped caller unless the profile is one the
+// caller may select (its own pin with visible reach; for an unpinned scoped
+// caller, a profile its grant reaches). The push form must not hand over what
+// the pull form refuses, so a scoped subscriber gets `""` for a slug it may
+// not learn — the same "refetch /profiles/active" invalidation, carrying
+// nothing. Administrators receive the payload untouched. Fails closed on a
+// config-read failure, as the door does.
+func (s *Server) renderActiveProfileChangedForCaller(ctx context.Context, payload map[string]interface{}) map[string]interface{} {
+	if !auth.IsScopedCaller(ctx) {
+		return payload
+	}
+	slug, _ := payload["active_profile"].(string)
+	if slug != "" {
+		cfg, err := s.controller.GetConfig()
+		if err == nil && cfg != nil && profileReachable(ctx, cfg, slug) {
+			return payload
+		}
+	}
+	out := make(map[string]interface{}, len(payload))
+	for k, v := range payload {
+		out[k] = v
+	}
+	out["active_profile"] = ""
 	return out
 }
 
@@ -5644,6 +5707,7 @@ func (s *Server) maskToolCallRecord(record *contracts.ToolCallRecord) {
 // @Success      200      {object}  contracts.ReplayToolCallResponse    "Tool call replayed successfully"
 // @Failure      400      {object}  contracts.ErrorResponse             "Tool call ID required or invalid JSON payload"
 // @Failure      401      {object}  contracts.ErrorResponse             "Unauthorized - missing or invalid API key"
+// @Failure      403      {object}  contracts.ErrorResponse             "Replay refused: tool quarantined or not callable, server quarantined, outside the profile policy, or the token lacks the tool's permission tier"
 // @Failure      405      {object}  contracts.ErrorResponse             "Method not allowed"
 // @Failure      429      {object}  contracts.ErrorResponse             "Shed by a concurrency limit or an agent token call rate limit (Retry-After header carries the wait hint)"
 // @Failure      500      {object}  contracts.ErrorResponse             "Failed to replay tool call"
@@ -5809,7 +5873,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	// one, so a client cannot widen its own read by staging the flag and
 	// re-reading before the restart, and (#1167) it is ANDed with the caller's
 	// identity so only an authenticated admin can exercise the opt-out.
-	published := cfg
+	var published *config.Config
 	if !s.revealSecrets(r.Context()) {
 		published = oauth.RedactedConfig(cfg)
 		if published == nil {
@@ -5819,6 +5883,11 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusInternalServerError, "Failed to get configuration")
 			return
 		}
+	} else if published = oauth.WithMaskedOAuthTokenKey(cfg); published == nil {
+		// reveal_secret_headers never reveals the OAuth token encryption key.
+		s.logger.Errorw("Failed to redact configuration for publication")
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to get configuration")
+		return
 	}
 
 	// Convert config to contracts type for consistent API response

@@ -345,9 +345,16 @@ func TestApplySystemFlag_RefusesServe(t *testing.T) {
 }
 
 func TestRootRegistersSystemFlag(t *testing.T) {
-	root := newRootCmd()
+	root := docsSmokeRoot(t)
 	if root.PersistentFlags().Lookup("system") == nil {
 		t.Fatal("root has no persistent --system flag")
+	}
+}
+
+func TestRootRegistersSystemFlagDoesNotReparentSingletons(t *testing.T) {
+	t.Run("register system flag", TestRootRegistersSystemFlag)
+	if activityCmd.Root() != activityCmd {
+		t.Fatal("activityCmd stayed attached to a finished test root")
 	}
 }
 

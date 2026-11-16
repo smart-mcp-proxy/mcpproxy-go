@@ -193,14 +193,8 @@ func (w *OAuthTransportWrapper) RoundTrip(req *http.Request) (*http.Response, er
 			return resp, err
 		}
 
-		// Normalize 201 Created to 200 OK for token responses.
-		// Some OAuth providers (e.g., Supabase) return 201 for token exchange,
-		// but mcp-go only accepts 200.
-		if tokenReq && resp.StatusCode == http.StatusCreated {
-			w.logger.Debug("Normalized token response status 201→200",
-				zap.String("url", logSafeURL(req.URL.String())))
-			resp.StatusCode = http.StatusOK
-			resp.Status = "200 OK"
+		if tokenReq {
+			w.normalizeTokenResponse(req, resp)
 		}
 
 		return resp, nil
@@ -211,15 +205,180 @@ func (w *OAuthTransportWrapper) RoundTrip(req *http.Request) (*http.Response, er
 		return resp, err
 	}
 
-	// Normalize 201 Created to 200 OK for token responses even without extra params.
-	if tokenReq && resp.StatusCode == http.StatusCreated {
+	if tokenReq {
+		w.normalizeTokenResponse(req, resp)
+	}
+
+	return resp, nil
+}
+
+// maxTokenResponseBodyBytes caps how much of a token response body is buffered
+// for normalization. Larger bodies are passed through unchanged.
+const maxTokenResponseBodyBytes = 1 << 20
+
+// normalizeTokenResponse post-processes a token endpoint response (code
+// exchange or refresh; mcp-go uses the same HTTP client for both) so mcp-go can
+// decode it:
+//   - 201 Created becomes 200 OK (some providers, e.g. Supabase, return 201
+//     but mcp-go only accepts 200);
+//   - an "expires_at" that is not an RFC 3339 string (a numeric epoch, null or
+//     any other string) is dropped from 2xx JSON bodies, and "expires_in" is
+//     derived from a numeric epoch when it is missing (mcp-go decodes
+//     "expires_at" into a time.Time and otherwise fails with
+//     "Time.UnmarshalJSON: input is not a JSON string"; see
+//     normalizeTokenResponseBody).
+func (w *OAuthTransportWrapper) normalizeTokenResponse(req *http.Request, resp *http.Response) {
+	if resp.StatusCode == http.StatusCreated {
 		w.logger.Debug("Normalized token response status 201→200",
 			zap.String("url", logSafeURL(req.URL.String())))
 		resp.StatusCode = http.StatusOK
 		resp.Status = "200 OK"
 	}
 
-	return resp, nil
+	if resp.StatusCode < 200 || resp.StatusCode > 299 || resp.Body == nil {
+		return
+	}
+	// A still-encoded body (the transport did not transparently decode it) cannot be parsed here.
+	if enc := resp.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
+		return
+	}
+
+	orig := resp.Body
+	buf, err := io.ReadAll(io.LimitReader(orig, maxTokenResponseBodyBytes+1))
+	if err != nil || len(buf) > maxTokenResponseBodyBytes {
+		// Hand mcp-go exactly what it would have seen: what we read so far,
+		// then the rest of the stream (including a read error, if any).
+		resp.Body = &prefixedReadCloser{
+			Reader: io.MultiReader(bytes.NewReader(buf), orig),
+			Closer: orig,
+		}
+		return
+	}
+	_ = orig.Close()
+
+	out, changed := normalizeTokenResponseBody(buf, time.Now())
+	resp.Body = io.NopCloser(bytes.NewReader(out))
+	if !changed {
+		return
+	}
+	resp.ContentLength = int64(len(out))
+	if resp.Header == nil {
+		resp.Header = make(http.Header)
+	}
+	resp.Header.Set("Content-Length", strconv.Itoa(len(out)))
+	w.logger.Debug("Normalized token response body: dropped non-RFC3339 expires_at",
+		zap.String("url", logSafeURL(req.URL.String())))
+}
+
+// prefixedReadCloser reads from Reader and closes Closer.
+type prefixedReadCloser struct {
+	io.Reader
+	io.Closer
+}
+
+// Bounds for an "expires_in" derived from a numeric "expires_at".
+const (
+	// epochMillisThreshold: a numeric epoch above this (year ~5138 in seconds)
+	// is taken to be in milliseconds, as JS-based providers send. A value still
+	// above it after that conversion is not a plausible timestamp and derives
+	// no expires_in.
+	epochMillisThreshold = 1e11
+	// maxDerivedExpiresInSecs caps the derived lifetime (10 years) so mcp-go's
+	// time.Duration(ExpiresIn)*time.Second cannot overflow or land far in the future.
+	maxDerivedExpiresInSecs = 10 * 366 * 24 * 3600
+)
+
+// normalizeTokenResponseBody makes a token response JSON body decodable by
+// mcp-go's transport.Token, whose "expires_at" is a time.Time decoded with
+// time.Time.UnmarshalJSON (RFC 3339 string only). Some providers (e.g. Better
+// Auth) send a numeric Unix epoch, null, or another string form alongside the
+// RFC 6749 "expires_in".
+//
+// If "expires_at" is present and is not an RFC 3339 JSON string it is dropped.
+// When it was a number (seconds, or milliseconds above 1e11) or a quoted
+// all-digit epoch, and "expires_in" is absent or <= 0, "expires_in" is derived
+// as clamp(expires_at - now, 0, 10 years) seconds; implausible epochs derive
+// nothing. All other values are carried over verbatim as json.RawMessage. It
+// returns the input untouched, with changed=false, when the body is not a JSON
+// object or needs no change.
+func normalizeTokenResponseBody(body []byte, now time.Time) ([]byte, bool) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil || m == nil {
+		return body, false
+	}
+	rawAt, ok := m["expires_at"]
+	if !ok {
+		return body, false
+	}
+	at := bytes.TrimSpace(rawAt)
+	if len(at) > 0 && at[0] == '"' {
+		// Same decoder mcp-go uses: leave only what it can parse.
+		var t time.Time
+		if t.UnmarshalJSON(at) == nil {
+			return body, false
+		}
+	}
+	delete(m, "expires_at")
+
+	var epoch float64
+	haveEpoch := false
+	switch {
+	case bytes.Equal(at, []byte("null")):
+	case len(at) > 0 && at[0] == '"':
+		var str string
+		if json.Unmarshal(at, &str) == nil && isAllDigits(str) {
+			if f, err := strconv.ParseFloat(str, 64); err == nil {
+				epoch, haveEpoch = f, true
+			}
+		}
+	default:
+		haveEpoch = json.Unmarshal(at, &epoch) == nil
+	}
+
+	if haveEpoch {
+		var expiresIn float64
+		rawIn, hasIn := m["expires_in"]
+		inOK := !hasIn || json.Unmarshal(rawIn, &expiresIn) == nil // null decodes to 0
+		if inOK && expiresIn <= 0 {
+			if epoch > epochMillisThreshold {
+				epoch /= 1000
+			}
+			if epoch <= epochMillisThreshold {
+				secs := int64(0)
+				if epoch > 0 {
+					secs = int64(epoch) - now.Unix()
+				}
+				if secs < 0 {
+					secs = 0
+				}
+				if secs > maxDerivedExpiresInSecs {
+					secs = maxDerivedExpiresInSecs
+				}
+				m["expires_in"] = json.RawMessage(strconv.FormatInt(secs, 10))
+			}
+		}
+	}
+
+	// Encode without HTML escaping so values such as URLs with "&" stay as sent.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(m); err != nil {
+		return body, false
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), true
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // isAuthorizationRequest detects if this is an OAuth authorization request

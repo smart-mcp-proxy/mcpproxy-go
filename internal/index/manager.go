@@ -101,13 +101,17 @@ func (m *Manager) BatchIndexTools(tools []*config.ToolMetadata) error {
 	return m.bleveIndex.BatchIndex(tools)
 }
 
+// DefaultSearchLimit is the window the Manager searches use when the caller's
+// limit is not positive.
+const DefaultSearchLimit = 20
+
 // SearchTools searches for tools matching the query
 func (m *Manager) SearchTools(query string, limit int) ([]*config.SearchResult, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	if limit <= 0 {
-		limit = 20 // default limit
+		limit = DefaultSearchLimit // default limit
 	}
 
 	return m.bleveIndex.SearchTools(query, limit)
@@ -120,7 +124,7 @@ func (m *Manager) SearchToolsScoped(query string, limit int, inScope func(server
 	defer m.mu.RUnlock()
 
 	if limit <= 0 {
-		limit = 20 // default limit, as SearchTools
+		limit = DefaultSearchLimit // default limit, as SearchTools
 	}
 
 	return m.bleveIndex.SearchToolsScoped(query, limit, inScope)
@@ -135,7 +139,7 @@ func (m *Manager) SearchToolsAdmitted(query string, limit int, admit func(Hit) A
 	defer m.mu.RUnlock()
 
 	if limit <= 0 {
-		limit = 20 // default limit, as SearchTools
+		limit = DefaultSearchLimit // default limit, as SearchTools
 	}
 
 	return m.bleveIndex.SearchToolsAdmitted(query, limit, admit)

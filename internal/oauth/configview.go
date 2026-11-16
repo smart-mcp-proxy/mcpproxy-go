@@ -44,7 +44,48 @@ func RedactedConfig(cfg *config.Config) *config.Config {
 		return nil
 	}
 	restorePublicSigners(cfg, &masked)
+	masked.OAuthTokenEncryptionKey = publishOAuthTokenKey(cfg.OAuthTokenEncryptionKey, masked.OAuthTokenEncryptionKey)
 	return &masked
+}
+
+// publishOAuthTokenKey is the Spec 123 masking policy for
+// oauth_token_encryption_key in every config output: a LITERAL key is always
+// masked; a REFERENCE (${file:}, ${env:}, ${keyring:}) is shown exactly as
+// written, because it is operator-authored and not secret. walked is what the
+// generic walk rendered; a literal it left readable is still masked here.
+func publishOAuthTokenKey(src, walked string) string {
+	if src == "" {
+		return ""
+	}
+	if config.IsOAuthTokenKeyReference(src) {
+		return src
+	}
+	if walked == src {
+		return bulletMarker
+	}
+	return walked
+}
+
+// WithMaskedOAuthTokenKey returns a shallow copy of cfg whose
+// oauth_token_encryption_key is masked exactly as RedactedConfig masks it, and
+// everything else is untouched. It is for the reveal_secret_headers read path:
+// that opt-out unmasks upstream credentials, but the at-rest encryption key
+// protects every stored OAuth token and is never published (Spec 123). Returns
+// nil when the walk cannot round-trip (the caller fails closed).
+func WithMaskedOAuthTokenKey(cfg *config.Config) *config.Config {
+	if cfg == nil {
+		return nil
+	}
+	cp := *cfg
+	if cfg.OAuthTokenEncryptionKey == "" {
+		return &cp
+	}
+	masked := RedactedConfig(cfg)
+	if masked == nil {
+		return nil
+	}
+	cp.OAuthTokenEncryptionKey = masked.OAuthTokenEncryptionKey
+	return &cp
 }
 
 // restorePublicSigners puts security.tpa_operator_signers back verbatim after

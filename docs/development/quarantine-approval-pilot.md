@@ -16,7 +16,7 @@ does not prove the implementation correct.
 |---|---|
 | `internal/qapilot/model.go` | The reference state machine (server quarantine, enablement, trust mode, tool records, dispatch classification). Imports no production package; computes every expectation from its own state, the action and the encoded policy. |
 | `internal/qapilot/policy.go` | Decision tables: add-time admission, the agent deny-list, permitted approval-transition reasons, the 896-cell dispatch classification table. |
-| `internal/qapilot/scenarios.go` | The **mandatory deterministic scenario inventory** (S01…S29), fixture contracts, and the recorded known deviations. |
+| `internal/qapilot/scenarios.go` | The **mandatory deterministic scenario inventory** (S01…S31), fixture contracts, and the recorded known deviations. |
 | `internal/qapilot/requirements.go` | Selected requirements QP-01…QP-20 with their policy sources, and the list of mandatory standalone checks. |
 | `internal/qapilot/ledger.go` | `qapilot.Track(t, id, reqs…)` records each check's real outcome (passed / failed / skipped) to `$QAPILOT_REPORT_DIR`. |
 | `internal/runtime/qapilot_conformance_test.go` | Runtime **adapter**: maps model actions onto `checkToolApprovals`, `ApproveTools`, `ApproveAllTools`, `QuarantineServer`, `EnableServer`, `BlockTools`, `SetToolEnabled` and a real close/reopen restart; projects storage into a snapshot and compares after every step. Also the invariant table, the stale-review and server-replaced denial checks, the fixture-verdict check, the known-deviation test and the rapid exploration lane. |
@@ -42,7 +42,7 @@ The IDs, titles and sources are in `internal/qapilot/requirements.go`
 | QP-05 | Agent tokens cannot mutate servers/tools over REST: 403 and no controller call | authz table (23 operations) |
 | QP-06 | MCP has no unquarantine op; `upstream_servers` patch/update ignores `quarantined:false` | MCP checks |
 | QP-07 | New tool on a quarantined manual/scan server is pending and stays pending across reconnects | S01, S02, S18, S26 |
-| QP-08 | Trusted server's first discovery is the baseline; durable baseline decision recorded | S04 |
+| QP-08 | Trusted server's first discovery is the baseline for every tool that scans clean; durable baseline decision recorded; a tool that scans dangerous is held pending and a pass that approves nothing records no baseline (R2-1) | S04, S30, S31 |
 | QP-09 | Post-baseline additions: manual → pending; scan → clean approved / dangerous pending; auto or global off → approved | S05, S11, S12, S15, S16, S17 |
 | QP-10 | Changed definition held in manual (whatever the verdict); scan approves it on a clean verdict when the structural gate finds nothing and holds it on a dangerous one; auto approves | S03, S06, S08, S09, S13, S14, S16, S28, S29 |
 | QP-11 | Changed stays changed across reconnects; revert restores approved | S06, S07, S19 |

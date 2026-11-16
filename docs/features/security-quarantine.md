@@ -672,7 +672,12 @@ setting.
 ### Signature bundle (offline TPA corpus)
 
 The `scan` mode runs an offline TPA signature corpus (the tpa-db
-`scanner-bundle.json`). By default it is the corpus embedded in the build; set
+`scanner-bundle.json`). By default it is the corpus embedded in the build, which
+holds 44 signatures across 16 attack classes (42 of them gating, meaning they
+own a rule that runs offline against tool descriptions and holds a matching tool).
+Every signature carries a public source, a date and a redistributable licence;
+contributors add signatures as described in
+[TPA Signature Database](/features/tpa-signatures). To use a different corpus, set
 `security.tpa_bundle_path` in `mcp_config.json` (env override:
 `MCPPROXY_TPA_BUNDLE_PATH`, which wins over the file value on every path —
 loader, hot-reload, `/api/v1/config/apply`) to run a corpus from disk instead.
@@ -901,6 +906,22 @@ The first start after the upgrade logs one `WARN` naming every such enabled
 server (persisted marker in `config.db`; a fresh install with no servers logs
 nothing), and `mcpproxy doctor` names them on every run. Set `trust_mode:
 "manual"` on a server whose tool changes a person should review.
+
+### Replay honours the same gate
+
+`POST /api/v1/tool-calls/{id}/replay` re-dispatches a recorded call, so it is
+a dispatch path like `call_tool_*`: it evaluates the same per-tool gate and
+refuses (`403`, zero upstream calls) a tool that is pending or changed, denied
+by `enabled_tools` / `disabled_tools`, on a quarantined or disabled server, or
+not certified on the live connection. This applies to administrators too; a
+normally approved tool on a connected server replays as before.
+
+Replay is stricter than the agent call path in one respect: it dispatches only
+onto a connected server whose tool is certified on the SAME connection
+generation the gate evaluated, and pins the call to it. A server that is not
+connected, or one that reconnected while the replay was being checked, is
+refused (`403`, zero upstream calls); retry and the next replay evaluates the
+new generation from scratch.
 
 ### Block (approve + disable)
 

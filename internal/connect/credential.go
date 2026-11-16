@@ -136,19 +136,23 @@ func (s *Service) ClientSecret(clientID string) (secret string, found bool, err 
 
 // extractEntryCredential pulls the credential secret out of an existing
 // client entry through the same carriers buildServerEntry writes: an
-// X-API-Key header, an mcp-remote `--header X-API-Key:<v>` arg, or an
-// ?apikey= query on url / serverUrl / httpUrl. Empty when there is none.
+// X-API-Key header (a `headers` object, or Codex's `http_headers` table), an
+// mcp-remote `--header X-API-Key:<v>` arg, or a legacy ?apikey= query on url /
+// serverUrl / httpUrl (no longer written, still recognised). Empty when there is
+// none.
 // The value is returned only to be classified; callers never echo it.
 func extractEntryCredential(clientID string, entry interface{}) (string, bool) {
 	m, ok := entry.(map[string]interface{})
 	if !ok {
 		return "", false
 	}
-	if headers, ok := m["headers"].(map[string]interface{}); ok {
-		for k, v := range headers {
-			if strings.EqualFold(k, "x-api-key") {
-				if sv, ok := v.(string); ok && sv != "" {
-					return sv, true
+	for _, field := range []string{"headers", "http_headers"} {
+		if headers, ok := m[field].(map[string]interface{}); ok {
+			for k, v := range headers {
+				if strings.EqualFold(k, "x-api-key") {
+					if sv, ok := v.(string); ok && sv != "" {
+						return sv, true
+					}
 				}
 			}
 		}

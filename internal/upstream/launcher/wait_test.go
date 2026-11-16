@@ -3,7 +3,8 @@ package launcher
 import (
 	"context"
 	"net"
-	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -27,66 +28,73 @@ func TestWaitForURL_ImmediatelyBound(t *testing.T) {
 	assert.Less(t, time.Since(start), 500*time.Millisecond, "should return quickly when listener is already bound")
 }
 
-func TestWaitForURL_BoundLate(t *testing.T) {
-	// Reserve a port, close it, then re-bind after a delay so we can
-	// give WaitForURL a stable address to poll while it isn't yet
-	// listening.
-	probe, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := probe.Addr().String()
-	probe.Close()
+// refusingDial returns a dial func that fails with ECONNREFUSED-style errors
+// until open(n) reports true for the 1-based attempt number n, then dials addr
+// for real. It counts attempts. Gating on the attempt number (not wall-clock
+// time) keeps the tests independent of scheduler delays on loaded runners.
+//
+// The tests below use it instead of "reserve a port, close it, rebind later":
+// a released ephemeral port can be grabbed by any other process or parallel
+// test before the late bind, which made those tests flaky under
+// `go test -race ./...`. Here the listener stays bound for the whole test, so
+// the port can never be stolen, and "not listening yet" is simulated at the
+// dial seam that WaitForURLWithDial exposes.
+func refusingDial(addr string, open func(attempt int32) bool, attempts *atomic.Int32) func(ctx context.Context, network, a string) (net.Conn, error) {
+	return func(ctx context.Context, network, _ string) (net.Conn, error) {
+		n := attempts.Add(1)
+		if !open(n) {
+			return nil, &net.OpError{Op: "dial", Net: network, Err: syscall.ECONNREFUSED}
+		}
+		return (&net.Dialer{Timeout: defaultDialPerAttempt}).DialContext(ctx, network, addr)
+	}
+}
 
+func TestWaitForURL_BoundLate(t *testing.T) {
+	// The listener is held from the start (so the port cannot be stolen) but
+	// the first `refusals` dials are refused, i.e. "not listening -> listening".
+	// Gating on a fixed attempt count rather than a wall-clock time makes the
+	// retry assertion deterministic.
+	const refusals = 2
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	addr := ln.Addr().String()
 	url := "http://" + addr + "/mcp"
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		time.Sleep(400 * time.Millisecond)
-		ln, err := net.Listen("tcp", addr)
-		if err != nil {
-			t.Errorf("late bind failed: %v", err)
-			return
-		}
-		defer ln.Close()
-		// Hold the listener briefly so WaitForURL has a chance to dial it.
-		time.Sleep(500 * time.Millisecond)
-	}()
+	var attempts atomic.Int32
+	dial := refusingDial(addr, func(n int32) bool { return n > refusals }, &attempts)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Generous bounds: only the two 200ms backoffs are needed, the rest is
+	// slack for slow runners.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	err = WaitForURL(ctx, url, 2*time.Second)
+	err = WaitForURLWithDial(ctx, url, 10*time.Second, dial)
 	assert.NoError(t, err, "should succeed once the listener binds")
-
-	wg.Wait()
+	assert.Equal(t, int32(refusals+1), attempts.Load(), "should have retried past every refused attempt and stopped at the first success")
 }
 
 func TestWaitForURL_NeverBound(t *testing.T) {
-	// Reserve and release a port so we know nothing is listening on it.
-	probe, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := probe.Addr().String()
-	probe.Close()
-
-	url := "http://" + addr + "/mcp"
+	// Dials are refused for the whole test; no real port is involved, so a
+	// stray process binding some ephemeral port cannot make this succeed.
+	var attempts atomic.Int32
+	dial := refusingDial("127.0.0.1:1", func(int32) bool { return false }, &attempts)
 
 	ctx := context.Background()
 	start := time.Now()
-	err = WaitForURL(ctx, url, 300*time.Millisecond)
+	err := WaitForURLWithDial(ctx, "http://127.0.0.1:1/mcp", 300*time.Millisecond, dial)
 	elapsed := time.Since(start)
 	assert.Error(t, err)
 	assert.GreaterOrEqual(t, elapsed, 250*time.Millisecond, "should poll for at least the timeout duration")
-	assert.Less(t, elapsed, 1500*time.Millisecond, "should give up promptly after timeout")
+	assert.Less(t, elapsed, 5*time.Second, "should give up promptly after timeout")
+	// Only the first attempt is guaranteed: on a loaded runner the goroutine
+	// can be delayed past the 300ms deadline after a single dial.
+	assert.GreaterOrEqual(t, attempts.Load(), int32(1), "should have dialed at least once")
 }
 
 func TestWaitForURL_ContextCanceled(t *testing.T) {
-	probe, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := probe.Addr().String()
-	probe.Close()
-
-	url := "http://" + addr + "/mcp"
+	var attempts atomic.Int32
+	dial := refusingDial("127.0.0.1:1", func(int32) bool { return false }, &attempts)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -95,7 +103,7 @@ func TestWaitForURL_ContextCanceled(t *testing.T) {
 	}()
 
 	start := time.Now()
-	err = WaitForURL(ctx, url, 5*time.Second)
+	err := WaitForURLWithDial(ctx, "http://127.0.0.1:1/mcp", 5*time.Second, dial)
 	assert.Error(t, err)
 	assert.Less(t, time.Since(start), 1*time.Second, "should observe ctx cancel quickly")
 }

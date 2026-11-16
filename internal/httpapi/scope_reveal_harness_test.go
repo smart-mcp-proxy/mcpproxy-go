@@ -191,6 +191,10 @@ type scopeController struct {
 	// realistic list from c.servers via runtime.Compute.
 	attentionItemsOverride []contracts.AttentionItem
 
+	// statusCh, when non-nil, is what StatusChannel returns, so a test can
+	// publish a status snapshot and observe the per-subscriber status frame.
+	statusCh chan interface{}
+
 	mu   sync.Mutex
 	subs []chan internalRuntime.Event
 }
@@ -344,6 +348,9 @@ func (c *scopeController) GetStatus() interface{} {
 // it immediately, which makes the SSE handler's select spin on a closed channel
 // and return before any runtime event is delivered.
 func (c *scopeController) StatusChannel() <-chan interface{} {
+	if c.statusCh != nil {
+		return c.statusCh
+	}
 	return make(chan interface{})
 }
 

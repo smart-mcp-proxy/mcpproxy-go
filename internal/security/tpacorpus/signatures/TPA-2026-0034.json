@@ -1,0 +1,48 @@
+{
+  "category": "tpa_preference_manipulation",
+  "gating": true,
+  "id": "TPA-2026-0034",
+  "license": "MIT",
+  "provenance": {
+    "note": "Boastful superlative placed in a description so models rank the tool above equivalents.",
+    "published": "2026-03-24",
+    "source": "https://github.com/dongsenzhang/MSB/blob/main/data/tools/attack_tools/academic_search/PubMed_MCP_Server/pubmed_server-preference_manipulation.py"
+  },
+  "rules": [
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.8,
+      "detector": "superlative_claim",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0034",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)(?:^|[.!?:;\\n(*_>\\-]\\s*)this\\s+is\\s+the\\s+(?:(?:best|greatest|ultimate)\\s+(?:\\w+\\s+){0,2}?tool\\s+(?:in\\s+the\\s+world|ever|available|on\\s+the\\s+market)|only\\s+(?:\\w+\\s+){0,2}?tool\\s+(?:in\\s+the\\s+world|on\\s+the\\s+market))\\s*(?:[.!]|\\z|\\n)",
+      "severity": "medium",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.85,
+      "detector": "always_prefer_this",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0034",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:always|must|should)\\s+(?:use|prefer|choose|select|pick)\\s+this\\s+tool\\s+(?:instead\\s+of|over|rather\\s+than)\\s+(?:all\\s+|any\\s+)?(?:other|similar|alternative|competing)\\s+(?:(?:other|similar|alternative|competing|search|web|file|code|data|document)\\s+)*(?:tools?|servers?|options?|alternatives?|products?|implementations?)\\s*(?:[.!;,:]|$)",
+      "severity": "medium",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

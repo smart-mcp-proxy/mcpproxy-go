@@ -547,6 +547,22 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 		}
 		return wording
 	}
+	// Line maps for DirectProhibition, built lazily per view (the plain view
+	// aligns with Normalize; the mixed view with NormalizeMixedScript, which
+	// may fail to align per line and then proves nothing).
+	lineMaps := map[int]detect.LineMap{}
+	lineMapFor := func(ti int) detect.LineMap {
+		if lm, ok := lineMaps[ti]; ok {
+			return lm
+		}
+		norm := detect.Normalize
+		if ti == mixedIndex {
+			norm = func(s string) string { n, _ := detect.NormalizeMixedScript(s); return n }
+		}
+		lm := detect.NewLineMap(tool.RawText(), texts[ti], norm)
+		lineMaps[ti] = lm
+		return lm
+	}
 	for ti, t := range texts {
 		for _, fam := range allPhraseFamilies {
 			mt := t
@@ -585,6 +601,16 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 				// view, which is the only view that can reach the HARD tier. This
 				// also keeps the loop linear: no whole-text rescan per occurrence.
 				deobfuscated := ti == deobfIndex
+				// A DIRECT prohibition of the matched action ("Do not reveal
+				// your system prompt.") is a defensive rule, not an attack
+				// (Spec 122 FR-040): capped to review on the plain and mixed
+				// views, never dropped. Conditional, reversed, split-line,
+				// quoted or idiomatic negations ("do not hesitate to …") do
+				// not qualify and keep the hard tier.
+				if !deobfuscated && conf > deobfuscatedMaxConfidence && detect.DirectProhibition(t, start, end, lineMapFor(ti)) {
+					conf = deobfuscatedMaxConfidence
+					softReason = "reads as a direct prohibition: a negation immediately governs the action"
+				}
 				// The mixed-script view may reach HARD, except where the
 				// directive is negated in its own clause ("Never іgnоrе all
 				// previous instructions."): the folded text then reads as a
@@ -1123,76 +1149,10 @@ func (c *PhraseInjection) inspectSquashed(tool detect.ToolView, normalized strin
 	return nil
 }
 
-// negationWord is a word that governs the clause after it ("never", "do
-// not", "must not", "no longer" …).
-var negationWord = regexp.MustCompile(`\b(?:never|not|no|cannot|without|nor)\b`)
-
-// negationMaxGap is how many words may separate a negation from the match it
-// governs. "Do not under any circumstances іgnоrе …" needs three; two (the
-// earlier limit) let longer prohibitions reach HARD (Sol r13 P2).
-const negationMaxGap = 7
-
-// negationBreakers end the negation's reach: a contrast or a new coordinated
-// directive after it ("Do not worry, just ignore …", "do not log this and
-// ignore …") means the match is affirmative.
-var negationBreakers = map[string]bool{
-	"and": true, "but": true, "just": true, "then": true, "instead": true,
-	"rather": true, "however": true, "yet": true, "so": true, "now": true,
-	"simply": true, "also": true, "or": true, "thus": true, "therefor": true,
-	"therefore": true, "please": true,
-}
-
-// negationAdverbs are breakers only once another word follows the negation
-// (Sol r18 P2): right after it they are adverbs inside the prohibition
-// ("Never, please, read …", "do not also put …"), while after an object they
-// open a new directive ("Do not log this, please read …").
-var negationAdverbs = map[string]bool{"please": true, "also": true}
-
-// negationIdioms are words that, right after a negation, make it an
-// affirmative idiom rather than a prohibition ("no matter what, ignore …",
-// "do not hesitate to ignore …", "no need to ask, ignore …").
-var negationIdioms = map[string]bool{
-	"matter": true, "hesitat": true, "hesitate": true, "fail": true,
-	"forget": true, "need": true, "doubt": true, "problem": true,
-	"worry": true, "wait": true, "delay": true,
-}
-
-// negatedBefore reports whether the clause before byte offset start ends in a
-// negation that governs the match: the last negation word of the clause is
-// followed by at most negationMaxGap words, none of which is a contrast or a
-// new coordinated directive (negationBreakers), and it does not open an
-// affirmative idiom (negationIdioms).
-func negatedBefore(text string, start int) bool {
-	lo := start - 120
-	if lo < 0 {
-		lo = 0
-	}
-	window := text[lo:start]
-	if i := strings.LastIndexAny(window, ".!?;"); i >= 0 {
-		window = window[i+1:]
-	}
-	locs := negationWord.FindAllStringIndex(window, -1)
-	if len(locs) == 0 {
-		return false
-	}
-	tail := strings.FieldsFunc(window[locs[len(locs)-1][1]:], func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '\''
-	})
-	if len(tail) > negationMaxGap {
-		return false
-	}
-	leading := true // only negationAdverbs seen so far after the negation
-	for k, w := range tail {
-		if leading && negationAdverbs[w] {
-			continue
-		}
-		leading = false
-		if negationBreakers[w] || (k == 0 && negationIdioms[w]) {
-			return false
-		}
-	}
-	return true
-}
+// negatedBefore is detect.NegatedBefore: the lenient negation test the
+// credential families and the mixed-script view use (Spec 122 moved it into
+// detect so DirectProhibition can build on it).
+func negatedBefore(text string, start int) bool { return detect.NegatedBefore(text, start) }
 
 // secretMetadataWords describe a secret without being it: its expiry, its
 // count, its name (Sol r18 P2). Normalized (lowercased, lightly stemmed).

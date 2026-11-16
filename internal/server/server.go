@@ -14,6 +14,7 @@ import (
 	gruntime "runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -46,6 +47,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
@@ -113,6 +115,10 @@ type Server struct {
 	// logged once per reason rather than once per settle event.
 	bundleDegradedMu     sync.Mutex
 	bundleDegradedLogged string
+	// queryAPIKeyRejectLogged is the unix-millisecond time of the last
+	// mcp_reject_query_apikey warning, so a client retrying in a loop logs
+	// once per queryAPIKeyRejectLogInterval, not once per request.
+	queryAPIKeyRejectLogged atomic.Int64
 	// createAfterConfigRead is a Spec 116 test seam (nil in production): it
 	// runs in the create path after the runtime configuration was read and
 	// before the new server is published.
@@ -545,6 +551,29 @@ func (s *Server) trustedProxiesProvider() config.TrustedProxiesProvider {
 	}
 }
 
+// queryAPIKeyRejectLogInterval bounds how often a refused ?apikey= credential
+// is logged.
+const queryAPIKeyRejectLogInterval = time.Minute
+
+// logQueryAPIKeyRejection warns that mcp_reject_query_apikey refused a request,
+// so an operator can tell why a client got a bare 401. It names the caller's
+// address and User-Agent and never the credential, and logs at most once per
+// queryAPIKeyRejectLogInterval.
+func (s *Server) logQueryAPIKeyRejection(r *http.Request) {
+	now := time.Now().UnixMilli()
+	last := s.queryAPIKeyRejectLogged.Load()
+	if last != 0 && now-last < queryAPIKeyRejectLogInterval.Milliseconds() {
+		return
+	}
+	if !s.queryAPIKeyRejectLogged.CompareAndSwap(last, now) {
+		return
+	}
+	s.logger.Warn("Refused MCP request carrying ?apikey= (mcp_reject_query_apikey is on); reconnect the client so it sends X-API-Key or Authorization: Bearer",
+		zap.String("remote_addr", r.RemoteAddr),
+		zap.String("user_agent", r.UserAgent()),
+		zap.String("path", r.URL.Path))
+}
+
 // mcpAuthMiddleware wraps the MCP endpoint handler to inject AuthContext into the
 // request context. The MCP endpoint is not behind the REST API key middleware, so
 // this middleware extracts tokens from the request and creates the appropriate
@@ -584,6 +613,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 		// administrator, so silently ignoring the parameter would downgrade a
 		// caller that thinks it is authenticated.
 		if cfg := s.runtime.Config(); cfg != nil && cfg.MCPRejectQueryAPIKey && r.URL.Query().Has("apikey") {
+			s.logQueryAPIKeyRejection(r)
 			http.Error(w, `{"error":"A credential in the ?apikey= query parameter is not accepted on MCP endpoints. Send it as Authorization: Bearer <token> or X-API-Key."}`, http.StatusUnauthorized)
 			return
 		}
@@ -2220,7 +2250,8 @@ func (s *Server) AddServer(ctx context.Context, serverConfig *config.ServerConfi
 
 	// Create-only: refuses an existing name (runtime config or storage) and
 	// commits it atomically. A failed add touches nothing.
-	if err := s.createServer(serverConfig); err != nil {
+	committed, err := s.createServerCommitted(serverConfig)
+	if err != nil {
 		return err
 	}
 
@@ -2228,6 +2259,13 @@ func (s *Server) AddServer(ctx context.Context, serverConfig *config.ServerConfi
 	s.OnUpstreamServerChange()
 
 	s.grantNewServerInspectionExemption(serverConfig)
+
+	// Issue #1698: the REST door records the add as the MCP door does, naming
+	// the caller the request context carries. The row describes the entry as
+	// this commit published it (the admission gate may have quarantined it),
+	// with the same redaction as the MCP row: `url` routinely carries a
+	// credential in its query string.
+	s.runtime.EmitActivityConfigChangeCtx(ctx, "server_added", serverConfig.Name, nil, nil, serverAddedValues(committed))
 
 	s.logger.Info("Server added successfully",
 		zap.String("name", serverConfig.Name))
@@ -2384,7 +2422,12 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 func (s *Server) PatchServer(ctx context.Context, serverName string, resolve func(cur *config.ServerConfig) (*config.ServerConfig, error)) error {
 	s.logger.Info("Updating upstream server", zap.String("name", serverName))
 
-	_, err := s.runtime.Commit("update_server", func(tx *runtime.CommitTx) error {
+	// The entry before this update, for the config_change row (issue #1698):
+	// captured inside the commit, compared after it against the PUBLISHED
+	// entry, so a quarantine the admission gate applied in the same commit is
+	// part of the recorded delta.
+	var before, applied *config.ServerConfig
+	res, err := s.runtime.Commit("update_server", func(tx *runtime.CommitTx) error {
 		return tx.UpdateServer(serverName, func(cur *config.ServerConfig) error {
 			updates, err := resolve(config.CopyServerConfig(cur))
 			if err != nil {
@@ -2393,6 +2436,7 @@ func (s *Server) PatchServer(ctx context.Context, serverName string, resolve fun
 			if updates == nil {
 				return nil
 			}
+			before = config.CopyServerConfig(cur)
 			applyServerUpdates(cur, updates)
 			// Spec 116 review R2.1: the concurrency overrides are validated
 			// against the LIVE global defaults before anything is persisted,
@@ -2400,6 +2444,7 @@ func (s *Server) PatchServer(ctx context.Context, serverName string, resolve fun
 			if errs := tx.Config().ValidateServerConcurrency(cur); len(errs) > 0 {
 				return &config.InvalidServerUpdateError{Server: serverName, Errors: errs}
 			}
+			applied = config.CopyServerConfig(cur)
 			return nil
 		})
 	})
@@ -2412,6 +2457,22 @@ func (s *Server) PatchServer(ctx context.Context, serverName string, resolve fun
 
 	// Notify about change
 	s.OnUpstreamServerChange()
+
+	var changedFields []string
+	var previousValues, newValues map[string]interface{}
+	if before != nil {
+		after := applied
+		if res != nil && res.Snapshot != nil {
+			if live := res.Snapshot.GetServer(serverName); live != nil {
+				after = live
+			}
+		}
+		changedFields, previousValues, newValues = serverConfigDelta(before, after)
+	}
+	if len(changedFields) > 0 {
+		s.runtime.EmitActivityConfigChangeCtx(ctx, "server_updated", serverName, changedFields,
+			redactActivityConfigValues(previousValues), redactActivityConfigValues(newValues))
+	}
 
 	s.logger.Info("Server updated successfully", zap.String("name", serverName))
 
@@ -2441,6 +2502,10 @@ func (s *Server) RemoveServer(ctx context.Context, serverName string) error {
 	// Notify about upstream server change
 	s.OnUpstreamServerChange()
 
+	// Issue #1698: the REST door records the removal (and what it purged, Spec
+	// 116 PR2) as the MCP door does, naming the caller.
+	s.runtime.EmitActivityServerRemovedCtx(ctx, serverName, purged.Deleted)
+
 	s.logger.Info("Server removed successfully",
 		zap.String("name", serverName),
 		zap.Int("purged_records", purged.Total()))
@@ -2457,6 +2522,12 @@ func (s *Server) EnableServer(serverName string, enabled bool) error {
 // RestartServer restarts an upstream server
 func (s *Server) RestartServer(serverName string) error {
 	return s.runtime.RestartServer(serverName)
+}
+
+// RestartServerCtx is RestartServer carrying the request context (issue
+// #1698; management.RuntimeOperations).
+func (s *Server) RestartServerCtx(ctx context.Context, serverName string) error {
+	return s.runtime.RestartServerCtx(ctx, serverName)
 }
 
 // DiscoverServerTools triggers manual tool discovery for a specific server.
@@ -2479,6 +2550,23 @@ func (s *Server) ForceReconnectAllServers(reason string) error {
 // QuarantineServer quarantines/unquarantines a server
 func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
 	return s.runtime.QuarantineServer(serverName, quarantined)
+}
+
+// QuarantineServerCtx is QuarantineServer naming the caller of ctx on the
+// quarantine_change row (issue #1698; the REST door's optional capability).
+func (s *Server) QuarantineServerCtx(ctx context.Context, serverName string, quarantined bool) error {
+	return s.runtime.QuarantineServerCtx(ctx, serverName, quarantined)
+}
+
+// QuarantineServerAtCtx is QuarantineServerAt naming the caller of ctx.
+func (s *Server) QuarantineServerAtCtx(ctx context.Context, serverName string, quarantined bool, expectedIncarnation int64) error {
+	return s.runtime.QuarantineServerAtCtx(ctx, serverName, quarantined, expectedIncarnation)
+}
+
+// EnableServerCtx is EnableServer naming the caller of ctx (issue #1698;
+// management.RuntimeOperations).
+func (s *Server) EnableServerCtx(ctx context.Context, serverName string, enabled bool) error {
+	return s.runtime.EnableServerCtx(ctx, serverName, enabled)
 }
 
 // getServerToolCount returns the number of tools for a specific server
@@ -4115,7 +4203,8 @@ func (s *Server) SearchToolsScoped(query string, limit int, inScope func(serverN
 }
 
 // searchResultsToMaps converts index hits to the /api/v1/index/search map
-// shape, applying the server-level quarantine gate (issue #877).
+// shape, applying the server-level quarantine gate (issue #877) and the
+// tool-level approval gate (Spec 032).
 func (s *Server) searchResultsToMaps(results []*config.SearchResult) []map[string]interface{} {
 	// SECURITY (issue #877): the MCP retrieve_tools path never surfaces a
 	// quarantined server's tools — their descriptions/schemas are withheld
@@ -4125,6 +4214,13 @@ func (s *Server) searchResultsToMaps(results []*config.SearchResult) []map[strin
 	// server-level visibility gate rather than returning raw index hits. Names
 	// stay bare (server_name is a separate field) — only which tools appear is
 	// filtered, so the /api/v1/index/search response shape is unchanged.
+	//
+	// The same holds one level down: a tool whose approval is pending or
+	// changed is removed from the index only by the next discovery pass, and
+	// until then its document is found by any matching word and, with
+	// certainty, by its canonical "server:tool" id (index.exactQualifiedTool).
+	// The hit is dropped after the ranked cut, like the quarantine gate on the
+	// unscoped path, so it costs at most one gate read per returned row.
 	withheld := s.quarantinedServerFilter()
 
 	// Convert to map format for API
@@ -4132,14 +4228,19 @@ func (s *Server) searchResultsToMaps(results []*config.SearchResult) []map[strin
 	for _, result := range results {
 		if result.Tool != nil {
 			serverName := result.Tool.ServerName
+			toolName := config.RawToolName(result.Tool)
 			if serverName == "" {
-				// Fallback: recover the server from a "server:tool" index name so
-				// the quarantine gate still applies when ServerName is unset.
+				// Fallback: recover the pair from a "server:tool" index name so
+				// both gates still apply when ServerName is unset.
 				if parts := strings.SplitN(result.Tool.Name, ":", 2); len(parts) == 2 {
 					serverName = parts[0]
+					toolName = parts[1]
 				}
 			}
 			if withheld(serverName) {
+				continue
+			}
+			if s.mcpProxy != nil && s.mcpProxy.approvalLocked(serverName, toolName) {
 				continue
 			}
 			toolData := map[string]interface{}{
@@ -4383,6 +4484,14 @@ func (s *Server) GetServerToolCalls(serverName string, limit int) ([]*contracts.
 	return s.runtime.GetServerToolCalls(serverName, limit)
 }
 
+// replayBlockReasonTokenPermission labels a replay refused for the agent
+// token's permission tier; httpapi maps *profile.ToolBlockedError to 403.
+const replayBlockReasonTokenPermission profile.BlockReason = "token_permission"
+
+// replayBlockReasonToolNotCallable labels a replay refused by the shared
+// per-tool gate or the live identity check (tool disabled / not certified).
+const replayBlockReasonToolNotCallable profile.BlockReason = "tool_not_callable"
+
 // ReplayToolCall replays a tool call with modified arguments. ctx is the
 // caller's request context: it governs the concurrency-limiter queue wait as
 // well as the upstream call (spec 093 FR-005).
@@ -4399,8 +4508,20 @@ func (s *Server) GetServerToolCalls(serverName string, limit int) ([]*contracts.
 // and no `(server, tool)` pair was ever resolved to audit.
 func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error) {
 	original, lookupErr := s.runtime.GetToolCallByID(id)
-	if lookupErr != nil || original == nil || s.mcpProxy == nil {
-		return s.runtime.ReplayToolCall(ctx, id, arguments)
+	// Fail closed for every caller: without the record or the proxy there is no
+	// gate to answer to, and the ungated runtime delegate is never reachable
+	// from here (an administrator included).
+	if lookupErr != nil {
+		return nil, lookupErr
+	}
+	if original == nil {
+		return nil, fmt.Errorf("tool call not found: %s", id)
+	}
+	if s.mcpProxy == nil {
+		return nil, &profile.ToolBlockedError{
+			Reason:  replayBlockReasonToolNotCallable,
+			Message: "Tool call replay is unavailable: the MCP proxy is not initialized",
+		}
 	}
 
 	callArgs := arguments
@@ -4434,9 +4555,37 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 			sessionIDFromContext(ctx), requestID, "blocked", profile.ErrToolOutsideProfile.Error(), telemetry.BlockReasonProfileScope)
 		return nil, profile.ErrToolOutsideProfile
 	}
+	// Agent token server access first, so a scoped caller learns nothing about
+	// a server outside its scope from the shape of any later refusal (the
+	// order handleCallToolVariant keeps: effective server scope, then the
+	// identity gate).
+	replayAuth := auth.AuthContextFromContext(ctx)
+	authCtx := auth.ScopedView(replayAuth, (replayAuth == nil || replayAuth.Anonymous) && profileResolution.anonymousConfinementActive())
+	scopedCaller := auth.IsNonAdmin(authCtx)
+	if scopedCaller && !authCtx.CanAccessServer(original.ServerName) {
+		s.mcpProxy.emitActivityPolicyDecision(ctx, original.ServerName, original.ToolName,
+			sessionIDFromContext(ctx), requestID, "blocked", profile.ErrToolOutsideProfile.Error(), telemetry.BlockReasonTokenPermission)
+		return nil, profile.ErrToolOutsideProfile
+	}
+
+	// Replay is a dispatch path, so it answers to the SAME shared per-tool gate
+	// as every other one (evaluateExactToolGate: server quarantine / disabled,
+	// tool-level quarantine, enabled_tools / disabled_tools, review-dirty) and
+	// takes the tool's identity, annotations and tier from it, never from a
+	// separate read. The stored record only names WHICH tool to replay.
+	gate := s.mcpProxy.evaluateExactToolGate(original.ServerName, original.ToolName)
+	identity := gate.identity
+	annotations, annotationsFound := identity.Annotations, identity.Found
+	if annotationsFound {
+		auditSetOperation(ctx, tierForAnnotations(annotations, annotationsFound))
+	}
+	if identity.Unresolved() {
+		message := unresolvedToolIdentityMessage(original.ServerName, original.ToolName, identity.DiscoveryDone)
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, message, telemetry.BlockReasonToolNotCallable)
+	}
+
 	if policy := profileResolution.Policy; policy != nil {
-		annotations, found := s.mcpProxy.EffectiveAnnotations(original.ServerName, original.ToolName)
-		intrinsic := profile.IntrinsicTier(annotations, found)
+		intrinsic := profile.IntrinsicTier(annotations, annotationsFound)
 		if admitted, reason, tier := policy.Decide(original.ServerName, original.ToolName, intrinsic); !admitted && reason != profile.ReasonServerNotInProfile {
 			message, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, original.ServerName, original.ToolName, profileRefusalSubject(profileResolution, profileIndex))
 			refusal := &profile.ToolBlockedError{Reason: blockReason, Message: message}
@@ -4444,6 +4593,55 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 				sessionIDFromContext(ctx), requestID, "blocked", message, telemetry.BlockReasonOther, string(blockReason))
 			return nil, refusal
 		}
+	}
+
+	// Agent token authorization: replay dispatches a real call, so a scoped
+	// credential needs the TARGET tool's permission tier (fail closed to
+	// destructive when unknown), exactly as handleCallToolVariant enforces.
+	// Exact-match, not hierarchical.
+	if scopedCaller {
+		if perm := tierForAnnotations(annotations, annotationsFound); perm != "" && !authCtx.HasPermission(perm) {
+			message := tokenTierRefusalText(perm, original.ServerName, original.ToolName)
+			return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonTokenPermission, message, telemetry.BlockReasonTokenPermission)
+		}
+	}
+
+	// The shared policy gates, in handleCallToolVariant's order of answer.
+	if refusal := s.mcpProxy.replayGateRefusal(ctx, gate, requestID); refusal != nil {
+		return nil, refusal
+	}
+	if s.mcpProxy.replayAfterGate != nil {
+		s.mcpProxy.replayAfterGate()
+	}
+
+	// Live identity. Replay is an operator convenience, not a hot path, so it
+	// is stricter than handleCallToolVariant: it dispatches only onto a
+	// CERTIFIED connection generation, and only the SAME generation every
+	// verdict above (quarantine, profile policy, token tier, audit operation)
+	// was computed from. A missing or disconnected client, a gate identity
+	// that was not certified, or a live generation that differs from the
+	// gate's is refused with zero upstream calls; the caller retries and the
+	// next replay evaluates everything against the new generation. The
+	// dispatch is pinned to that generation, so a reconnect between this
+	// check and the transport is refused by the managed client.
+	client, exists := s.mcpProxy.upstreamManager.GetClient(original.ServerName)
+	if !exists || !client.IsConnected() {
+		message := fmt.Sprintf("Server '%s' is not connected - use 'upstream_servers' tool to check server configuration", original.ServerName)
+		if exists {
+			message = fmt.Sprintf("Server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", original.ServerName, client.GetState().String())
+		}
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, message, telemetry.BlockReasonToolNotCallable)
+	}
+	discoveryWindow := unresolvedToolIdentityMessage(original.ServerName, original.ToolName, false)
+	if !identity.certified() {
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, discoveryWindow, telemetry.BlockReasonToolNotCallable)
+	}
+	certified, message, refuse := s.mcpProxy.liveIdentityRefusal(gate.serverConfig, original.ServerName, original.ToolName, identity, client)
+	if refuse {
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, message, telemetry.BlockReasonToolNotCallable)
+	}
+	if !certified.certified() || certified.DiscoveryEpoch != identity.DiscoveryEpoch {
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, discoveryWindow, telemetry.BlockReasonToolNotCallable)
 	}
 
 	// Spec 107 (round-3 cross-review finding, PR-D): the persisted record's
@@ -4459,11 +4657,30 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 	s.mcpProxy.auditAuthz(ctx, "allow", "")
 
 	startTime := time.Now()
-	result, err := s.runtime.ReplayToolCall(ctx, id, arguments)
+	ctx = s.mcpProxy.withReviewDirtyRecheck(ctx, original.ServerName)
+	result, err := s.runtime.ReplayToolCallWithOptions(ctx, id, arguments, runtime.ReplayOptions{
+		PinEpoch: true,
+		Epoch:    certified.DiscoveryEpoch,
+	})
 	durationMs := time.Since(startTime).Milliseconds()
 
 	var limitErr *limiter.LimitError
+	dirty := isReviewNotRecordedRefusal(err)
 	switch {
+	case dirty || errors.Is(err, managed.ErrConnectionGenerationChanged):
+		// The generation moved (or the review state changed) while the call
+		// waited: the managed client refused before the transport, so nothing
+		// reached the upstream. Same refusal bodies as the other dispatch
+		// paths; the allow line is closed by an error tool_call, never a
+		// second authz.
+		message := unresolvedToolIdentityMessage(original.ServerName, original.ToolName, false)
+		if dirty {
+			message = reviewNotRecordedMessage(original.ServerName)
+		}
+		s.mcpProxy.auditToolCall(ctx, "error", "", audit.ErrorClassUpstreamUnavailable, durationMs, nil, nil)
+		s.mcpProxy.emitActivityPolicyDecision(ctx, original.ServerName, original.ToolName,
+			sessionIDFromContext(ctx), requestID, "blocked", message, telemetry.BlockReasonToolNotCallable)
+		return nil, &profile.ToolBlockedError{Reason: replayBlockReasonToolNotCallable, Message: message}
 	case errors.As(err, &limitErr) && limitErr.Shed():
 		// Spec 093 FR-011: a shed never reached the upstream, so it is the
 		// tool_call half of the authz-allow pair, never a second authz —
@@ -4871,10 +5088,16 @@ func (a *serverUnquarantinerAdapter) CommitServerApproval(serverName string, blo
 // CommitServerApproval (Spec 117 PR-2): activity record and upstream/index
 // refresh, with no promotion of tools filed after the commit.
 func (a *serverUnquarantinerAdapter) FinishServerApproval(serverName string) error {
+	return a.FinishServerApprovalCtx(context.Background(), serverName)
+}
+
+// FinishServerApprovalCtx is FinishServerApproval naming the approver the
+// request context carries (issue #1698; scanner's optional capability).
+func (a *serverUnquarantinerAdapter) FinishServerApprovalCtx(ctx context.Context, serverName string) error {
 	if a.server == nil || a.server.runtime == nil {
 		return fmt.Errorf("server unavailable")
 	}
-	return a.server.runtime.FinishServerApproval(serverName)
+	return a.server.runtime.FinishServerApprovalCtx(ctx, serverName)
 }
 
 // CommitServerApprovalAt is CommitServerApproval bound to the reviewed server
@@ -5339,7 +5562,7 @@ func (p *configServerInfoProvider) EnsureConnected(ctx context.Context, serverNa
 		}
 	}
 
-	return p.server.runtime.RestartServer(serverName)
+	return p.server.runtime.RestartServerCtx(ctx, serverName)
 }
 
 // AwaitingOAuthLogin implements the scanner's optional oauthLoginAwareProvider

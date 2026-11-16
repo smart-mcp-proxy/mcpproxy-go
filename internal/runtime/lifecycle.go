@@ -73,11 +73,21 @@ func (r *Runtime) StartBackgroundInitialization() {
 		}
 		r.mu.RUnlock()
 
-		if deleted, err := r.storageManager.CleanupOrphanedOAuthTokens(validServerNames); err != nil {
+		// Spec 123 FR-015: a row the cleanup cannot decode is never deleted;
+		// it is kept and reported, and one that names no configured server
+		// is listed as an undecryptable orphan for the operator to discard.
+		if rep, err := r.storageManager.CleanupOrphanedOAuthTokensReport(validServerNames); err != nil {
 			r.logger.Warn("Failed to cleanup orphaned OAuth tokens", zap.Error(err))
-		} else if deleted > 0 {
-			r.logger.Info("Cleaned up orphaned OAuth tokens during startup",
-				zap.Int("deleted", deleted))
+		} else {
+			if rep.Deleted > 0 {
+				r.logger.Info("Cleaned up orphaned OAuth tokens during startup",
+					zap.Int("deleted", rep.Deleted))
+			}
+			if len(rep.UndecryptableKept) > 0 {
+				r.logger.Warn("Kept OAuth token rows that cannot be decrypted with the configured key",
+					zap.Strings("rows", rep.UndecryptableKept),
+					zap.Strings("orphans", rep.UndecryptableOrphans))
+			}
 		}
 	}
 
@@ -423,7 +433,7 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 
 	// Prune entries for servers removed from config. Fresh snapshots are NOT
 	// published here: each server's snapshot, capture stamp and approval
-	// records are committed together under captureSnapMu by
+	// records are committed together under captureSnapLock by
 	// commitDiscoveredTools, so a concurrent review never reads one
 	// generation's records with another's stamp.
 	r.lastGoodToolsMu.Lock()
@@ -1039,13 +1049,13 @@ func (r *Runtime) persistQuarantinedToolDefinitionsAt(serverName string, tools [
 // applied for the server, or from a retired or reconnected client, persists
 // nothing.
 func (r *Runtime) persistInventoryDefinitions(serverName string, tools []*config.ToolMetadata, instanceGen int64, inv managed.InventoryCapture) (persisted bool, err error) {
-	r.captureSnapMu.Lock()
-	defer r.captureSnapMu.Unlock()
+	r.captureSnapLock(serverName).Lock()
+	defer r.captureSnapLock(serverName).Unlock()
 	return r.persistToolDefinitionsLocked(serverName, tools, instanceGen, inv)
 }
 
 // persistToolDefinitionsLocked records, prunes and publishes one review
-// capture. Caller holds captureSnapMu for writing.
+// capture. Caller holds captureSnapLock for writing.
 //
 // Spec 116 FR-008a (review R2.2): the capture's final generation check and
 // all of its writes (review records, prune, last-good snapshot, capture
@@ -1121,7 +1131,7 @@ func (r *Runtime) noteCaptureLocked(serverName string) {
 }
 
 // commitDiscoveredTools publishes a discovery result and updates the stored
-// approval records under captureSnapMu, so GetServerReview never observes the
+// approval records under captureSnapLock, so GetServerReview never observes the
 // new capture stamp with the previous generation's records (or vice versa).
 // For an eligible server the last-good snapshot and capture stamp are written,
 // together with the differential index update, in ONE hold of the server's
@@ -1156,8 +1166,8 @@ func (r *Runtime) commitDiscoveredToolsAt(ctx context.Context, serverName string
 // re-lists the current client.
 func (r *Runtime) commitInventoryAt(ctx context.Context, serverName string, tools []*config.ToolMetadata, instanceGen int64, capture *supervisor.DiscoveryCapture, inv inventoryRef) (eligible, published bool, err error) {
 	r.inventoryBeforeApply(serverName, inv.capture)
-	r.captureSnapMu.Lock()
-	defer r.captureSnapMu.Unlock()
+	r.captureSnapLock(serverName).Lock()
+	defer r.captureSnapLock(serverName).Unlock()
 	if !r.serverEligibleForIndexing(serverName) {
 		if _, perr := r.persistToolDefinitionsLocked(serverName, tools, instanceGen, inv.capture); perr != nil {
 			r.logger.Warn("Failed to capture review definitions for ineligible server",
@@ -1395,7 +1405,7 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	}
 
 	// Publish the last-good snapshot, capture stamp and approval records as
-	// one generation (captureSnapMu), then apply the differential index
+	// one generation (captureSnapLock), then apply the differential index
 	// update. The snapshot gives the approval-driven reindex (issue #873) a
 	// source without a network round-trip; on an authoritative empty refresh
 	// it stores an empty slice so no stale set lingers.
@@ -1748,6 +1758,14 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 		return incomplete(err)
 	}
 
+	// Make this inventory peer context for other servers' scans from before
+	// its own scan until this function returns, which is after complete()
+	// published it to the StateView (or after the pass failed). With
+	// per-server capture locks another server's pass can scan while this one
+	// runs; without the registration neither pass would see the other's new
+	// tools until both published (see Runtime.inflightInventories).
+	defer r.registerInflightInventory(serverName, newTools)()
+
 	// Check tool-level quarantine approvals before indexing. Any error
 	// (errCaptureIncomplete: a record write failed; errBaselineMarker) leaves
 	// the capture incomplete: nothing below runs and nothing is published.
@@ -2076,10 +2094,15 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 // later compact retrieve_tools is a pure cache read — never a per-request
 // compile. Hashless tools are skipped: warming them would memoize distinct
 // schemas under one "" key (indexed tools always carry a hash).
+//
+// It holds sigReconcileMu, so a warm never lands inside a concurrent
+// reconcile's enumerate-then-retain window (see reconcileSignatureCache).
 func (r *Runtime) warmSignatureCache(tools []*config.ToolMetadata) {
 	if r.sigCache == nil {
 		return
 	}
+	r.sigReconcileMu.Lock()
+	defer r.sigReconcileMu.Unlock()
 	for _, tool := range tools {
 		if tool == nil || tool.Hash == "" {
 			continue
@@ -2094,10 +2117,19 @@ func (r *Runtime) warmSignatureCache(tools []*config.ToolMetadata) {
 // would otherwise accumulate for the life of the process. Called after index
 // rebuilds and differential updates; enumerates the SHARED index only —
 // per-profile indexes hold subsets of the same tools, hence the same hashes.
+//
+// sigReconcileMu is held from the enumeration through RetainHashes. Discovery
+// passes of different servers run concurrently, and a pass indexes a tool
+// before it warms its hash; holding the lock across both steps means a warm
+// either completes before the enumeration starts (so its tool is already
+// indexed and enumerated) or waits until RetainHashes is done, so a live hash
+// is never evicted by a reconcile that enumerated too early.
 func (r *Runtime) reconcileSignatureCache() {
 	if r.sigCache == nil || r.indexManager == nil {
 		return
 	}
+	r.sigReconcileMu.Lock()
+	defer r.sigReconcileMu.Unlock()
 	serverNames, err := r.indexManager.GetAllIndexedServerNames()
 	if err != nil {
 		r.logger.Debug("signature cache reconcile skipped: cannot enumerate indexed servers", zap.Error(err))
@@ -2349,10 +2381,9 @@ func (r *Runtime) postConfigReload() {
 
 	r.logger.Info("Triggering immediate reconnection after config reload")
 
-	connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	if err := r.upstreamManager.ConnectAll(connectCtx); err != nil {
+	// No deadline of our own (#1772): ConnectAll bounds each client with its
+	// resolved init_timeout, and a shorter parent here would cap one above it.
+	if err := r.upstreamManager.ConnectAll(ctx); err != nil {
 		r.logger.Warn("Some servers failed to reconnect after config reload", zap.Error(err))
 	}
 
@@ -2372,6 +2403,12 @@ func (r *Runtime) postConfigReload() {
 // together, the commit purges a disabled server's tools from the index, and
 // the connect/disconnect runs after the commit lock is released.
 func (r *Runtime) EnableServer(serverName string, enabled bool) error {
+	return r.EnableServerCtx(context.Background(), serverName, enabled)
+}
+
+// EnableServerCtx is EnableServer for a change the caller of ctx made: the
+// config_change row names them (issue #1698, RequestActor).
+func (r *Runtime) EnableServerCtx(ctx context.Context, serverName string, enabled bool) error {
 	r.logger.Info("Request to change server enabled state",
 		zap.String("server", serverName),
 		zap.Bool("enabled", enabled))
@@ -2390,7 +2427,7 @@ func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 	if enabled {
 		action = "server_enabled"
 	}
-	r.EmitActivityConfigChange(action, serverName, "api", []string{"enabled"}, map[string]interface{}{"enabled": !enabled}, map[string]interface{}{"enabled": enabled})
+	r.EmitActivityConfigChangeCtx(ctx, action, serverName, []string{"enabled"}, map[string]interface{}{"enabled": !enabled}, map[string]interface{}{"enabled": enabled})
 
 	// Reindexing and reconnect checks are slow; run them off the caller's
 	// goroutine so the HTTP handler returns right after the commit.
@@ -2407,7 +2444,13 @@ func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 // written to storage under the server's approval lock in the same step that
 // purges the index (FR-008), and published before this returns.
 func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
-	return r.QuarantineServerAt(serverName, quarantined, 0)
+	return r.QuarantineServerAtCtx(context.Background(), serverName, quarantined, 0)
+}
+
+// QuarantineServerCtx is QuarantineServer for a change the caller of ctx made:
+// the quarantine_change row names them (issue #1698, RequestActor).
+func (r *Runtime) QuarantineServerCtx(ctx context.Context, serverName string, quarantined bool) error {
+	return r.QuarantineServerAtCtx(ctx, serverName, quarantined, 0)
 }
 
 // QuarantineServerAt is QuarantineServer bound to expectedIncarnation (Spec
@@ -2416,6 +2459,12 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 // scanner approval and an unquarantine the operator reviewed in the Web UI use
 // it, so a remove and re-add in between can never release the replacement.
 func (r *Runtime) QuarantineServerAt(serverName string, quarantined bool, expectedIncarnation int64) error {
+	return r.QuarantineServerAtCtx(context.Background(), serverName, quarantined, expectedIncarnation)
+}
+
+// QuarantineServerAtCtx is QuarantineServerAt naming the caller of ctx on the
+// quarantine_change row (issue #1698).
+func (r *Runtime) QuarantineServerAtCtx(ctx context.Context, serverName string, quarantined bool, expectedIncarnation int64) error {
 	r.logger.Info("Request to change server quarantine state",
 		zap.String("server", serverName),
 		zap.Bool("quarantined", quarantined))
@@ -2494,7 +2543,7 @@ func (r *Runtime) QuarantineServerAt(serverName string, quarantined bool, expect
 	if quarantined {
 		reason = "Server quarantined for security review"
 	}
-	r.EmitActivityQuarantineChange(serverName, quarantined, reason)
+	r.EmitActivityQuarantineChangeCtx(ctx, serverName, quarantined, reason)
 
 	r.HandleUpstreamServerChange(r.AppContext())
 
@@ -2623,6 +2672,13 @@ func (r *Runtime) refreshServerFromDiskForRestart(serverName string) (*config.Se
 // Validation and disconnect are synchronous; reconnection and reindexing happen
 // asynchronously so the caller (HTTP handler) returns immediately.
 func (r *Runtime) RestartServer(serverName string) error {
+	return r.RestartServerCtx(context.Background(), serverName)
+}
+
+// RestartServerCtx is RestartServer carrying the request context: a restart
+// of a disabled server enables it, and that config_change row names the
+// caller (issue #1698).
+func (r *Runtime) RestartServerCtx(ctx context.Context, serverName string) error {
 	r.logger.Info("Request to restart server", zap.String("server", serverName))
 
 	// Issue #467: pull the latest server config from disk before falling
@@ -2645,7 +2701,7 @@ func (r *Runtime) RestartServer(serverName string) error {
 	if !serverConfig.Enabled {
 		r.logger.Info("Server is disabled, enabling it",
 			zap.String("server", serverName))
-		return r.EnableServer(serverName, true)
+		return r.EnableServerCtx(ctx, serverName, true)
 	}
 
 	// Spec 116 PR3 (#1563, review R5.4): the restart is bound to the
@@ -2663,7 +2719,7 @@ func (r *Runtime) RestartServer(serverName string) error {
 			return fmt.Errorf("server '%s' not found in configuration", serverName)
 		}
 		if !cfg.Enabled {
-			return r.EnableServer(serverName, true)
+			return r.EnableServerCtx(ctx, serverName, true)
 		}
 		client, exists := r.upstreamManager.GetClient(serverName)
 		if !exists {
@@ -2941,13 +2997,13 @@ func configsEquivalent(a, b *config.Config) bool {
 
 // reapplyLastGoodSnapshot re-applies a server's last-good snapshot to the index
 // (the sweep fallback for a connected server missing from discovery). The
-// snapshot is selected and applied under one captureSnapMu hold: a snapshot
+// snapshot is selected and applied under one captureSnapLock hold: a snapshot
 // read outside the lock could be superseded by a concurrent capture that marks
 // a tool changed, and applying the stale one afterwards would look like a
 // genuine revert and clear that hold.
 func (r *Runtime) reapplyLastGoodSnapshot(ctx context.Context, serverName string) {
-	r.captureSnapMu.Lock()
-	defer r.captureSnapMu.Unlock()
+	r.captureSnapLock(serverName).Lock()
+	defer r.captureSnapLock(serverName).Unlock()
 
 	snapshot, inv, seq, snapshotGen := r.lastGoodSnapshotWithCaptureGen(serverName)
 	if len(snapshot) == 0 {

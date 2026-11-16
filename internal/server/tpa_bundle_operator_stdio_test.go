@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
-	"fmt"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -18,10 +19,22 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 )
 
-// operatorSignedBundle renders a one-rule corpus whose manifest names keyID, at
-// the given sequence and trust epoch 0.
-func operatorSignedBundle(keyID string, seq uint64) []byte {
-	return []byte(fmt.Sprintf(`{"bundle_version":"0.1.0","key_id":%q,"rules":[{"category":"rug-pull","confidence":0.9,"detector":"op","engine":"regex","id":"TPA-2099-9002","level":"high","pattern":"operator-bundle-canary","target":"tool_description"}],"schema_version":"0.1.0","sequence":"%d","signature_count":1,"trust_epoch":0}`, keyID, seq))
+// operatorSignedBundle renders the embedded seed corpus as an operator manifest
+// naming keyID, at the given sequence and trust epoch 0. It reuses the full
+// corpus because the activation self-check (Spec 101 US3) scores every
+// candidate on the eval corpus: a reduced operator corpus would miss the seed
+// signatures' samples and be refused as gate_failure, which is not what this
+// transport test is about.
+func operatorSignedBundle(t *testing.T, keyID string, seq uint64) []byte {
+	t.Helper()
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(scanner.EmbeddedBundle(), &m))
+	m["key_id"] = keyID
+	m["sequence"] = strconv.FormatUint(seq, 10)
+	m["trust_epoch"] = 0
+	out, err := json.Marshal(m)
+	require.NoError(t, err)
+	return out
 }
 
 // TestTPAOperatorSignedBundleActivatesInStdioMode: a stdio-mode server (no
@@ -38,7 +51,7 @@ func TestTPAOperatorSignedBundleActivatesInStdioMode(t *testing.T) {
 
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "scanner-bundle.json")
-	bundle := operatorSignedBundle(bundlesig.KeyID(pub), 5)
+	bundle := operatorSignedBundle(t, bundlesig.KeyID(pub), 5)
 	require.NoError(t, os.WriteFile(bundlePath, bundle, 0o600))
 	require.NoError(t, os.WriteFile(bundlePath+".sig", bundlesig.SignSidecar(priv, bundle), 0o600))
 

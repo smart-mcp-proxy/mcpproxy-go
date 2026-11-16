@@ -1,0 +1,33 @@
+{
+  "category": "bug",
+  "message": "mcpproxy is using very high CPU even when idle",
+  "email": "user@example.com",
+  "context": {
+    "version": "v0.70.1",
+    "edition": "personal",
+    "os": "darwin",
+    "arch": "arm64",
+    "go_version": "go1.26.1",
+    "server_count": 12,
+    "connected_server_count": 9,
+    "tool_count": 184,
+    "routing_mode": "retrieve_tools",
+    "uptime_minutes": 95,
+    "anonymous_id": "550e8400-e29b-41d4-a716-446655440000",
+    "machine_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "last_startup_outcome": "success",
+    "previous_shutdown": "crash",
+    "last_error_code": "MCPX_STDIO_SPAWN_ENOENT",
+    "diagnostics": {
+      "error_code_counts_24h": {
+        "MCPX_STDIO_SPAWN_ENOENT": 3
+      },
+      "current_error_codes": {
+        "MCPX_OAUTH_REFRESH_EXPIRED": 1
+      },
+      "fix_attempted_24h": 0,
+      "fix_succeeded_24h": 0,
+      "unique_codes_ever": 2
+    }
+  }
+}

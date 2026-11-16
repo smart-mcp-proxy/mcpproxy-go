@@ -89,7 +89,7 @@ sudo rpm --import https://rpm.mcpproxy.app/mcpproxy.gpg
 
 ### `404` on `https://apt.mcpproxy.app/dists/stable/Release` just after a release
 
-Cloudflare's edge cache is `max-age=300` (5 minutes) on metadata files, so you might see the old state briefly. Wait up to 5 minutes and retry. If it persists longer than 30 minutes after a tag push, the publish job may have failed — check the Actions tab of the repository.
+The publish scripts set `Cache-Control: public, max-age=60, must-revalidate` on repository metadata. If a new or just-updated `Release` file appears stale, wait about a minute and retry. If it persists longer than 30 minutes after a tag push, the publish job may have failed — check the Actions tab of the repository.
 
 ### `apt update` reports `Packages file is expired`
 

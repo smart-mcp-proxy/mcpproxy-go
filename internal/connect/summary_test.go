@@ -263,6 +263,35 @@ func TestPreview_ExistingEntrySummary_TOMLClient(t *testing.T) {
 	}
 }
 
+// A Codex entry's http_headers / env_http_headers tables project header NAMES
+// only, never values.
+func TestPreview_ExistingEntrySummary_TOMLHeaderNames(t *testing.T) {
+	svc, home := serviceWithKey(t, "")
+	cfgPath := ConfigPath("codex", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "[mcp_servers.mcpproxy]\nurl = \"http://127.0.0.1:8080/mcp\"\n" +
+		"http_headers = { \"X-API-Key\" = \"HDR-SECRET\" }\n" +
+		"env_http_headers = { \"X-Extra\" = \"ENV-VAR-NAME\" }\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := svc.Preview("codex", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if preview.ExistingEntrySummary == nil {
+		t.Fatal("expected ExistingEntrySummary")
+	}
+	if got := strings.Join(preview.ExistingEntrySummary.HeaderNames, ","); got != "X-API-Key,X-Extra" {
+		t.Errorf("HeaderNames = %q, want X-API-Key,X-Extra", got)
+	}
+	if serialized := mustMarshal(t, preview); strings.Contains(serialized, "HDR-SECRET") {
+		t.Errorf("preview leaked the header value: %s", serialized)
+	}
+}
+
 // mustMarshal serializes v the way the HTTP layer would, so assertions run over
 // exactly the bytes that would leave the core.
 func mustMarshal(t *testing.T, v interface{}) string {

@@ -1,0 +1,38 @@
+name: Compose example
+
+# Validates examples/compose-stdio-sidecars and runs it end to end. Path-filtered:
+# it does not run on unrelated changes.
+
+on:
+  pull_request:
+    paths:
+      - 'examples/compose-stdio-sidecars/**'
+      - '.github/workflows/compose-example.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'examples/compose-stdio-sidecars/**'
+      - '.github/workflows/compose-example.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compose-stdio-sidecars:
+    name: Compose stdio sidecars
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Validate the compose file
+        working-directory: examples/compose-stdio-sidecars
+        run: |
+          ./gen-secrets.sh
+          docker compose config --quiet
+          python3 -c 'import json; json.load(open("mcpproxy/mcp_config.json"))'
+
+      - name: Bring the stack up and check it
+        working-directory: examples/compose-stdio-sidecars
+        run: ./test.sh

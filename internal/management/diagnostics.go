@@ -15,6 +15,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/redirectionguard"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 )
 
@@ -188,6 +189,12 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 				Timestamp:    errorTime,
 			})
 
+		case healthAction == health.ActionConfigure && !needsSignIn &&
+			diagnostics.Code(extractDiagnosticCode(srvRaw)) == diagnostics.OAuthTokenUndecryptable:
+			// Spec 123: an undecryptable stored OAuth row has action
+			// "configure" but is no OAuth provider parameter mismatch; the
+			// OAuth token storage section and its runtime warning name it.
+
 		case healthAction == health.ActionConfigure && !needsSignIn:
 			// Extract parameter name from error
 			// The parameter NAME is read off the pre-scrub string: it is an
@@ -274,6 +281,30 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 	// to read MCP client configs as an actionable runtime warning. No-op off darwin.
 	if warning, ok := appDataDenialWarning(); ok {
 		diag.RuntimeWarnings = append(diag.RuntimeWarnings, warning)
+	}
+
+	// #1844: Windows RedirectionGuard inherited from the installer breaks uv
+	// servers (os error 448). No-op off Windows.
+	if warning, ok := redirectionguard.Check(); ok {
+		diag.RuntimeWarnings = append(diag.RuntimeWarnings, warning)
+	}
+
+	// Spec 123 FR-030: the OAuth token storage section, and one runtime
+	// warning per undecryptable server so the issue count and tray badge
+	// reflect it. Optional: a runtime that cannot report leaves it out.
+	if src, ok := s.runtime.(OAuthTokenStorageOperations); ok {
+		if st, err := src.OAuthTokenStorageState(); err != nil {
+			s.logger.Warnw("Failed to read OAuth token storage state for diagnostics", "error", err)
+		} else {
+			admin := !auth.IsScopedCaller(ctx)
+			section := BuildOAuthTokenStorageReport(st, func(server string) bool {
+				return auth.CanEnumerateServer(ctx, server)
+			}, admin)
+			diag.OAuthTokenStorage = section
+			for _, srv := range section.Servers {
+				diag.RuntimeWarnings = append(diag.RuntimeWarnings, oauthTokenStorageWarningLine(srv, admin))
+			}
+		}
 	}
 
 	// Registered runtime-warning sources (Spec 107 T052): configuration

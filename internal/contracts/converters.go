@@ -69,6 +69,10 @@ func ConvertServerConfig(cfg *config.ServerConfig, globalIsolation *config.Docke
 			Scopes:      cfg.OAuth.Scopes,
 			ExtraParams: nil, // TODO: Add to config.OAuthConfig
 		}
+		if cfg.OAuth.RefreshReplayEnabled != nil {
+			enabled := *cfg.OAuth.RefreshReplayEnabled
+			server.OAuth.RefreshReplayEnabled = &enabled
+		}
 	}
 
 	// Convert isolation config. The per-server overrides that actually live on
@@ -447,6 +451,9 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 			}
 			if redirectPort, ok := oauth["redirect_port"].(int); ok {
 				server.OAuth.RedirectPort = redirectPort
+			}
+			if enabled, ok := oauth["refresh_replay_enabled"].(bool); ok {
+				server.OAuth.RefreshReplayEnabled = &enabled
 			}
 			if pkceEnabled, ok := oauth["pkce_enabled"].(bool); ok {
 				server.OAuth.PKCEEnabled = pkceEnabled

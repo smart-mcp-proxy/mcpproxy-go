@@ -595,6 +595,51 @@ func (r *Runtime) refreshHeldContractSnapshot(serverName, toolName string, exist
 	return true
 }
 
+// inflightInventory is one server's in-flight inventory as peer context: the
+// tools its running discovery pass will publish, already projected the way
+// collectPeerToolMetadata reads the StateView. The pointer identifies the
+// registration, so a finished pass never unregisters a newer one.
+type inflightInventory struct {
+	tools []*config.ToolMetadata
+}
+
+// registerInflightInventory makes the inventory a discovery pass of
+// serverName is applying visible as peer context to other servers' scans
+// (Runtime.inflightInventories) and returns its idempotent unregister. The
+// tools are copied into the peer projection here, by the pass's own
+// goroutine, so concurrent readers never touch the pass's metadata. Like the
+// StateView publish, only tools whose ServerName is serverName are kept.
+func (r *Runtime) registerInflightInventory(serverName string, tools []*config.ToolMetadata) func() {
+	metas := make([]*config.ToolMetadata, 0, len(tools))
+	for _, t := range tools {
+		if t == nil || t.ServerName != serverName {
+			continue
+		}
+		metas = append(metas, &config.ToolMetadata{
+			ServerName:       serverName,
+			Name:             t.Name,
+			RawName:          config.RawToolName(t),
+			Description:      t.Description,
+			ParamsJSON:       t.ParamsJSON,
+			OutputSchemaJSON: t.OutputSchemaJSON,
+		})
+	}
+	entry := &inflightInventory{tools: metas}
+	r.inflightInventoryMu.Lock()
+	if r.inflightInventories == nil {
+		r.inflightInventories = make(map[string]*inflightInventory)
+	}
+	r.inflightInventories[serverName] = entry
+	r.inflightInventoryMu.Unlock()
+	return func() {
+		r.inflightInventoryMu.Lock()
+		if r.inflightInventories[serverName] == entry {
+			delete(r.inflightInventories, serverName)
+		}
+		r.inflightInventoryMu.Unlock()
+	}
+}
+
 // collectPeerToolMetadata returns every OTHER connected server's current tools,
 // keyed by server name, projected onto config.ToolMetadata for the synchronous
 // scan gate. It is the cross-server context that lets the peer-dependent
@@ -602,10 +647,26 @@ func (r *Runtime) refreshHeldContractSnapshot(serverName, toolName string, exist
 // scan). Sourced from the lock-free StateView snapshot; returns nil when no
 // supervisor/snapshot is available (best effort — a genuinely single-server
 // deployment has no peers to shadow anyway).
+//
+// Discovery passes of different servers run concurrently (the capture lock is
+// per server) and publish to the StateView only at their end, so the
+// in-flight inventories of OTHER servers (Runtime.inflightInventories) are
+// overlaid on the snapshot: a peer's in-flight tool replaces its published
+// tool of the same raw name, and published tools the pass does not carry
+// stay. The union is deliberately conservative — it is what this scan would
+// have seen with the peer's pass ordered either before or after it — so a
+// pass that later fails cannot make a scan miss a still-published tool.
 func (r *Runtime) collectPeerToolMetadata(serverName string) map[string][]*config.ToolMetadata {
 	if r.supervisor == nil {
 		return nil
 	}
+	// The in-flight registrations are read BEFORE the StateView snapshot. A
+	// pass unregisters only after it published (or failed without publishing),
+	// so a peer missing from this copy because it already unregistered is
+	// either visible in the snapshot taken next or never became a tool. Read
+	// the other way round, a peer could publish and unregister between the two
+	// reads and be seen by neither.
+	inflight := r.inflightPeerInventories(serverName)
 	snapshot := r.supervisor.StateView().Snapshot()
 	if snapshot == nil {
 		return nil
@@ -637,10 +698,75 @@ func (r *Runtime) collectPeerToolMetadata(serverName string) map[string][]*confi
 			peers[name] = metas
 		}
 	}
+	overlayInflightPeers(inflight, peers)
 	if len(peers) == 0 {
 		return nil
 	}
 	return peers
+}
+
+// inflightPeerInventories copies the in-flight inventories of every server but
+// serverName (see collectPeerToolMetadata). The entries are immutable once
+// registered, so only the map is copied under the lock.
+func (r *Runtime) inflightPeerInventories(serverName string) map[string][]*config.ToolMetadata {
+	r.inflightInventoryMu.Lock()
+	defer r.inflightInventoryMu.Unlock()
+	if len(r.inflightInventories) == 0 {
+		return nil
+	}
+	out := make(map[string][]*config.ToolMetadata, len(r.inflightInventories))
+	for name, entry := range r.inflightInventories {
+		if name == serverName || entry == nil || len(entry.tools) == 0 {
+			continue
+		}
+		out[name] = entry.tools
+	}
+	return out
+}
+
+// overlayInflightPeers merges in-flight peer inventories into peers (see
+// collectPeerToolMetadata). It is a union: every published tool stays,
+// including one with the same raw name as an in-flight tool whose contract
+// differs (an in-flight replacement is not yet published and its pass may
+// still fail; the published contract is still what a clone would shadow), and
+// every in-flight tool is added after it. Published first: the detector's
+// per-name checks read the first entry of a server (sameTokens), and the
+// published contract is the one every pass before #1813's per-server locks
+// would have scanned against. Only an in-flight tool whose contract equals the
+// published one is skipped, so an unchanged tool is listed once.
+//
+// Known limitation (fails closed): a hold taken against a peer's in-flight
+// tool stays if that peer's pass then fails before publishing; the operator
+// reviews it like any other hold.
+func overlayInflightPeers(inflight, peers map[string][]*config.ToolMetadata) {
+	for name, tools := range inflight {
+		if len(tools) == 0 {
+			continue
+		}
+		published := make(map[string][]*config.ToolMetadata, len(peers[name]))
+		for _, t := range peers[name] {
+			raw := config.RawToolName(t)
+			published[raw] = append(published[raw], t)
+		}
+		merged := make([]*config.ToolMetadata, 0, len(tools)+len(peers[name]))
+		merged = append(merged, peers[name]...)
+	next:
+		for _, t := range tools {
+			for _, p := range published[t.RawName] {
+				if samePeerContract(t, p) {
+					continue next
+				}
+			}
+			merged = append(merged, t)
+		}
+		peers[name] = merged
+	}
+}
+
+// samePeerContract reports whether two peer projections carry the same
+// contract as far as the peer-dependent scan checks read it.
+func samePeerContract(a, b *config.ToolMetadata) bool {
+	return a.Description == b.Description && a.ParamsJSON == b.ParamsJSON && a.OutputSchemaJSON == b.OutputSchemaJSON
 }
 
 // ToolApprovalResult contains the result of checking tool approvals for a server.
@@ -2690,7 +2816,7 @@ func (r *Runtime) reindexServerToolsAfterApprovalChange(serverName string) {
 	// Prefer the last-good snapshot so the reindex is a pure local diff with no
 	// network round-trip. It is populated by the full sweep and by
 	// DiscoverAndIndexToolsForServer. Selection and application happen under one
-	// captureSnapMu hold so a concurrent capture cannot be overwritten by a
+	// captureSnapLock hold so a concurrent capture cannot be overwritten by a
 	// stale snapshot (which would look like a revert and clear a changed hold).
 	if r.reindexFromLastGoodSnapshot(serverName) {
 		return
@@ -2707,14 +2833,14 @@ func (r *Runtime) reindexServerToolsAfterApprovalChange(serverName string) {
 }
 
 // reindexFromLastGoodSnapshot re-runs the differential update from the
-// last-good snapshot under captureSnapMu. It reports false when no snapshot
+// last-good snapshot under captureSnapLock. It reports false when no snapshot
 // exists yet, or (Spec 117 PR-3, FR-037) when the snapshot no longer
 // describes the live connection — its client was replaced, retired or
 // reconnected, or a newer capture with definitions was applied — so the caller
 // re-lists the server instead of re-applying older definitions.
 func (r *Runtime) reindexFromLastGoodSnapshot(serverName string) bool {
-	r.captureSnapMu.Lock()
-	defer r.captureSnapMu.Unlock()
+	r.captureSnapLock(serverName).Lock()
+	defer r.captureSnapLock(serverName).Unlock()
 
 	snapshot, inv, seq, snapshotGen := r.lastGoodSnapshotWithCaptureGen(serverName)
 	if len(snapshot) == 0 {

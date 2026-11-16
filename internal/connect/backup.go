@@ -91,7 +91,7 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode, preRename func(
 	dir := filepath.Dir(path)
 
 	// Ensure the directory exists
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, newDirPerm); err != nil {
 		return fmt.Errorf("create directory %s: %w", dir, err)
 	}
 
@@ -134,3 +134,13 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode, preRename func(
 	success = true
 	return nil
 }
+
+// Create defaults for files and directories the wizard itself creates. The
+// written config embeds a minted per-client credential, so a new file must not
+// be readable by other local users. Existing files and directories keep
+// their current mode (see currentPerm / preWriteState); a backup is created
+// with the mode of the file it copies, so it is never more permissive.
+const (
+	newFilePerm os.FileMode = 0o600
+	newDirPerm  os.FileMode = 0o700
+)

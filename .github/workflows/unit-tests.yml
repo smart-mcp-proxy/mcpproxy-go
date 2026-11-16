@@ -89,6 +89,33 @@ jobs:
       - name: Check the repository
         run: bash scripts/check-no-unquarantine-callers.sh
 
+  # Issue #1794: the Windows test legs run through a wrapper that retries a
+  # Go runtime fault once. Its self-test (fake `go`, canned logs) proves the
+  # retry fires only on the fault signature and never on a real failure.
+  go-test-retry-self-test:
+    name: Go Test Retry Wrapper
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Self-test the retry wrapper
+        run: bash scripts/go-test-retry-runtime-fault.test.sh
+
+  # The macOS Build Binaries leg builds the Swift tray through
+  # scripts/build-swift-app.sh. Its self-test (fake swift/swiftc/curl, a stale
+  # SwiftPM artifact-cache entry) proves a stale Sparkle download is purged
+  # and retried once, and that a compile error is not.
+  build-swift-app-self-test:
+    name: Swift Build Script
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Self-test the SwiftPM retry
+        run: bash scripts/build-swift-app.test.sh
+
   # Spec 116 FR-009 (T002): storage's upstreams rows are written only by the
   # config commit (internal/runtime/commit*.go). Hermetic grep; the self-test
   # proves the check can fail.
@@ -104,6 +131,85 @@ jobs:
 
       - name: Check the repository
         run: bash scripts/check-upstream-write-sites.sh
+
+  # Issue #1844: the Inno Setup install action and the Ver guard in
+  # scripts/installer.iss otherwise only run on tag builds. This job proves on
+  # every PR that the pinned 6.7.4 installs (SHA-256 verified), that the real
+  # installer script compiles with it (stub binaries; no Go build needed), and
+  # that the preprocessor guard can actually fail.
+  inno-setup-action-self-test:
+    name: Inno Setup Action
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install pinned Inno Setup
+        uses: ./.github/actions/install-inno-setup
+
+      - name: Compile scripts/installer.iss with stub binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+
+          # installer.iss only needs the two exe files to exist; ignoreversion
+          # means their content is not inspected, so stubs are enough.
+          $bin = Join-Path $env:RUNNER_TEMP 'inno-selftest\bin'
+          $out = Join-Path $env:RUNNER_TEMP 'inno-selftest\out'
+          New-Item -ItemType Directory -Force -Path $bin, $out | Out-Null
+          Set-Content -Path (Join-Path $bin 'mcpproxy.exe') -Value 'stub' -Encoding ASCII
+          Set-Content -Path (Join-Path $bin 'mcpproxy-tray.exe') -Value 'stub' -Encoding ASCII
+
+          $log = (& $iscc "/O$out" "/DVersion=0.0.0-selftest" "/DArch=amd64" "/DBinPath=$bin" 'scripts\installer.iss' 2>&1 | Out-String)
+          $code = $LASTEXITCODE
+          Write-Host $log
+          if ($code -ne 0) {
+            Write-Host "::error::ISCC failed to compile scripts/installer.iss (exit code $code)"
+            exit 1
+          }
+          if ($log -notmatch '6\.7\.4') {
+            Write-Host '::error::ISCC output does not report Inno Setup 6.7.4'
+            exit 1
+          }
+          $setup = Join-Path $out 'mcpproxy-setup-0.0.0-selftest-amd64.exe'
+          if (-not (Test-Path -LiteralPath $setup)) {
+            Write-Host "::error::Expected installer was not produced: $setup"
+            exit 1
+          }
+          Write-Host "Compiled $setup"
+
+      - name: Prove the version guard can fail
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          $dir = Join-Path $env:RUNNER_TEMP 'inno-selftest\guard'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $script = Join-Path $dir 'guard.iss'
+          # Same guard shape as installer.iss, but demanding a version that
+          # does not exist: ISCC must exit non-zero.
+          @(
+            '#if Ver < EncodeVer(99,0,0)'
+            '  #error "guard fired"'
+            '#endif'
+            '[Setup]'
+            'AppName=Guard'
+            'AppVersion=1.0'
+            'DefaultDirName={autopf}\Guard'
+            "OutputDir=$dir"
+            'OutputBaseFilename=guard'
+          ) | Set-Content -Path $script -Encoding ASCII
+          $log = (& $iscc $script 2>&1 | Out-String)
+          $code = $LASTEXITCODE
+          Write-Host $log
+          if ($code -eq 0) {
+            Write-Host '::error::The Ver guard did not fail the compile; it would not protect installer.iss'
+            exit 1
+          }
+          Write-Host "Guard failed the compile as expected (exit code $code)"
+          exit 0
 
   test:
     name: Unit Tests
@@ -195,20 +301,29 @@ jobs:
       # slow runner away from "panic: test timed out" — which is how the leg
       # failed on the first green-again push after #1266. It has since grown to
       # ~1100-1200s, so the bound is 40m to leave real headroom.
+      #
+      # The run goes through scripts/go-test-retry-runtime-fault.sh: when the
+      # first run dies of a Go runtime fault (`unexpected fault address … /
+      # fatal error: fault`, issue #1794 — a Go/Windows runtime bug,
+      # golang/go#81189 and #81238), the failed packages are re-run once and a
+      # ::warning:: annotation names them. Assertion failures, build errors
+      # and timeouts are never retried.
       - name: Run unit tests (Windows)
         if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: go test -v -race -timeout 40m '-coverprofile=coverage.out' -covermode=atomic '-skip=E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint' ./...
+        shell: bash
+        run: bash scripts/go-test-retry-runtime-fault.sh -v -race -timeout 40m -coverprofile=coverage.out -covermode=atomic -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" -- ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
       # internal/server under -race takes ~10 minutes on the macOS runner and
       # grows with every spec's tests, so the default 10m package timeout
-      # ("panic: test timed out") is no longer enough there; match the
-      # Windows leg's 20m.
+      # ("panic: test timed out") is no longer enough there. internal/security/
+      # scanner also scores the full 1.2k-entry TPA eval corpus (Spec 101 US2,
+      # 1047 hard negatives) in several tests and timed out at 20m on
+      # ubuntu-latest; match the Windows leg's 40m.
       - name: Run unit tests (Unix)
         if: matrix.os != 'windows-latest'
-        run: go test -v -race -timeout 20m -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
+        run: go test -v -race -timeout 40m -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
@@ -315,7 +430,7 @@ jobs:
       # Keep the flags identical to the required ubuntu lane except for
       # -shuffle=on (and no coverage — Codecov already gets the ordered run).
       - name: Run unit tests (shuffled)
-        run: go test -v -race -timeout 20m -shuffle=on -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
+        run: go test -v -race -timeout 40m -shuffle=on -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
@@ -420,8 +535,10 @@ jobs:
       # race-tested (Spec 107 FR-047). The -skip regex is the one the unit-test
       # job uses (see "Run unit tests" above): it drops the binary-spawning
       # internal/server tests that otherwise hang to the package timeout.
+      # internal/server alone took ~1130s of the old 20m here once the bundle
+      # activation self-check scored the full TPA corpus, hence 40m.
       - name: Test server edition packages
-        run: go test -race -tags server -timeout 20m -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/serveredition/... ./internal/config/... ./internal/oauth/... ./internal/server/... ./internal/httpapi/... ./internal/storage/...
+        run: go test -race -tags server -timeout 40m -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/serveredition/... ./internal/config/... ./internal/oauth/... ./internal/server/... ./internal/httpapi/... ./internal/storage/...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 

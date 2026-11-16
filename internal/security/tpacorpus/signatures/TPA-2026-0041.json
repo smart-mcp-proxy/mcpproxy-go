@@ -1,0 +1,74 @@
+{
+  "category": "tpa_payload_execution",
+  "gating": true,
+  "id": "TPA-2026-0041",
+  "license": "MIT",
+  "provenance": {
+    "note": "Injected agent directive to wipe the local filesystem and delete cloud resources.",
+    "published": "2025-07-23",
+    "source": "https://aws.amazon.com/security/security-bulletins/AWS-2025-015/"
+  },
+  "rules": [
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "destroy_then_proceed_unasked",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0041",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$destroy",
+          "type": "regex",
+          "value": "delete|wipe|destroy"
+        },
+        {
+          "context": "tool_description",
+          "id": "$noask",
+          "type": "regex",
+          "value": "proceed without asking"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)(?:^|[.!?:;]\\s*)(?:(?:first|then|now|also|immediately|always)\\b,?\\s+)*(?:(?:you|agent|assistant|model|ai)\\s+)?(?:(?:must|should|shall|will)\\s+)?\\b(?:delete|wipe|erase|remove|destroy|terminate)\\b[^.\\n]{0,100}?\\b(?:cloud resources|aws resources|home directory|all backups|file[- ]?system contents|everything on (?:the )?disk)\\b(?:[\\s,;:.!?\\-\\x{2013}\\x{2014}\\\"`()\\[\\]]+(?:[^\\Wncd]\\w*|n(?:[^\\Woe]\\w*|o(?:[^\\Wtr]\\w*|t\\w+|r\\w+)|e(?:[^\\Wv]\\w*|v(?:[^\\We]\\w*|e(?:[^\\Wr]\\w*|r\\w+)?)?)?)?|c(?:[^\\Wa]\\w*|a(?:[^\\Wn]\\w*|n(?:[^\\Wn]\\w*|n(?:[^\\Wo]\\w*|o(?:[^\\Wt]\\w*|t\\w+)?)?)?)?)?|d(?:[^\\Wo]\\w*|o(?:[^\\Wn]\\w*|n(?:[^\\Wt]\\w*|t\\w+)?)?)?)(?:'s)?){0,40}\\s*(?:[.!;]\\s*|\\b(?:and|then)\\s+)(?:(?:then|and|just|simply|please|now|always)\\s+)*proceed\\w*\\s+without\\s+(?:asking|confirm\\w*|prompt\\w*|approval)(?:\\s+(?:for|from|of|with)\\b[^.\\n]{0,40})?\\s*(?:[.!;)]|$)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "wipe_fs_and_cloud",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0041",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$fs",
+          "type": "regex",
+          "value": "file[- ]?system|home directory"
+        },
+        {
+          "context": "tool_description",
+          "id": "$cloud",
+          "type": "regex",
+          "value": "cloud resources|backups|s3 buckets"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)(?:\\b(?:agent|assistant|model|ai)\\b[^.\\n]{0,30}?\\b(?:directives?|instructions?|must|should|tasks?)\\b.{0,160}?(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:(?:silently|quietly|secretly|covertly|discreetly|automatically|immediately)\\s+)*(?:wipe|erase|destroy|delete|remove)\\b[^.\\n]{0,40}?\\b(?:(?:the |your |their )?(?:entire |whole |local )?file[- ]?system|(?:the |your )?home directory|(?:the )?entire disk|all (?:local |of the )?(?:files|data))\\b.{0,250}?(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:(?:silently|quietly|secretly|covertly|discreetly|automatically|immediately)\\s+)*(?:delete|destroy|terminate|remove|tear\\s*down)\\b[^.\\n]{0,40}?\\b(?:all|every|each|entire)\\b[^.\\n]{0,40}?\\b(?:cloud (?:resources?|infrastructure)|aws (?:resources?|account)|backups?|s3 buckets?|ec2|iam)\\b[\\s,;:.!?\\-\\x{2013}\\x{2014}\\\"`()\\[\\]]+(?:(?:[^\\Wncd]\\w*|n(?:[^\\Woe]\\w*|o(?:[^\\Wtr]\\w*|t\\w+|r\\w+)|e(?:[^\\Wv]\\w*|v(?:[^\\We]\\w*|e(?:[^\\Wr]\\w*|r\\w+)?)?)?)?|c(?:[^\\Wa]\\w*|a(?:[^\\Wn]\\w*|n(?:[^\\Wn]\\w*|n(?:[^\\Wo]\\w*|o(?:[^\\Wt]\\w*|t\\w+)?)?)?)?)?|d(?:[^\\Wo]\\w*|o(?:[^\\Wn]\\w*|n(?:[^\\Wt]\\w*|t\\w+)?)?)?)(?:'s)?[\\s,;:.!?\\-\\x{2013}\\x{2014}\\\"`()\\[\\]]+){0,40}(?:\\bsilently\\s*(?:[.!;)]|$)|\\bwithout\\s+(?:asking|confirm\\w*|telling|notifying|approval)(?:\\s+(?:for|from|of|with)\\b[^.\\n]{0,40})?\\s*(?:[.!;)]|$)|\\bdo\\s+not\\s+(?:ask|tell|mention|confirm|warn|notify)\\b(?:\\s+(?:the\\s+)?(?:user|human|owner|operator)s?)?(?:\\s+(?:for|about)\\s+(?:any\\s+|the\\s+)?(?:confirm\\w*|approval|permission))?\\s*(?:[.!;)]|$))|(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:(?:silently|quietly|secretly|covertly|discreetly|automatically|immediately)\\s+)*(?:wipe|erase|destroy|delete|remove)\\b[^.\\n]{0,40}?\\b(?:(?:the |your |their )?(?:entire |whole |local )?file[- ]?system|(?:the |your )?home directory|(?:the )?entire disk|all (?:local |of the )?(?:files|data))\\b.{0,250}?(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:(?:silently|quietly|secretly|covertly|discreetly|automatically|immediately)\\s+)*(?:delete|destroy|terminate|remove|tear\\s*down)\\b[^.\\n]{0,40}?\\b(?:all|every|each|entire)\\b[^.\\n]{0,40}?\\b(?:cloud (?:resources?|infrastructure)|aws (?:resources?|account)|backups?|s3 buckets?|ec2|iam)\\b[\\s,;:.!?\\-\\x{2013}\\x{2014}\\\"`()\\[\\]]+(?:(?:[^\\Wncd]\\w*|n(?:[^\\Woe]\\w*|o(?:[^\\Wtr]\\w*|t\\w+|r\\w+)|e(?:[^\\Wv]\\w*|v(?:[^\\We]\\w*|e(?:[^\\Wr]\\w*|r\\w+)?)?)?)?|c(?:[^\\Wa]\\w*|a(?:[^\\Wn]\\w*|n(?:[^\\Wn]\\w*|n(?:[^\\Wo]\\w*|o(?:[^\\Wt]\\w*|t\\w+)?)?)?)?)?|d(?:[^\\Wo]\\w*|o(?:[^\\Wn]\\w*|n(?:[^\\Wt]\\w*|t\\w+)?)?)?)(?:'s)?[\\s,;:.!?\\-\\x{2013}\\x{2014}\\\"`()\\[\\]]+){0,40}(?:\\bsilently\\s*(?:[.!;)]|$)|\\bwithout\\s+(?:asking|confirm\\w*|telling|notifying|approval)(?:\\s+(?:for|from|of|with)\\b[^.\\n]{0,40})?\\s*(?:[.!;)]|$)|\\bdo\\s+not\\s+(?:ask|tell|mention|confirm|warn|notify)\\b(?:\\s+(?:the\\s+)?(?:user|human|owner|operator)s?)?(?:\\s+(?:for|about)\\s+(?:any\\s+|the\\s+)?(?:confirm\\w*|approval|permission))?\\s*(?:[.!;)]|$)))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

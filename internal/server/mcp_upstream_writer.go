@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
@@ -25,7 +27,17 @@ type upstreamWriter interface {
 	// removeServer removes the server in one commit and returns what the
 	// purge deleted (Spec 116 PR2).
 	removeServer(name string) (storage.PurgeReport, error)
-	quarantineServer(name string) error
+	// quarantineServer quarantines the server; ctx names the caller for the
+	// quarantine_change row (issue #1698).
+	quarantineServer(ctx context.Context, name string) error
+}
+
+// mcpActorContext returns ctx carrying the MCP caller as the request's actor
+// (issue #1698): the credential kind and name from the AuthContext, on the
+// `mcp` surface. The MCP management tools are the only callers, so the
+// surface is never in doubt.
+func mcpActorContext(ctx context.Context) context.Context {
+	return runtime.ContextWithActor(ctx, runtime.ActorFromContext(ctx, profile.SurfaceMCP))
 }
 
 // errUpstreamNotFound is returned by an upstreamWriter for an unknown name.
@@ -82,11 +94,11 @@ func (w commitUpstreamWriter) removeServer(name string) (storage.PurgeReport, er
 	return w.s.removeServerFromConfig(name)
 }
 
-func (w commitUpstreamWriter) quarantineServer(name string) error {
+func (w commitUpstreamWriter) quarantineServer(ctx context.Context, name string) error {
 	// The runtime's QuarantineServer is the commit (SetQuarantined) plus the
 	// review events and the activity record: the MCP door gets exactly what
 	// the REST door gets, including the index purge (B1, #1061).
-	if err := w.s.runtime.QuarantineServer(name, true); err != nil {
+	if err := w.s.runtime.QuarantineServerCtx(ctx, name, true); err != nil {
 		if errors.Is(err, runtime.ErrServerNotFound) {
 			return errUpstreamNotFound
 		}

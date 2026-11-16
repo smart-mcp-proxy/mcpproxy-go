@@ -88,6 +88,7 @@ A running MCPProxy core watches `mcp_config.json` and hot-reloads external edits
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `oauth_token_encryption_key` | string | `""` (off) | Key that encrypts the upstream OAuth tokens in `config.db` (AES-256-GCM): 32 random bytes, base64. A literal key or one reference: `${file:/abs/path}`, `${env:NAME}`, `${keyring:NAME}`. Env `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY` / `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE` override it. A key that cannot be resolved stops startup with exit code 4 before `config.db` is opened. Needs a restart. Masked in the REST API and the Web UI. See [OAuth Token Encryption](features/oauth-token-encryption.md) |
 | `enable_socket` | boolean | `true` | Enable the Unix socket (macOS/Linux) or named pipe (Windows) the tray uses to talk to the core. **Connections over it are trusted without the API key**, and that includes every stdio server the proxy itself spawns under `none` or `sandbox` isolation: such a server can call the admin API and mint agent tokens with no credential. The tray is the only socket client, so **set `false` on headless installs, and whenever a stdio server you do not fully trust runs outside `docker` isolation**. `mcpproxy doctor` warns about the combination. See [What the sandbox does not hide](features/sandbox-isolation.md#what-the-sandbox-does-not-hide). |
 | `tray_endpoint` | string | `""` | Override socket/pipe path (advanced, usually not needed) |
 
@@ -634,6 +635,7 @@ explicitly to one of `http`, `sse`, or `streamable-http`.
 | `pkce_enabled` | boolean | No | PKCE is always enabled for security; this flag is currently ignored |
 | `authorization_endpoint` | string | No | Overrides the authorization endpoint the authorization server advertises (see [Overriding OAuth discovery](#overriding-oauth-discovery)) |
 | `token_endpoint` | string | No | Overrides the token endpoint |
+| `refresh_replay_enabled` | boolean | No | Disabled by default. Allows one bounded transport retry only for an explicit `token_endpoint` that supports idempotent refresh replay |
 | `registration_endpoint` | string | No | Overrides the Dynamic Client Registration endpoint |
 | `auth_server_metadata_url` | string | No | Authorization server metadata URL to use instead of discovering one |
 
@@ -683,6 +685,56 @@ refreshed. An explicit `oauth.scopes` is sent exactly as written. If the
 authorization server publishes `grant_types_supported` without `refresh_token`,
 mcpproxy logs one warning per server per run, because that login cannot be
 refreshed and will expire.
+
+#### Recovering a lost refresh response
+
+If the authorization server rotates a refresh token but its response is lost,
+the client may only have the consumed token. Retrying it is safe only when the
+server explicitly supports **idempotent refresh replay**: a matching retry
+returns the same already-issued token pair rather than rotating again or
+revoking the grant as token reuse.
+
+For such a provider, set both fields in that upstream's `oauth` block:
+
+```json
+"oauth": {
+  "token_endpoint": "https://login.example.com/token",
+  "refresh_replay_enabled": true
+}
+```
+
+This is an operator assertion of provider support, not capability detection.
+Verify a replay window of at least 30 seconds before enabling it. Ordinary
+FastMCP refresh rotation, by itself, does not imply replay support. The option
+is absent/off by default and must not be enabled for a provider that revokes a
+grant when a consumed refresh token is repeated (see [RFC 9700 §4.14.2](https://www.rfc-editor.org/rfc/rfc9700.html#section-4.14.2)).
+
+The first attempt gets up to 10 seconds. A typed transport failure (for example,
+a timeout or truncated response) permits one immediate retry inside the existing
+30-second refresh flight deadline. The effective endpoint must still match the
+explicit endpoint, and the stored grant's client, refresh token and revision
+must be unchanged. Cancellation, retirement, OAuth rejections such as
+`invalid_grant`, HTTP 429/5xx and unknown errors do not enable this retry. Any
+response with an error status counts as an answer, even when its body is cut
+short, and so does a refused redirect; a certificate or proxy error is not a
+lost response either. A provider that regularly needs more than 10 seconds to
+answer a refresh should stay opted out. A concurrent login or credential
+replacement still takes precedence through the existing coordinator and
+persistence checks.
+
+`token_endpoint` must be an `https` URL (`http` only on a loopback host). The
+flag without a valid explicit `token_endpoint` is refused by a config apply and
+by the MCP `upstream_servers` add and patch operations, and it is inert in a
+hand-edited file. Set it in the config file, through a config apply, or with
+`oauth_json` on the MCP tool.
+
+Attempt logs contain only fixed outcome categories and timing, never token
+values, raw errors or endpoint URLs. Disable with `refresh_replay_enabled:
+false`. Changing this retry policy replaces the connection without clearing
+the stored grant. Changing the endpoint itself follows the existing OAuth
+reconfiguration lifecycle and can require sign-in.
+This option does not recover a grant already lost, change token lifetimes or
+scopes, or guarantee recovery after provider restarts or longer outages.
 
 #### Discovery caching
 
@@ -982,7 +1034,6 @@ block** — off by default, best-effort, and unable to change the baseline verdi
     "scan_timeout_default": "60s",
     "integrity_check_interval": "1h",
     "integrity_check_on_restart": false,
-    "scanner_registry_url": "",
     "tpa_bundle_path": "",
     "require_signed_bundle": false,
     "tpa_active_root": "publisher",
@@ -1948,6 +1999,8 @@ Many configuration options can be overridden via environment variables:
 | `MCPPROXY_LISTEN` / `MCPP_LISTEN` | `listen` | Network binding address |
 | `MCPPROXY_API_KEY` | `api_key` | API key for authentication (empty values trigger auto-generation; auth remains enabled) |
 | `MCPPROXY_API_KEY_FILE` | `api_key` | Absolute path of a file that holds the API key; set it or `MCPPROXY_API_KEY`, not both (both set stops startup with an error naming both); an unusable file stops startup (no fallback, nothing generated) |
+| `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY` | `oauth_token_encryption_key` | The key itself (base64, 32 bytes); overrides the field. Set it or the `_FILE` form, not both (exit 4) |
+| `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE` | `oauth_token_encryption_key` | Absolute path of a file that holds the key; overrides the field. A key source that is named but unusable or empty stops startup with exit 4 (no fallback to plaintext) |
 | `MCPPROXY_TRUSTED_HOSTS` | `trusted_hosts` | Comma-separated `Host` allowlist for loopback listeners behind a reverse proxy |
 | `MCPPROXY_TRUSTED_PROXIES` | `trusted_proxies` | Comma-separated CIDRs/IPs whose `X-Forwarded-*` headers are honoured |
 | `MCPPROXY_AUDIT_LOG_ENABLED` | `audit_log.enabled` | Turn audit logging on/off |

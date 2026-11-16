@@ -646,9 +646,6 @@ func (s *Supervisor) executeAction(serverName string, planned plannedAction, con
 		(*h)(serverName, action)
 	}
 
-	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
-	defer cancel()
-
 	stale := func(err error) bool {
 		if !errors.Is(err, upstream.ErrStaleGeneration) {
 			return false
@@ -695,7 +692,12 @@ func (s *Supervisor) executeAction(serverName string, planned plannedAction, con
 					zap.String("action", string(action)))
 			}
 
-			if err := s.upstream.ConnectServerAt(ctx, serverName, planned.Gen); err != nil && !stale(err) {
+			// s.ctx carries no deadline on purpose (#1772): the manager bounds
+			// every connect with the server's resolved init_timeout
+			// (Manager.connectInstanceCtx), and a shorter parent deadline here
+			// would silently cap an init_timeout above it. The other actions
+			// take no context.
+			if err := s.upstream.ConnectServerAt(s.ctx, serverName, planned.Gen); err != nil && !stale(err) {
 				s.logger.Warn("Failed to connect server (will retry)",
 					zap.String("server", serverName),
 					zap.Error(err))

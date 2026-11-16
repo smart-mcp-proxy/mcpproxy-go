@@ -222,6 +222,7 @@ func TestToolsListSnapshot_MatchesMergeBaseGoldens(t *testing.T) {
 //     back to shell CLIs (retrieveToolsReachNote). DESCRIPTION ONLY, static
 //     prose; the per-caller "CONNECTED SERVERS" suffix is added by a tool
 //     filter at list time and is absent here (no connected upstreams).
+//   - retrieve_tools gains the optional exact upstream selector (issue #1824).
 var toolsListAllowedDelta = map[string][]string{
 	"default_server":      {"call_tool_read", "call_tool_write", "call_tool_destructive", "describe_tool", "quarantine_security", "upstream_servers", "search_servers", "list_registries", "retrieve_tools"},
 	"retrieve_tools_mode": {"call_tool_read", "call_tool_write", "call_tool_destructive", "code_execution", "describe_tool", "quarantine_security", "upstream_servers", "search_servers", "list_registries", "retrieve_tools"},
@@ -477,8 +478,8 @@ func TestCodeExecutionDescriptions_EnumerationIsAdminOnly(t *testing.T) {
 				if name == "retrieve_tools" {
 					// Agent visibility and compact routing guidance are both
 					// deliberate description changes. Pin the new route policy,
-					// then normalize only this description to compare the rest of
-					// the entry with the frozen capture.
+					// then normalize the description and the #1824 selector
+					// to compare the rest of the entry with the frozen capture.
 					var postM map[string]interface{}
 					var preM map[string]interface{}
 					require.NoError(t, json.Unmarshal(pre, &preM))
@@ -506,10 +507,11 @@ func TestCodeExecutionDescriptions_EnumerationIsAdminOnly(t *testing.T) {
 							"surface %s: retrieve_tools description may differ from pre-105 only by the #1668 routing sentence and the two live notes", surface)
 						postM["description"] = preM["description"]
 					}
+					delete(schemaProps(postM), "server")
 					trimmed, err := json.Marshal(postM)
 					require.NoError(t, err)
 					assert.JSONEq(t, string(pre), string(trimmed),
-						"surface %s: retrieve_tools may differ from pre-105 only by the allowed description and existing schema deltas", surface)
+						"surface %s: retrieve_tools may differ from pre-105 only by the allowed description and the server selector", surface)
 					continue
 				}
 				if isCallToolVariantName(name) {

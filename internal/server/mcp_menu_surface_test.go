@@ -220,12 +220,12 @@ var spec094FilterParams = []string{"exclude_destructive", "exclude_open_world", 
 const spec094WindowCaveat = "Filter diagnostics describe this call's candidate window, not the whole catalog."
 
 // addedRetrieveToolsParams is the exact allowed parameter delta per surface.
-// code_execution keeps no additions: describe_tool is absent there in v1 (so
-// no `detail`, spec 085 FR-011), and it already declared the filters.
+// All three surfaces expose the upstream selector (#1824). Code execution
+// still omits `detail` because it does not expose describe_tool (Spec 085 FR-011).
 var addedRetrieveToolsParams = map[string][]string{
-	"default_server":      {"detail", "exclude_destructive", "exclude_open_world", "read_only_only"},
-	"call_tool_mode":      {"detail"},
-	"code_execution_mode": {},
+	"default_server":      {"detail", "exclude_destructive", "exclude_open_world", "read_only_only", "server"},
+	"call_tool_mode":      {"detail", "server"},
+	"code_execution_mode": {"server"},
 }
 
 // assertRetrieveToolsDelta: the parameter delta is exactly the surface's
@@ -259,6 +259,10 @@ func assertRetrieveToolsDelta(t *testing.T, surface string, preM, curM map[strin
 		assert.Equal(t, preSchema, curProps[p],
 			"surface %s: pre-feature retrieve_tools parameter %q must be preserved unchanged (SC-003)", surface, p)
 	}
+
+	assert.Equal(t, map[string]interface{}{
+		"type": "string", "description": "Restrict results to the exact configured upstream server name.",
+	}, curProps["server"], "surface %s: the selector schema is shared", surface)
 
 	// Added params stay optional: the required list is unchanged.
 	preSchema, _ := preM["inputSchema"].(map[string]interface{})

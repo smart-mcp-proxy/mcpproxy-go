@@ -4,7 +4,7 @@ MCPProxy automatically detects and injects the RFC 8707 `resource` parameter for
 
 ## How It Works
 
-1. MCPProxy sends a preflight HEAD request to the MCP server URL
+1. MCPProxy sends a preflight POST request to the MCP server URL
 2. If server returns 401 with `WWW-Authenticate` header containing `resource_metadata` URL, MCPProxy fetches the Protected Resource Metadata
 3. The `resource` field from metadata is automatically injected into OAuth authorization URL and token requests
 4. If metadata doesn't contain `resource`, MCPProxy falls back to using the server URL

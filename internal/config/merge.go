@@ -608,6 +608,11 @@ func MergeOAuthConfig(base, patch *OAuthConfig, removeIfNil bool) *OAuthConfig {
 		result.AuthServerMetadataURL = patch.AuthServerMetadataURL
 	}
 
+	if patch.RefreshReplayEnabled != nil {
+		enabled := *patch.RefreshReplayEnabled
+		result.RefreshReplayEnabled = &enabled
+	}
+
 	// Boolean - always take patch value
 	result.PKCEEnabled = patch.PKCEEnabled
 
@@ -803,6 +808,11 @@ func copyOAuthConfig(src *OAuthConfig) *OAuthConfig {
 		TokenEndpoint:         src.TokenEndpoint,
 		RegistrationEndpoint:  src.RegistrationEndpoint,
 		AuthServerMetadataURL: src.AuthServerMetadataURL,
+	}
+
+	if src.RefreshReplayEnabled != nil {
+		enabled := *src.RefreshReplayEnabled
+		dst.RefreshReplayEnabled = &enabled
 	}
 
 	if src.Scopes != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
+	"unicode/utf8"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 )
@@ -75,16 +76,37 @@ func (c *PayloadDecoded) Inspect(tool detect.ToolView, _ detect.RegistryView) []
 // matchPayload returns a hard signal when decoded text is printable and matches
 // a shell/exfil pattern.
 func (c *PayloadDecoded) matchPayload(decoded string) (detect.Signal, bool) {
-	if !isPrintableText(decoded) || !shellRe.MatchString(decoded) {
+	return shellPayloadSignal(c.ID(), "decoded payload", "An encoded blob decodes to", decoded)
+}
+
+// shellPayloadSignal is the decode-then-confirm rule shared with the
+// declared-marker reconstruction check (Spec 122 FR-035): a HARD signal when
+// the recovered text is printable and is a shell/exfiltration command. label
+// prefixes the evidence ("decoded payload", "reconstructed payload") and lead
+// opens the detail sentence.
+func shellPayloadSignal(checkID, label, lead, decoded string) (detect.Signal, bool) {
+	return shellSignalWith(isPrintableText, checkID, label, lead, decoded)
+}
+
+// shellPayloadSignalText is shellPayloadSignal for TEXT the author wrote
+// (a reconstructed payload): any valid UTF-8 without control runes is
+// printable, so a non-ASCII comment ("# café") never hides the command
+// (Sol r3 P2). Decoded blobs keep the stricter ASCII rule.
+func shellPayloadSignalText(checkID, label, lead, text string) (detect.Signal, bool) {
+	return shellSignalWith(isPrintableUTF8, checkID, label, lead, text)
+}
+
+func shellSignalWith(printable func(string) bool, checkID, label, lead, decoded string) (detect.Signal, bool) {
+	if !printable(decoded) || !shellRe.MatchString(decoded) {
 		return detect.Signal{}, false
 	}
 	return detect.Signal{
-		CheckID:    c.ID(),
+		CheckID:    checkID,
 		Tier:       detect.TierHard,
 		ThreatType: detect.ThreatMaliciousCode,
 		Confidence: 0.97,
-		Evidence:   detect.CapEvidence("decoded payload: " + decoded),
-		Detail:     fmt.Sprintf("An encoded blob decodes to a shell/exfiltration command: %q", truncateForDetail(decoded)),
+		Evidence:   detect.CapEvidence(label + ": " + decoded),
+		Detail:     fmt.Sprintf("%s a shell/exfiltration command: %q", lead, truncateForDetail(decoded)),
 	}, true
 }
 
@@ -113,6 +135,14 @@ func isPrintableText(s string) bool {
 		}
 	}
 	return true
+}
+
+// isPrintableUTF8 reports non-empty valid UTF-8 text. Control runes do not
+// veto it: an author can put an ESC sequence in a shell comment after the
+// command ("… | sh # \x1b[0m", Sol r9 P2); the shell rule decides on the
+// command itself, and evidence rendering escapes the control runes anyway.
+func isPrintableUTF8(s string) bool {
+	return s != "" && utf8.ValidString(s)
 }
 
 func truncateForDetail(s string) string {

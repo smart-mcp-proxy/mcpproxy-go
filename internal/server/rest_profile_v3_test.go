@@ -485,18 +485,16 @@ func TestRESTProfileV3_Replay_PinnedAgentToken(t *testing.T) {
 			"an out-of-profile record and an unknown id must be one response (FR-015)")
 		require.Empty(t, ids.fs.dispatched())
 
-		// D1: the out-of-profile replay writes the Spec 105-shaped row
-		// (status=blocked, the non-disclosing 404 reason, NO block_reason),
-		// never a profile_* one; an unknown id writes no row at all.
-		row := f.waitBlocked("filesystem", "read_text_file", "")
-		require.Equal(t, profile.ErrToolOutsideProfile.Error(), row.Metadata["reason"])
+		// Spec 118 FR-005 (supersedes the Spec 108 D1 reading): the pin is
+		// bound into the token's visible set, so an out-of-pin record is
+		// refused at the #1166 entitlement gate — the same code path an
+		// unknown id takes, before ReplayToolCall and the profile evaluator —
+		// exactly as a `--servers github` token's always was. Neither writes
+		// an activity row, and no profile_* block reason can appear.
 		f.settle()
 		for _, r := range f.activities() {
-			if r.Type != storage.ActivityTypePolicyDecision || r.ServerName != "filesystem" {
-				continue
-			}
-			got, _ := r.Metadata[storage.MetadataKeyBlockReason].(string)
-			require.Empty(t, got, "an out-of-scope replay never records a profile_* block reason")
+			require.False(t, r.Type == storage.ActivityTypePolicyDecision && r.ServerName == "filesystem",
+				"an out-of-pin replay is refused before the profile evaluator and writes no row: %+v", r)
 		}
 		require.Empty(t, f.rowsFor("no-such-id"), "an unknown id writes no activity row")
 	})

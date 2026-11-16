@@ -155,6 +155,56 @@ func (ac *AuthContext) CanAccessServer(name string) bool {
 	return false
 }
 
+// BoundToPinReach returns a copy of ac whose AllowedServers is the caller's
+// VISIBLE SET under Spec 118 (issue #1686): the token's grant intersected with
+// `reach`, the effective server set of the profile the token is pinned to.
+//
+// The operator-set pin is a visibility boundary on every surface, not an
+// ergonomic filter: a token minted with `--profile p` takes its grant from the
+// profile, so its stored AllowedServers is normally "*" and, read alone, let
+// the token enumerate the whole fleet on every REST door that the MCP resolver
+// (which applies the pin as its first tier) already narrowed. Folding the
+// intersection into AllowedServers at authentication time means every
+// consumer of the grant — CanEnumerateServer, CanAccessServer, the
+// grant-as-filter seams that hand storage an allow-list, the usage cache key —
+// answers from one resolved set, so no door and no derived count can disagree.
+//
+// Fails CLOSED (FR-002): a nil or empty reach — the pinned profile was
+// deleted, emptied, names only unconfigured servers, or no longer overlaps the
+// grant — yields an EMPTY, NON-NIL slice, which every downstream filter reads
+// as "allowed nothing" (nil would read as unrestricted). The result is then
+// indistinguishable from a token whose grant is [].
+//
+// Administrators, callers with no pin and a nil receiver are returned as-is:
+// the pin can only narrow, never widen, and it never applies to them. The
+// receiver is never edited in place — the validated token value it was built
+// from may be shared.
+//
+// The caller resolves `reach` from the LIVE configuration on every request and
+// every SSE frame (FR-003); nothing here is cached.
+func (ac *AuthContext) BoundToPinReach(reach []string) *AuthContext {
+	if ac == nil || ac.IsAdmin() || ac.ProfilePin == "" {
+		return ac
+	}
+	visible := make([]string, 0, len(reach))
+	seen := make(map[string]struct{}, len(reach))
+	for _, name := range reach {
+		if name == "" {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		if ac.CanAccessServer(name) {
+			visible = append(visible, name)
+		}
+	}
+	bound := *ac
+	bound.AllowedServers = visible
+	return &bound
+}
+
 // HasPermission checks whether this context includes the given permission.
 // Admin contexts have all permissions. Agent contexts check their Permissions list.
 func (ac *AuthContext) HasPermission(perm string) bool {

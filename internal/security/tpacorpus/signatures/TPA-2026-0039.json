@@ -1,0 +1,122 @@
+{
+  "category": "tpa_payload_execution",
+  "gating": true,
+  "id": "TPA-2026-0039",
+  "license": "MIT",
+  "provenance": {
+    "note": "Base64 or hex blob whose decoded text downloads and pipes into a shell, or a run/execute directive pointing at an encoded download-and-run command blob.",
+    "published": "2026-10-11",
+    "source": "https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/research/2026-10-11-tpa-attack-lab/research.md"
+  },
+  "rules": [
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.85,
+      "detector": "b64_dropper_prefix",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0039",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$curl",
+          "type": "string",
+          "value": "Y3VybC"
+        },
+        {
+          "context": "tool_description",
+          "id": "$wget",
+          "type": "string",
+          "value": "d2dldC"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?s)(?:(?:^|[^A-Za-z0-9+/])(?:Y3VybC|d2dldC|YmFzaCAtYy|L2Jpbi9zaCAt|c2ggLWMg|cG93ZXJzaGVsbC)[A-Za-z0-9+/]{4,}?(?:IHNo|O3No|fHNo|ICYmIGJh|IHN1ZG8g|IHwgYmFz|JiYgYmFz|O3N1ZG8g|c3VkbyBz|dWRvIGJh|fHN1ZG8g|IGJhc2g=|IHwgc2g=|JiBzaA==|JiYgc2g=|O2Jhc2g=|OyBzaA==|fCBzaA==|fGJhc2g=)[A-Za-z0-9+/]{0,24}={0,2}[\\\"'`)\\]}>\\s]*(?:\\n|\\z)|\\b(?i:profile|config|setup|bootstrap|init|payload|relay|hook|cmd|command|script|blob)\\b[\\\"'`]?\\s*[:=]\\s*[\\\"'`]*(?:Y3VybC|d2dldC|YmFzaCAtYy|L2Jpbi9zaCAt|c2ggLWMg|cG93ZXJzaGVsbC)[A-Za-z0-9+/]{4,}?(?:IHNo|O3No|fHNo|ICYmIGJh|IHN1ZG8g|IHwgYmFz|JiYgYmFz|O3N1ZG8g|c3VkbyBz|dWRvIGJh|fHN1ZG8g|IGJhc2g=|IHwgc2g=|JiBzaA==|JiYgc2g=|O2Jhc2g=|OyBzaA==|fCBzaA==|fGJhc2g=))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.8,
+      "detector": "b64_run_directive",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0039",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$curl",
+          "type": "string",
+          "value": "Y3VybC"
+        },
+        {
+          "context": "tool_description",
+          "id": "$wget",
+          "type": "string",
+          "value": "d2dldC"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)(?:^|[.!?:;\\n]\\s*|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:(?:run|execute|eval(?:uate)?|exec|pipe)\\b[^\\n.]{0,40}?\\b(?:following|below|encoded|base64|blob|payload|decoded|this|the\\s+(?:string|value|data|result))\\b|decode\\s+(?:it\\s+)?(?:and|then)\\s+(?:run|execute|eval(?:uate)?)\\b)[^\\n]{0,60}?(?:^|[^A-Za-z0-9+/])(?:Y3VybC|d2dldC|YmFzaCAtYy|L2Jpbi9zaCAt|c2ggLWMg|cG93ZXJzaGVsbC)[A-Za-z0-9+/]{16,}",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.82,
+      "detector": "hex_dropper_prefix",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0039",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$hexcurl",
+          "type": "string",
+          "value": "6375726c20"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)(?:(?:^|[^0-9a-fx])(?:6375726c20|7767657420|2f62696e2f7368202d)[0-9a-f]{4,}?(?:7c|3b|2626)(?:20)?(?:7375646f20)?(?:2f62696e2f)?(?:7368|62617368)[0-9a-f]{0,24}[\\\"'`)\\]}>\\s]*(?:\\n|\\z)|\\b(?i:profile|config|setup|bootstrap|init|payload|relay|hook|cmd|command|script|blob)\\b[\\\"'`]?\\s*[:=]\\s*[\\\"'`]*(?:6375726c20|7767657420|2f62696e2f7368202d)[0-9a-f]{4,}?(?:7c|3b|2626)(?:20)?(?:7375646f20)?(?:2f62696e2f)?(?:7368|62617368))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.78,
+      "detector": "hex_run_directive",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0039",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$hexcurl",
+          "type": "string",
+          "value": "6375726c20"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)(?:^|[.!?:;\\n]\\s*|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:(?:run|execute|eval(?:uate)?|exec|pipe)\\b[^\\n.]{0,40}?\\b(?:following|below|encoded|hex|blob|payload|decoded|this|the\\s+(?:string|value|data|result))\\b|decode\\s+(?:it\\s+)?(?:and|then)\\s+(?:run|execute|eval(?:uate)?)\\b)[^\\n]{0,60}?(?:^|[^0-9a-fx])(?:6375726c20|7767657420|2f62696e2f7368202d)[0-9a-f]{16,}",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

@@ -1095,7 +1095,13 @@ func runToolsListStandalone(ctx context.Context, serverName string, globalConfig
 	// Create storage (optional, for OAuth persistence)
 	var db *storage.BoltDB
 	if globalConfig.DataDir != "" {
-		boltDB, err := storage.NewBoltDB(globalConfig.DataDir, logger.Sugar())
+		// Spec 123: a key resolution error stops the command (exit 4); only a
+		// storage open error falls back to in-memory OAuth.
+		oauthKey, err := resolveCLIOAuthTokenKey(globalConfig)
+		if err != nil {
+			return err
+		}
+		boltDB, err := storage.NewBoltDB(globalConfig.DataDir, logger.Sugar(), storage.WithOAuthTokenKey(oauthKey))
 		if err != nil {
 			logger.Warn("Failed to create storage, OAuth will use in-memory")
 		} else {

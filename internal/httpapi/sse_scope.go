@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
@@ -44,7 +45,10 @@ func (s *Server) newSSECallerContextRefresher(r *http.Request) func() (context.C
 		if validateErr != nil {
 			return nil, validateErr
 		}
-		return auth.WithAuthContext(base, token.AuthContext()), nil
+		// Spec 118: the pin's reach is re-resolved from the live configuration
+		// before every frame, like the token itself — a profile deleted or
+		// emptied mid-stream narrows the very next frame (FR-003).
+		return auth.WithAuthContext(base, s.bindCallerToPin(token.AuthContext())), nil
 	}
 }
 
@@ -260,7 +264,10 @@ func eventVisibleToCaller(ctx context.Context, evt internalRuntime.Event) bool {
 	if !auth.IsScopedCaller(ctx) {
 		return true
 	}
-	if evt.Type == internalRuntime.EventTypeServersChanged || evt.Type == internalRuntime.EventTypeAttentionChanged {
+	if evt.Type == internalRuntime.EventTypeServersChanged {
+		return serversChangedDeliverable(ctx, evt.Payload)
+	}
+	if evt.Type == internalRuntime.EventTypeAttentionChanged {
 		return true
 	}
 	if _, adminOnly := adminConfigEventTypes[evt.Type]; adminOnly {
@@ -284,6 +291,57 @@ func eventVisibleToCaller(ctx context.Context, evt internalRuntime.Event) bool {
 		return false
 	}
 	return true
+}
+
+// serversChangedDeliverable decides whether a coalesced servers.changed frame
+// reaches a PINNED subscriber at all (Spec 118 FR-007).
+//
+// The type is rendered rather than dropped on identity (see
+// eventVisibleToCaller): one coalesced frame may stand for changes to several
+// servers, so a frame whose marker names a hidden server may still carry the
+// caller's own rows. For a pinned caller it is dropped only when it would
+// carry NOTHING the caller may see: every identity extra names a hidden server
+// AND the narrowed embed is empty (or there is no embed — the notify-only
+// path, where the extra was the whole payload). A frame with at least one
+// visible row, at least one visible identity, or no identity at all is
+// delivered, with the hidden extras withheld by renderEventPayloadForCaller as
+// before. That last case — an identity-less frame, or a change to a hidden
+// server alone while the caller still has visible rows — is the accepted
+// residual: it tells the caller that something changed, never what or where.
+//
+// An UNPINNED scoped caller (a --servers token) keeps the #1166 delivery: the
+// frame arrives with the hidden identity and its sibling extras withheld
+// (FR-004 holds its responses unchanged apart from the extras withholding
+// renderEventPayloadForCaller now applies to every scoped caller).
+func serversChangedDeliverable(ctx context.Context, payload map[string]interface{}) bool {
+	if !authContextHasPin(auth.AuthContextFromContext(ctx)) {
+		return true
+	}
+	hiddenIdentity, visibleIdentity := false, false
+	for _, key := range eventServerIdentityFields {
+		name, ok := payload[key].(string)
+		if !ok || name == "" {
+			continue
+		}
+		if canSeeServer(ctx, name) {
+			visibleIdentity = true
+		} else {
+			hiddenIdentity = true
+		}
+	}
+	if !hiddenIdentity || visibleIdentity {
+		return true
+	}
+	servers, ok := payload["servers"].([]contracts.Server)
+	if !ok {
+		return false
+	}
+	for i := range servers {
+		if canSeeServer(ctx, servers[i].Name) {
+			return true
+		}
+	}
+	return false
 }
 
 // isOutOfScopeIdentityField reports whether a payload key must be withheld from

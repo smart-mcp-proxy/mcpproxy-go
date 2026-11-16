@@ -574,6 +574,10 @@
         "read_only_only": {
           "description": "Only return tools with readOnlyHint=true. Use to self-restrict to safe read operations.",
           "type": "boolean"
+        },
+        "server": {
+          "description": "Restrict results to the exact configured upstream server name.",
+          "type": "string"
         }
       },
       "required": [

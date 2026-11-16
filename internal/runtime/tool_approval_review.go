@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -400,7 +401,13 @@ func (r *Runtime) commitServerApprovalHeld(serverName string, blocks []string, e
 // QuarantineServer(false) it promotes nothing, so a tool filed after the
 // commit stays pending (FR-012).
 func (r *Runtime) FinishServerApproval(serverName string) error {
-	r.EmitActivityQuarantineChange(serverName, false, "Server unquarantined by administrator")
+	return r.FinishServerApprovalCtx(context.Background(), serverName)
+}
+
+// FinishServerApprovalCtx is FinishServerApproval naming the approver the
+// request context carries on the quarantine_change row (issue #1698).
+func (r *Runtime) FinishServerApprovalCtx(ctx context.Context, serverName string) error {
+	r.EmitActivityQuarantineChangeCtx(ctx, serverName, false, "Server unquarantined by administrator")
 	r.HandleUpstreamServerChange(r.AppContext())
 	r.logger.Info("Server approval finished; tools listed later wait for review",
 		zap.String("server", serverName))

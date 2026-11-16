@@ -20,7 +20,7 @@ type attentionResponse struct {
 
 // handleGetAttention godoc
 // @Summary Get the needs-attention list
-// @Description One list, one count, every surface (Web UI, macOS tray/Home, CLI) reads from it. Filtered per caller: an administrator sees every item; a scoped caller (agent token, or a non-admin server-edition OAuth user session) sees only server items whose server it may enumerate; every other subject type (client, setting) is administrator-only.
+// @Description One list, one count, every surface (Web UI, macOS tray/Home, CLI) reads from it. Filtered per caller: an administrator sees every item; a scoped caller (agent token, or a non-admin server-edition OAuth user session) sees only server items whose server it may enumerate (for a profile-pinned token: servers within its pin); every other subject type (client, setting) is administrator-only.
 // @Tags attention
 // @Produce json
 // @Security ApiKeyAuth

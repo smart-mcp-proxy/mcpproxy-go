@@ -123,6 +123,7 @@ const sidebars = {
             'features/security-quarantine',
             'features/tool-quarantine',
             'features/tool-scanner',
+            'features/tpa-signatures',
             'features/tpa-bundle-signing',
             'features/security-scanner-plugins',
             'features/sensitive-data-detection',
@@ -146,6 +147,7 @@ const sidebars = {
           label: 'Authentication',
           items: [
             'features/oauth-authentication',
+            'features/oauth-token-encryption',
             'features/auth-broker',
             'features/idp-token-storage',
           ],
@@ -171,6 +173,7 @@ const sidebars = {
       items: [
         'operations/reverse-proxy',
         'operations/deploying-for-a-team',
+        'operations/compose-stdio-sidecars',
         'operations/shutdown-behavior',
         'features/observability',
         'logging',
@@ -209,6 +212,7 @@ const sidebars = {
             'errors/MCPX_OAUTH_CALLBACK_MISMATCH',
             'errors/MCPX_OAUTH_LOGIN_REQUIRED',
             'errors/MCPX_OAUTH_REAUTH_REQUIRED',
+            'errors/MCPX_OAUTH_TOKEN_UNDECRYPTABLE',
           ],
         },
         {

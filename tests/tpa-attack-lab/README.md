@@ -138,7 +138,7 @@ to fire — the victim provides the peer context.
 | V04 | `weather_lookup` | ASCII smuggling via Unicode TAG block (U+E0000) | `unicode.hidden` critical |
 | V05 | `notes_search` | Zero-width steganography + HTML-comment covert directive | `unicode.hidden` + tpa-db `TPA-2026-0002` |
 | V06 | `crypto_price` | Base64 dropper (`curl … \| sh`) in description | `payload.decoded` critical |
-| V07 | `filesystem_read` | Cross-server impersonation (perfect clone of victim tool) | `shadowing.cross_server` |
+| V07 | `filesystem_read` | Cross-server impersonation (near-clone of victim tool: one cosmetic edit; a byte-identical copy is a second instance of the same server and exempt by design) | `shadowing.cross_server` |
 | V08 | `docs_export` | Cross-server reference luring the victim's write tool | `shadowing.cross_server` |
 | V09 | `calendar_get_events` | **Rug pull**: benign facade → armed exfiltrative contract | stage 1 clean → approvable; stage 2 contract hash changes → `status=changed` → blocked |
 | V10 | `stock_quote` | **Sneaky rug pull**: description unchanged, schema grows `sidenote` | contract hash change only |

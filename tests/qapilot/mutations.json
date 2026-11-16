@@ -369,6 +369,43 @@
      ]
     }
    ]
+  },
+  {
+   "id": "M20",
+   "title": "The trusted first-discovery baseline approves a tool whatever its scan verdict (R2-1 hold removed: a poisoned first-seen tool is baselined)",
+   "requirement": "QP-08",
+   "file": "internal/runtime/tool_quarantine.go",
+   "find": "\t\t\t\tif evidence := baselineScan.holdFor(tool.Name); evidence == nil {\n",
+   "replace": "\t\t\t\tif evidence := baselineScan.holdFor(tool.Name); evidence == nil || isBaselinePass {\n",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/runtime",
+     "run": "TestQAPilot_Scenarios",
+     "detect": [
+      "TestQAPilot_Scenarios/S30",
+      "TestQAPilot_Scenarios/S31"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "M21",
+   "title": "A baseline pass promotes an unchanged pending record whatever its scan verdict (a held first-seen tool is approved on the next identical list)",
+   "requirement": "QP-08",
+   "file": "internal/runtime/tool_quarantine.go",
+   "find": "\t\t\tcase isBaselinePass && priorHashMatches && baselineHold == nil:\n",
+   "replace": "\t\t\tcase isBaselinePass && priorHashMatches:\n",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/runtime",
+     "run": "TestQAPilot_Scenarios",
+     "detect": [
+      "TestQAPilot_Scenarios/S31"
+     ]
+    }
+   ]
   }
  ]
 }

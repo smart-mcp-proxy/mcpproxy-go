@@ -306,6 +306,17 @@ components:
         oauth_expiry_warning_hours:
           description: Health status settings
           type: number
+        oauth_token_encryption_key:
+          description: |-
+            OAuthTokenEncryptionKey seals the upstream OAuth tokens stored in
+            config.db (Spec 123). Empty (the default) leaves them as plain JSON. It
+            takes a secret reference (${file:/abs/path}, ${env:NAME},
+            ${keyring:NAME}) or a literal standard-base64 32-byte key; the
+            MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY[_FILE] variables override it. The key
+            is resolved only where config.db is opened (ResolveOAuthTokenKey), never
+            stored on Config, and is restart-gated, so every save writes the field
+            as configured.
+          type: string
         observability:
           $ref: '#/components/schemas/config.ObservabilityConfig'
         output_sanitisation:
@@ -795,6 +806,10 @@ components:
           type: boolean
         redirect_uri:
           type: string
+        refresh_replay_enabled:
+          description: Opt in only when token_endpoint supports idempotent refresh
+            replay for at least 30 seconds.
+          type: boolean
         registration_endpoint:
           type: string
         scopes:
@@ -2097,6 +2112,8 @@ components:
             $ref: '#/components/schemas/contracts.OAuthRequirement'
           type: array
           uniqueItems: false
+        oauth_token_storage:
+          $ref: '#/components/schemas/contracts.OAuthTokenStorageReport'
         runtime_warnings:
           items:
             type: string
@@ -2604,6 +2621,8 @@ components:
           type: boolean
         redirect_port:
           type: integer
+        refresh_replay_enabled:
+          type: boolean
         registration_endpoint:
           type: string
         scopes:
@@ -2718,6 +2737,88 @@ components:
         success:
           description: Always true for successful start
           type: boolean
+      type: object
+    contracts.OAuthTokenStorageReport:
+      description: |-
+        OAuthTokenStorage (Spec 123 FR-030) reports the state of the stored
+        upstream OAuth rows: encryption on or off, the public key id, the row
+        counts by state, the undecryptable servers and the compaction advice.
+        It never carries key material or the key reference.
+      properties:
+        compaction_advised:
+          description: |-
+            CompactionAdvised mirrors the compaction marker: freed pages may still
+            hold old plaintext until `mcpproxy db compact --keep-backup=false`.
+          type: boolean
+        encryption_enabled:
+          description: EncryptionEnabled is true when an encryption key is configured.
+          type: boolean
+        key_id:
+          description: KeyID is the public, non-secret id of the configured key (administrator
+            only).
+          type: string
+        key_source_in_data_dir:
+          description: KeySourceInDataDir is true when the key file lies inside the
+            data directory.
+          type: boolean
+        key_source_kind:
+          description: |-
+            KeySourceKind is how the key was obtained: literal, env, env_file,
+            ref_file, ref_env or ref_keyring (administrator only).
+          type: string
+        plaintext:
+          description: |-
+            Plaintext counts valid JSON rows; Sealed counts envelopes the configured
+            key opens; Undecryptable counts everything else.
+          type: integer
+        sealed:
+          type: integer
+        servers:
+          description: Servers lists the undecryptable rows by server.
+          items:
+            $ref: '#/components/schemas/contracts.OAuthTokenStorageServer'
+          type: array
+          uniqueItems: false
+        undecryptable:
+          type: integer
+        undecryptable_by_reason:
+          $ref: '#/components/schemas/contracts.OAuthTokenUndecryptableByReason'
+        warnings:
+          description: |-
+            Warnings are stable codes: literal_key, key_file_in_data_dir,
+            plaintext_rows_with_key, compaction_advised, backup_file_present
+            (administrator only).
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    contracts.OAuthTokenStorageServer:
+      properties:
+        bucket_key:
+          type: string
+        reason:
+          type: string
+        row_key_id:
+          description: RowKeyID is the key id in the row's envelope (administrator
+            only).
+          type: string
+        server:
+          type: string
+      type: object
+    contracts.OAuthTokenUndecryptableByReason:
+      description: UndecryptableByReason breaks Undecryptable down by reason.
+      properties:
+        auth_failed:
+          type: integer
+        key_mismatch:
+          type: integer
+        malformed:
+          type: integer
+        no_key:
+          type: integer
+        unsupported_version:
+          type: integer
       type: object
     contracts.PreflightPolicy:
       properties:
@@ -5765,19 +5866,94 @@ components:
           description: 'ServerStepStatus is one of: "", "completed", "skipped".'
           type: string
       type: object
+    telemetry.DiagnosticsCounters:
+      properties:
+        current_error_codes:
+          additionalProperties:
+            type: integer
+          description: |-
+            CurrentErrorCodes is the STANDING state at heartbeat time: stable MCPX_
+            code -> number of configured servers currently in that state. It is not
+            a counter and is never persisted — it is recomputed each heartbeat from
+            the supervisor's live stateview.
+
+            Schema v11 (MCP-2967). It exists because error_code_counts_24h became
+            edge-triggered in the same change: previously the supervisor re-counted
+            every standing failure on its 30s reconcile ticker, so a parked install
+            inflated the counter by ~2880/day/server. Edge-triggering alone would
+            have swung the error to the other side — the 24h window decays, this
+            struct is omitempty via isZero(), so a permanently broken install would
+            emit once and then disappear from the payload entirely, and absent reads
+            as zero. The two fields answer different questions and are only correct
+            together: "how often did something newly break" and "how many servers
+            are broken right now".
+
+            Safe: only MCPX_* enum constants as keys, never server names, URLs,
+            commands, or free text; values are non-negative server counts.
+          type: object
+        error_code_counts_24h:
+          additionalProperties:
+            type: integer
+          description: |-
+            ErrorCodeCounts24h maps stable MCPX_ code strings to 24h occurrence counts.
+            Safe: only MCPX_* enum constants are stored here, never free text, paths,
+            server names, or user-entered values.
+          type: object
+        fix_attempted_24h:
+          description: FixAttempted24h counts POST /api/v1/diagnostics/fix calls in
+            the last 24h.
+          type: integer
+        fix_succeeded_24h:
+          description: FixSucceeded24h counts fix invocations with outcome="success"
+            in the last 24h.
+          type: integer
+        unique_codes_ever:
+          description: |-
+            UniqueCodesEver is the cardinality of the all-time error code set.
+            Bounded by the MCPX_ catalog size (~30 codes), never approaches PII risk.
+          type: integer
+      type: object
     telemetry.FeedbackContext:
       properties:
+        anonymous_id:
+          description: AnonymousID is the install's telemetry anonymous ID (heartbeat
+            value).
+          type: string
         arch:
           type: string
         connected_server_count:
           type: integer
+        diagnostics:
+          $ref: '#/components/schemas/telemetry.DiagnosticsCounters'
         edition:
           type: string
+        go_version:
+          type: string
+        last_error_code:
+          description: LastErrorCode is the most recent MCPX_* error code.
+          type: string
+        last_startup_outcome:
+          description: LastStartupOutcome is the previous startup's outcome word.
+          type: string
+        machine_id:
+          description: MachineID is the hashed machine identifier (heartbeat value).
+          type: string
         os:
+          type: string
+        previous_shutdown:
+          description: PreviousShutdown is how the previous run ended (clean, crash,
+            ...).
           type: string
         routing_mode:
           type: string
         server_count:
+          type: integer
+        tool_count:
+          type: integer
+        uptime_minutes:
+          description: |-
+            UptimeMinutes is the daemon's uptime. Omitted from short-lived CLI
+            submissions, where the process uptime says nothing about the daemon.
           type: integer
         version:
           type: string
@@ -6665,8 +6841,8 @@ paths:
       description: 'One list, one count, every surface (Web UI, macOS tray/Home, CLI)
         reads from it. Filtered per caller: an administrator sees every item; a scoped
         caller (agent token, or a non-admin server-edition OAuth user session) sees
-        only server items whose server it may enumerate; every other subject type
-        (client, setting) is administrator-only.'
+        only server items whose server it may enumerate (for a profile-pinned token:
+        servers within its pin); every other subject type (client, setting) is administrator-only.'
       responses:
         "200":
           content:
@@ -9212,8 +9388,9 @@ paths:
       - registries
   /api/v1/review:
     get:
-      description: Returns one row per quarantined server or trusted server with pending
-        or changed tools. Scoped callers see only servers they may enumerate.
+      description: 'Returns one row per quarantined server or trusted server with
+        pending or changed tools. Scoped callers see only servers they may enumerate
+        (for a profile-pinned token: servers within its pin), with count recomputed.'
       responses:
         "200":
           content:
@@ -11221,7 +11398,7 @@ paths:
   /api/v1/status:
     get:
       description: |-
-        Get comprehensive server status including running state, listen address, upstream statistics, and timestamp
+        Get comprehensive server status including running state, listen address, upstream statistics, and timestamp. For a scoped caller (an agent token; for a profile-pinned token, its allowed_servers intersected with the pin) upstream_stats lists only the servers it may enumerate and every counter is recomputed over them.
         telemetry (admin only): effective telemetry state {enabled, source: env|config|default, disabled_by}
       responses:
         "200":
@@ -11450,6 +11627,14 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: 'Replay refused: tool quarantined or not callable, server quarantined,
+            outside the profile policy, or the token lacks the tool''s permission
+            tier'
         "405":
           content:
             application/json:

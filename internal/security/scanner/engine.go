@@ -1179,11 +1179,15 @@ func AggregateReports(jobID, serverName string, reports []*ScanReport) *Aggregat
 	agg := &AggregatedReport{
 		JobID:      jobID,
 		ServerName: serverName,
-		ScannedAt:  time.Now(),
 		Reports:    make([]ScanReport, 0, len(reports)),
 	}
 
 	for _, r := range reports {
+		// Aggregation happens on reads too. Preserve the latest actual scan
+		// time (including a merged Pass 2), rather than making old scans fresh.
+		if r.ScannedAt.After(agg.ScannedAt) {
+			agg.ScannedAt = r.ScannedAt
+		}
 		agg.Findings = append(agg.Findings, r.Findings...)
 		agg.Reports = append(agg.Reports, *r)
 	}
@@ -1232,6 +1236,7 @@ func AggregateReportsWithJobStatus(jobID, serverName string, reports []*ScanRepo
 	agg := AggregateReports(jobID, serverName, reports)
 
 	if job != nil {
+		includeScanJobTimestamp(agg, job)
 		agg.ScannersTotal = len(job.ScannerStatuses)
 		failed := 0
 		succeeded := 0
@@ -1265,6 +1270,17 @@ func AggregateReportsWithJobStatus(jobID, serverName string, reports []*ScanRepo
 	}
 
 	return agg
+}
+
+// includeScanJobTimestamp also handles completed companion passes whose legacy
+// reports lack dates, or whose scanners produced no report.
+func includeScanJobTimestamp(agg *AggregatedReport, job *ScanJob) {
+	if job.CompletedAt.After(agg.ScannedAt) {
+		agg.ScannedAt = job.CompletedAt
+	}
+	if agg.ScannedAt.IsZero() {
+		agg.ScannedAt = job.StartedAt
+	}
 }
 
 // isCiscoScannerOutput checks if the data looks like Cisco MCP Scanner output

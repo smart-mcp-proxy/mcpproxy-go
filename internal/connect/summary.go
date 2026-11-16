@@ -70,7 +70,12 @@ func buildEntrySummary(entryName string, entry map[string]interface{}) *EntrySum
 			}
 		}
 	}
-	summary.HeaderNames = mapKeyNames(entry["headers"])
+	// "headers" is the JSON clients' object; Codex's TOML entry uses
+	// http_headers (literal values) and env_http_headers (env-var names).
+	summary.HeaderNames = dedupeSorted(append(append(
+		mapKeyNames(entry["headers"]),
+		mapKeyNames(entry["http_headers"])...),
+		mapKeyNames(entry["env_http_headers"])...))
 	summary.EnvNames = mapKeyNames(entry["env"])
 
 	// Stdio-bridge entries carry the endpoint and the credential in argv. Only

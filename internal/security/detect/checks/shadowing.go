@@ -1,7 +1,10 @@
 package checks
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"unicode"
@@ -21,6 +24,10 @@ import (
 //     — retrieve_tools' ranking is what disambiguates them, and no fixed
 //     "distinctive name" heuristic can separate those from attacks (MCP-3520:
 //     ElevenLabs vs kaggle list_models).
+//     A BYTE-IDENTICAL definition (description and schemas) on another server
+//     is not a clone either: that is one MCP server installed twice (two
+//     filesystem roots, two GitHub orgs), carries no rewritten text, and is
+//     exempt from both shape 1 and 1b (identicalDefinition).
 //     1b. Name squat (SOFT, review-only; round-2 red team R2-5): a DISTINCTIVE
 //     name that another server also exposes, with a DIFFERENT description.
 //     Round 1 and round 2 both showed this is the one offline bypass that
@@ -127,6 +134,13 @@ func (c *Shadowing) Inspect(tool detect.ToolView, reg detect.RegistryView) []det
 		if other.Server == tool.Server {
 			continue
 		}
+		// A byte-identical definition (description AND both schemas) is a
+		// second instance of the same server software — two filesystem roots,
+		// two GitHub orgs — not an impersonation. It is neither clone evidence
+		// nor a squat candidate; see identicalDefinition.
+		if identicalDefinition(tool, other) {
+			continue
+		}
 		if cloneDescriptions(tool.Description, other.Description) {
 			sigs = append(sigs, detect.Signal{
 				CheckID:    c.ID(),
@@ -172,6 +186,48 @@ func (c *Shadowing) Inspect(tool detect.ToolView, reg detect.RegistryView) []det
 
 	sigs = append(sigs, c.referenceSignals(tool, reg)...)
 	return sigs
+}
+
+// identicalDefinition reports whether two same-named tools on different
+// servers are the SAME definition: byte-equal raw description and
+// semantically equal input and output schemas (JSON compared after decoding,
+// so key order and whitespace do not matter; an absent schema equals only an
+// absent schema). This is what two instances of one MCP server look like,
+// and it is exempt from both shadowing shapes (owner decision, 2026-11-07,
+// v0.73.0-rc.1 gate): the clone shape exists to catch a copy with injected or
+// rewritten prose, and an identical copy has none — the poisoned text the
+// scanner guards against is absent by construction, and server:tool
+// namespacing keeps the two reachable apart. The remaining risk, an agent
+// picking the other server's instance, is the retrieve_tools provenance and
+// admission-quarantine story, not a definition finding. Any edit at all —
+// one word, one schema property — leaves this exemption and is judged by
+// cloneDescriptions as before.
+func identicalDefinition(a, b detect.ToolView) bool {
+	if a.Description != b.Description {
+		return false
+	}
+	return equalJSON(a.InputSchema, b.InputSchema) && equalJSON(a.OutputSchema, b.OutputSchema)
+}
+
+// equalJSON compares two raw JSON documents structurally. Empty and literal
+// null are the same absence; a document that does not decode is compared
+// byte-for-byte, so malformed input can only ever make two schemas unequal.
+func equalJSON(a, b json.RawMessage) bool {
+	ta, tb := bytes.TrimSpace(a), bytes.TrimSpace(b)
+	if len(ta) == 0 || bytes.Equal(ta, []byte("null")) {
+		ta = nil
+	}
+	if len(tb) == 0 || bytes.Equal(tb, []byte("null")) {
+		tb = nil
+	}
+	if ta == nil || tb == nil {
+		return ta == nil && tb == nil
+	}
+	var va, vb any
+	if json.Unmarshal(ta, &va) != nil || json.Unmarshal(tb, &vb) != nil {
+		return bytes.Equal(ta, tb)
+	}
+	return reflect.DeepEqual(va, vb)
 }
 
 // sameTokens reports whether desc has exactly the token set of the colliding

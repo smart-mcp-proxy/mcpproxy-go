@@ -15,36 +15,62 @@ import (
 // not re-derive visibility for itself — it answers from here.
 
 // ---------------------------------------------------------------------------
-// Scope vs profile — the boundary this package defends
+// The boundary this package defends: grant ∩ pin (Spec 118, issue #1686)
 // ---------------------------------------------------------------------------
 //
-// Three things in this tree look like "scope" and only ONE of them is an
-// authorization boundary:
+// What a non-administrator caller may learn EXISTS — its visible set — is:
 //
-//  1. auth.CanEnumerateServer — token scope (AllowedServers) alone. This is the
-//     boundary. It is the only one of the three that decides whether a caller
-//     may learn that a server exists, and it is what every read door in this
-//     package answers from.
+//   - a caller with no pin: its token grant (AllowedServers; "*" = every
+//     server), and
+//   - a PINNED caller (an agent token minted with --profile): its grant
+//     intersected with the REACH of its pin, the pinned profile's effective
+//     server set under the live configuration.
 //
-//  2. server.serverInScope (internal/server/mcp_visibility.go) — token scope
-//     AND the active PROFILE. The profile half is an ERGONOMIC filter: it
-//     narrows what an agent is offered so a 300-tool fleet does not drown one
-//     task, and the user flips it at will with set_profile. It is deliberately
-//     NOT intersected into (1): a profile switch would then silently change
-//     what a token is authorized to read, and because the profile is
-//     caller-selectable while the token scope is not, a caller could WIDEN its
-//     own visibility by switching profiles.
+// That set is computed in ONE place — auth.AuthContext.BoundToPinReach, applied
+// by bindCallerToPin (pin_boundary.go) at the two seams that mint an agent
+// token's context: handleAgentTokenAuth for every REST request and the SSE
+// refresher before every identity-bearing frame — and from then on
+// AuthContext.AllowedServers IS the visible set. auth.CanEnumerateServer, the
+// canSeeServer / visibleServers wrappers in scope.go, scopeAllowedServers
+// below, every recomputed count and the one predicate caller outside this
+// package (internal/management/diagnostics.go) all read it. A REST read door
+// never re-derives visibility: it answers from here.
 //
-//  3. preflight.ResolveScope (the REST /preflight door) — token scope ∩ token
-//     PIN ∩ requested profile. The pin (AuthContext.ProfilePin) is operator-set
-//     and not caller-selectable, so intersecting it there genuinely narrows;
-//     the requested-profile half is again ergonomics, and preflight is a
-//     "would these tools resolve under profile X?" question that has to answer
-//     under the profile the caller names. See the comment on
-//     handleAgentTokenAuth, which describes THAT door and not this predicate.
+// Why the pin is part of the boundary and not an ergonomic filter: it is set
+// by the operator at token creation, it cannot be changed or even confirmed by
+// the token, and a --profile token takes its grant FROM the profile, so its
+// stored grant is "*". Read alone, that "*" let a pinned token enumerate the
+// whole fleet on /status, /events, /review, /attention, /profiles and
+// /annotations/coverage while the MCP resolver (pin = highest tier) showed it
+// one profile's servers. Intersecting the pin can only narrow, never widen.
 //
-// So (1) ⊇ (2) and (1) ⊇ (3) always. A REST read door must be gated by (1);
-// anything (2) or (3) additionally hides is hidden for convenience, not safety.
+// Fail closed (FR-002): a pin naming no configured profile, an empty profile,
+// a profile whose servers are all unconfigured, or one with no overlap with
+// the grant yields an EMPTY visible set — the same shape, on every door, as a
+// token whose grant is []. The token cannot tell "profile deleted" from
+// "nothing granted". The reach is resolved from the live configuration per
+// request and per SSE frame, never cached on the credential (FR-003).
+//
+// Two things in this tree still look like "scope" and are NOT the boundary —
+// they are ERGONOMIC filters that can only narrow further:
+//
+//  1. The requested profile: ?profile= view-as on REST (view_as.go),
+//     set_profile and /mcp/p/<slug> on MCP (server.serverInScope,
+//     internal/server/mcp_visibility.go). Caller-selectable, so it is never
+//     folded into the boundary — a caller could otherwise widen its own
+//     visibility by switching profiles. A pinned caller may select only its
+//     own pin (FR-012); every other slug, existing or not, gets the same
+//     non-disclosing refusal, exactly as the MCP surface answers it.
+//
+//  2. preflight.ResolveScope (the REST /preflight door) — token scope ∩ token
+//     pin ∩ requested profile. With the pin already bound into the token
+//     scope the pin term is idempotent there; the requested-profile half is
+//     again ergonomics, because preflight is a "would these tools resolve
+//     under profile X?" question.
+//
+// So the boundary ⊇ (1) and ⊇ (2) always. A REST read door must be gated by
+// the boundary; anything (1) or (2) additionally hides is hidden for
+// convenience, not safety.
 
 // scopeAllowedServers returns the server names a scoped caller may see, plus
 // whether the caller is scoped at all.
@@ -54,6 +80,9 @@ import (
 // nil as "unrestricted", so handing them a nil for a token that is allowed
 // nothing would open the door it was meant to close. "*" is preserved and
 // honoured by those filters exactly as AuthContext.CanAccessServer honours it.
+// For a pinned caller the context's AllowedServers is already the resolved
+// visible set (bindCallerToPin), so this seam — and the usage cache key built
+// from it — never hands storage the raw "*" of a --profile token (FR-019).
 func scopeAllowedServers(ctx context.Context) ([]string, bool) {
 	if !auth.IsScopedCaller(ctx) {
 		return nil, false

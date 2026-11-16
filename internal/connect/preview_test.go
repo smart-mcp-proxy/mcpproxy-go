@@ -454,13 +454,14 @@ func TestPreview_OpenCode_EquivalentEntryExists(t *testing.T) {
 // TestConnect_CredentialCarrierMatrix pins the per-client credential carrier
 // when require_mcp_auth is on (Spec 078): a header where the client config
 // supports one, the mcp-remote --header bridge arg for Claude Desktop, and the
-// ?apikey= query only for Codex (whose TOML headers are env-var indirected).
+// TOML http_headers table for Codex. No client gets the ?apikey= query: the
+// proxy can refuse it (mcp_reject_query_apikey).
 func TestConnect_CredentialCarrierMatrix(t *testing.T) {
 	type carrier int
 	const (
 		header carrier = iota
 		bridgeHeaderArg
-		query
+		tomlHeader
 	)
 	want := map[string]carrier{
 		"claude-code":    header,
@@ -470,7 +471,7 @@ func TestConnect_CredentialCarrierMatrix(t *testing.T) {
 		"gemini":         header,
 		"opencode":       header,
 		"claude-desktop": bridgeHeaderArg,
-		"codex":          query,
+		"codex":          tomlHeader,
 	}
 
 	for clientID, c := range want {
@@ -508,10 +509,13 @@ func TestConnect_CredentialCarrierMatrix(t *testing.T) {
 				if last != "X-API-Key:"+secret {
 					t.Fatalf("%s: expected --header arg, got %v", clientID, args)
 				}
-			case query:
-				u, _ := entry["url"].(string)
-				if !strings.Contains(u, "apikey="+secret) {
-					t.Fatalf("%s: expected apikey query, got %v", clientID, u)
+			case tomlHeader:
+				h, ok := entry["http_headers"].(map[string]interface{})
+				if !ok || h["X-API-Key"] != secret {
+					t.Fatalf("%s: expected http_headers X-API-Key, got %v", clientID, entry)
+				}
+				if u, _ := entry["url"].(string); strings.Contains(u, "apikey") {
+					t.Fatalf("%s: url must stay clean, got %v", clientID, u)
 				}
 			}
 		})

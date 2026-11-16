@@ -235,6 +235,13 @@ type ReviewedServerApprover interface {
 	FinishServerApproval(serverName string) error
 }
 
+// reviewedServerApprovalFinisher is the optional ctx-aware tail of a reviewed
+// approval (issue #1698): the request context names the approver on the
+// quarantine_change row. Preferred over FinishServerApproval when present.
+type reviewedServerApprovalFinisher interface {
+	FinishServerApprovalCtx(ctx context.Context, serverName string) error
+}
+
 // IncarnationServerApprovalCommitter extends ServerApprovalCommitter with the
 // Spec 116 incarnation binding: CommitServerApprovalAt runs the same locked
 // section but first checks (under the approval lock) that the stored row
@@ -1974,6 +1981,9 @@ func (s *Service) GetScanReport(ctx context.Context, serverName string) (*Aggreg
 	allReports = deduplicatePass2Findings(allReports)
 
 	agg := AggregateReportsWithJobStatus(primaryJob.ID, serverName, allReports, primaryJob)
+	if pass2Job != nil && pass2Job.Status == ScanJobStatusCompleted {
+		includeScanJobTimestamp(agg, pass2Job)
+	}
 
 	// Set pass completion status
 	agg.Pass1Complete = pass1Job != nil && pass1Job.Status == ScanJobStatusCompleted
@@ -2155,6 +2165,9 @@ func (s *Service) GetScanReportByJobID(ctx context.Context, jobID string) (*Aggr
 			// supply-chain scanners run in Pass 2.
 			if cj, cerr := s.storage.GetScanJob(companionID); cerr == nil {
 				companionPass2 = cj
+				if cj.Status == ScanJobStatusCompleted {
+					includeScanJobTimestamp(agg, cj)
+				}
 			}
 		}
 
@@ -2460,7 +2473,7 @@ func (s *Service) approveServer(ctx context.Context, serverName string, force bo
 		save = func() error { return s.storage.SaveIntegrityBaselineWithBlocks(baseline, blocks) }
 	}
 	if approver, ok := s.unquarantiner.(ReviewedServerApprover); ok {
-		return s.approveServerReviewed(approver, serverName, approvedBy, blocks, expected, save, bound, inc)
+		return s.approveServerReviewed(ctx, approver, serverName, approvedBy, blocks, expected, save, bound, inc)
 	}
 	if expected != nil {
 		// Never drop a binding silently: without the reviewed capability the
@@ -2559,7 +2572,7 @@ func (s *Service) approveServer(ctx context.Context, serverName string, force bo
 // commit section (validate, baseline marker, integrity baseline + blocks,
 // promotion of the pending tools present, storage/config unquarantine), then
 // the block audit events and the unlocked finish.
-func (s *Service) approveServerReviewed(approver ReviewedServerApprover, serverName, approvedBy string, blocks []ToolApprovalBlock, expected map[string]string, save func() error, bound bool, inc int64) error {
+func (s *Service) approveServerReviewed(ctx context.Context, approver ReviewedServerApprover, serverName, approvedBy string, blocks []ToolApprovalBlock, expected map[string]string, save func() error, bound bool, inc int64) error {
 	blockNames := make([]string, 0, len(blocks))
 	for _, block := range blocks {
 		blockNames = append(blockNames, block.ToolName)
@@ -2589,7 +2602,11 @@ func (s *Service) approveServerReviewed(approver ReviewedServerApprover, serverN
 			recorder.RecordToolBlocksForSecurityApproval(serverName, blockNames, approvedBy)
 		}
 	}
-	if err := approver.FinishServerApproval(serverName); err != nil {
+	finish := approver.FinishServerApproval
+	if f, ok := approver.(reviewedServerApprovalFinisher); ok {
+		finish = func(name string) error { return f.FinishServerApprovalCtx(ctx, name) }
+	}
+	if err := finish(serverName); err != nil {
 		s.logger.Error("Failed to finish server approval",
 			zap.String("server", serverName), zap.Error(err))
 		return fmt.Errorf("failed to finish approval of server %q: %w", serverName, err)

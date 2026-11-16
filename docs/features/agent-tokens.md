@@ -191,6 +191,11 @@ Server scoping is enforced at three levels:
    `GET /api/v1/diagnostics` / `doctor`, `GET /api/v1/profiles`,
    `GET /api/v1/annotations/coverage` and `GET /api/v1/security/scans`.
 
+   For a token minted with `--profile`, the set that scopes all of the above is
+   `allowed_servers` **intersected with the pinned profile's servers** (Spec
+   118, issue #1686): the pin is part of the visibility boundary, not only of
+   dispatch. See [Profile Pinning](#profile-pinning) for the fail-closed cases.
+
    **The whole `/api/v1/servers/{id}` subtree** answers `404 Server not found`
    for a server outside the scope — `tools`, `logs`, `tool-calls`,
    `diagnostics`, `scan/status`, `scan/report`, `scan/files`, `integrity`,
@@ -204,7 +209,18 @@ Server scoping is enforced at three levels:
    **The activity, tool-call and usage doors** are scoped to records
    attributable to an allowed server: `GET /api/v1/activity`,
    `/activity/summary`, `/activity/usage`, `/activity/export`, `/activity/{id}`,
-   `GET /api/v1/tool-calls` and `/tool-calls/{id}` (plus its `/replay`). The
+   `GET /api/v1/tool-calls` and `/tool-calls/{id}` (plus its `/replay`; a replay
+   re-dispatches the call, so it answers to the same per-tool gate as
+   `call_tool_*` for every caller, administrators included: a tool that is
+   pending or changed under tool-level quarantine, denied by `enabled_tools` /
+   `disabled_tools`, on a quarantined or disabled server, or not certified on
+   the server's live connection (the discovery window after a reconnect) is
+   refused with `403` and never reaches the upstream. A scoped token also
+   requires the permission tier of the target tool, taken from that same
+   certified identity, else `403`; the dispatch is pinned to the certified
+   connection generation, so a reconnect between the check and the call is
+   refused too;
+   `POST /api/v1/feedback` is admin-only). The
    entitlement is applied inside the query, so `total` and the page always
    describe the same record set, and a `?server=` filter narrows *within* the
    scope rather than escaping it. Records with no server attribution
@@ -568,6 +584,10 @@ See [Which profile applies](./profiles.md#which-profile-applies) for how a clien
 
 **Validation & config changes**: the pinned slug must name a configured profile at creation time (creation is rejected otherwise). If the profile is **later removed** from the configuration, the pin resolves to a **deny-all scope**: the token sees no upstream servers and no tools, on the MCP session path and in [preflight](./tools-preflight.md#disclosure-tiers) alike. A pin with **zero reach** — the profile still exists but is empty, names only unconfigured servers, or no longer overlaps the token's `allowed_servers` — is treated exactly like a deleted one on `set_profile` and `/mcp/p/<pin>`, so the token cannot tell whether its own pin still exists. A request under a **deleted** pin is logged with a warning naming the removed profile, not hard-failed at the transport; a refused `/mcp/p/<pin>` initialization (deleted or zero-reach alike) is logged as `profile URL refused for scoped caller`. The pin is a restriction the operator applied, so losing the profile it names must never hand the token a wider view than it had the day before — re-create the profile, or re-mint the token against a live one, to restore it. Pinning composes with server scoping and permission tiers: a request must satisfy **all** of them.
 
+**The pin bounds every REST and SSE read, not only dispatch** (Spec 118, issue #1686). A pinned token's visible set on the REST API is `allowed_servers` ∩ the pinned profile's effective servers, resolved from the live configuration on every request and before every `/events` frame. Every read door answers from that one set — `GET /api/v1/status` (`upstream_stats` and its counters), `GET /api/v1/servers` and `/tools` (bare or with `?profile=`), the `/events` stream (status frames, the `servers.changed` and `attention.changed` embeds, every server-named event), `GET /api/v1/review`, `/attention`, `/annotations/coverage`, `/diagnostics`, `/catalog/search`, the activity and tool-call doors, and the whole `/servers/{id}` subtree — so no door and no count can disclose a server outside the pin. On the profile doors a pinned token may learn **only its own pin**: `GET /api/v1/profiles` lists that one profile (narrowed to the visible servers, `switchable_to` cleared), `GET /api/v1/profiles/{name}`, `/profiles/{name}/effective-tools` and `?profile=<name>` for any other name answer the same non-disclosing `404` an unknown profile gets, and `GET /api/v1/profiles/active` reads `""` unless the server-level active profile is the pin itself. (For an unpinned scoped token, `/profiles/active` likewise reads `""` when the active profile has no server in its `allowed_servers`.)
+
+Fail-closed cases: a pin naming a **deleted** profile, an **empty** one, one whose servers are all unconfigured, or one with **no overlap** with `allowed_servers` yields an empty visible set on every door — the same empty lists, zero counts and `404`s a token granted `[]` receives — so the token cannot tell which of these happened. On `/events`, the `active_profile.changed` slug is rendered as `GET /profiles/active` would answer it, and a `servers.changed` extra naming a hidden server is withheld together with the counts that describe that server's change. Accepted residual on `/events`: `servers.changed` is a coalesced state snapshot, so while the token still has at least one visible server a frame caused by a change to a hidden server alone is still delivered (its narrowed embed holds the token's own, unchanged rows); it never carries a hidden name, row or count. A frame that would carry nothing visible is dropped.
+
 The pin is shown by `token list` (PROFILE PIN column) and `token show` (Profile Pin field), and is preserved across `token regenerate`.
 
 ### Token kinds and legacy scope
@@ -724,6 +744,11 @@ mcpproxy token regenerate deploy-bot
 
 The new token is displayed once — save it immediately.
 
+A regeneration writes one `profile_change` activity record with `change: rotate`,
+the `token_name`, the actor (`actor_kind`, `actor_name`, `surface`) and a diff
+holding the old and new `token_prefix` — never the secret — so the record of who
+minted, rotated or revoked a token is complete (`issue`, `rotate`, `revoke`).
+
 ### JSON Output
 
 All commands support JSON output for scripting:
@@ -803,7 +828,7 @@ as `rate_limit` when the token has one.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `require_mcp_auth` | bool | `false` | Require authentication on `/mcp` endpoint |
-| `mcp_reject_query_apikey` | bool | `false` | Refuse a `?apikey=` query parameter on every MCP endpoint (`/mcp*` and the legacy `/v1/tool_code` aliases) with a 401, forcing clients onto `Authorization: Bearer <token>` or `X-API-Key`. It does not stop a URL already sent from being logged in transit; it makes a query-form client fail until it is migrated, so tokens stop appearing in access logs, proxy logs and browser history. Applies to MCP endpoints only; the REST API, the Web UI and its `/events` stream keep accepting the query form. Clients the Connect wizard configured with `?apikey=` in the URL (Codex, the generic fallback) need a header carrier first (see [Connect clients](./connect-clients.md)). Takes effect without a restart |
+| `mcp_reject_query_apikey` | bool | `false` | Refuse a `?apikey=` query parameter on every MCP endpoint (`/mcp*` and the legacy `/v1/tool_code` aliases) with a 401, forcing clients onto `Authorization: Bearer <token>` or `X-API-Key`. It does not stop a URL already sent from being logged in transit; it makes a query-form client fail until it is migrated, so tokens stop appearing in access logs, proxy logs and browser history. Applies to MCP endpoints only; the REST API, the Web UI and its `/events` stream keep accepting the query form. Entries an older Connect wizard wrote with `?apikey=` in the URL (Codex, the generic fallback) must be reconnected first; current versions write an `X-API-Key` header (see [Connect clients](./connect-clients.md)). Takes effect without a restart |
 | `api_key` | string | auto-generated | Admin API key for full access |
 | `agent_token_rate_limit` | object | off | Default call budget for every agent token: `per_minute` (calls a minute, `0` = off, max 100000) and `burst` (optional, defaults to `per_minute`). A token created with `--rate-limit` uses its own budget instead. See [Call Rate Limit](#call-rate-limit). Takes effect without a restart |
 

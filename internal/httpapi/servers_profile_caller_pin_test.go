@@ -161,12 +161,20 @@ func TestServersProfileCallerPin(t *testing.T) {
 		t.Run(branch.name, func(t *testing.T) {
 			srv, token := callerPinServer(t, branch.withManagement)
 
-			rows := serverRows(callerPinGet(t, srv, "/api/v1/servers?profile=work-full", token))
+			// Spec 118 FR-012 (supersedes the #1437 reading): a pinned caller
+			// may name only its own pin on ?profile=; a wider profile answers
+			// the same non-disclosing 404 an unknown one does, even though it
+			// contains a server the caller may see.
+			wide := scopeGet(t, srv, "/api/v1/servers?profile=work-full", token)
+			assert.Equal(t, http.StatusNotFound, wide.Code, wide.Body.String())
+			assert.Equal(t, http.StatusNotFound, scopeGet(t, srv, "/api/v1/tools?profile=work-full", token).Code)
+
+			rows := serverRows(callerPinGet(t, srv, "/api/v1/servers?profile=work-readonly", token))
 			assert.Equal(t, map[string]float64{"github": 1}, rows,
 				"notion and filesystem are outside the caller's own pin; github counts only read_* tools")
 
 			// /servers and /tools must agree for the same caller.
-			tools := callerPinGet(t, srv, "/api/v1/tools?profile=work-full", token)
+			tools := callerPinGet(t, srv, "/api/v1/tools?profile=work-readonly", token)
 			githubRows := 0
 			for _, tr := range tools["tools"].([]interface{}) {
 				if tr.(map[string]interface{})["server"] == "github" || tr.(map[string]interface{})["server_name"] == "github" {
@@ -175,7 +183,7 @@ func TestServersProfileCallerPin(t *testing.T) {
 			}
 			assert.Equal(t, githubRows, int(rows["github"]), "tool_count equals the GET /tools github row count")
 
-			stats := callerPinGet(t, srv, "/api/v1/servers?profile=work-full", token)["stats"].(map[string]interface{})
+			stats := callerPinGet(t, srv, "/api/v1/servers?profile=work-readonly", token)["stats"].(map[string]interface{})
 			assert.Equal(t, float64(1), stats["total_servers"])
 			assert.Equal(t, float64(1), stats["total_tools"])
 

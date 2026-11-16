@@ -300,12 +300,12 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 		}
 	}
 	// Stored records and the live capture state are published by different
-	// writers. A capture holds captureSnapMu for persist + prune + stamp, so
+	// writers. A capture holds captureSnapLock for persist + prune + stamp, so
 	// reading both under the read lock yields one generation, never a mix.
-	r.captureSnapMu.RLock()
+	r.captureSnapLock(serverName).RLock()
 	records, err := r.storageManager.ListToolApprovals(serverName)
 	if err != nil {
-		r.captureSnapMu.RUnlock()
+		r.captureSnapLock(serverName).RUnlock()
 		return nil, fmt.Errorf("list tool reviews for %q: %w", serverName, err)
 	}
 	if hook := r.reviewAfterRecords; hook != nil {
@@ -321,7 +321,7 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 		liveNames[config.RawToolName(t)] = struct{}{}
 	}
 	r.lastGoodToolsMu.RUnlock()
-	r.captureSnapMu.RUnlock()
+	r.captureSnapLock(serverName).RUnlock()
 	for _, rec := range records {
 		if _, ok := liveNames[rec.ToolName]; ok {
 			reviewServer.LiveToolCount++

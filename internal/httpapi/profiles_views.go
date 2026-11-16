@@ -160,6 +160,10 @@ func redactProfileView(ctx context.Context, cfg *config.Config, v *internalRunti
 		v.Tools = &t
 	}
 	if v.SwitchableTo != nil {
+		// A pinned caller may learn no profile but its own (Spec 118
+		// FR-009): profileReachable answers false for every other name, so
+		// the list empties for it; a non-pinned scoped caller keeps the
+		// per-profile reachability projection.
 		kept := make([]string, 0, len(*v.SwitchableTo))
 		for _, name := range *v.SwitchableTo {
 			if profileReachable(ctx, cfg, name) {

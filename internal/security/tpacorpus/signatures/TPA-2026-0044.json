@@ -1,0 +1,86 @@
+{
+  "category": "tpa_persistence_implant",
+  "gating": true,
+  "id": "TPA-2026-0044",
+  "license": "MIT",
+  "provenance": {
+    "note": "Prompt injection makes a coding agent write a directive or auto-approve setting into its own config file so it persists across sessions.",
+    "published": "2025-08-12",
+    "source": "https://embracethered.com/blog/posts/2025/github-copilot-remote-code-execution-via-prompt-injection/"
+  },
+  "rules": [
+    {
+      "category": "prompt-injection",
+      "confidence": 0.88,
+      "detector": "config_persist",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0044",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$cfg",
+          "type": "regex",
+          "value": "AGENTS\\.md|CLAUDE\\.md|\\.cursor/rules|copilot-instructions\\.md"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)(?:(?:^|[.!?]\\s+|[:;\\n]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:agent|assistant|model|ai|llm)\\s+to\\s+)(?:append|add|write|save|insert|record)\\b.{0,120}?\\b(?:to|into|in)\\s+(?:the\\s+)?[\"'`{}\\[\\]]*(?:(?:project|repo|repository|workspace)(?:'s)?\\s+)?[\"'`{}\\[\\]]*(?:~/|\\./|/)?(?:\\.claude/|\\.gemini/)?(?:agents\\.md|claude\\.md|gemini\\.md|\\.cursorrules|\\.windsurfrules|\\.cursor/rules|\\.github/copilot-instructions\\.md|copilot-instructions\\.md).{0,200}?\\b(?:future|every|all|each|subsequent|next)\\s+(?:\\w+\\s+){0,2}(?:session|conversation|run|chat)s?\\b.{0,200}?(?:(?:^|[.!?]\\s+|[:;\\n\\\"'`(\\[{]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|so|that|will|can|may|you)\\s+)(?:(?:(?:enable\\w*|activate\\w*|use|turn\\s+on|switch\\s+to|keep)\\s+(?:the\\s+|an?\\s+)?auto-?approv\\w*|auto-?approv(?:e|es)\\b)|\\b(?:run|runs|running|execut\\w+|install\\w*|call\\w*|approv\\w+|allow\\w*|trust\\w*)\\b(?:\\s+(?:d(?:o(?:[a-mo-z](?:[\\w/~-]|\\.\\w)*)?|[a-np-z](?:[\\w/~-]|\\.\\w)*)?|[a-ce-mo-z0-9_/~-](?:[\\w/~-]|\\.\\w)*)){0,6}?\\s+(?:without|no)\\s+(?:asking|confirm\\w*|approval|permission|prompting|review)|\\bdisable\\s+(?:confirm\\w*|approval|safety|sandbox)|\\bbypass\\w*\\s+(?:confirm\\w*|approval|permission|safety|sandbox|review)|(?:enable\\w*|activate\\w*|keep|use|turn\\s+on|switch\\s+to|stay\\s+in)\\s+(?:the\\s+|a\\s+)?(?:yolo|allow[- ]all|trust[- ]all)\\b)|(?:^|[.!?]\\s+|[:;\\n\\\"'`(\\[{]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|so|that|will|can|may|you)\\s+)\\b(?:without|no)\\s+(?:asking|confirm\\w*|approval|permission|prompting|review)\\b[,;:]?(?:\\s+(?:d(?:o(?:[a-mo-z](?:[\\w/~-]|\\.\\w)*)?|[a-np-z](?:[\\w/~-]|\\.\\w)*)?|[a-ce-mo-z0-9_/~-](?:[\\w/~-]|\\.\\w)*)){0,4}?\\s+(?:run\\w*|execut\\w+|install\\w*|call\\w*|tool\\s+calls?)\\b|\\b(?:never|do\\s+not|don't)\\s+(?:ask|prompt|confirm)\\b[^.\\n]{0,30}?\\b(?:confirm\\w*|approval|permission)\\b[^.\\n]{0,60}?\\b(?:command|shell|tool|execut\\w+|run|edit|install|delet\\w+|writ\\w+|destructive|any\\s+action|all\\s+actions|everything))|(?:(?:^|[.!?]\\s+|[:;\\n\\\"'`(\\[{]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|so|that|will|can|may|you)\\s+)(?:(?:(?:enable\\w*|activate\\w*|use|turn\\s+on|switch\\s+to|keep)\\s+(?:the\\s+|an?\\s+)?auto-?approv\\w*|auto-?approv(?:e|es)\\b)|\\b(?:run|runs|running|execut\\w+|install\\w*|call\\w*|approv\\w+|allow\\w*|trust\\w*)\\b(?:\\s+(?:d(?:o(?:[a-mo-z](?:[\\w/~-]|\\.\\w)*)?|[a-np-z](?:[\\w/~-]|\\.\\w)*)?|[a-ce-mo-z0-9_/~-](?:[\\w/~-]|\\.\\w)*)){0,6}?\\s+(?:without|no)\\s+(?:asking|confirm\\w*|approval|permission|prompting|review)|\\bdisable\\s+(?:confirm\\w*|approval|safety|sandbox)|\\bbypass\\w*\\s+(?:confirm\\w*|approval|permission|safety|sandbox|review)|(?:enable\\w*|activate\\w*|keep|use|turn\\s+on|switch\\s+to|stay\\s+in)\\s+(?:the\\s+|a\\s+)?(?:yolo|allow[- ]all|trust[- ]all)\\b)|(?:^|[.!?]\\s+|[:;\\n\\\"'`(\\[{]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|so|that|will|can|may|you)\\s+)\\b(?:without|no)\\s+(?:asking|confirm\\w*|approval|permission|prompting|review)\\b[,;:]?(?:\\s+(?:d(?:o(?:[a-mo-z](?:[\\w/~-]|\\.\\w)*)?|[a-np-z](?:[\\w/~-]|\\.\\w)*)?|[a-ce-mo-z0-9_/~-](?:[\\w/~-]|\\.\\w)*)){0,4}?\\s+(?:run\\w*|execut\\w+|install\\w*|call\\w*|tool\\s+calls?)\\b|\\b(?:never|do\\s+not|don't)\\s+(?:ask|prompt|confirm)\\b[^.\\n]{0,30}?\\b(?:confirm\\w*|approval|permission)\\b[^.\\n]{0,60}?\\b(?:command|shell|tool|execut\\w+|run|edit|install|delet\\w+|writ\\w+|destructive|any\\s+action|all\\s+actions|everything)).{0,120}?(?:^|[.!?]\\s+|[:;\\n]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:agent|assistant|model|ai|llm)\\s+to\\s+)(?:append|add|write|save|insert|record)\\b.{0,120}?\\b(?:to|into|in)\\s+(?:the\\s+)?[\"'`{}\\[\\]]*(?:(?:project|repo|repository|workspace)(?:'s)?\\s+)?[\"'`{}\\[\\]]*(?:~/|\\./|/)?(?:\\.claude/|\\.gemini/)?(?:agents\\.md|claude\\.md|gemini\\.md|\\.cursorrules|\\.windsurfrules|\\.cursor/rules|\\.github/copilot-instructions\\.md|copilot-instructions\\.md).{0,200}?\\b(?:future|every|all|each|subsequent|next)\\s+(?:\\w+\\s+){0,2}(?:session|conversation|run|chat)s?\\b)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.88,
+      "detector": "config_autoapprove_settings",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0044",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$cfg",
+          "type": "regex",
+          "value": "chat\\.tools\\.(?:global\\.)?autoApprove"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)(?:(?:^|[.!?]\\s+|[:;\\n]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:agent|assistant|model|ai|llm)\\s+to\\s+)(?:add|set|write|put|insert|enable|inject|append|merge|update|apply|configure|store|turn\\s+on|save)\\b(?:\\s+|[:,]\\s*|[\\\"'`{}\\[\\]]|\\b(?:the|a|an|this|that|following|new|setting|settings|line|option|entry|key|flag|property|to|in|into|inside|of|your|my|workspace|project|user|folder|file|and|also|then|json|object|config|configuration|value|below|here|these|those|them|it|as|at|under|on|for|with|use)\\b){0,16}[\"'`{}\\[\\]]*(?:[\\w-]+\\.)*chat\\.tools\\.(?:global\\.)?autoApprove[\"'`{}\\[\\]]*(?:\\s+(?:setting|option|key|flag))?(?:\\s*[:=]\\s*|\\s+(?:to|as)\\s+)true\\b[\"'`{}\\[\\]]*(?:\\s+|[:,]\\s*|[\\\"'`{}\\[\\]]|\\b(?:the|a|an|this|that|following|new|setting|settings|line|option|entry|key|flag|property|to|in|into|inside|of|your|my|workspace|project|user|folder|file|and|also|then|json|object|config|configuration|value|below|here|these|those|them|it|as|at|under|on|for|with|use)\\b){0,16}[\"'`{}\\[\\]]*\\.vscode/settings\\.json[\"'`{}\\[\\]]*|(?:^|[.!?]\\s+|[:;\\n]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:agent|assistant|model|ai|llm)\\s+to\\s+)(?:add|set|write|put|insert|enable|inject|append|merge|update|apply|configure|store|turn\\s+on|save)\\b(?:\\s+|[:,]\\s*|[\\\"'`{}\\[\\]]|\\b(?:the|a|an|this|that|following|new|setting|settings|line|option|entry|key|flag|property|to|in|into|inside|of|your|my|workspace|project|user|folder|file|and|also|then|json|object|config|configuration|value|below|here|these|those|them|it|as|at|under|on|for|with|use)\\b){0,16}[\"'`{}\\[\\]]*\\.vscode/settings\\.json[\"'`{}\\[\\]]*(?:\\s+|[:,]\\s*|[\\\"'`{}\\[\\]]|\\b(?:the|a|an|this|that|following|new|setting|settings|line|option|entry|key|flag|property|to|in|into|inside|of|your|my|workspace|project|user|folder|file|and|also|then|json|object|config|configuration|value|below|here|these|those|them|it|as|at|under|on|for|with|use)\\b){0,16}[\"'`{}\\[\\]]*(?:[\\w-]+\\.)*chat\\.tools\\.(?:global\\.)?autoApprove[\"'`{}\\[\\]]*(?:\\s+(?:setting|option|key|flag))?(?:\\s*[:=]\\s*|\\s+(?:to|as)\\s+)true\\b[\"'`{}\\[\\]]*)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.85,
+      "detector": "config_persist_bypass",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0044",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$cfg",
+          "type": "regex",
+          "value": "AGENTS\\.md|CLAUDE\\.md|\\.cursor/rules|copilot-instructions\\.md"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)(?:^|[.!?]\\s+|[:;\\n]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:agent|assistant|model|ai|llm)\\s+to\\s+)(?:append|add|write|save|insert|record)\\b.{0,120}?\\b(?:to|into|in)\\s+(?:the\\s+)?[\"'`{}\\[\\]]*(?:(?:project|repo|repository|workspace)(?:'s)?\\s+)?[\"'`{}\\[\\]]*(?:~/|\\./|/)?(?:\\.claude/|\\.gemini/)?(?:agents\\.md|claude\\.md|gemini\\.md|\\.cursorrules|\\.windsurfrules|\\.cursor/rules|\\.github/copilot-instructions\\.md|copilot-instructions\\.md).{0,200}?(?:(?:^|[.!?]\\s+|[:;\\n\\\"'`(\\[{]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|so|that|will|can|may|you)\\s+)(?:(?:(?:enable\\w*|activate\\w*|use|turn\\s+on|switch\\s+to|keep)\\s+(?:the\\s+|an?\\s+)?auto-?approv\\w*|auto-?approv(?:e|es)\\b)|\\b(?:run|runs|running|execut\\w+|install\\w*|call\\w*|approv\\w+|allow\\w*|trust\\w*)\\b(?:\\s+(?:d(?:o(?:[a-mo-z](?:[\\w/~-]|\\.\\w)*)?|[a-np-z](?:[\\w/~-]|\\.\\w)*)?|[a-ce-mo-z0-9_/~-](?:[\\w/~-]|\\.\\w)*)){0,6}?\\s+(?:without|no)\\s+(?:asking|confirm\\w*|approval|permission|prompting|review)|\\bdisable\\s+(?:confirm\\w*|approval|safety|sandbox)|\\bbypass\\w*\\s+(?:confirm\\w*|approval|permission|safety|sandbox|review)|(?:enable\\w*|activate\\w*|keep|use|turn\\s+on|switch\\s+to|stay\\s+in)\\s+(?:the\\s+|a\\s+)?(?:yolo|allow[- ]all|trust[- ]all)\\b)|(?:^|[.!?]\\s+|[:;\\n\\\"'`(\\[{]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|so|that|will|can|may|you)\\s+)\\b(?:without|no)\\s+(?:asking|confirm\\w*|approval|permission|prompting|review)\\b[,;:]?(?:\\s+(?:d(?:o(?:[a-mo-z](?:[\\w/~-]|\\.\\w)*)?|[a-np-z](?:[\\w/~-]|\\.\\w)*)?|[a-ce-mo-z0-9_/~-](?:[\\w/~-]|\\.\\w)*)){0,4}?\\s+(?:run\\w*|execut\\w+|install\\w*|call\\w*|tool\\s+calls?)\\b|\\b(?:never|do\\s+not|don't)\\s+(?:ask|prompt|confirm)\\b[^.\\n]{0,30}?\\b(?:confirm\\w*|approval|permission)\\b[^.\\n]{0,60}?\\b(?:command|shell|tool|execut\\w+|run|edit|install|delet\\w+|writ\\w+|destructive|any\\s+action|all\\s+actions|everything))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -128,9 +129,34 @@ func (m *mockTokenStore) RegenerateAgentToken(name string, _ string, _ []byte) (
 
 type mockTokenController struct {
 	baseController
-	apiKey   string
-	servers  []string
-	profiles []string
+	apiKey  string
+	servers []string
+	// lastQuarantineCtx is the context the ctx-aware quarantine toggle
+	// received (issue #1698).
+	lastQuarantineCtx context.Context
+	lastEnableCtx     context.Context
+	lastRestartCtx    context.Context
+	profiles          []string
+}
+
+func (m *mockTokenController) QuarantineServerCtx(ctx context.Context, _ string, _ bool) error {
+	m.lastQuarantineCtx = ctx
+	return nil
+}
+
+func (m *mockTokenController) QuarantineServerAtCtx(ctx context.Context, _ string, _ bool, _ int64) error {
+	m.lastQuarantineCtx = ctx
+	return nil
+}
+
+func (m *mockTokenController) EnableServerCtx(ctx context.Context, _ string, _ bool) error {
+	m.lastEnableCtx = ctx
+	return nil
+}
+
+func (m *mockTokenController) RestartServerCtx(ctx context.Context, _ string) error {
+	m.lastRestartCtx = ctx
+	return nil
 }
 
 func (m *mockTokenController) GetCurrentConfig() *config.Config {
