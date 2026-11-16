@@ -290,6 +290,14 @@ type ServerController interface {
 	BlockAllTools(serverName string, blockedBy string) (int, error)
 	GetToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error)
 
+	// Skills over MCP (Spec 125, PR-1). Administrator-only reads of the skills
+	// catalog and a refresh trigger; nothing here is offered to agents yet.
+	SkillsStatus(serverName string) internalRuntime.SkillsServerStatus
+	ListSkillRecords(serverName string) ([]*storage.SkillApprovalRecord, error)
+	SkillFileText(serverName, skillPath, relPath string, approvedCopy bool) ([]byte, storage.SkillFile, error)
+	SkillAvailable(serverName string, rec *storage.SkillApprovalRecord) bool
+	RefreshServerSkills(ctx context.Context, serverName string) error
+
 	// Onboarding wizard (Spec 046)
 	GetOnboardingState() (*storage.OnboardingState, error)
 	SaveOnboardingState(state *storage.OnboardingState) error
@@ -1146,6 +1154,10 @@ func (s *Server) setupRoutes() {
 			// operation (issue #873): pure rediscover + reindex, no state change.
 			r.Post("/refresh", s.requireServerOp(auth.ServerOpRefresh, s.handleRefreshServer))
 			r.Get("/tools", s.handleGetServerTools)
+			// Spec 125 PR-1: skills catalog, administrator-only.
+			r.Get("/skills", s.handleGetServerSkills)
+			r.Get("/skills/content", s.handleGetServerSkillContent)
+			r.Post("/skills/refresh", s.handleRefreshServerSkills)
 			r.Get("/review", s.handleGetServerReview)
 			r.Get("/logs", s.handleGetServerLogs)
 			// Spec 044: per-server diagnostics with stable error_code.
