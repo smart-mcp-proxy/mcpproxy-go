@@ -1538,8 +1538,8 @@ func TestFindClient(t *testing.T) {
 
 func TestGetAllClients(t *testing.T) {
 	clients := GetAllClients()
-	if len(clients) != 9 {
-		t.Errorf("Expected 9 clients, got %d", len(clients))
+	if len(clients) != 10 {
+		t.Errorf("Expected 10 clients, got %d", len(clients))
 	}
 
 	// Verify all have non-empty IDs and names
