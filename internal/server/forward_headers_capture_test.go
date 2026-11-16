@@ -38,7 +38,7 @@ func captureProbe(t *testing.T, cfg *config.Config) *httptest.Server {
 	})
 	streamable := mcpserver.NewStreamableHTTPServer(srv, clientFacingStreamableOptions(func() *config.Config { return cfg })...)
 	hs := httptest.NewServer(streamable)
-	t.Cleanup(hs.Close)
+	t.Cleanup(func() { closeHTTPFixture(hs) })
 	return hs
 }
 

@@ -197,6 +197,15 @@ type Client struct {
 	// stdioProc is the stdio child registered with the gate (FR-025a), so a
 	// normal Disconnect can hand it back to its own teardown. Guarded by mu.
 	stdioProc *dialgate.Process
+
+	// listen is the standalone GET stream of a streamable-HTTP upstream that
+	// advertises tools.listChanged (GH #1910, list_changed_stream.go). Guarded
+	// by listenMu, never by mu: Connect holds mu while it starts one.
+	// listenClient is the connection the stream belongs to; nil once it was
+	// released, so a racing re-initialize starts nothing for it.
+	listenMu     sync.Mutex
+	listen       *listChangedStream
+	listenClient *client.Client
 }
 
 // NewClient creates a new core MCP client

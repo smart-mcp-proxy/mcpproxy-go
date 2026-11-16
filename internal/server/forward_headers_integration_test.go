@@ -118,7 +118,7 @@ func newFwdUpstream(t *testing.T) *fwdUpstream {
 		}
 		inner.ServeHTTP(w, r)
 	}))
-	t.Cleanup(hs.Close)
+	t.Cleanup(func() { closeHTTPFixture(hs) })
 	u.URL = hs.URL
 	return u
 }

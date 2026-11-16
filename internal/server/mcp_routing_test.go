@@ -1049,7 +1049,7 @@ func TestRefreshPrompts_AggregatesBuiltinsAndUpstream(t *testing.T) {
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
 	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
-	t.Cleanup(testServer.Close)
+	t.Cleanup(func() { closeHTTPFixture(testServer) })
 
 	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
 	t.Cleanup(func() { um.DisconnectAll() })
@@ -1088,7 +1088,7 @@ func TestRefreshPrompts_RugPullBaseline_WithholdsFirstSeen(t *testing.T) {
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
 	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
-	t.Cleanup(testServer.Close)
+	t.Cleanup(func() { closeHTTPFixture(testServer) })
 
 	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
 	t.Cleanup(func() { um.DisconnectAll() })
@@ -1126,7 +1126,7 @@ func TestRefreshPrompts_AggregationDisabled_BuiltinsOnly(t *testing.T) {
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
 	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
-	t.Cleanup(testServer.Close)
+	t.Cleanup(func() { closeHTTPFixture(testServer) })
 
 	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
 	t.Cleanup(func() { um.DisconnectAll() })
@@ -1177,7 +1177,7 @@ func TestRefreshPrompts_ReadsLiveAggregateFlag(t *testing.T) {
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
 	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
-	t.Cleanup(testServer.Close)
+	t.Cleanup(func() { closeHTTPFixture(testServer) })
 
 	um := upstream.NewManager(zap.NewNop(), live, nil, secret.NewResolver(), nil)
 	t.Cleanup(func() { um.DisconnectAll() })
@@ -1230,7 +1230,7 @@ func TestRefreshPrompts_PopulatesRoutingModeServers(t *testing.T) {
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
 	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
-	t.Cleanup(testServer.Close)
+	t.Cleanup(func() { closeHTTPFixture(testServer) })
 
 	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
 	t.Cleanup(func() { um.DisconnectAll() })

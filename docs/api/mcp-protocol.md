@@ -258,6 +258,29 @@ Tool change notifications are supported across all connection types:
 - **HTTP/SSE**: Remote HTTP-based servers
 - **Streamable HTTP**: Modern HTTP transport
 
+**Streamable HTTP upstreams and the GET stream.** A streamable HTTP server can
+send a notification outside a request only on a standalone `GET` stream that the
+client keeps open. When a streamable HTTP upstream advertises
+`capabilities.tools.listChanged: true` in its `initialize` result, MCPProxy keeps
+one `GET` stream open to it for the life of the connection, so its tool changes
+are re-listed within seconds. The stream carries the session id, the static
+headers and the OAuth bearer of the connection. It closes on disconnect,
+reconnect and server removal, and moves to the new session after a session
+re-initialize. Two cases do not get a stream:
+
+- An upstream that does not advertise `tools.listChanged` gets no `GET` and no
+  extra held connection, which matters for scale-to-zero hosting. Its tool
+  changes are picked up by the discovery poll (`tool_discovery_interval`).
+- An upstream that refuses the `GET` (`405`, `400`, `406`, `401`, `403` or
+  another 4xx, or an answer that is not an event stream) also falls back to the
+  discovery poll. MCPProxy does not retry the `GET` and logs one INFO line.
+
+Network errors, `429`, `408` and `5xx` answers are retried with exponential
+backoff (1 s up to 2 minutes). A `404` means the upstream no longer knows the
+session, so the stream waits until the session is re-initialized or the server
+reconnects. SSE upstreams (`protocol: sse`) always hold their event stream, so
+they need no extra connection.
+
 ### Resilience Features
 
 - **Deduplication**: Rapid successive notifications are deduplicated to prevent redundant discovery
@@ -274,6 +297,8 @@ When notifications are received, MCPProxy logs:
 | DEBUG | "Server supports tool change notifications - registered handler" |
 | DEBUG | "Tool discovery triggered by notification" |
 | WARN | "Received tools notification from server that did not advertise listChanged capability" |
+| INFO | "Upstream does not serve the standalone GET stream; tool changes are picked up by the discovery poll" |
+| DEBUG | "Opening the upstream's standalone GET stream for tools/list_changed" |
 
 ## Error Handling
 

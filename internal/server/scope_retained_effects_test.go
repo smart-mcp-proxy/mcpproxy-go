@@ -293,7 +293,7 @@ func connectPromptUpstream(t *testing.T, proxy *MCPProxyServer, servers map[stri
 			})
 		}
 		testServer := servertest.NewTestStreamableHTTPServer(mcpSrv)
-		t.Cleanup(testServer.Close)
+		t.Cleanup(func() { closeHTTPFixture(testServer) })
 		require.NoError(t, um.AddServerConfig(name, &config.ServerConfig{
 			Name: name, Protocol: "streamable-http", URL: testServer.URL, Enabled: true,
 		}))

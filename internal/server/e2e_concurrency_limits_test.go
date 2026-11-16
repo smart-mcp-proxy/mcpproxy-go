@@ -96,7 +96,7 @@ func startSlowUpstream(t *testing.T) *slowUpstream {
 
 	httpSrv := &http.Server{Handler: mcpserver.NewStreamableHTTPServer(mcpSrv), ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = httpSrv.Serve(ln) }()
-	t.Cleanup(func() { _ = httpSrv.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = httpSrv.Close() })
 
 	return up
 }

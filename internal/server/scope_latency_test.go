@@ -290,7 +290,7 @@ func connectLatencyPromptUpstream(t *testing.T, proxy *MCPProxyServer, server st
 		})
 	}
 	testServer := servertest.NewTestStreamableHTTPServer(mcpSrv)
-	t.Cleanup(testServer.Close)
+	t.Cleanup(func() { closeHTTPFixture(testServer) })
 	require.NoError(t, um.AddServerConfig(server, &config.ServerConfig{
 		Name: server, Protocol: "streamable-http", URL: testServer.URL, Enabled: true,
 	}))

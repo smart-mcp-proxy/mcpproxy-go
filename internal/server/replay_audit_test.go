@@ -49,7 +49,7 @@ func startRuntimeCountingUpstream(t *testing.T, proxy *MCPProxyServer, server, t
 	require.NoError(t, err)
 	httpSrv := &http.Server{Handler: mcpserver.NewStreamableHTTPServer(mcpSrv), ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = httpSrv.Serve(ln) }()
-	t.Cleanup(func() { _ = httpSrv.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = httpSrv.Close() })
 	return fmt.Sprintf("http://%s", ln.Addr().String()), uc
 }
 
@@ -75,7 +75,7 @@ func startRuntimeBlockingUpstream(t *testing.T, server, tool string) (url string
 	require.NoError(t, err)
 	httpSrv := &http.Server{Handler: mcpserver.NewStreamableHTTPServer(mcpSrv), ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = httpSrv.Serve(ln) }()
-	t.Cleanup(func() { _ = httpSrv.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = httpSrv.Close() })
 	return fmt.Sprintf("http://%s", ln.Addr().String()), reached, release
 }
 
@@ -422,7 +422,7 @@ func startRuntimeFailingUpstream(t *testing.T, server, tool string, isRPCError b
 	require.NoError(t, err)
 	httpSrv := &http.Server{Handler: mcpserver.NewStreamableHTTPServer(mcpSrv), ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = httpSrv.Serve(ln) }()
-	t.Cleanup(func() { _ = httpSrv.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = httpSrv.Close() })
 	return fmt.Sprintf("http://%s", ln.Addr().String())
 }
 
