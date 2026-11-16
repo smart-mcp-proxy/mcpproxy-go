@@ -157,7 +157,7 @@ A refresh also runs by itself when a server connects, on the periodic discovery 
 
 ## REST API
 
-All three require administrator credentials; a scoped agent token gets `403`. The same shapes are in [REST API: Skills](../api/rest-api.md#skills).
+All three require administrator credentials; a scoped agent token gets `403`, and so does a user session in the server edition. The same shapes are in [REST API: Skills](../api/rest-api.md#skills).
 
 | Endpoint | Purpose |
 |----------|---------|
