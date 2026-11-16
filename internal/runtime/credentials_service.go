@@ -187,7 +187,9 @@ func CredentialStateOf(t *auth.AgentToken, now time.Time) string {
 	switch {
 	case t.Revoked:
 		return CredentialStateRevoked
-	case !t.ExpiresAt.IsZero() && !t.ExpiresAt.After(now):
+	case (t.Kind == auth.KindClient || !t.ExpiresAt.IsZero()) && !t.ExpiresAt.After(now):
+		// A zero ExpiresAt means "never expires" only for a regular agent token;
+		// a client credential must carry an expiry, so a zero one is expired.
 		return CredentialStateExpired
 	default:
 		return CredentialStateActive

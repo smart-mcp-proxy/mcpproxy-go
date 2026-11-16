@@ -417,7 +417,7 @@ func runTokenList(_ *cobra.Command, _ []string) error {
 			kind = "agent"
 		}
 
-		expiresAt := formatTokenExpiry(getMapString(tok, "expires_at"), "2006-01-02 15:04")
+		expiresAt := formatTokenExpiry(getMapString(tok, "expires_at"), "2006-01-02 15:04", kind)
 
 		rows = append(rows, []string{
 			getMapString(tok, "name"), getMapString(tok, "token_prefix"), kind,
@@ -720,8 +720,9 @@ func printField(label string, m map[string]interface{}, key string) {
 
 // formatTokenExpiry renders an expires_at value for display. A token that never
 // expires carries Go's zero time ("0001-01-01T00:00:00Z") on the wire, which is
-// shown as "never" rather than as a date in year 1.
-func formatTokenExpiry(raw, layout string) string {
+// shown as "never" rather than as a date in year 1. A client credential must
+// carry an expiry, so a zero one is shown as invalid rather than "never".
+func formatTokenExpiry(raw, layout, kind string) string {
 	if raw == "" {
 		return ""
 	}
@@ -730,6 +731,9 @@ func formatTokenExpiry(raw, layout string) string {
 		return raw
 	}
 	if t.IsZero() {
+		if kind == "client" {
+			return "invalid (no expiry)"
+		}
 		return "never"
 	}
 	if layout == "" {
@@ -739,7 +743,7 @@ func formatTokenExpiry(raw, layout string) string {
 }
 
 func printExpiryField(label string, m map[string]interface{}) {
-	if v := formatTokenExpiry(getMapString(m, "expires_at"), ""); v != "" {
+	if v := formatTokenExpiry(getMapString(m, "expires_at"), "", getMapString(m, "kind")); v != "" {
 		fmt.Printf("%s%s\n", label, v)
 	}
 }

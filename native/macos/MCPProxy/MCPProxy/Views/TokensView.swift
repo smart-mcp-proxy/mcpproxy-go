@@ -39,7 +39,8 @@ struct AgentToken: Codable, Identifiable, Equatable {
 
     /// A token minted with `--expires never` has no expiry: the API sends Go's
     /// zero time ("0001-01-01T00:00:00Z") for it.
-    var neverExpires: Bool { expiresAt?.hasPrefix("0001-01-01") ?? false }
+    /// A client credential must carry an expiry, so a zero one is not "never".
+    var neverExpires: Bool { kind != "client" && (expiresAt?.hasPrefix("0001-01-01") ?? false) }
 
     enum CodingKeys: String, CodingKey {
         case name, permissions, revoked, kind

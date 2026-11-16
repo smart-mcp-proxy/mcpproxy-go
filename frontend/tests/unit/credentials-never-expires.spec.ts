@@ -34,4 +34,14 @@ describe('never-expiring credentials', () => {
     expect(w.text()).toContain('Never expires')
     expect(w.text()).not.toContain('Expired')
   })
+
+  it('a client credential with a zero expiry is not "Never" and not active', () => {
+    expect(isNeverExpires(ZERO, 'client')).toBe(false)
+    expect(isNeverExpires(ZERO, 'agent')).toBe(true)
+    expect(expiresText(ZERO, 'client')).not.toBe('Never')
+    const c = { expires_at: ZERO, created_at: '2026-10-10T11:00:00Z', kind: 'client' }
+    expect(stateBadge(c, NOW).label).not.toBe('Active')
+    const w = mount(CredentialLifecycle, { props: { id: 'c', kind: 'client', profile: 'p', lease: false, expiresAt: ZERO, showState: true, now: NOW } })
+    expect(w.text()).not.toContain('Never expires')
+  })
 })

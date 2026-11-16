@@ -17,24 +17,26 @@ export interface LifecycleFields {
   created_at?: string | null
   lease?: boolean
   credential_state?: string
+  kind?: string
 }
 
 // A credential minted with `--expires never` carries Go's zero time
 // ("0001-01-01T00:00:00Z") as its expires_at. It has no expiry at all: never
 // expired, never a lease, never "expiring soon".
-export function isNeverExpires(value: string | null | undefined): boolean {
-  if (!value) return false
+// A client credential must carry an expiry, so a zero one is never "Never".
+export function isNeverExpires(value: string | null | undefined, kind?: string): boolean {
+  if (!value || kind === 'client') return false
   const t = new Date(value).getTime()
   return !Number.isNaN(t) && new Date(t).getUTCFullYear() <= 1
 }
 
 // "Never" for a credential without an expiry, else the short date-time.
-export function expiresText(value: string): string {
-  return isNeverExpires(value) ? 'Never' : formatDateTimeShort(value)
+export function expiresText(value: string, kind?: string): string {
+  return isNeverExpires(value, kind) ? 'Never' : formatDateTimeShort(value)
 }
 
-function ms(value: string | null | undefined): number | null {
-  if (!value || isNeverExpires(value)) return null
+function ms(value: string | null | undefined, kind?: string): number | null {
+  if (!value || isNeverExpires(value, kind)) return null
   const t = new Date(value).getTime()
   return Number.isNaN(t) ? null : t
 }
@@ -56,7 +58,7 @@ export function durationText(remainingMs: number): string {
 export function isLease(c: LifecycleFields): boolean {
   if (typeof c.lease === 'boolean') return c.lease
   const created = ms(c.created_at)
-  const expires = ms(c.expires_at)
+  const expires = ms(c.expires_at, c.kind)
   return created !== null && expires !== null && expires - created <= LEASE_THRESHOLD_MS
 }
 
@@ -64,7 +66,7 @@ export function isLease(c: LifecycleFields): boolean {
 // credential that is not a lease (the caller keeps today's expiry text).
 export function leaseText(c: LifecycleFields, now: number = Date.now()): string {
   if (!isLease(c)) return ''
-  const expires = ms(c.expires_at)
+  const expires = ms(c.expires_at, c.kind)
   if (expires === null) return ''
   if (expires <= now) return 'Lease ended'
   return `Lease ends in ${durationText(expires - now)}`
@@ -101,7 +103,7 @@ export function stateBadge(c: LifecycleFields, now: number = Date.now()): StateB
     const at = c.revoked_at ? formatDateTimeShort(c.revoked_at) : ''
     return { label: 'Revoked', tone: 'error', detail: at ? `Revoked ${at}` : 'Revoked' }
   }
-  const expires = ms(c.expires_at)
+  const expires = ms(c.expires_at, c.kind)
   if ((expires !== null && expires <= now) || c.credential_state === 'expired') {
     return isLease(c)
       ? { label: 'Lease ended', tone: 'neutral', detail: 'Lease ended' }
@@ -114,7 +116,7 @@ export function stateBadge(c: LifecycleFields, now: number = Date.now()): StateB
 // lease running out is the plan, never a warning (UI-005).
 export function expiringSoon(c: LifecycleFields, now: number = Date.now()): boolean {
   if (isLease(c) || c.revoked) return false
-  const expires = ms(c.expires_at)
+  const expires = ms(c.expires_at, c.kind)
   if (expires === null || expires <= now) return false
   return expires - now < 72 * 60 * 60 * 1000
 }

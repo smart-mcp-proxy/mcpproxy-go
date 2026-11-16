@@ -563,7 +563,7 @@ const filteredTokens = computed(() => {
 const now = useNow()
 
 function isExpired(token: AgentTokenInfo): boolean {
-  if (isNeverExpires(token.expires_at)) return false
+  if (isNeverExpires(token.expires_at, token.kind)) return false
   return new Date(token.expires_at).getTime() < now.value
 }
 
@@ -574,7 +574,7 @@ function isExpiringSoon(token: AgentTokenInfo): boolean {
 }
 
 function expiryText(token: AgentTokenInfo): string {
-  return token.revoked ? expiresText(token.expires_at) : (leaseText(token, now.value) || expiresText(token.expires_at))
+  return token.revoked ? expiresText(token.expires_at, token.kind) : (leaseText(token, now.value) || expiresText(token.expires_at, token.kind))
 }
 
 function formatDate(dateStr: string): string {

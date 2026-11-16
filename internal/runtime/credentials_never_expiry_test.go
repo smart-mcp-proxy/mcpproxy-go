@@ -95,3 +95,12 @@ func TestCredentialsService_NeverTokenState(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, CredentialStateActive, CredentialStateOf(tok, time.Now().Add(100*365*24*time.Hour)))
 }
+
+// A zero ExpiresAt means "never expires" only for a regular agent token. A
+// client credential must carry an expiry, so a zero one reads as expired.
+func TestCredentialStateOf_ZeroExpiryDependsOnKind(t *testing.T) {
+	now := time.Now()
+	assert.Equal(t, CredentialStateActive, CredentialStateOf(&auth.AgentToken{Kind: auth.KindAgent}, now))
+	assert.Equal(t, CredentialStateActive, CredentialStateOf(&auth.AgentToken{}, now))
+	assert.Equal(t, CredentialStateExpired, CredentialStateOf(&auth.AgentToken{Kind: auth.KindClient}, now))
+}

@@ -118,6 +118,8 @@ final class TokensCreateModelTests: XCTestCase {
         XCTAssertTrue(token(#"{"name":"a","expires_at":"0001-01-01T00:00:00Z","created_at":"x"}"#).neverExpires)
         XCTAssertFalse(token(#"{"name":"b","expires_at":"2026-12-01T00:00:00Z","created_at":"x"}"#).neverExpires)
         XCTAssertFalse(token(#"{"name":"c","created_at":"x"}"#).neverExpires)
+        // A client credential must carry an expiry: a zero one is not "never".
+        XCTAssertFalse(token(#"{"name":"d","kind":"client","expires_at":"0001-01-01T00:00:00Z","created_at":"x"}"#).neverExpires)
     }
 
     // MARK: Row presentation

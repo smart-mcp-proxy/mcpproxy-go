@@ -56,6 +56,7 @@ const nowMs = computed(() => props.now ?? clock.value)
 const fields = computed(() => ({
   revoked: props.revoked, revoked_at: props.revokedAt, expires_at: props.expiresAt,
   created_at: props.createdAt, lease: props.lease, credential_state: props.credentialState,
+  kind: props.kind,
 }))
 const binding = computed(() => bindingText(props.kind, props.profile, props.mode))
 const issuer = computed(() => issuerText(props.issuer))
@@ -66,7 +67,7 @@ const dangling = computed(() => props.profileState === 'dangling')
 // A revoked lease keeps its planned end too (no countdown, no reconnect).
 const expiryText = computed(() => {
   if (lease.value || !props.expiresAt) return ''
-  if (isNeverExpires(props.expiresAt)) return 'Never expires'
+  if (isNeverExpires(props.expiresAt, props.kind)) return 'Never expires'
   if (isLease(fields.value) && state.value.label !== 'Revoked') return ''
   const past = new Date(props.expiresAt).getTime() <= nowMs.value
   if (isLease(fields.value)) return `Lease ${past ? 'ended' : 'was to end'} ${formatDateTimeShort(props.expiresAt)}`
