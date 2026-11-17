@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/skills"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -337,39 +337,22 @@ func (s *Server) handleGetServerSkillContent(w http.ResponseWriter, r *http.Requ
 	}
 
 	size := int64(len(data))
-	if offset > size {
+	text, next, more, cerr := skills.Chunk(data, offset, limit)
+	switch {
+	case errors.Is(cerr, skills.ErrChunkOffsetPastEnd):
 		s.writeError(w, r, http.StatusBadRequest, "offset is past the end of the file")
 		return
-	}
-	if offset < size && !utf8.RuneStart(data[offset]) {
+	case errors.Is(cerr, skills.ErrChunkOffsetInsideRune):
 		s.writeError(w, r, http.StatusBadRequest, "offset is inside a UTF-8 character")
 		return
 	}
-	end := offset + limit
-	if end >= size {
-		end = size
-	} else {
-		// Shorten the chunk so it ends on a character boundary.
-		for end > offset && !utf8.RuneStart(data[end]) {
-			end--
-		}
-		if end == offset {
-			// The limit is smaller than one character: take that character
-			// whole so the reader always makes progress.
-			end = offset + 1
-			for end < size && !utf8.RuneStart(data[end]) {
-				end++
-			}
-		}
-	}
 	resp := contracts.SkillContentResponse{
-		Text:   string(data[offset:end]),
+		Text:   string(text),
 		Offset: offset,
 		Size:   size,
 		Digest: meta.Digest,
 	}
-	if end < size {
-		next := end
+	if more {
 		resp.NextOffset = &next
 	}
 	s.writeSuccess(w, resp)

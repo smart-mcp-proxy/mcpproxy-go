@@ -17,6 +17,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/skills"
+	skillindex "github.com/smart-mcp-proxy/mcpproxy-go/internal/skills/index"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
@@ -165,6 +166,14 @@ type skillsCatalogState struct {
 	// under mu, so no refresh can be added once close has started to wait.
 	wg     sync.WaitGroup
 	closed bool
+
+	// The agent search index (agent_search.go), built lazily and rebuilt when
+	// indexGen moved past the generation it was built from.
+	indexGen atomic.Uint64
+	idxMu    sync.Mutex
+	idx      *skillindex.Index
+	idxBuilt uint64
+	idxDone  bool
 }
 
 // init allocates the maps; callers hold mu.
@@ -199,6 +208,7 @@ func (s *skillsCatalogState) close() {
 	s.closed = true
 	s.mu.Unlock()
 	s.wg.Wait()
+	s.closeIndex()
 }
 
 func (s *skillsCatalogState) setStatus(serverName string, mut func(*SkillsServerStatus)) {
@@ -643,7 +653,7 @@ func (r *Runtime) runSkillsRefresh(ctx, scanCtx context.Context, serverName stri
 		r.emitSkillTransition(ctx, serverName, t)
 	}
 	if changed {
-		r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": serverName, "counts": counts}))
+		r.publishSkillsChanged(serverName, counts)
 	}
 	return nil
 }
@@ -1027,6 +1037,14 @@ func (r *Runtime) SkillFileText(serverName, skillPath, relPath string, approvedC
 		}
 		content = rec.Approved
 	}
+	return r.readSkillFileOf(serverName, rec, content, relPath, approvedCopy)
+}
+
+// readSkillFileOf reads one file of a copy of a record that the caller already
+// holds: the file is matched by exact relative path, then re-verified against
+// its digest and size. A failing verification marks the record unusable when
+// markDamaged is set (the approved copy).
+func (r *Runtime) readSkillFileOf(serverName string, rec *storage.SkillApprovalRecord, content *storage.SkillContent, relPath string, markDamaged bool) ([]byte, storage.SkillFile, error) {
 	var file *storage.SkillFile
 	for i := range content.Files {
 		if content.Files[i].RelPath == relPath {
@@ -1035,7 +1053,7 @@ func (r *Runtime) SkillFileText(serverName, skillPath, relPath string, approvedC
 		}
 	}
 	if file == nil {
-		return nil, storage.SkillFile{}, fmt.Errorf("%w: %s in %s", ErrSkillFileNotFound, relPath, skillPath)
+		return nil, storage.SkillFile{}, fmt.Errorf("%w: %s in %s", ErrSkillFileNotFound, relPath, rec.SkillPath)
 	}
 	if !file.Text {
 		return nil, *file, fmt.Errorf("%w: %s", ErrSkillFileBinary, relPath)
@@ -1055,7 +1073,7 @@ func (r *Runtime) SkillFileText(serverName, skillPath, relPath string, approvedC
 		} else {
 			detail += ": " + u.Error()
 		}
-		if approvedCopy {
+		if markDamaged {
 			r.markSkillStoredCopyDamaged(serverName, rec.SkillURI, detail)
 		}
 		return nil, *file, fmt.Errorf("%w: %s", ErrSkillStoredCopyDamaged, detail)
@@ -1113,7 +1131,7 @@ func (r *Runtime) markSkillStoredCopyDamaged(serverName, skillURI, detail string
 			zap.String("server", serverName), zap.String("skill", skillURI), zap.Error(err))
 		return
 	}
-	r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": serverName, "counts": counts}))
+	r.publishSkillsChanged(serverName, counts)
 }
 
 // --- triggers ---
@@ -1175,6 +1193,10 @@ func (r *Runtime) triggerSkillsRefreshAll() {
 // changed one held), and, for every eligible server, when quarantine_enabled
 // changed. Switching off or narrowing never refreshes.
 func (r *Runtime) onSkillsConfigChanged(oldCfg, newCfg *config.Config) {
+	// Any configuration change may alter which skills are available (the
+	// switch, a server's expose_skills, enabled, quarantine, add or remove):
+	// the search index is rebuilt at its next use (spec 125 D12).
+	r.skills.bumpIndexGeneration()
 	if newCfg == nil || !newCfg.EnableSkills {
 		return
 	}
