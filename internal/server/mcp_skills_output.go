@@ -80,14 +80,13 @@ func (p *MCPProxyServer) skillPolicy() skillOutputPolicy {
 }
 
 // skillSecretDetector returns the detector a blocking or redacting policy
-// needs. The proxy builds one at start only when such a policy is configured
-// then, while skills read the LIVE policy: a policy switched on later must not
-// find no detector and let everything through. One is built on first need from
-// the live detection settings.
+// needs. Skills read the LIVE policy and the LIVE detection settings, so they
+// keep a detector of their own, built on first need and built again after
+// every configuration reload (resetSkillOutputState). The detector the proxy
+// builds at start for tool results is not used: it exists only when such a
+// policy was configured then, and it keeps the patterns and limits of that
+// moment.
 func (p *MCPProxyServer) skillSecretDetector() *security.Detector {
-	if p.sanitisationDetector != nil {
-		return p.sanitisationDetector
-	}
 	p.skillServedMu.Lock()
 	defer p.skillServedMu.Unlock()
 	if p.skillDetector == nil {

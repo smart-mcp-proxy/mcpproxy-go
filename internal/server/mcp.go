@@ -129,8 +129,8 @@ type MCPProxyServer struct {
 	skillServedMu    sync.Mutex
 	skillServedCache map[string]*skillServed
 	skillServedTick  uint64
-	// skillDetector is the secret detector skills use when the proxy was
-	// started without one (see skillSecretDetector).
+	// skillDetector is the secret detector skills use, built from the live
+	// detection settings (see skillSecretDetector).
 	skillDetector *security.Detector
 	// inventoryMu guards lastInventoryKey, the reachable-server set last
 	// announced via tools/list_changed (NotifyUpstreamInventoryChanged).

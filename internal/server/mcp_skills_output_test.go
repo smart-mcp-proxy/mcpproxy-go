@@ -18,7 +18,7 @@ const skillTestSecret = "AKIA1234567890ABCDEF"
 
 func (fx *skillFixture) policy(action string) {
 	fx.proxy.config.OutputSanitisation = &config.OutputSanitisationConfig{ResponseAction: action, MaxRedactions: 100}
-	fx.proxy.sanitisationDetector = security.NewDetector(config.DefaultSensitiveDataDetectionConfig())
+	fx.proxy.resetSkillOutputState()
 }
 
 var skillContinueRe = regexp.MustCompile(`Continue with offset=(\d+) and version="([^"]+)"`)
@@ -126,7 +126,6 @@ func TestSkillText_SpotlightFenceUsesThePolicyCleanedName(t *testing.T) {
 	fx := newSkillFixture(t)
 	fx.cat.add("hf", "s", skillTestSecret, "d", "sk1-a", map[string]string{"SKILL.md": "body"})
 	fx.proxy.config.OutputSanitisation = &config.OutputSanitisationConfig{ResponseAction: "redact", SpotlightUntrusted: true, MaxRedactions: 100}
-	fx.proxy.sanitisationDetector = security.NewDetector(config.DefaultSensitiveDataDetectionConfig())
 
 	text := skillResultText(t, fx.load(t, context.Background(), map[string]any{"id": "hf:s"}))
 	assert.NotContains(t, text, skillTestSecret)
@@ -250,8 +249,8 @@ func TestSkillText_BlockingPolicySeesTheWholeFile(t *testing.T) {
 	detection.MaxPayloadSizeKB = limitKB
 	fx.proxy.config.SensitiveDataDetection = detection
 	fx.proxy.config.OutputSanitisation = &config.OutputSanitisationConfig{ResponseAction: "block"}
-	fx.proxy.sanitisationDetector = security.NewDetector(detection)
-	require.False(t, hasCriticalDetection(fx.proxy.sanitisationDetector, beyond),
+	fx.proxy.resetSkillOutputState()
+	require.False(t, hasCriticalDetection(fx.proxy.skillSecretDetector(), beyond),
 		"the fixture must place the secret beyond what one detector scan reads")
 
 	for _, args := range []map[string]any{
@@ -284,15 +283,6 @@ func TestCriticalAnywhere_FollowsTheDetectorsOwnLimit(t *testing.T) {
 	assert.False(t, criticalAnywhere(det, strings.Repeat("harmless words ", 3000)))
 	assert.False(t, criticalAnywhere(det, ""))
 
-	// The live setting says 1 MiB; the detector in use still reads 2 KiB.
-	fx := newSkillFixture(t)
-	fx.cat.add("hf", "s", "s", "d", "sk1-a", map[string]string{"SKILL.md": text})
-	fx.proxy.config.SensitiveDataDetection = config.DefaultSensitiveDataDetectionConfig()
-	fx.proxy.config.OutputSanitisation = &config.OutputSanitisationConfig{ResponseAction: "block"}
-	fx.proxy.sanitisationDetector = det
-	res := fx.load(t, context.Background(), map[string]any{"id": "hf:s", "offset": float64(9000)})
-	require.True(t, res.IsError)
-	assert.Equal(t, runtime.SkillAccessBlocked, fx.lastRow(t).Outcome)
 }
 
 // A file too large to check within one call is not let out under a policy that
@@ -365,4 +355,29 @@ func TestSkillOutputState_IsForgottenOnAConfigReload(t *testing.T) {
 	fx.proxy.RefreshSkillsAvailability()
 	assert.Empty(t, fx.proxy.skillServedCache)
 	assert.NotSame(t, first, fx.proxy.skillPolicy().detector, "a detector is built again from the live settings")
+}
+
+// Skills follow the LIVE detection settings, also when the proxy was started
+// with a blocking policy and therefore with a detector of its own: a pattern
+// added later applies to the next read.
+func TestSkillText_DetectionSettingsChangedAfterStartApply(t *testing.T) {
+	fx := newSkillFixture(t)
+	fx.cat.add("hf", "s", "s", "d", "sk1-a", map[string]string{"SKILL.md": "the launch code is ZEBRA-7781-QX, keep it"})
+	startup := config.DefaultSensitiveDataDetectionConfig()
+	fx.proxy.config.SensitiveDataDetection = startup
+	fx.proxy.config.OutputSanitisation = &config.OutputSanitisationConfig{ResponseAction: "block"}
+	fx.proxy.sanitisationDetector = security.NewDetector(startup) // as built at start under a blocking policy
+
+	res := fx.load(t, context.Background(), map[string]any{"id": "hf:s"})
+	require.False(t, res.IsError, "nothing the startup patterns know")
+
+	// A reload adds a critical pattern.
+	reloaded := config.DefaultSensitiveDataDetectionConfig()
+	reloaded.CustomPatterns = []config.CustomPattern{{Name: "launch-code", Regex: `ZEBRA-\d{4}-[A-Z]{2}`, Severity: "critical"}}
+	fx.proxy.config.SensitiveDataDetection = reloaded
+	fx.proxy.RefreshSkillsAvailability()
+
+	res = fx.load(t, context.Background(), map[string]any{"id": "hf:s"})
+	require.True(t, res.IsError, skillResultText(t, res))
+	assert.Equal(t, runtime.SkillAccessBlocked, fx.lastRow(t).Outcome)
 }
