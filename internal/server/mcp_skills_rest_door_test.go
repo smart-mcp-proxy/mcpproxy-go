@@ -9,7 +9,6 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/skills/skillstest"
 )
 
@@ -26,9 +25,9 @@ func TestRealSkills_RESTDoorAppliesTheOutputPolicyLikeTheTools(t *testing.T) {
 		}})
 	}, nil)
 	g.approve(t, "pdf")
-	if g.p.sanitisationDetector == nil {
-		g.p.sanitisationDetector = security.NewDetector(config.DefaultSensitiveDataDetectionConfig())
-	}
+	// The proxy started with the default policy and therefore without a secret
+	// detector: the policy is switched on afterwards, as a hot reload does.
+	require.Nil(t, g.p.sanitisationDetector)
 	srv := g.env.proxyServer
 
 	// No mutating policy: the approved bytes.

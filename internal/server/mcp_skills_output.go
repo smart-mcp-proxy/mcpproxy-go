@@ -40,7 +40,10 @@ type skillServed struct {
 
 // skillOutputPolicy is the live output sanitisation policy, as skills use it.
 type skillOutputPolicy struct {
-	cfg       *config.OutputSanitisationConfig
+	cfg *config.OutputSanitisationConfig
+	// detector finds secrets for a policy that blocks or redacts; it is never
+	// nil under such a policy.
+	detector  *security.Detector
 	mutates   bool // block, redact or strip is on
 	spotlight bool
 	key       string // identifies the mutating part of the policy
@@ -59,6 +62,9 @@ func (p *MCPProxyServer) skillPolicy() skillOutputPolicy {
 		mutates:   cfg.IsBlock() || cfg.IsRedact() || cfg.IsStripEnabled(),
 		spotlight: cfg.IsSpotlightEnabled(),
 	}
+	if cfg.IsBlock() || cfg.IsRedact() {
+		pol.detector = p.skillSecretDetector()
+	}
 	if pol.mutates {
 		var classes []string
 		for c, on := range cfg.EnabledStripClasses() {
@@ -68,9 +74,53 @@ func (p *MCPProxyServer) skillPolicy() skillOutputPolicy {
 		}
 		sort.Strings(classes)
 		pol.key = fmt.Sprintf("b%t r%t s%t %s m%d d%p", cfg.IsBlock(), cfg.IsRedact(), cfg.IsStripEnabled(),
-			strings.Join(classes, ","), cfg.MaxRedactions, p.sanitisationDetector)
+			strings.Join(classes, ","), cfg.MaxRedactions, pol.detector)
 	}
 	return pol
+}
+
+// skillSecretDetector returns the detector a blocking or redacting policy
+// needs. The proxy builds one at start only when such a policy is configured
+// then, while skills read the LIVE policy: a policy switched on later must not
+// find no detector and let everything through. One is built on first need from
+// the live detection settings.
+func (p *MCPProxyServer) skillSecretDetector() *security.Detector {
+	if p.sanitisationDetector != nil {
+		return p.sanitisationDetector
+	}
+	p.skillServedMu.Lock()
+	defer p.skillServedMu.Unlock()
+	if p.skillDetector == nil {
+		var detection *config.SensitiveDataDetectionConfig
+		if live := p.currentConfig(); live != nil {
+			detection = live.SensitiveDataDetection
+		}
+		p.skillDetector = security.NewDetector(detection)
+	}
+	return p.skillDetector
+}
+
+// sanitise redacts and strips txt as d says, with the policy's own detector.
+func (pol skillOutputPolicy) sanitise(txt string, d osDecision, cats, classes map[string]struct{}) (string, int) {
+	n := 0
+	if d.redact && pol.detector != nil {
+		redacted, dets := pol.detector.Redact(txt)
+		if len(dets) > 0 {
+			txt = redacted
+			n += len(dets)
+			for _, det := range dets {
+				cats[det.Category] = struct{}{}
+			}
+		}
+	}
+	if d.strip {
+		stripped, found := security.StripControlSequences(txt, pol.cfg.EnabledStripClasses())
+		txt = stripped
+		for _, cl := range found {
+			classes[cl] = struct{}{}
+		}
+	}
+	return txt, n
 }
 
 // decide is the policy's decision for untrusted text.
@@ -134,7 +184,7 @@ const skillScanOverlap = 8 << 10
 // reads at most its configured payload size of one input and ignores the rest,
 // while a skill file may be many times larger: the text is scanned in
 // overlapping windows no larger than that size.
-func (p *MCPProxyServer) criticalAnywhere(text string) bool {
+func (p *MCPProxyServer) criticalAnywhere(det *security.Detector, text string) bool {
 	window := 256 << 10
 	if live := p.currentConfig(); live != nil {
 		if max := live.SensitiveDataDetection.GetMaxPayloadSize(); max < window {
@@ -153,7 +203,7 @@ func (p *MCPProxyServer) criticalAnywhere(text string) bool {
 		if end > len(text) {
 			end = len(text)
 		}
-		if hasCriticalDetection(p.sanitisationDetector, text[start:end]) {
+		if hasCriticalDetection(det, text[start:end]) {
 			return true
 		}
 		if end == len(text) {
@@ -171,10 +221,10 @@ const skillPolicyMaxBytes = 4 << 20
 const skillTooLargeForPolicy = "the file is larger than the output sanitisation policy can check"
 
 func (p *MCPProxyServer) sanitiseWholeSkillText(pol skillOutputPolicy, text string) skillServed {
-	if len(text) > skillPolicyMaxBytes && (pol.cfg.IsBlock() || pol.cfg.IsRedact()) && p.sanitisationDetector != nil {
+	if len(text) > skillPolicyMaxBytes && pol.detector != nil {
 		return skillServed{blocked: true, reason: skillTooLargeForPolicy}
 	}
-	critical := pol.cfg.IsBlock() && p.sanitisationDetector != nil && p.criticalAnywhere(text)
+	critical := pol.cfg.IsBlock() && p.criticalAnywhere(pol.detector, text)
 	d := pol.decide(critical)
 	if d.block {
 		return skillServed{blocked: true, reason: d.reason}
@@ -183,7 +233,7 @@ func (p *MCPProxyServer) sanitiseWholeSkillText(pol skillOutputPolicy, text stri
 		return skillServed{}
 	}
 	cats, classes := map[string]struct{}{}, map[string]struct{}{}
-	out, n := p.sanitiseTextValue(text, d, pol.cfg.EnabledStripClasses(), cats, classes)
+	out, n := pol.sanitise(text, d, cats, classes)
 	var e skillServed
 	if out != text {
 		e.text = []byte(out)
@@ -211,11 +261,8 @@ func (p *MCPProxyServer) skillWordCleaner(pol skillOutputPolicy) func(string) st
 		return same
 	}
 	if pol.cfg.IsBlock() {
-		if p.sanitisationDetector == nil {
-			return same
-		}
 		return func(s string) string {
-			if hasCriticalDetection(p.sanitisationDetector, s) {
+			if hasCriticalDetection(pol.detector, s) {
 				return skillWordWithheld
 			}
 			return s
@@ -225,9 +272,8 @@ func (p *MCPProxyServer) skillWordCleaner(pol skillOutputPolicy) func(string) st
 	if !d.redact && !d.strip {
 		return same
 	}
-	strip := pol.cfg.EnabledStripClasses()
 	return func(s string) string {
-		out, _ := p.sanitiseTextValue(s, d, strip, map[string]struct{}{}, map[string]struct{}{})
+		out, _ := pol.sanitise(s, d, map[string]struct{}{}, map[string]struct{}{})
 		return out
 	}
 }

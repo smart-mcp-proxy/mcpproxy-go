@@ -296,3 +296,31 @@ func TestSkillAddressable_CoversTheAddress(t *testing.T) {
 	assert.False(t, skillAddressable(clean, &runtime.AvailableSkill{Path: "pdf", URI: skillTestSecret + "://pdf/SKILL.md"}))
 	assert.False(t, skillAddressable(clean, &runtime.AvailableSkill{Path: skillTestSecret, URI: "skill://x/SKILL.md"}))
 }
+
+// The proxy builds its secret detector at start, and only when a blocking or
+// redacting policy is configured then. Skills read the live policy: one that is
+// switched on later must find a detector, not let everything through.
+func TestSkillText_APolicySwitchedOnAfterStartIsEnforced(t *testing.T) {
+	fx := newSkillFixture(t)
+	fx.cat.add("hf", "s", "s", "pdf helper, key "+skillTestSecret, "sk1-a", map[string]string{"SKILL.md": "use key " + skillTestSecret + " now"})
+	require.Nil(t, fx.proxy.sanitisationDetector, "started without a detector")
+
+	text := skillResultText(t, fx.load(t, context.Background(), map[string]any{"id": "hf:s"}))
+	require.Contains(t, text, skillTestSecret, "no reading policy yet")
+
+	fx.proxy.config.OutputSanitisation = &config.OutputSanitisationConfig{ResponseAction: "redact", MaxRedactions: 100}
+	text = skillResultText(t, fx.load(t, context.Background(), map[string]any{"id": "hf:s"}))
+	assert.NotContains(t, text, skillTestSecret)
+	assert.Contains(t, text, "use key ")
+	res, _ := fx.search(t, context.Background(), map[string]any{"query": "pdf"})
+	assert.NotContains(t, skillResultText(t, res), skillTestSecret)
+
+	fx.proxy.config.OutputSanitisation = &config.OutputSanitisationConfig{ResponseAction: "block"}
+	blocked := fx.load(t, context.Background(), map[string]any{"id": "hf:s"})
+	require.True(t, blocked.IsError)
+	assert.Equal(t, runtime.SkillAccessBlocked, fx.lastRow(t).Outcome)
+	res, out := fx.search(t, context.Background(), map[string]any{"query": "pdf"})
+	assert.NotContains(t, skillResultText(t, res), skillTestSecret)
+	require.Len(t, out.Skills, 1)
+	assert.Equal(t, skillWordWithheld, out.Skills[0].Description)
+}
