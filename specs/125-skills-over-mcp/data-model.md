@@ -28,7 +28,7 @@ Derived: `Root` (URI without `/SKILL.md`), `Name` (last segment of `Root`, must 
 | `HashSchemaVersion` | int | 1 |
 | `Incarnation` | int64 | server incarnation the record belongs to |
 | `ApprovedAt`, `ApprovedBy` | time, string | `ApprovedBy` is an actor name, `auto` or `scan` |
-| `Scan` | *SkillScan | verdict, complete flag, findings `{file, offset, rule, severity, evidence}` (capped) |
+| `Scan` | *SkillScan | `verdict`, `complete`, `incomplete` (`size_cap`, `time_limit`, `coverage`, `interrupted`), `hash` (the content hash scanned), `scanned_at`, findings `{file, offset, rule, severity, evidence}` (at most 32, `findings_truncated`) |
 | `FirstSeen`, `UpdatedAt`, `CaptureSeq` | time, time, uint64 | ordering |
 
 `SkillContent{Frontmatter json.RawMessage; Files []SkillFile}`; `SkillFile{RelPath, URI, Digest string; Size int64; Text bool; Stored bool}`.

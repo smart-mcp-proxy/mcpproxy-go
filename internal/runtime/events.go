@@ -101,6 +101,13 @@ const (
 	// EventTypeActivityToolQuarantineChange is emitted when a tool's quarantine status changes.
 	EventTypeActivityToolQuarantineChange EventType = "activity.tool_quarantine_change"
 
+	// Spec 125: skills over MCP
+	// EventTypeActivitySkillQuarantineChange is emitted when a skill's approval
+	// state changes (an automatic transition of a refresh, or a person's
+	// approve / block / unblock). It names a skill that may be unapproved, so it
+	// is administrator-only (FR-019a).
+	EventTypeActivitySkillQuarantineChange EventType = "activity.skill_quarantine_change"
+
 	// Spec 039: Security scanner events
 	// EventTypeSecurityScanStarted is emitted when a security scan begins.
 	EventTypeSecurityScanStarted EventType = "security.scan_started"

@@ -62,11 +62,35 @@ type SkillScanFinding struct {
 	Evidence string `json:"evidence"`
 }
 
+// Why a skill scan is not complete (SkillScan.Incomplete).
+const (
+	// SkillScanIncompleteSizeCap: the skill has more text than one scan covers.
+	SkillScanIncompleteSizeCap = "size_cap"
+	// SkillScanIncompleteCoverage: the scanner reported degraded coverage.
+	SkillScanIncompleteCoverage = "coverage"
+	// SkillScanIncompleteInterrupted: the scan was stopped before it finished.
+	SkillScanIncompleteInterrupted = "interrupted"
+	// SkillScanIncompleteTimeLimit: the scan of this skill ran into its time
+	// limit. It is not repeated for the same content.
+	SkillScanIncompleteTimeLimit = "time_limit"
+)
+
 // SkillScan is the scan result recorded for a skill's current content.
 type SkillScan struct {
-	Verdict  string             `json:"verdict"`
-	Complete bool               `json:"complete"`
-	Findings []SkillScanFinding `json:"findings,omitempty"`
+	// Verdict is the worst verdict over every scanned chunk: "clean",
+	// "warnings" or "dangerous".
+	Verdict  string `json:"verdict"`
+	Complete bool   `json:"complete"`
+	// Incomplete says why Complete is false; empty when it is true.
+	Incomplete string `json:"incomplete,omitempty"`
+	// Hash is the content hash (CurrentHash) the scan was made of. A scan
+	// whose Hash differs from the record's CurrentHash says nothing about
+	// the current content.
+	Hash      string             `json:"hash,omitempty"`
+	ScannedAt time.Time          `json:"scanned_at"`
+	Findings  []SkillScanFinding `json:"findings,omitempty"`
+	// FindingsTruncated is set when more findings existed than are stored.
+	FindingsTruncated bool `json:"findings_truncated,omitempty"`
 }
 
 // SkillApprovalRecord is the per-(server, skill URI) review record.
@@ -366,6 +390,26 @@ func (b *BoltDB) CollectUnreferencedSkillFiles(serverName string) (int, int64, e
 	return removed, retained, err
 }
 
+// UpdateSkillApprovals writes records of one server in one transaction and
+// touches nothing else. Unlike ApplySkillRefresh it does not collect
+// unreferenced skill_files rows: a refresh that is still reading stages its
+// blobs before any record references them, and a person's decision made in
+// the meantime must not delete them. The rows a decision leaves unreferenced
+// are collected by the next refresh.
+func (b *BoltDB) UpdateSkillApprovals(serverName string, records []*SkillApprovalRecord) error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		for _, r := range records {
+			if r.ServerName != serverName {
+				return fmt.Errorf("skill record %q belongs to server %q, not %q", r.SkillURI, r.ServerName, serverName)
+			}
+			if err := putSkillApprovalTx(tx, r); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // ApplySkillRefresh applies one refresh in a single transaction: write the new
 // blobs (digest hex -> bytes), upsert records, mark unlistedURIs as not listed
 // (unknown URIs are ignored), then delete the server's unreferenced blobs.
@@ -476,6 +520,14 @@ func (m *Manager) CollectUnreferencedSkillFiles(serverName string) (int, int64, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.db.CollectUnreferencedSkillFiles(serverName)
+}
+
+// UpdateSkillApprovals writes records of one server in one transaction,
+// without collecting unreferenced files.
+func (m *Manager) UpdateSkillApprovals(serverName string, records []*SkillApprovalRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.db.UpdateSkillApprovals(serverName, records)
 }
 
 // ApplySkillRefresh applies a skill refresh in one transaction.

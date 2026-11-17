@@ -69,6 +69,9 @@ type SkillsServerStatus struct {
 	Error       string
 	Truncated   bool
 	EntryErrors int
+	// ScansPending is how many usable skills the last refresh left unscanned
+	// because its scan time was spent; a follow-up refresh scans them.
+	ScansPending int
 }
 
 // skillsLimits are the per-refresh and per-server budgets. Zero means the
@@ -76,6 +79,41 @@ type SkillsServerStatus struct {
 type skillsLimits struct {
 	readPerRefresh  int64
 	storedPerServer int64
+	scanPerRefresh  time.Duration
+	scanPerSkill    time.Duration
+	followUpDelay   time.Duration
+	// scanClock replaces time.Now for the per-refresh scan budget. Tests set
+	// it: a budget measured on the real clock cannot be made to run out after
+	// exactly one skill on a platform whose clock ticks coarsely (Windows).
+	scanClock func() time.Time
+}
+
+func (l skillsLimits) now() time.Time {
+	if l.scanClock != nil {
+		return l.scanClock()
+	}
+	return time.Now()
+}
+
+func (l skillsLimits) scanRefresh() time.Duration {
+	if l.scanPerRefresh > 0 {
+		return l.scanPerRefresh
+	}
+	return skillsScanPerRefresh
+}
+
+func (l skillsLimits) scanSkill() time.Duration {
+	if l.scanPerSkill > 0 {
+		return l.scanPerSkill
+	}
+	return skillScanPerSkill
+}
+
+func (l skillsLimits) followUp() time.Duration {
+	if l.followUpDelay > 0 {
+		return l.followUpDelay
+	}
+	return skillsScanFollowUpGap
 }
 
 func (l skillsLimits) read() int64 {
@@ -107,11 +145,20 @@ type skillsCatalogState struct {
 	// PR-3): an older capture writes nothing.
 	applied map[string]uint64
 	status  map[string]SkillsServerStatus
+	// followUp marks servers whose last refresh left skills unscanned; the
+	// flight starts one more refresh for them when it ends.
+	followUp map[string]bool
+	// rerun marks servers for which a background trigger arrived while a
+	// refresh was running. That refresh may already have applied its
+	// decisions (with the trust mode of before a configuration change, for
+	// one), so joining it would lose the trigger: one more refresh runs.
+	rerun map[string]bool
 
 	// Tests only: budgets, a seam after the listing returns, and a switch for
 	// the background triggers.
 	limits        skillsLimits
 	afterList     func(serverName string)
+	scanFunc      skillScanFunc
 	noAutoTrigger atomic.Bool
 
 	// wg counts the background refreshes; closed stops new ones. Both change
@@ -126,6 +173,8 @@ func (s *skillsCatalogState) init() {
 		s.flights = map[string]*skillsFlight{}
 		s.applied = map[string]uint64{}
 		s.status = map[string]SkillsServerStatus{}
+		s.followUp = map[string]bool{}
+		s.rerun = map[string]bool{}
 	}
 }
 
@@ -217,23 +266,6 @@ func (r *Runtime) SkillAvailable(serverName string, rec *storage.SkillApprovalRe
 
 // --- status of one record ---
 
-// nextSkillStatus decides a record's status after a refresh. PR-1 rule: a
-// usable skill is pending unless it has an approved copy, in which case it is
-// approved while the content equals that copy and changed once it differs.
-// The full trust-mode table replaces this function in the next PR.
-func nextSkillStatus(prev *storage.SkillApprovalRecord, usable bool, currentHash string) string {
-	if !usable {
-		return storage.SkillStatusUnusable
-	}
-	if prev != nil && prev.Approved != nil && prev.ApprovedHash != "" {
-		if currentHash == prev.ApprovedHash {
-			return storage.SkillStatusApproved
-		}
-		return storage.SkillStatusChanged
-	}
-	return storage.SkillStatusPending
-}
-
 // --- refresh ---
 
 // RefreshServerSkills reads one server's skills into the catalog. It is
@@ -280,8 +312,20 @@ func (r *Runtime) runSkillsFlight(serverName string, f *skillsFlight) {
 	defer func() {
 		st.mu.Lock()
 		delete(st.flights, serverName)
+		rerun := st.rerun[serverName] && !st.closed
+		again := st.followUp[serverName] && !st.closed
+		delete(st.rerun, serverName)
+		delete(st.followUp, serverName)
 		st.mu.Unlock()
 		close(f.done)
+		switch {
+		case rerun:
+			r.triggerSkillsRefresh(serverName)
+		case again:
+			// After a pause, so a server that keeps changing its skills cannot
+			// keep one core scanning without a break.
+			time.AfterFunc(st.limits.followUp(), func() { r.triggerSkillsRefresh(serverName) })
+		}
 	}()
 	ctx := r.lifetimeContext()
 	if ctx == nil {
@@ -298,6 +342,11 @@ type skillOutcome struct {
 	files                        []storage.SkillFile
 	hash                         string
 	frontmatter                  json.RawMessage
+	scan                         *storage.SkillScan
+	// needScan: usable, and no earlier scan of this very content stands.
+	// scanRetry: an earlier scan of this very content exists but has to be
+	// repeated (degraded coverage); it stays on the record until the retry.
+	needScan, scanRetry bool
 }
 
 // skillsBudget tracks the refresh-wide budgets across skills.
@@ -320,10 +369,13 @@ func (r *Runtime) refreshServerSkills(ctx context.Context, serverName string) er
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, skillsRefreshTimeout)
+	// The timeout bounds the upstream requests. The scan that follows them is
+	// local work with its own budget and runs on the caller's context, so a
+	// slow server cannot eat the scan's time and the scan cannot fail a read.
+	netCtx, cancel := context.WithTimeout(ctx, skillsRefreshTimeout)
 	defer cancel()
 
-	err := r.runSkillsRefresh(ctx, serverName)
+	err := r.runSkillsRefresh(netCtx, ctx, serverName)
 	if err != nil && (errors.Is(err, errSkillsSwitchedOff) || !r.skillsEligible(serverName)) {
 		// Whatever stopped it, a refresh of a server whose skills are off by
 		// now gets the answer it would have got at its start: nothing to do.
@@ -342,7 +394,7 @@ func (r *Runtime) refreshServerSkills(ctx context.Context, serverName string) er
 	return err
 }
 
-func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error {
+func (r *Runtime) runSkillsRefresh(ctx, scanCtx context.Context, serverName string) error {
 	um, sm := r.upstreamManager, r.storageManager
 	inc, err := r.CaptureApprovalIncarnation(serverName, 0)
 	if err != nil {
@@ -457,6 +509,10 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 		}
 		outcomes = append(outcomes, o)
 	}
+	// Every skill is read and its text is stored: scan what has no scan yet,
+	// outside any lock and outside the upstream timeout.
+	firstScans, unscanned, scansPending := r.scanSkillOutcomes(scanCtx, serverName, outcomes)
+
 	// A listing entry that did not decode but carried a URI is still a skill
 	// the person should see; without a URI there is nothing to key a record on.
 	for _, ee := range entryErrs {
@@ -475,6 +531,7 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 
 	var counts map[string]int
 	var changed bool
+	var transitions []skillTransition
 	err = r.WithServerApprovalLockAt(serverName, inc, func() error {
 		if !r.skillsEligible(serverName) {
 			return errSkillsSwitchedOff
@@ -503,6 +560,15 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 			prev[p.SkillURI] = p
 		}
 
+		// The live configuration is read here, under the lock, so a trust-mode
+		// change that landed while the files were being read still decides.
+		cfg := r.Config()
+		sc := skillsServerConfig(cfg, serverName)
+		if sc == nil {
+			return errSkillsSwitchedOff
+		}
+		mode, quarantineOn := sc.EffectiveTrustMode(), cfg.IsQuarantineEnabled()
+
 		now := time.Now()
 		upserts := make([]*storage.SkillApprovalRecord, 0, len(outcomes))
 		listed := make(map[string]struct{}, len(outcomes))
@@ -510,8 +576,19 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 			listed[o.uri] = struct{}{}
 			p := prev[o.uri]
 			rec := mergeSkillRecord(serverName, inc, capture.Seq, now, p, o)
-			if p == nil || p.Status != rec.Status || p.CurrentHash != rec.CurrentHash || !p.Listed ||
-				p.UnusableReason != rec.UnusableReason {
+			d := decideSkill(p, o.usable, o.hash, mode, quarantineOn, scanStateOf(rec.Scan, rec.CurrentHash))
+			applySkillDecision(rec, d, now)
+			if enforceSkillInvariant(rec, r.logger) {
+				d.action = "" // nothing was approved; no row claims it was
+			}
+			if d.action != "" {
+				transitions = append(transitions, skillTransition{
+					uri: rec.SkillURI, path: rec.SkillPath, action: d.action,
+					previousHash: approvedHashOf(p), currentHash: rec.CurrentHash,
+					reason: rec.UnusableReason, approvedBy: rec.ApprovedBy,
+				})
+			}
+			if skillRecordChanged(p, rec) {
 				changed = true
 			}
 			upserts = append(upserts, rec)
@@ -548,11 +625,60 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 		s.Error = ""
 		s.Truncated = truncated
 		s.EntryErrors = len(entryErrs) + skipped
+		s.ScansPending = scansPending
 	})
+	// Scan time ran out with never-scanned skills left: the next refresh
+	// scans them (what was scanned now is on the records and comes after
+	// them). Only while this refresh gave at least one skill its first scan,
+	// so every follow-up shrinks the never-scanned set and the chain ends;
+	// skills that only wait for a retry of a degraded scan start none.
+	if unscanned > 0 && firstScans > 0 {
+		r.skills.mu.Lock()
+		r.skills.init()
+		r.skills.followUp[serverName] = true
+		r.skills.mu.Unlock()
+	}
+	// Activity rows are emitted after the approval lock is released.
+	for _, t := range transitions {
+		r.emitSkillTransition(ctx, serverName, t)
+	}
 	if changed {
 		r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": serverName, "counts": counts}))
 	}
 	return nil
+}
+
+// skillTransition is an automatic status transition to report as activity.
+type skillTransition struct {
+	uri, path, action, previousHash, currentHash, reason, approvedBy string
+}
+
+func (r *Runtime) emitSkillTransition(ctx context.Context, serverName string, t skillTransition) {
+	// A refresh has no caller behind it: the row is attributed to the system.
+	r.emitSkillQuarantineChangeCtx(context.WithoutCancel(ctx), serverName, t.path, t.uri, t.action, t.previousHash, t.currentHash, t.reason, t.approvedBy)
+}
+
+func approvedHashOf(p *storage.SkillApprovalRecord) string {
+	if p == nil {
+		return ""
+	}
+	return p.ApprovedHash
+}
+
+// skillRecordChanged: whether a refresh changed anything a subscriber shows.
+func skillRecordChanged(p, rec *storage.SkillApprovalRecord) bool {
+	if p == nil || p.Status != rec.Status || p.CurrentHash != rec.CurrentHash || !p.Listed ||
+		p.UnusableReason != rec.UnusableReason || p.ApprovedHash != rec.ApprovedHash {
+		return true
+	}
+	return scanVerdictOf(p.Scan) != scanVerdictOf(rec.Scan)
+}
+
+func scanVerdictOf(s *storage.SkillScan) string {
+	if s == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s/%t/%s/%d", s.Verdict, s.Complete, s.Incomplete, len(s.Findings))
 }
 
 func (r *Runtime) skillCounts(serverName string, recs []*storage.SkillApprovalRecord) map[string]int {
@@ -606,12 +732,19 @@ func mergeSkillRecord(serverName string, inc int64, seq uint64, now time.Time, p
 	rec.HashSchemaVersion = 1
 	rec.Current = storage.SkillContent{Frontmatter: o.frontmatter, Files: o.files}
 	rec.CurrentHash = o.hash
-	rec.Status = nextSkillStatus(prev, o.usable, o.hash)
 	if o.usable {
 		rec.UnusableReason = ""
+		rec.Scan = o.scan
 	} else {
 		rec.UnusableReason = o.reason
+		// An unusable skill is not scanned; an earlier scan stays only while it
+		// still describes the content on the record.
+		if rec.Scan != nil && rec.Scan.Hash != o.hash {
+			rec.Scan = nil
+		}
 	}
+	// The status and any new approval come from decideSkill, applied by the
+	// caller; until then the record keeps what it had.
 	return rec
 }
 
@@ -712,6 +845,9 @@ func (r *Runtime) readSkill(ctx context.Context, serverName string, inc int64, e
 
 	var skillStored int64
 	staged := map[string][]byte{} // digest hex -> new text blob, written once the skill verifies
+	// The text is kept for the scan only when there is no scan of this very
+	// content to reuse: a finished scan is never repeated.
+	reuseScan := reusableSkillScan(prev, o.hash)
 	for i, ref := range e.Files {
 		sf := &o.files[i]
 		digestHex := strings.TrimPrefix(ref.Digest, "sha256:")
@@ -819,6 +955,17 @@ func (r *Runtime) readSkill(ctx context.Context, serverName string, inc int64, e
 	}
 	b.stored += skillStored
 	o.usable = true
+
+	// A finished scan of this very content is never repeated; anything else
+	// is scanned after the reads, from the stored text (scanSkillOutcomes).
+	switch {
+	case reuseScan:
+		o.scan = prev.Scan
+	case prev != nil && prev.Scan != nil && prev.Scan.Hash == o.hash:
+		o.scan, o.needScan, o.scanRetry = prev.Scan, true, true
+	default:
+		o.needScan = true
+	}
 	return o, nil
 }
 
@@ -990,6 +1137,14 @@ func (r *Runtime) triggerSkillsRefresh(serverName string) {
 		r.skills.mu.Unlock()
 		return
 	}
+	r.skills.init()
+	if r.skills.flights[serverName] != nil {
+		// A refresh is running and may be past the point where it reads the
+		// configuration and the listing: have it followed by one more.
+		r.skills.rerun[serverName] = true
+		r.skills.mu.Unlock()
+		return
+	}
 	r.skills.wg.Add(1)
 	r.skills.mu.Unlock()
 	go func() {
@@ -1013,19 +1168,25 @@ func (r *Runtime) triggerSkillsRefreshAll() {
 	}
 }
 
-// onSkillsConfigChanged refreshes after a config change: every server when
-// enable_skills turned on, and a server whose expose_skills turned on.
+// onSkillsConfigChanged refreshes after a config change. A server is refreshed
+// when it becomes eligible to serve skills (enable_skills turned on, its
+// expose_skills turned on, it was enabled or left quarantine), when its
+// effective trust mode changed (a pending skill may now be approved, or a
+// changed one held), and, for every eligible server, when quarantine_enabled
+// changed. Switching off or narrowing never refreshes.
 func (r *Runtime) onSkillsConfigChanged(oldCfg, newCfg *config.Config) {
 	if newCfg == nil || !newCfg.EnableSkills {
 		return
 	}
-	exposed := func(sc *config.ServerConfig) bool { return sc != nil && (sc.ExposeSkills == nil || *sc.ExposeSkills) }
-	turnedOn := oldCfg == nil || !oldCfg.EnableSkills
+	quarantineFlipped := oldCfg != nil && oldCfg.IsQuarantineEnabled() != newCfg.IsQuarantineEnabled()
 	for _, sc := range newCfg.Servers {
-		if sc == nil {
+		if sc == nil || !skillsServerExposed(newCfg, sc) {
 			continue
 		}
-		if turnedOn || (exposed(sc) && !exposed(skillsServerConfig(oldCfg, sc.Name))) {
+		oldSc := skillsServerConfig(oldCfg, sc.Name)
+		becameEligible := !skillsServerExposed(oldCfg, oldSc)
+		trustChanged := oldSc != nil && oldSc.EffectiveTrustMode() != sc.EffectiveTrustMode()
+		if becameEligible || trustChanged || quarantineFlipped {
 			r.triggerSkillsRefresh(sc.Name)
 		}
 	}

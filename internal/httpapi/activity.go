@@ -161,6 +161,8 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 func applyActivityScope(ctx context.Context, filter *storage.ActivityFilter) {
 	if allowed, scoped := scopeAllowedServers(ctx); scoped {
 		filter.AllowedServers = allowed
+		// Spec 125 FR-019a: skill approval rows are administrator-only.
+		filter.ExcludeAdminOnlyTypes = true
 		// Spec 108 FR-031: a scoped caller's profile/client/token filters
 		// evaluate the view it is allowed to see, in which another token's
 		// rows carry no attribution. Without it ?token=<someone else> would be
@@ -300,7 +302,8 @@ func (s *Server) handleGetActivityDetail(w http.ResponseWriter, r *http.Request)
 	// oracle is status parity with an absent id, not "the body omits the server
 	// name": this route's 404 body carries no echo of the caller's input, so an
 	// absence assertion would pass vacuously.
-	if activity == nil || !canSeeServer(r.Context(), activity.ServerName) {
+	if activity == nil || !canSeeServer(r.Context(), activity.ServerName) ||
+		(auth.IsScopedCaller(r.Context()) && storage.IsAdminOnlyActivityType(activity.Type)) {
 		s.writeError(w, r, http.StatusNotFound, "Activity not found")
 		return
 	}
@@ -1435,6 +1438,7 @@ func (s *Server) scopedUsageResponse(ctx context.Context, p usageParams, now tim
 	}
 	if p.scoped {
 		filter.AllowedServers = p.allowed
+		filter.ExcludeAdminOnlyTypes = true
 	}
 	agg := internalRuntime.NewUsageAggregate()
 	// The producer releases its read transaction when the request context is
