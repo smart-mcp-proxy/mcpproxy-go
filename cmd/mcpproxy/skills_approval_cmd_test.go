@@ -216,7 +216,7 @@ func TestSkillsBlockUnblock(t *testing.T) {
 		require.Contains(t, out, tc.want)
 		require.Equal(t, []any{"hf-cli"}, rec.only(t).jsonBody(t)["skills"])
 
-		rec = newRESTRecorder(t, map[string]cannedResponse{
+		newRESTRecorder(t, map[string]cannedResponse{
 			"POST /api/v1/servers/alpha/skills/" + tc.route: okResp(`{"changed":1}`),
 		})
 		out, _, err = runCLI(t, GetSkillsCommand, "json", tc.cmd, "alpha:hf-cli")
