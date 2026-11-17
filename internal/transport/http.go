@@ -230,7 +230,11 @@ func (cfg *HTTPTransportConfig) upstreamRoundTripper(base http.RoundTripper, log
 	//
 	// Next in: strips forwarded headers from everything but the tools/call
 	// request itself (Spec 112 FR-008), before tracing sees the request.
-	return NewCallRecorderTransport(newForwardGateTransport(rt))
+	//
+	// The response limit (skills, Spec 125 D2) is outermost of all: it wraps
+	// the body the caller reads, after tracing and Retry-After have seen it.
+	// A request without a limit in its ctx passes through untouched.
+	return newResponseLimitTransport(NewCallRecorderTransport(newForwardGateTransport(rt)))
 }
 
 // maxRedirects mirrors net/http's default redirect limit.

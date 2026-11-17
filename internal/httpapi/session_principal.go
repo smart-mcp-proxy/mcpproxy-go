@@ -168,6 +168,12 @@ func tenantSessionAllowlist(method, path string) bool {
 		if sub == "tool-calls" {
 			return false // named must-refuse: /servers/{id}/tool-calls
 		}
+		// Named must-refuse: the skills catalog (Spec 125) is administrator-
+		// only. A held skill is upstream instruction text nobody approved, and
+		// a server being in a tenant's reach is no reason to show it.
+		if sub == "skills" || strings.HasPrefix(sub, "skills/") {
+			return false
+		}
 		return true // every other GET under /servers/{id}/**
 	}
 

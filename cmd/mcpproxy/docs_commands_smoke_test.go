@@ -55,6 +55,7 @@ var docsSmokeFiles = []string{
 	"docs/cli/profile-commands.md",
 	"docs/cli/security-commands.md",
 	"docs/features/oauth-token-encryption.md",
+	"docs/features/skills.md",
 }
 
 var inlineCodeRe = regexp.MustCompile("`([^`\n]+)`")

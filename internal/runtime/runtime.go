@@ -269,6 +269,9 @@ type Runtime struct {
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
 	supervisor *supervisor.Supervisor
 
+	// skills is the Spec 125 skills catalog state (skills_catalog.go).
+	skills skillsCatalogState
+
 	// Tool discovery deduplication: tracks servers with in-progress reactive discovery
 	// Key: serverName, Value: struct{} (presence indicates discovery in progress)
 	discoveryInProgress sync.Map
@@ -1327,6 +1330,12 @@ func (r *Runtime) Close() error {
 	// instance, so RefreshBundle falls back to ReloadBundle afterwards without
 	// evicting a replacement installed by someone else.
 	r.stopBundleRefresher()
+
+	// Spec 125: background skill refreshes write BBolt state (staged file
+	// rows, records) from their own goroutines, so they are joined here,
+	// before the storage manager starts to stop. appCancel above ended their
+	// context; no new one starts once this returns.
+	r.skills.close()
 
 	// The index closes AFTER the telemetry flush above, not before it. That
 	// flush builds one last heartbeat, and tool_count is read from this index
@@ -3249,6 +3258,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		if serverStatus.Config != nil && serverStatus.Config.ExposePrompts != nil {
 			serverMap["expose_prompts"] = *serverStatus.Config.ExposePrompts
 		}
+		if serverStatus.Config != nil && serverStatus.Config.ExposeSkills != nil {
+			serverMap["expose_skills"] = *serverStatus.Config.ExposeSkills
+		}
 
 		// Spec 112: surface the forward_headers allowlist (names only).
 		if serverStatus.Config != nil && len(serverStatus.Config.ForwardHeaders) > 0 {
@@ -3592,6 +3604,9 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 		// path. Tri-state *bool — only emit when set.
 		if srv.ExposePrompts != nil {
 			serverInfo["expose_prompts"] = *srv.ExposePrompts
+		}
+		if srv.ExposeSkills != nil {
+			serverInfo["expose_skills"] = *srv.ExposeSkills
 		}
 
 		// Spec 112: forward_headers allowlist in parity with the StateView path.

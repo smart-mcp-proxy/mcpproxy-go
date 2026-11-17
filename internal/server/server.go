@@ -2383,6 +2383,9 @@ func applyServerUpdates(existing, updates *config.ServerConfig) {
 	if updates.ExposePrompts != nil {
 		existing.ExposePrompts = updates.ExposePrompts
 	}
+	if updates.ExposeSkills != nil {
+		existing.ExposeSkills = updates.ExposeSkills
+	}
 	if updates.MaxConcurrentRequests != nil {
 		existing.MaxConcurrentRequests = updates.MaxConcurrentRequests
 	}
@@ -4885,6 +4888,33 @@ func (s *Server) AggregateToolUsage(since time.Time) (map[string]storage.ToolUsa
 // UsageSnapshot returns the actor-owned usage aggregate snapshot (spec 069 A3).
 func (s *Server) UsageSnapshot() *runtime.UsageAggregate {
 	return s.runtime.UsageSnapshot()
+}
+
+// Skills over MCP (Spec 125, PR-1): thin forwards to the runtime catalog.
+
+// SkillsStatus returns the in-memory state of a server's last skills refresh.
+func (s *Server) SkillsStatus(serverName string) runtime.SkillsServerStatus {
+	return s.runtime.SkillsStatus(serverName)
+}
+
+// ListSkillRecords returns a server's skill records.
+func (s *Server) ListSkillRecords(serverName string) ([]*storage.SkillApprovalRecord, error) {
+	return s.runtime.ListSkillRecords(serverName)
+}
+
+// SkillFileText returns one stored text file of a skill.
+func (s *Server) SkillFileText(serverName, skillPath, relPath string, approvedCopy bool) ([]byte, storage.SkillFile, error) {
+	return s.runtime.SkillFileText(serverName, skillPath, relPath, approvedCopy)
+}
+
+// SkillAvailable reports whether an agent may have the skill.
+func (s *Server) SkillAvailable(serverName string, rec *storage.SkillApprovalRecord) bool {
+	return s.runtime.SkillAvailable(serverName, rec)
+}
+
+// RefreshServerSkills reads one server's skills into the catalog.
+func (s *Server) RefreshServerSkills(ctx context.Context, serverName string) error {
+	return s.runtime.RefreshServerSkills(ctx, serverName)
 }
 
 // ListToolApprovals returns tool approval records for a server (Spec 032).

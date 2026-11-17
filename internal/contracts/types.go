@@ -106,6 +106,9 @@ type Server struct {
 	// default aggregation". Surfaced on GET so a caller that PATCHed the override
 	// can read it back; PATCH/POST accept it via AddServerRequest.
 	ExposePrompts *bool `json:"expose_prompts,omitempty"`
+	// ExposeSkills mirrors config.ServerConfig.ExposeSkills: the per-server
+	// skills override. Tri-state *bool; nil/omitted means "inherit".
+	ExposeSkills *bool `json:"expose_skills,omitempty"`
 	// ForwardHeaders mirrors config.ServerConfig.ForwardHeaders (Spec 112): the
 	// allowlist of inbound MCP client header NAMES forwarded to this server on
 	// tools/call. Names only, never values. Omitted when empty.
