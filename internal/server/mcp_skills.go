@@ -54,9 +54,6 @@ const (
 	// skillMaxChunk is the default and the maximum number of bytes of skill
 	// text one answer carries.
 	skillMaxChunk = 60000
-	// skillMinChunk is the least a configured tool_response_limit may shrink a
-	// chunk to, so a tiny limit still makes progress.
-	skillMinChunk = 1024
 	// skillMainFile is the file load_skill reads.
 	skillMainFile = "SKILL.md"
 
@@ -312,7 +309,9 @@ func safeSkillRelPath(rel string) bool {
 //
 // next is the offset to continue from; done says the part reaches the end.
 //
-// TODO: replace with skills.Chunk when the runtime half is merged.
+// The REST content route uses skills.Chunk, which refuses an offset beyond the
+// end or inside a character (400). An agent gets the forgiving form here: a
+// refusal would cost it a call to learn something the answer can just say.
 func chunkUTF8(data []byte, offset, limit int) (chunk []byte, start, next int, done bool) {
 	n := len(data)
 	if offset < 0 {
@@ -516,23 +515,18 @@ func (h skillHeader) render(start, end, total int, hasRange, done bool) string {
 	return b.String()
 }
 
-// skillChunkCap sizes the part so header and text stay within a configured
-// tool_response_limit, and never below skillMinChunk.
-func skillChunkCap(requested, headerLen int, responseLimit int) int {
-	limit := requested
-	if limit < 1 || limit > skillMaxChunk {
-		limit = skillMaxChunk
+// skillChunkLimit is the number of bytes of text one answer carries: what the
+// caller asked for, at most skillMaxChunk.
+//
+// tool_response_limit is deliberately not applied. It guards against upstream
+// tool output of unknown size, and its truncation cannot be continued; a skill
+// part has a known bound and names the offset that continues it. A caller that
+// wants smaller parts passes a smaller limit.
+func skillChunkLimit(requested int) int {
+	if requested < 1 || requested > skillMaxChunk {
+		return skillMaxChunk
 	}
-	if responseLimit > 0 {
-		room := responseLimit - headerLen
-		if room < skillMinChunk {
-			room = skillMinChunk
-		}
-		if room < limit {
-			limit = room
-		}
-	}
-	return limit
+	return requested
 }
 
 func (p *MCPProxyServer) serveSkillText(ctx context.Context, request mcp.CallToolRequest, tool string) (*mcp.CallToolResult, error) {
@@ -644,14 +638,7 @@ func (p *MCPProxyServer) serveSkillText(ctx context.Context, request mcp.CallToo
 		}
 	}
 
-	cfg := p.currentConfig()
-	responseLimit := 0
-	if cfg != nil {
-		responseLimit = cfg.ToolResponseLimit
-	}
-	// Size the part against the longest header this answer can have.
-	worst := len(hdr.render(len(data), len(data), len(data), true, false)) + 48
-	chunk, from, next, done := chunkUTF8(data, offset, skillChunkCap(limit, worst, responseLimit))
+	chunk, from, next, done := chunkUTF8(data, offset, skillChunkLimit(limit))
 
 	text := string(chunk)
 	text, blocked := p.sanitiseSkillText(ctx, serverName, hdr.skillName, tool, requestID, sessionID, text)
@@ -688,7 +675,10 @@ func firstNonEmpty(vals ...string) string {
 // strip control sequences, spotlight (each as configured). Offsets and sizes
 // refer to the approved copy, not to the sanitised text.
 func (p *MCPProxyServer) sanitiseSkillText(ctx context.Context, serverName, skillName, tool, requestID, sessionID, text string) (string, bool) {
-	cfg := p.currentConfig().OutputSanitisation
+	var cfg *config.OutputSanitisationConfig
+	if live := p.currentConfig(); live != nil {
+		cfg = live.OutputSanitisation
+	}
 	if cfg == nil {
 		cfg = config.DefaultOutputSanitisationConfig()
 	}

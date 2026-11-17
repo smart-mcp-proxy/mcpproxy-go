@@ -445,28 +445,28 @@ func TestLoadSkill_ManifestIsBounded(t *testing.T) {
 	assert.Less(t, len(text), 4000)
 }
 
-func TestLoadSkill_ToolResponseLimitLowersTheChunk(t *testing.T) {
+// tool_response_limit guards upstream tool output, whose truncation cannot be
+// continued. A skill part has its own bound and names its continuation, so the
+// limit does not shrink it: a SKILL.md of ordinary size arrives in one call.
+func TestLoadSkill_ToolResponseLimitDoesNotShrinkThePart(t *testing.T) {
 	fx := newSkillFixture(t)
 	body := strings.Repeat("a", 30000)
 	fx.cat.add("hf", "big", "big", "d", "sk1-a", map[string]string{"SKILL.md": body})
 
-	fx.proxy.config.ToolResponseLimit = 5000
-	res := fx.load(t, context.Background(), map[string]any{"id": "hf:big"})
-	text := skillResultText(t, res)
-	assert.LessOrEqual(t, len(text), 5000, "header and chunk fit the configured limit")
-	assert.Contains(t, text, "Continue with offset=")
-	assert.Greater(t, len(text), 3000, "the chunk is not needlessly small")
+	for _, limit := range []int{0, 10, 5000, 20000} {
+		fx.proxy.config.ToolResponseLimit = limit
+		res := fx.load(t, context.Background(), map[string]any{"id": "hf:big"})
+		text := skillResultText(t, res)
+		_, chunk, ok := strings.Cut(text, "\n---\n")
+		require.True(t, ok)
+		assert.Equal(t, 30000, len(chunk), "tool_response_limit=%d", limit)
+		assert.NotContains(t, text, "Continue with offset=")
+	}
 
-	fx.proxy.config.ToolResponseLimit = 10 // absurd: still progress, never empty
-	res = fx.load(t, context.Background(), map[string]any{"id": "hf:big"})
-	_, chunk, ok := strings.Cut(skillResultText(t, res), "\n---\n")
-	require.True(t, ok)
-	assert.Equal(t, skillMinChunk, len(chunk))
-
-	fx.proxy.config.ToolResponseLimit = 0
-	res = fx.load(t, context.Background(), map[string]any{"id": "hf:big"})
-	_, chunk, _ = strings.Cut(skillResultText(t, res), "\n---\n")
-	assert.Equal(t, 30000, len(chunk), "no limit configured: up to 60000 bytes per answer")
+	// The caller asks for smaller parts itself.
+	res := fx.load(t, context.Background(), map[string]any{"id": "hf:big", "limit": float64(4000)})
+	_, chunk, _ := strings.Cut(skillResultText(t, res), "\n---\n")
+	assert.Equal(t, 4000, len(chunk))
 }
 
 func TestLoadSkill_LimitIsClampedToTheMaximum(t *testing.T) {
