@@ -618,9 +618,12 @@ func (r *Runtime) runSkillsRefresh(ctx, scanCtx context.Context, serverName stri
 			return err
 		}
 		// A server that renames its skills on every listing would otherwise
-		// leave a record behind each time. The blobs the deleted records
-		// referenced are collected by the next apply.
-		if n, err := sm.PruneUnlistedSkillApprovals(serverName, skills.MaxUnlistedSkillsPerServer); err != nil {
+		// leave a record behind each time, also when its listings are cut
+		// short and prove nothing about what is gone: the records this
+		// listing did not name are bounded, whatever their listed mark says.
+		// The blobs the deleted records referenced are collected by the next
+		// apply.
+		if n, err := sm.PruneSkillApprovalsNotIn(serverName, listed, skills.MaxUnlistedSkillsPerServer); err != nil {
 			return err
 		} else if n > 0 {
 			changed = true
@@ -1112,6 +1115,39 @@ func skillByPath(recs []*storage.SkillApprovalRecord, path string) *storage.Skil
 		return listed[0]
 	}
 	return nil
+}
+
+// skillsByPath resolves every path of recs at once, by the rule of
+// skillByPath: a path that names no single record is absent.
+func skillsByPath(recs []*storage.SkillApprovalRecord) map[string]*storage.SkillApprovalRecord {
+	type group struct {
+		all, listed     int
+		one, onlyListed *storage.SkillApprovalRecord
+	}
+	groups := map[string]*group{}
+	for _, c := range recs {
+		g := groups[c.SkillPath]
+		if g == nil {
+			g = &group{}
+			groups[c.SkillPath] = g
+		}
+		g.all++
+		g.one = c
+		if c.Listed {
+			g.listed++
+			g.onlyListed = c
+		}
+	}
+	out := make(map[string]*storage.SkillApprovalRecord, len(groups))
+	for path, g := range groups {
+		switch {
+		case g.all == 1:
+			out[path] = g.one
+		case g.listed == 1:
+			out[path] = g.onlyListed
+		}
+	}
+	return out
 }
 
 func (r *Runtime) markSkillStoredCopyDamaged(serverName, skillURI, detail string) {

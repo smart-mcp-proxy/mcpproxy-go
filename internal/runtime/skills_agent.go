@@ -209,10 +209,11 @@ func (r *Runtime) skillIndexFor(cfg *config.Config, gen uint64, servers []string
 		if err != nil {
 			return nil, err
 		}
+		resolved := skillsByPath(recs)
 		for _, rec := range recs {
 			// Only the record its path resolves to, so an id found by search
 			// is the id load_skill finds.
-			if rec.Approved == nil || !skillAvailableIn(cfg, name, rec) || skillByPath(recs, rec.SkillPath) != rec {
+			if rec.Approved == nil || !skillAvailableIn(cfg, name, rec) || resolved[rec.SkillPath] != rec {
 				continue
 			}
 			n, desc := approvedNameDescription(rec)
@@ -250,6 +251,10 @@ func (r *Runtime) skillIndexFor(cfg *config.Config, gen uint64, servers []string
 	return e.ix, nil
 }
 
+// skillSearchAttempts bounds how often one search is repeated because a hit
+// turned out to be gone.
+const skillSearchAttempts = 3
+
 // SearchAvailableSkills searches the skills available to a caller. total is the
 // number of matches among the skills available to THIS caller (reach applied),
 // never a wider count; hits are the best limit of them. The index it searches
@@ -261,11 +266,32 @@ func (r *Runtime) SearchAvailableSkills(query string, limit int, reach SkillReac
 	if query == "" || limit <= 0 || r.storageManager == nil {
 		return nil, 0, nil
 	}
+	for attempt := 1; ; attempt++ {
+		var stale bool
+		hits, total, stale, err = r.searchAvailableSkillsOnce(query, limit, reach)
+		if err != nil || !stale {
+			return hits, total, err
+		}
+		// A hit was gone: the index is older than the records. Its count of
+		// the matches that were not returned cannot be trusted either, so the
+		// index is rebuilt and the search repeated.
+		r.skills.bumpIndexGeneration()
+		if attempt == skillSearchAttempts {
+			// Records keep changing under the search. Count only what was
+			// checked: too low is safe, too high would count a held skill.
+			return hits, len(hits), nil
+		}
+	}
+}
+
+// searchAvailableSkillsOnce is one search against the caller's index. stale
+// reports that a returned hit no longer has an available record.
+func (r *Runtime) searchAvailableSkillsOnce(query string, limit int, reach SkillReach) (hits []AvailableSkill, total int, stale bool, err error) {
 	s := &r.skills
 	s.idxMu.Lock()
 	if s.idxDone {
 		s.idxMu.Unlock()
-		return nil, 0, nil
+		return nil, 0, false, nil
 	}
 	// The generation is read before the configuration and the records: a
 	// change that lands after this point moves the generation past the one
@@ -274,7 +300,7 @@ func (r *Runtime) SearchAvailableSkills(query string, limit int, reach SkillReac
 	cfg := r.Config()
 	if cfg == nil || !cfg.EnableSkills {
 		s.idxMu.Unlock()
-		return nil, 0, nil
+		return nil, 0, false, nil
 	}
 	var servers []string
 	for _, sc := range cfg.Servers {
@@ -284,19 +310,19 @@ func (r *Runtime) SearchAvailableSkills(query string, limit int, reach SkillReac
 	}
 	if len(servers) == 0 {
 		s.idxMu.Unlock()
-		return nil, 0, nil
+		return nil, 0, false, nil
 	}
 	sort.Strings(servers)
 	ix, err := r.skillIndexFor(cfg, gen, servers)
 	if err != nil {
 		s.idxMu.Unlock()
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 	// Searching under the lock keeps Close from releasing the index mid-search.
 	raw, total, err := ix.Search(query, limit)
 	s.idxMu.Unlock()
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 
 	// One record read per returned hit, by its key: the cost of a search does
@@ -305,13 +331,10 @@ func (r *Runtime) SearchAvailableSkills(query string, limit int, reach SkillReac
 		rec, gerr := r.storageManager.GetSkillApproval(h.Server, h.URI)
 		if gerr != nil || rec == nil || rec.Approved == nil || rec.SkillPath != h.Path ||
 			!reach.allows(h.Server) || !skillAvailableIn(cfg, h.Server, rec) {
-			total-- // gone since the index was built
+			stale = true
 			continue
 		}
 		hits = append(hits, *availableSkillOf(h.Server, rec))
 	}
-	if total < len(hits) {
-		total = len(hits)
-	}
-	return hits, total, nil
+	return hits, total, stale, nil
 }

@@ -38,25 +38,26 @@ func skillAccessRecords() []*storage.ActivityRecord {
 	}
 }
 
-func TestSkillAccessActivity_ScopedTokenSeesOnlyRowsOfItsServers(t *testing.T) {
+// A skill access row names the id its caller asked for, which may be a skill
+// that is held, on a server the reader can see. No scoped reader gets any of
+// them, on any activity door (FR-019a).
+func TestSkillAccessActivity_ScopedTokenSeesNoRow(t *testing.T) {
 	ctrl := &scopeParamsController{records: skillAccessRecords()}
 	srv, token := scopedAgentServer(t, ctrl, []string{"alpha"})
 
-	assert.Equal(t, []string{"sa-alpha"}, activityIDs(t, srv, "/api/v1/activity?type=skill_access", token),
-		"the list shows only the caller's own server's row")
+	assert.Empty(t, activityIDs(t, srv, "/api/v1/activity?type=skill_access", token))
+	assert.Empty(t, activityIDs(t, srv, "/api/v1/activity", token))
 
-	for _, id := range []string{"sa-beta", "sa-probe", "sa-search"} {
+	for _, id := range []string{"sa-alpha", "sa-beta", "sa-probe", "sa-search"} {
 		rec := scopeGet(t, srv, "/api/v1/activity/"+id, token)
 		assert.Equal(t, http.StatusNotFound, rec.Code, id)
 		assert.NotContains(t, rec.Body.String(), "probed", id)
 	}
-	assert.Equal(t, http.StatusOK, scopeGet(t, srv, "/api/v1/activity/sa-alpha", token).Code)
 
 	export := scopeGet(t, srv, "/api/v1/activity/export?type=skill_access&format=json", token)
 	require.Equal(t, http.StatusOK, export.Code)
 	body := export.Body.String()
-	assert.Contains(t, body, "sa-alpha")
-	for _, leak := range []string{"sa-beta", "sa-probe", "sa-search", "secret plans", "beta:probed"} {
+	for _, leak := range []string{"sa-alpha", "sa-beta", "sa-probe", "sa-search", "secret plans", "beta:probed"} {
 		assert.False(t, strings.Contains(body, leak), "export leaks %q", leak)
 	}
 }

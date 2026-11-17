@@ -743,7 +743,7 @@ func TestRetrieveSkills_TwentyFiveEntriesStayCompact(t *testing.T) {
 // Activity
 // ---------------------------------------------------------------------------
 
-func TestSkillAccess_RowNeverCarriesTheSkillTextAndHidesUnreachableServers(t *testing.T) {
+func TestSkillAccess_RowNamesWhatWasAskedAndNeverCarriesTheSkillText(t *testing.T) {
 	fx := newSkillFixture(t)
 	fx.cat.add("hf", "s", "s", "d", "sk1-a", map[string]string{"SKILL.md": "the body text"})
 	fx.cat.add("secret", "s", "s", "d", "sk1-b", map[string]string{"SKILL.md": "x"})
@@ -758,7 +758,7 @@ func TestSkillAccess_RowNeverCarriesTheSkillTextAndHidesUnreachableServers(t *te
 	fx.load(t, skillAgentCtx("hf"), map[string]any{"id": "secret:s"})
 	row = fx.lastRow(t)
 	assert.Equal(t, runtime.SkillAccessNotFound, row.Outcome)
-	assert.Equal(t, "", row.Server, "an id out of reach is recorded without its server, so no scoped read can show it")
+	assert.Equal(t, "secret", row.Server, "the row names the server asked for; only administrators read these rows")
 	assert.Equal(t, "secret:s", row.SkillID, "what the caller itself asked for")
 }
 

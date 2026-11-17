@@ -458,34 +458,36 @@ func (b *BoltDB) ApplySkillRefresh(serverName string, upserts []*SkillApprovalRe
 	return removed, err
 }
 
-// PruneUnlistedSkillApprovals deletes the server's oldest records of skills it
-// no longer lists, so that at most keep of them remain. A blocked record is
-// never deleted: the mark is a person's decision and must still be there when
-// the skill comes back. It returns how many records it deleted.
-func (b *BoltDB) PruneUnlistedSkillApprovals(serverName string, keep int) (int, error) {
+// PruneSkillApprovalsNotIn bounds the records of skills the server's latest
+// listing did not name: the oldest of them are deleted so that at most keep
+// remain. current holds the addresses the listing named; those records are
+// never touched. A blocked record is never deleted either: the mark is a
+// person's decision and must still be there when the skill comes back. It
+// returns how many records it deleted.
+func (b *BoltDB) PruneSkillApprovalsNotIn(serverName string, current map[string]struct{}, keep int) (int, error) {
 	var removed int
 	err := b.db.Update(func(tx *bbolt.Tx) error {
 		recs, err := listSkillApprovalsTx(tx, serverName)
 		if err != nil {
 			return err
 		}
-		var unlisted []*SkillApprovalRecord
+		var old []*SkillApprovalRecord
 		for _, r := range recs {
-			if !r.Listed && !r.Blocked {
-				unlisted = append(unlisted, r)
+			if _, named := current[r.SkillURI]; !named && !r.Blocked {
+				old = append(old, r)
 			}
 		}
-		if len(unlisted) <= keep {
+		if len(old) <= keep {
 			return nil
 		}
-		sort.Slice(unlisted, func(i, j int) bool {
-			if !unlisted[i].UpdatedAt.Equal(unlisted[j].UpdatedAt) {
-				return unlisted[i].UpdatedAt.Before(unlisted[j].UpdatedAt)
+		sort.Slice(old, func(i, j int) bool {
+			if !old[i].UpdatedAt.Equal(old[j].UpdatedAt) {
+				return old[i].UpdatedAt.Before(old[j].UpdatedAt)
 			}
-			return unlisted[i].SkillURI < unlisted[j].SkillURI
+			return old[i].SkillURI < old[j].SkillURI
 		})
 		approvals := tx.Bucket([]byte(SkillApprovalBucket))
-		for _, r := range unlisted[:len(unlisted)-keep] {
+		for _, r := range old[:len(old)-keep] {
 			if err := approvals.Delete([]byte(SkillApprovalKey(serverName, r.SkillURI))); err != nil {
 				return err
 			}
@@ -576,9 +578,9 @@ func (m *Manager) ApplySkillRefresh(serverName string, upserts []*SkillApprovalR
 	return m.db.ApplySkillRefresh(serverName, upserts, unlistedURIs, newFiles)
 }
 
-// PruneUnlistedSkillApprovals bounds the records of skills no longer listed.
-func (m *Manager) PruneUnlistedSkillApprovals(serverName string, keep int) (int, error) {
+// PruneSkillApprovalsNotIn bounds the records the latest listing did not name.
+func (m *Manager) PruneSkillApprovalsNotIn(serverName string, current map[string]struct{}, keep int) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.db.PruneUnlistedSkillApprovals(serverName, keep)
+	return m.db.PruneSkillApprovalsNotIn(serverName, current, keep)
 }

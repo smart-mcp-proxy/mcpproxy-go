@@ -83,11 +83,11 @@ func TestActivityService_SkillAccessFailureIsAnErrorRowWithTheOutcome(t *testing
 	rec := onlyRecord(t, store)
 	assert.Equal(t, "error", rec.Status)
 	assert.Equal(t, "not_found", rec.ErrorMessage)
-	assert.Equal(t, "", rec.ServerName, "an id out of the caller's reach is written without its server")
+	assert.Equal(t, "", rec.ServerName)
 }
 
 func TestSkillAccessIsAValidActivityType(t *testing.T) {
 	assert.Contains(t, storage.ValidActivityTypes, string(storage.ActivityTypeSkillAccess))
-	assert.False(t, storage.IsAdminOnlyActivityType(storage.ActivityTypeSkillAccess),
-		"access rows are filtered by server reach, not hidden wholesale")
+	assert.True(t, storage.IsAdminOnlyActivityType(storage.ActivityTypeSkillAccess),
+		"an access row names the id its caller asked for, which may be a held skill")
 }

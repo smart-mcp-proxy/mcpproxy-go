@@ -494,3 +494,76 @@ func TestListAvailableSkills(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got)
 }
+
+// A listing that is cut short proves nothing about what is gone, so its
+// absent records keep their listed mark. They are bounded all the same: a
+// server that names 200 new skills and a continuation on every refresh must
+// not grow the store.
+func TestSkillsRefresh_RecordsALaterListingDoesNotNameAreBounded(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	old := time.Now().Add(-time.Hour)
+	for i := 0; i < skills.MaxUnlistedSkillsPerServer+7; i++ {
+		p := fmt.Sprintf("stale-%03d", i)
+		require.NoError(t, g.rt.storageManager.SaveSkillApproval(&storage.SkillApprovalRecord{
+			ServerName: skillsSrv, SkillURI: "skill://" + p + "/SKILL.md", SkillPath: p, Name: p,
+			Status: storage.SkillStatusPending, Listed: true, // still marked listed, as after a truncated refresh
+			FirstSeen: old, UpdatedAt: old.Add(time.Duration(i) * time.Second),
+		}))
+	}
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf"})
+	require.NoError(t, g.refresh(t))
+
+	recs := g.records(t)
+	assert.Len(t, recs, skills.MaxUnlistedSkillsPerServer+1, "the bound, plus the skill the listing named")
+	assert.Contains(t, recs, "pdf")
+	assert.NotContains(t, recs, "stale-000")
+	assert.Contains(t, recs, fmt.Sprintf("stale-%03d", skills.MaxUnlistedSkillsPerServer+6))
+}
+
+// The index's count of matches it did not return cannot be trusted once a
+// returned hit turned out to be gone: the search is repeated on a fresh index,
+// so a held skill is never counted.
+func TestSearchAvailableSkills_AStaleHitNeverLeavesAHeldSkillInTheTotal(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf-a"})
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf-b"})
+	require.NoError(t, g.refresh(t))
+	g.approve(t, "pdf-a", "pdf-b")
+	_, total, err := g.rt.SearchAvailableSkills("pdf", 1, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, total)
+
+	// Both blocked behind the index's back (no generation bump), as when the
+	// block lands between the index search and the record check.
+	for _, p := range []string{"pdf-a", "pdf-b"} {
+		rec := g.records(t)[p]
+		rec.Blocked = true
+		require.NoError(t, g.rt.storageManager.SaveSkillApproval(rec))
+	}
+	hits, total, err := g.rt.SearchAvailableSkills("pdf", 1, nil)
+	require.NoError(t, err)
+	assert.Empty(t, hits)
+	assert.Zero(t, total, "a blocked skill is not counted, also when it was not among the returned hits")
+}
+
+func TestSkillsByPath_AgreesWithSkillByPath(t *testing.T) {
+	rec := func(uri, path string, listed bool) *storage.SkillApprovalRecord {
+		return &storage.SkillApprovalRecord{SkillURI: uri, SkillPath: path, Listed: listed}
+	}
+	recs := []*storage.SkillApprovalRecord{
+		rec("u1", "one", true),
+		rec("u2", "two", false), rec("u3", "two", true),
+		rec("u4", "three", true), rec("u5", "three", true),
+		rec("u6", "four", false), rec("u7", "four", false),
+		rec("u8", "five", false),
+	}
+	got := skillsByPath(recs)
+	for _, p := range []string{"one", "two", "three", "four", "five", "none"} {
+		want := skillByPath(recs, p)
+		if want == nil {
+			assert.NotContains(t, got, p)
+			continue
+		}
+		assert.Same(t, want, got[p], p)
+	}
+}

@@ -608,13 +608,14 @@ func (p *MCPProxyServer) serveSkillText(ctx context.Context, request mcp.CallToo
 	if !ok {
 		return notFound()
 	}
+	// The row names the server asked for; skill_access rows are read by
+	// administrators only, whatever the id.
+	act.Server = serverName
 	// Reach first: an id out of the caller's reach is refused before the catalog
-	// is asked about it, and its server is left out of the activity row so the
-	// row cannot become visible to a caller that must not know the server.
+	// is asked about it.
 	if !p.skillReach(ctx)(serverName) {
 		return notFound()
 	}
-	act.Server = serverName
 	if !safeSkillRelPath(file) {
 		return notFound()
 	}

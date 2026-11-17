@@ -185,6 +185,9 @@ var adminConfigEventTypes = map[internalRuntime.EventType]struct{}{
 	// FR-019a); it also carries a server name, but a scoped caller must not
 	// learn of an unapproved skill even on a server it can see.
 	internalRuntime.EventTypeActivitySkillQuarantineChange: {},
+	// A skill access names the id its caller asked for, which may be a held
+	// skill: administrator-only for the same reason.
+	internalRuntime.EventTypeActivitySkillAccess: {},
 }
 
 // identityBearingEventTypes are the event types whose payload is ABOUT one
@@ -230,7 +233,6 @@ var identityBearingEventTypes = map[internalRuntime.EventType]struct{}{
 	internalRuntime.EventTypeActivityQuarantineChange:     {},
 	internalRuntime.EventTypeActivityToolQuarantineChange: {},
 	internalRuntime.EventTypeActivityPromptGet:            {},
-	internalRuntime.EventTypeActivitySkillAccess:          {},
 	internalRuntime.EventTypeOAuthTokenRefreshed:          {},
 	internalRuntime.EventTypeOAuthRefreshFailed:           {},
 	internalRuntime.EventTypeSecurityScanSettled:          {},

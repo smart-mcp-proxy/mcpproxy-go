@@ -39,9 +39,8 @@ type SkillAccessActivity struct {
 	Source  string
 	Tool    string // retrieve_skills | load_skill | read_skill_file
 	Outcome string // one of the SkillAccess* outcomes
-	// Server is the skill's origin server for a load or read the caller may
-	// reach, and empty otherwise (a search, or an id out of the caller's reach).
-	// Rows with no server are administrator-only on every activity read door.
+	// Server is the server the id names (empty for a search). The rows are
+	// administrator-only on every activity read door, whatever they name.
 	Server    string
 	SkillID   string // the id as the caller gave it (bounded by the caller)
 	SkillName string
