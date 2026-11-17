@@ -56,10 +56,23 @@ func TestDecideSkill_Table(t *testing.T) {
 					assert.Equal(t, skillDecision{status: storage.SkillStatusChanged, action: skillActionHeldChanged}, d, "changed %v %v %s", q, mode, name)
 				}
 			}
-			// Already changed: no new action.
-			d := decideSkill(approvedPrev(storage.SkillStatusChanged), true, "sk1-new", mode, q, cleanScan)
+			// Already held with this very content: nothing new to record.
+			held := approvedPrev(storage.SkillStatusChanged)
+			held.CurrentHash = "sk1-new"
+			d := decideSkill(held, true, "sk1-new", mode, q, cleanScan)
 			if !trustAll {
 				assert.Equal(t, skillDecision{status: storage.SkillStatusChanged}, d)
+			}
+			// Held, and the content changed again: the new content is held, and recorded.
+			held.CurrentHash = "sk1-between"
+			d = decideSkill(held, true, "sk1-new", mode, q, cleanScan)
+			if !trustAll {
+				assert.Equal(t, skillDecision{status: storage.SkillStatusChanged, action: skillActionHeldChanged}, d)
+			}
+			// Back from unusable with other content than the approved one: held, and recorded.
+			d = decideSkill(approvedPrev(storage.SkillStatusUnusable), true, "sk1-new", mode, q, cleanScan)
+			if !trustAll {
+				assert.Equal(t, skillDecision{status: storage.SkillStatusChanged, action: skillActionHeldChanged}, d)
 			}
 
 			// SAME as approved.

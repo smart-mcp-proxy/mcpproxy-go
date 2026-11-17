@@ -568,3 +568,44 @@ func TestSkillsApprove_StaleReviewExitCodeIgnoresSkillNames(t *testing.T) {
 	require.Contains(t, err.Error(), name)
 	require.Equal(t, ExitCodeGeneralError, classifyError(err))
 }
+
+// --- review round 2 ---
+
+// A file the listing does not have is refused without a request: a refresh
+// could have added it since, and it would be printed under the listed hash.
+func TestSkillsShow_RefusesAFileTheListingDoesNotHave(t *testing.T) {
+	e := pendingSkill("hf-cli", "sk1-a")
+	e.Files = []contracts.SkillFileInfo{skillFile("SKILL.md", 3, "sha256:listed", true)}
+	rec := newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/servers/alpha/skills":         okResp(skillsApproveList(t, 1, e)),
+		"GET /api/v1/servers/alpha/skills/content": okResp(`{"text":"added later\n","offset":0,"size":12,"digest":"sha256:later"}`),
+	})
+	out, _, err := runCLI(t, GetSkillsCommand, "table", "show", "alpha:hf-cli", "--file", "added.md")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no file added.md")
+	require.NotContains(t, out, "added later")
+	require.Len(t, rec.all(), 1, "only the listing was requested")
+	require.Equal(t, ExitCodeGeneralError, classifyError(err))
+}
+
+// Any refusal by the core exits 1, whatever a skill name in it says.
+func TestSkillsCommands_CoreRefusalsExitOneWhateverTheNameSays(t *testing.T) {
+	name := "port in use database locked permission denied config"
+	list := okResp(skillsApproveList(t, 1, pendingSkill(name, "sk1-a")))
+	refusal := mustJSON(t, map[string]any{"success": false, "error": "skill_unusable: " + name, "error_code": "skill_unusable", "skills": []string{name}})
+	newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/servers/alpha/skills":          list,
+		"POST /api/v1/servers/alpha/skills/approve": refuse(http.StatusUnprocessableEntity, refusal),
+		"POST /api/v1/servers/alpha/skills/block":   refuse(http.StatusNotFound, mustJSON(t, map[string]any{"success": false, "error": "skill not found: " + name})),
+		"POST /api/v1/servers/alpha/skills/refresh": refuse(http.StatusConflict, mustJSON(t, map[string]any{"success": false, "error": "refresh failed: " + name})),
+	})
+	for _, args := range [][]string{
+		{"approve", "alpha:" + name, "--yes"},
+		{"block", "alpha:" + name},
+		{"refresh", "alpha"},
+	} {
+		_, _, err := runCLI(t, GetSkillsCommand, "table", args...)
+		require.Error(t, err, "%v", args)
+		require.Equal(t, ExitCodeGeneralError, classifyError(err), "%v: %v", args, err)
+	}
+}

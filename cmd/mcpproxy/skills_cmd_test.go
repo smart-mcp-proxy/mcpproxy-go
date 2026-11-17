@@ -12,6 +12,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"gopkg.in/yaml.v3"
 
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
@@ -136,8 +138,12 @@ func TestSkillsShow_FollowsNextOffset(t *testing.T) {
 }
 
 func TestSkillsShow_FileAndApprovedFlags(t *testing.T) {
+	e := pendingSkill("hf-cli", "sk1-abc")
+	e.Status, e.ApprovedHash = "approved", "sk1-abc"
+	e.Files = []contracts.SkillFileInfo{skillFile("SKILL.md", 9, "sha256:md", true), skillFile("refs/a.md", 1, "sha256:aa", true)}
+	e.ApprovedFiles = e.Files
 	rec := newRESTRecorder(t, map[string]cannedResponse{
-		"GET /api/v1/servers/alpha/skills":         okResp(skillsListBody),
+		"GET /api/v1/servers/alpha/skills":         okResp(skillsApproveList(t, 1, e)),
 		"GET /api/v1/servers/alpha/skills/content": okResp(`{"text":"x","offset":0,"size":1,"digest":"sha256:aa"}`),
 	})
 	_, _, err := runCLI(t, GetSkillsCommand, "table", "show", "alpha:hf-cli", "--file", "refs/a.md", "--approved")

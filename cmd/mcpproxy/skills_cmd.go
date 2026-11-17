@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
@@ -265,9 +266,18 @@ func (e escapedError) Unwrap() error { return e.err }
 // termSafeErr escapes the message of an error a skills command returns. Such a
 // message can quote an upstream server (the text of its JSON-RPC error), and
 // it is printed by the command's error path, not by the code above.
+//
+// A refusal by the core is also marked as one (cliRefusalError): its text can
+// carry a skill name or path, and the exit code must not depend on whether
+// that name happens to say "port in use" or "permission denied".
 func termSafeErr(err error) error {
 	if err == nil {
 		return nil
+	}
+	var apiErr *cliclient.APIError
+	var refusal cliRefusalError
+	if errors.As(err, &apiErr) && !errors.As(err, &refusal) {
+		err = cliRefusalError{err}
 	}
 	return escapedError{err}
 }

@@ -58,9 +58,13 @@ func parseSkillTargets(targets []string) (server string, skills []string, err er
 //
 // wantDigest binds the read to the listing the caller is showing: the text
 // printed under a listed content hash must be the text of that listing, not of
-// a refresh that ran between the listing and this read. Empty means the file
-// is not in the listing (the core answers 404 for it).
+// a refresh that ran between the listing and this read. A file the listing
+// does not have (an empty wantDigest) is refused without a request: a refresh
+// could have added it since, and it would be shown under the listed hash.
 func readSkillFile(ctx context.Context, client *cliclient.Client, server, skill, file string, approved bool, maxBytes int64, wantDigest string) (text string, truncated bool, err error) {
+	if wantDigest == "" {
+		return "", false, cliRefusalError{fmt.Errorf("the skill has no file %s in this copy", file)}
+	}
 	var b strings.Builder
 	offset := int64(0)
 	var digest string
@@ -74,7 +78,7 @@ func readSkillFile(ctx context.Context, client *cliclient.Client, server, skill,
 		// requests would otherwise be shown as text no version contains.
 		if first {
 			digest, size = chunk.Digest, chunk.Size
-			if wantDigest != "" && digest != wantDigest {
+			if digest != wantDigest {
 				return "", false, cliRefusalError{fmt.Errorf("%s changed after the skill was listed; run the command again", file)}
 			}
 		} else if chunk.Digest != digest || chunk.Size != size {

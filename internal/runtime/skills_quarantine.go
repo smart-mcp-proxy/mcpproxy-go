@@ -69,8 +69,12 @@ func decideSkill(prev *storage.SkillApprovalRecord, usable bool, currentHash str
 		return skillDecision{status: storage.SkillStatusPending}
 	}
 	// 5. A changed skill is held in manual and scan mode, whatever the scan says.
+	// Every content that is newly held gets its row: the first change after an
+	// approval, a further change while already held, and a skill that comes
+	// back from unusable with other content than the approved one. The same
+	// held content seen again by a later refresh says nothing new.
 	d := skillDecision{status: storage.SkillStatusChanged}
-	if prevStatus == storage.SkillStatusApproved {
+	if prevStatus != storage.SkillStatusChanged || prev.CurrentHash != currentHash {
 		d.action = skillActionHeldChanged
 	}
 	return d
