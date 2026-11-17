@@ -300,7 +300,8 @@ jobs:
       # same package takes ~450s), so the default 10m package timeout is one
       # slow runner away from "panic: test timed out" — which is how the leg
       # failed on the first green-again push after #1266. It has since grown to
-      # ~1100-1200s, so the bound is 40m to leave real headroom.
+      # ~1800s (2400s on a slow runner, which hit the former 40m bound on
+      # #1918), so the bound is 60m.
       #
       # The run goes through scripts/go-test-retry-runtime-fault.sh: when the
       # first run dies of a Go runtime fault (`unexpected fault address … /
@@ -311,7 +312,7 @@ jobs:
       - name: Run unit tests (Windows)
         if: matrix.os == 'windows-latest'
         shell: bash
-        run: bash scripts/go-test-retry-runtime-fault.sh -v -race -timeout 40m -coverprofile=coverage.out -covermode=atomic -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" -- ./...
+        run: bash scripts/go-test-retry-runtime-fault.sh -v -race -timeout 60m -coverprofile=coverage.out -covermode=atomic -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" -- ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
