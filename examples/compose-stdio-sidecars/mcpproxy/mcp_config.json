@@ -1,0 +1,17 @@
+{
+  "listen": "0.0.0.0:8080",
+  "enable_socket": false,
+  "data_dir": "/data",
+  "require_mcp_auth": true,
+  "mcpServers": [
+    {
+      "name": "everything",
+      "protocol": "streamable-http",
+      "url": "http://everything:8000/mcp",
+      "headers": { "Authorization": "Bearer ${file:/run/secrets/sidecar_api_key}" },
+      "quarantined": false,
+      "trust_mode": "manual",
+      "enabled": true
+    }
+  ]
+}

@@ -18,7 +18,7 @@ const adminKeyForTests = "test-key-123"
 // allConnectClients lists every supported client, including the two the
 // preview matrix does not seed (zcode) so every carrier is covered.
 var allConnectClients = []string{
-	"claude-code", "claude-desktop", "cursor", "windsurf",
+	"claude-code", "claude-desktop", "copilot", "cursor", "windsurf",
 	"vscode", "codex", "gemini", "opencode", "zcode",
 }
 

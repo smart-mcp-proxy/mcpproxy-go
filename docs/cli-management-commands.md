@@ -512,7 +512,10 @@ catalog with associated fix steps and fixer keys.
 ### `mcpproxy connect <client>`
 
 Register MCPProxy in an AI client's MCP configuration (Claude Code, Cursor,
-Windsurf, VS Code, Codex, Gemini, OpenCode, ZCode). Connect **never writes the
+Windsurf, VS Code, GitHub Copilot, Codex, Gemini, OpenCode, ZCode). For VS Code
+there are two clients, `vscode` and `copilot`: see
+[VS Code and GitHub Copilot](/features/connect-clients#vs-code-and-github-copilot).
+Connect **never writes the
 instance admin API key**: every write carries a per-client credential
 (`mcp_cli_...`) that identifies the client and binds it to a profile. The
 credential is valid on MCP endpoints only, so it cannot open the REST API.

@@ -255,7 +255,7 @@ func TestAggregatedPrompt_ScopeUsesCanonicalOwner(t *testing.T) {
 	t.Cleanup(func() { um.DisconnectAll() })
 	for _, name := range []string{"a", "a__b"} {
 		testServer := servertest.NewTestStreamableHTTPServer(newTestRefreshPromptsUpstream(t))
-		t.Cleanup(testServer.Close)
+		t.Cleanup(func() { closeHTTPFixture(testServer) })
 		require.NoError(t, um.AddServerConfig(name, &config.ServerConfig{
 			Name: name, Protocol: "streamable-http", URL: testServer.URL, Enabled: true,
 		}))
@@ -377,7 +377,7 @@ func TestAggregatedPrompt_LateEnableStillFiltered(t *testing.T) {
 	t.Cleanup(func() { um.DisconnectAll() })
 	for _, name := range []string{"a", "hidden"} {
 		testServer := servertest.NewTestStreamableHTTPServer(newTestRefreshPromptsUpstream(t))
-		t.Cleanup(testServer.Close)
+		t.Cleanup(func() { closeHTTPFixture(testServer) })
 		require.NoError(t, um.AddServerConfig(name, &config.ServerConfig{
 			Name: name, Protocol: "streamable-http", URL: testServer.URL, Enabled: true,
 		}))

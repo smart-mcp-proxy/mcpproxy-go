@@ -615,7 +615,10 @@ var undiffedHotConfigFields = []string{
 }
 
 // restartGatedConfigFields are bound once at startup; see pinRestartGated.
-var restartGatedConfigFields = []string{"TrayEndpoint", "EnableSocket", "DebugSearch", "Tokenizer", "EnablePrompts", "Instructions"}
+// OAuthTokenEncryptionKey (Spec 123 FR-023) is resolved once when config.db
+// is opened; adopting a new key mid-process would split oauth_tokens between
+// two keys.
+var restartGatedConfigFields = []string{"TrayEndpoint", "EnableSocket", "DebugSearch", "Tokenizer", "EnablePrompts", "Instructions", "OAuthTokenEncryptionKey"}
 
 func configFieldValue(cfg *config.Config, goName string) interface{} {
 	return reflect.ValueOf(cfg).Elem().FieldByName(goName).Interface()

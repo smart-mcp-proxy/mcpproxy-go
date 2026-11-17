@@ -515,3 +515,42 @@ func TestForgetClientCredential_NotFoundAndConflict(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, stored.Revoked, "a grandfathered agent token must not be revoked")
 }
+
+// A client credential must carry an expiry. A persisted kind=client record
+// with a zero ExpiresAt is unusable (authentication rejects it), so a fresh
+// mint for that client must replace it instead of reporting it as active.
+func TestMintClientCredential_ReplacesZeroExpiryRecord(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	rawOld, err := auth.GenerateClientToken()
+	require.NoError(t, err)
+	stale := auth.AgentToken{
+		Name:           "client-cursor",
+		Kind:           auth.KindClient,
+		ClientID:       "cursor",
+		ProfileMode:    auth.ProfileModeSwitchable,
+		AllowedServers: []string{"*"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+		CreatedAt:      time.Now(),
+	}
+	hash := auth.HashToken(rawOld, testHMACKey)
+	stale.TokenHash = hash
+	stale.TokenPrefix = auth.TokenPrefix(rawOld)
+	data, err := json.Marshal(stale)
+	require.NoError(t, err)
+	require.NoError(t, mgr.db.db.Update(func(tx *bbolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte(AgentTokensBucket))
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(hash), data)
+	}))
+
+	rawNew, err := auth.GenerateClientToken()
+	require.NoError(t, err)
+	_, err = mgr.MintClientCredential("cursor", rawNew, testHMACKey, auth.ProfileModeSwitchable, "", time.Now().Add(24*time.Hour))
+	require.NoError(t, err, "a zero-expiry client record must be replaceable")
+	_, err = mgr.ValidateAgentToken(rawNew, testHMACKey)
+	require.NoError(t, err)
+}

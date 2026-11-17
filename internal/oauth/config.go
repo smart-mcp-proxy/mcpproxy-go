@@ -252,21 +252,30 @@ func (m *TokenStoreManager) HasTokenStore(serverName string) bool {
 // records would make the upstream connection loop forever asking for re-auth even though a
 // valid token is on disk. This mirrors HasValidToken (see below), which already treats
 // IsZero() as "never expires".
-func HasPersistedToken(serverName, serverURL string, boltStorage *storage.BoltDB) (hasToken bool, hasRefreshToken bool, isExpired bool) {
+//
+// Spec 123 FR-031: err is non-nil only for a stored row the configured key
+// cannot decrypt (TokenUndecryptableError, MCPX_OAUTH_TOKEN_UNDECRYPTABLE):
+// the row exists but cannot be used, and a caller must not read that as "no
+// token, log in". Any other read failure, "not found" included, is reported
+// as no token with a nil error, as before.
+func HasPersistedToken(serverName, serverURL string, boltStorage *storage.BoltDB) (hasToken bool, hasRefreshToken bool, isExpired bool, err error) {
 	return HasPersistedTokenBound(serverName, serverURL, boltStorage, commitview.CredentialBinding{})
 }
 
 // HasPersistedTokenBound is HasPersistedToken for an upstream instance bound
 // to b (Spec 116 PR2b): a record written under another binding is absent.
-func HasPersistedTokenBound(serverName, serverURL string, boltStorage *storage.BoltDB, b commitview.CredentialBinding) (hasToken bool, hasRefreshToken bool, isExpired bool) {
+func HasPersistedTokenBound(serverName, serverURL string, boltStorage *storage.BoltDB, b commitview.CredentialBinding) (hasToken bool, hasRefreshToken bool, isExpired bool, err error) {
 	if boltStorage == nil {
-		return false, false, false
+		return false, false, false, nil
 	}
 
 	serverKey := GenerateServerKey(serverName, serverURL)
-	record, err := boltStorage.GetOAuthTokenBound(serverKey, b)
-	if err != nil || record == nil {
-		return false, false, false
+	record, rerr := boltStorage.GetOAuthTokenBound(serverKey, b)
+	if IsTokenUndecryptable(rerr) {
+		return false, false, false, TokenUndecryptableError(serverName, rerr)
+	}
+	if rerr != nil || record == nil {
+		return false, false, false, nil
 	}
 
 	hasToken = record.AccessToken != ""
@@ -281,18 +290,24 @@ func HasPersistedTokenBound(serverName, serverURL string, boltStorage *storage.B
 
 // GetPersistedRefreshToken retrieves the refresh token from persistent storage if available.
 // Returns empty string if no token exists or token has no refresh_token.
-func GetPersistedRefreshToken(serverName, serverURL string, boltStorage *storage.BoltDB) string {
+//
+// Spec 123 FR-031: an undecryptable stored row returns "" with
+// TokenUndecryptableError: do not refresh, report.
+func GetPersistedRefreshToken(serverName, serverURL string, boltStorage *storage.BoltDB) (string, error) {
 	if boltStorage == nil {
-		return ""
+		return "", nil
 	}
 
 	serverKey := GenerateServerKey(serverName, serverURL)
 	record, err := boltStorage.GetOAuthToken(serverKey)
+	if IsTokenUndecryptable(err) {
+		return "", TokenUndecryptableError(serverName, err)
+	}
 	if err != nil || record == nil {
-		return ""
+		return "", nil
 	}
 
-	return record.RefreshToken
+	return record.RefreshToken, nil
 }
 
 // TokenRefreshResult contains the result of a token refresh attempt.

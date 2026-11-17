@@ -2839,6 +2839,12 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 		return fmt.Errorf("failed to create core client for OAuth: %w", err)
 	}
 
+	// Spec 123: an undecryptable stored row is reported to the caller here,
+	// not logged inside the goroutine.
+	if guardErr := coreClient.CheckManualLoginAllowed(); guardErr != nil {
+		return guardErr
+	}
+
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 		defer cancel()
@@ -2998,6 +3004,14 @@ func (m *Manager) storedAccessToken(cfg *config.ServerConfig, b commitview.Crede
 		return ""
 	}
 	record, err := m.storage.GetOAuthTokenBound(oauth.GenerateServerKey(cfg.Name, cfg.URL), b)
+	if oauth.IsTokenUndecryptable(err) {
+		// Spec 123 FR-031: the header injector sends no token; the
+		// connection path reports the undecryptable row, nothing here
+		// starts a login.
+		m.logger.Debug("Stored OAuth token cannot be decrypted; no access token to inject",
+			zap.String("server", cfg.Name), zap.Error(err))
+		return ""
+	}
 	if err != nil || record == nil {
 		return ""
 	}
@@ -3545,6 +3559,12 @@ func (m *Manager) RefreshOAuthToken(serverName string) error {
 		// Tokens are stored with key = SHA256(serverName|serverURL)[:16], not just serverName.
 		serverKey := oauth.GenerateServerKey(serverName, serverConfig.URL)
 		token, err := m.storage.GetOAuthTokenBound(serverKey, client.CredentialBinding())
+		if oauth.IsTokenUndecryptable(err) {
+			// Spec 123 FR-031: the row is present but unusable. Report it with
+			// its code; no refresh and no reconnect fallback, which would
+			// only end in a login that cannot overwrite the row.
+			return fmt.Errorf("OAuth refresh for %s not attempted: %w", serverName, oauth.TokenUndecryptableError(serverName, err))
+		}
 		if err == nil && token != nil && token.RefreshToken != "" {
 			hasStoredTokens = true
 			m.logger.Debug("Found OAuth token in database for dynamic OAuth server",

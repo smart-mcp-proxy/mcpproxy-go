@@ -100,6 +100,7 @@ const sidebars = {
       link: { type: 'generated-index', slug: '/features', description: 'Explore tool discovery, routing, client connections and security controls.' },
       items: [
         'features/routing-modes',
+        'features/single-server-endpoints',
         'features/schema-deferred-direct-mode',
         'features/search-discovery',
         'features/tools-preflight',
@@ -147,6 +148,7 @@ const sidebars = {
           label: 'Authentication',
           items: [
             'features/oauth-authentication',
+            'features/oauth-token-encryption',
             'features/auth-broker',
             'features/idp-token-storage',
           ],
@@ -172,6 +174,7 @@ const sidebars = {
       items: [
         'operations/reverse-proxy',
         'operations/deploying-for-a-team',
+        'operations/compose-stdio-sidecars',
         'operations/shutdown-behavior',
         'features/observability',
         'logging',
@@ -210,6 +213,7 @@ const sidebars = {
             'errors/MCPX_OAUTH_CALLBACK_MISMATCH',
             'errors/MCPX_OAUTH_LOGIN_REQUIRED',
             'errors/MCPX_OAUTH_REAUTH_REQUIRED',
+            'errors/MCPX_OAUTH_TOKEN_UNDECRYPTABLE',
           ],
         },
         {

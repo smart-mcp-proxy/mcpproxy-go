@@ -14,9 +14,11 @@
 5. **API key included in URL** — if MCPProxy has an API key configured, include it as query param in the URL for clients that don't support headers
 6. **Dashboard replaces current view** — the new visual layout replaces the existing Dashboard.vue entirely
 7. **No new backend storage** — connect feature uses filesystem operations only; dashboard uses existing API endpoints
-8. **Supported clients for connect**: Claude Code, Claude Desktop, Cursor IDE, Windsurf, VS Code (Copilot), Codex CLI, Gemini CLI
+8. **Supported clients for connect**: Claude Code, Claude Desktop, Cursor IDE, Windsurf, VS Code, GitHub Copilot, Codex CLI, Gemini CLI
 9. **Windsurf path**: `~/.codeium/windsurf/mcp_config.json` (same JSON format as Cursor)
 10. **VS Code path**: `~/Library/Application Support/Code/User/mcp.json` on macOS (uses `servers` key, not `mcpServers`)
+11. **GitHub Copilot path**: `~/.copilot/mcp-config.json` on every OS, the file current VS Code versions and the
+    Copilot CLI read (`mcpServers` key)
 
 ## Feature 1: Connect Clients
 

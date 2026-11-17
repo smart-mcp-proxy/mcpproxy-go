@@ -293,7 +293,7 @@ func (env *TestEnvironment) CreateMockUpstreamServer(name string, tools []mcp.To
 	time.Sleep(200 * time.Millisecond)
 
 	mockServer.stopFunc = func() error {
-		return httpServer.Shutdown(context.Background())
+		return httpServer.Close() // not Shutdown: it waits for the GH #1910 GET stream
 	}
 
 	env.mockServers[name] = mockServer

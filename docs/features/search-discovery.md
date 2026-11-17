@@ -188,6 +188,12 @@ MCPProxy supports the MCP `notifications/tools/list_changed` notification protoc
 2. **Automatic Re-indexing**: MCPProxy receives the notification and triggers `DiscoverAndIndexToolsForServer()` within seconds
 3. **No Polling Delay**: Tools are updated immediately instead of waiting for the 5-minute background refresh cycle
 
+For a streamable HTTP upstream that advertises `tools.listChanged`, MCPProxy keeps
+one `GET` stream open, which is the only channel such a server has for a
+notification sent outside a request. An upstream that does not advertise
+`tools.listChanged`, or that refuses the `GET`, gets no held connection and falls
+back to polling. See [Tool Change Notifications](../api/mcp-protocol.md#tool-change-notifications).
+
 ### Fallback Behavior
 
 For servers that don't support tool change notifications:

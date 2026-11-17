@@ -469,7 +469,7 @@ import { useServersStore } from '@/stores/servers'
 import { useProfilesStore } from '@/stores/profiles'
 import { isScopeParamAvailable, useScopeQuery } from '@/composables/useScopeQuery'
 import { describeError, modeLabel } from '@/utils/profiles'
-import { expiringSoon, leaseText } from '@/utils/credentials'
+import { expiresText, expiringSoon, isNeverExpires, leaseText } from '@/utils/credentials'
 import { CREDENTIALS_CHANGED_EVENT, CLIENT_BINDING_CHANGED_EVENT } from '@/stores/clients'
 import { PROFILES_CHANGED_EVENT } from '@/stores/profiles'
 import CredentialLifecycle from '@/components/clients/CredentialLifecycle.vue'
@@ -563,6 +563,7 @@ const filteredTokens = computed(() => {
 const now = useNow()
 
 function isExpired(token: AgentTokenInfo): boolean {
+  if (isNeverExpires(token.expires_at, token.kind)) return false
   return new Date(token.expires_at).getTime() < now.value
 }
 
@@ -573,7 +574,7 @@ function isExpiringSoon(token: AgentTokenInfo): boolean {
 }
 
 function expiryText(token: AgentTokenInfo): string {
-  return token.revoked ? formatDate(token.expires_at) : (leaseText(token, now.value) || formatDate(token.expires_at))
+  return token.revoked ? expiresText(token.expires_at, token.kind) : (leaseText(token, now.value) || expiresText(token.expires_at, token.kind))
 }
 
 function formatDate(dateStr: string): string {

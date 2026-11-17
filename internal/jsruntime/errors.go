@@ -15,6 +15,9 @@ const (
 	// ErrorCodeTimeout indicates execution exceeded timeout limit
 	ErrorCodeTimeout ErrorCode = "TIMEOUT"
 
+	// ErrorCodeMemoryLimit indicates the script exceeded its memory budget
+	ErrorCodeMemoryLimit ErrorCode = "MEMORY_LIMIT"
+
 	// ErrorCodeMaxToolCallsExceeded indicates max_tool_calls limit reached
 	ErrorCodeMaxToolCallsExceeded ErrorCode = "MAX_TOOL_CALLS_EXCEEDED"
 

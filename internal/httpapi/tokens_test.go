@@ -982,3 +982,60 @@ func TestTokenEndpoints_NoStoreReturns500(t *testing.T) {
 		})
 	}
 }
+
+// An admin minting over REST may pass expires_in "never": the token is stored
+// with a zero ExpiresAt, reads back (GET) as never expiring, and a regular
+// duration is still capped at 365 days.
+func TestCreateToken_NeverExpires(t *testing.T) {
+	store := newMockTokenStore()
+	srv := newTestTokenServer(t, store, nil)
+
+	w := doRequest(t, srv, http.MethodPost, "/api/v1/tokens", createTokenRequest{
+		Name: "forever", Permissions: []string{"read"}, ExpiresIn: auth.TokenExpiryNever,
+	})
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+
+	var resp createTokenResponse
+	decodeSuccess(t, w, &resp)
+	assert.True(t, resp.ExpiresAt.IsZero(), "never is reported as the zero time")
+
+	stored, ok := store.tokens["forever"]
+	require.True(t, ok)
+	assert.True(t, stored.ExpiresAt.IsZero())
+	assert.False(t, stored.IsExpired())
+
+	w = doRequest(t, srv, http.MethodGet, "/api/v1/tokens/forever", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	var info tokenInfoResponse
+	decodeSuccess(t, w, &info)
+	assert.True(t, info.ExpiresAt.IsZero())
+	assert.False(t, info.Lease, "a token without an expiry is never a lease")
+}
+
+func TestCreateToken_DurationStillCapped(t *testing.T) {
+	store := newMockTokenStore()
+	srv := newTestTokenServer(t, store, nil)
+	w := doRequest(t, srv, http.MethodPost, "/api/v1/tokens", createTokenRequest{
+		Name: "long", Permissions: []string{"read"}, ExpiresIn: "366d",
+	})
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Empty(t, store.tokens)
+}
+
+// An agent token cannot mint itself a never-expiring token.
+func TestCreateToken_NeverRefusedForAgentToken(t *testing.T) {
+	store := newMockTokenStore()
+	srv := newTestTokenServer(t, store, nil)
+	agentToken, err := auth.GenerateToken()
+	require.NoError(t, err)
+
+	data, err := json.Marshal(createTokenRequest{Name: "x", Permissions: []string{"read"}, ExpiresIn: auth.TokenExpiryNever})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tokens", bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", agentToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Empty(t, store.tokens)
+}

@@ -54,6 +54,7 @@ var docsSmokeFiles = []string{
 	"docs/cli/review-commands.md",
 	"docs/cli/profile-commands.md",
 	"docs/cli/security-commands.md",
+	"docs/features/oauth-token-encryption.md",
 }
 
 var inlineCodeRe = regexp.MustCompile("`([^`\n]+)`")
@@ -153,10 +154,13 @@ func checkDocCommand(root *cobra.Command, line string) string {
 		return ""
 	}
 	cmd := root
+	seen := map[*pflag.Flag]bool{}
+	complete := true
 	for i := 1; i < len(toks); i++ {
 		t := toks[i]
 		// "--" ends flag parsing: the rest is the upstream server's own command line.
 		if t == "--" || t == "|" || t == "&&" || t == ">" || t == "\\" || isElision(t) {
+			complete = t == "--" || t == "|" || t == "&&" || t == ">"
 			break
 		}
 		var fl *pflag.Flag
@@ -172,6 +176,7 @@ func checkDocCommand(root *cobra.Command, line string) string {
 			if fl == nil {
 				return fmt.Sprintf("flag --%s does not exist on %q", name, cmd.CommandPath())
 			}
+			seen[fl] = true
 			if fl.Value.Type() != "bool" && !strings.Contains(t, "=") {
 				i++ // the next token is the flag's value
 			}
@@ -181,6 +186,7 @@ func checkDocCommand(root *cobra.Command, line string) string {
 			if msg != "" {
 				return msg
 			}
+			markShortFlagsSeen(cmd, t, seen)
 			if consumeNext {
 				i++
 			}
@@ -202,7 +208,45 @@ func checkDocCommand(root *cobra.Command, line string) string {
 			return fmt.Sprintf("unknown subcommand %q under %q", t, cmd.CommandPath())
 		}
 	}
+	// A complete invocation of a leaf command must pass its required flags:
+	// cobra rejects it otherwise (e.g. `auth logout <server>` instead of
+	// `auth logout --server=<server>`).
+	if complete && cmd != root && !cmd.HasSubCommands() {
+		if missing := missingRequiredFlag(cmd, seen); missing != "" {
+			return fmt.Sprintf("required flag --%s is missing on %q", missing, cmd.CommandPath())
+		}
+	}
 	return ""
+}
+
+// markShortFlagsSeen records the shorthands in one single-dash token, up to
+// and including the first value-taking one (the rest is its value).
+func markShortFlagsSeen(cmd *cobra.Command, t string, seen map[*pflag.Flag]bool) {
+	for j := 1; j < len(t) && t[j] != '='; j++ {
+		fl := lookupShort(cmd, string(t[j]))
+		if fl == nil {
+			return
+		}
+		seen[fl] = true
+		if fl.Value.Type() != "bool" {
+			return
+		}
+	}
+}
+
+// missingRequiredFlag returns the name of the first flag cobra marks
+// required on cmd that the documented line does not pass, or "".
+func missingRequiredFlag(cmd *cobra.Command, seen map[*pflag.Flag]bool) string {
+	missing := ""
+	cmd.Flags().VisitAll(func(fl *pflag.Flag) {
+		if missing != "" || seen[fl] {
+			return
+		}
+		if req := fl.Annotations[cobra.BashCompOneRequiredFlag]; len(req) > 0 && req[0] == "true" {
+			missing = fl.Name
+		}
+	})
+	return missing
 }
 
 // checkShortFlags validates one single-dash token: a lone shorthand (-o), an
@@ -298,6 +342,8 @@ func TestDocsCommandCheckerRejectsMissing(t *testing.T) {
 		"mcpproxy -o=json upstream list",
 		"mcpproxy -ojson upstream list",
 		"mcpproxy upstream patch obsidian --env \"A=B\" --env-remove OLD",
+		"mcpproxy auth logout --server=<server>",
+		"mcpproxy auth logout -s srv",
 	}
 	for _, g := range good {
 		if msg := checkDocCommand(root, g); msg != "" {
@@ -316,6 +362,8 @@ func TestDocsCommandCheckerRejectsMissing(t *testing.T) {
 		"mcpproxy connect cursor -Zo json",
 		"mcpproxy -oZ=1 -Z client list",
 		"mcpproxy upstream patch obsidian --env A=B --no-such-flag",
+		"mcpproxy auth logout <server>",
+		"mcpproxy auth logout srv",
 	}
 	for _, b := range bad {
 		if msg := checkDocCommand(root, b); msg == "" {

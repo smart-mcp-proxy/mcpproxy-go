@@ -1,0 +1,86 @@
+# mcpproxy with a stdio MCP server running in its own sidecar container.
+# Walkthrough: docs/operations/compose-stdio-sidecars.md
+#
+#   front : normal bridge. mcpproxy only; published on 127.0.0.1.
+#   back  : internal: true (no gateway, no route out). mcpproxy and the sidecars.
+#
+# A sidecar has no route to the internet, mounts nothing from mcpproxy (the
+# /data volume, with the API key and the OAuth token database, is mounted in the
+# mcpproxy container only), and no container gets the docker socket.
+#
+# Run ./gen-secrets.sh once, then: docker compose up --build --wait
+
+name: mcpproxy-sidecars
+
+x-sidecar: &sidecar
+  restart: unless-stopped
+  networks: [back]
+  secrets: [sidecar_api_key]
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  healthcheck:
+    # supergateway answers /healthz without the API key. With --healthCheck server
+    # it starts the stdio child, runs initialize + ping and stops it again, so
+    # "healthy" means the wrapped server really starts.
+    test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8000/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+    interval: 30s
+    timeout: 15s
+    retries: 3
+    start_period: 20s
+
+services:
+  mcpproxy:
+    # Pinned by digest (v0.73.0). ${file:} references and MCPPROXY_API_KEY_FILE
+    # need v0.72.0 or newer. Bump tag and digest together.
+    image: ghcr.io/smart-mcp-proxy/mcpproxy-server:v0.73.0@sha256:0f6cd65a3bc63f117d7f0fff7c539836c076f1834db620bf5fa9bbdd62578919
+    command: ["serve", "--listen=0.0.0.0:8080", "--config=/config/mcp_config.json", "--data-dir=/data"]
+    environment:
+      MCPPROXY_API_KEY_FILE: /run/secrets/mcpproxy_api_key
+    secrets: [mcpproxy_api_key, sidecar_api_key]
+    volumes:
+      # A directory, not a single file: mcpproxy saves its config by rename(2),
+      # which fails on a single-file bind mount.
+      - ./mcpproxy:/config:ro
+      - mcpproxy_data:/data     # mounted ONLY here
+    ports: ["127.0.0.1:${MCPPROXY_PORT:-18080}:8080"]
+    networks: [front, back]
+    restart: unless-stopped
+    # The default stop_grace_period (10 s) is shorter than mcpproxy's 60 s
+    # graceful-shutdown bound.
+    stop_grace_period: 60s
+    # No healthcheck here: the image is distroless (no shell, curl or wget) and
+    # `mcpproxy status` exits 0 even when the core is down, so no in-image probe
+    # is reliable. `up --wait` returns once the container is running.
+    depends_on:
+      everything: {condition: service_healthy}
+
+  everything:
+    <<: *sidecar
+    build:
+      context: ./sidecar
+      args:
+        SERVER_PKG: "@modelcontextprotocol/server-everything@2.3.0"
+    image: mcpproxy-sidecar-everything:2.3.0
+    command:
+      - --stdio=mcp-server-everything
+      - --outputTransport=streamableHttp
+      - --stateful                          # one child per MCP session; the default is stateless
+      - --sessionTimeout=120000             # reap abandoned sessions after 2 min instead of 30
+      - --port=8000
+      - --apiKeyFile=/run/secrets/sidecar_api_key
+      - --healthEndpoint=/healthz
+      - --healthCheck=server
+
+networks:
+  front: {}
+  back:
+    internal: true
+
+volumes:
+  mcpproxy_data: {}
+
+secrets:
+  mcpproxy_api_key: {file: ./secrets/mcpproxy_api_key}
+  sidecar_api_key:  {file: ./secrets/sidecar_api_key}

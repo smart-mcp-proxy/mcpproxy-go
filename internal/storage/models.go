@@ -171,6 +171,13 @@ const (
 	// its contents — is what suppresses a re-run, so the sweep stays one-shot
 	// across restarts and upgrades.
 	BaselineSweepDoneKey = "baseline_sweep_done"
+	// OAuthSealCompactAdvisedKey (Spec 123 FR-016) is set, to the RFC3339
+	// time of the first such write, by any write that replaced a plaintext
+	// oauth_tokens value with an envelope, in that write's transaction: bbolt
+	// does not zero freed pages, so the old plaintext can survive in the file
+	// until it is compacted. Cleared only by a compaction that keeps no
+	// backup.
+	OAuthSealCompactAdvisedKey = "oauth_seal_compact_advised"
 )
 
 // BaselineSweepState records the outcome of the one-shot informational baseline
