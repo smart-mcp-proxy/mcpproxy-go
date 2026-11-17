@@ -15,7 +15,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/tests/oauthserver"
 )
 
@@ -92,18 +91,21 @@ func TestStartManualOAuthQuick_StaticHeaderServerCanSignIn(t *testing.T) {
 		return err == nil && rec != nil && rec.AccessToken != ""
 	}, 5*time.Second, 100*time.Millisecond, "token from the completed sign-in must be stored")
 
-	// The reconnect the sign-in triggers: the header is still rejected, so the
-	// ladder must reach OAuth and connect with the new token — the rejected
-	// static Authorization header must not displace it.
-	c, err := core.NewClient(name, cfg, zap.NewNop(), nil, &config.Config{}, db, nil)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = c.Disconnect() })
+	// The reconnect the sign-in triggers, on the manager's own client: the
+	// header is still rejected, so the ladder must reach OAuth and connect with
+	// the new token — the rejected static Authorization header must not
+	// displace it. (A second client connecting here would race that reconnect
+	// for the server's OAuth flow and be told to retry.)
+	client, ok := m.GetClient(name)
+	require.True(t, ok)
+	t.Cleanup(func() { _ = m.DisconnectAll() }) // before the upstream shuts down (LIFO)
+	require.Eventually(t, client.IsConnected, 30*time.Second, 100*time.Millisecond,
+		"the server must reconnect once the sign-in completes")
+	assert.True(t, client.ConnectedWithOAuth(), "the connection must be the OAuth strategy's")
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	require.NoError(t, c.Connect(ctx))
-	assert.Equal(t, core.AuthStrategyOAuth, c.AuthStrategy())
-
-	callResult, err := c.CallTool(ctx, "get_time", nil)
+	callResult, err := client.CallTool(ctx, "get_time", nil)
 	require.NoError(t, err, "tool calls must carry the signed-in token")
 	require.NotNil(t, callResult)
 	assert.False(t, callResult.IsError)
