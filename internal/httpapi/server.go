@@ -296,6 +296,9 @@ type ServerController interface {
 	ListSkillRecords(serverName string) ([]*storage.SkillApprovalRecord, error)
 	SkillFileText(serverName, skillPath, relPath string, approvedCopy bool) ([]byte, storage.SkillFile, error)
 	SkillAvailable(serverName string, rec *storage.SkillApprovalRecord) bool
+	// Scoped callers (PR-3): approved copies of available skills only.
+	ListAvailableSkills(serverName string) ([]*internalRuntime.AvailableSkill, error)
+	AvailableSkillFile(serverName, skillPath, relPath string) ([]byte, storage.SkillFile, *internalRuntime.AvailableSkill, error)
 	RefreshServerSkills(ctx context.Context, serverName string) error
 	// Spec 125 PR-2: the approval gate. Both are review- and
 	// incarnation-bound in the runtime; ctx carries the actor.

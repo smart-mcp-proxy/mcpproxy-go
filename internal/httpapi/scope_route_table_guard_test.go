@@ -74,8 +74,8 @@ var getRouteScopes = map[string]routeScope{
 	"/api/v1/connect":                     {scopeRefused, "MCP client connection status is admin-only"},
 	"/api/v1/connect/{client}":            {scopeRefused, "MCP client connection status is admin-only"},
 	"/api/v1/connect/{client}/preview":    {scopeRefused, "MCP client configuration preview is admin-only"},
-	"/api/v1/servers/{id}/skills":         {scopeRefused, "Spec 125 PR-1: skills catalog is administrator-only until agents are offered skills; TestSkillsEndpoints_ScopedAgentTokenRefusedWithoutRuntimeCall"},
-	"/api/v1/servers/{id}/skills/content": {scopeRefused, "Spec 125 PR-1: skill file text is administrator-only; TestSkillsEndpoints_ScopedAgentTokenRefusedWithoutRuntimeCall"},
+	"/api/v1/servers/{id}/skills":         {scopeFiltered, "Spec 125 PR-3: available skills only, approved copy; TestSkillsList_ScopedCallerSeesOnlyAvailableApprovedCopies"},
+	"/api/v1/servers/{id}/skills/content": {scopeFiltered, "Spec 125 PR-3: approved text of available skills only; TestSkillContent_ScopedCallerGetsTheApprovedCopyOnly"},
 	"/api/v1/access/explain":              {scopeRefused, "access explainer names other credentials' bindings and every gate; requireServerOp(ConfigWrite); TestAccessExplainRoute_ScopedCallerIs403"},
 	"/api/v1/access/suggest":              {scopeRefused, "access suggest names other credentials' tokens, profiles and servers out of scope; requireServerOp(ConfigWrite); TestAccessSuggestRoute_ScopedCallerIs403"},
 
@@ -183,6 +183,7 @@ var shortCircuitCodes = map[string]int{
 	"/api/v1/servers/{id}/scan/files":         http.StatusNotFound,           // no scan record for alpha in the fixture
 	"/api/v1/security/scanners/{id}/status":   http.StatusNotFound,           // "alpha" is not a configured scanner plugin
 	"/api/v1/review":                          http.StatusServiceUnavailable, // review service not wired in the fixture
+	"/api/v1/servers/{id}/skills/content":     http.StatusNotFound,           // synthetic skill absent from the fixture → the one skill-not-found answer
 	"/api/v1/profiles/{name}":                 http.StatusNotFound,           // synthetic profile "alpha" is unknown, which reads the same as unreachable
 	"/api/v1/profiles/{name}/effective-tools": http.StatusNotFound,           // same uniform 404
 	"/api/v1/servers/{id}/review":             http.StatusServiceUnavailable, // review service not wired in the fixture

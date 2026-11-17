@@ -324,3 +324,24 @@ func TestSearchAvailableSkills_AfterCloseIsEmpty(t *testing.T) {
 	assert.Empty(t, hits)
 	assert.Zero(t, total)
 }
+
+func TestListAvailableSkills(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	for _, n := range []string{"b-skill", "a-skill", "held"} {
+		g.fx.AddSkill(skillstest.Skill{Path: n})
+	}
+	require.NoError(t, g.refresh(t))
+	got, err := g.rt.ListAvailableSkills(skillsSrv)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	g.approve(t, "b-skill", "a-skill")
+	got, err = g.rt.ListAvailableSkills(skillsSrv)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	assert.Equal(t, "a-skill", got[0].Path)
+	assert.Equal(t, "b-skill", got[1].Path)
+	g.setServer(t, func(sc *config.ServerConfig) { sc.Enabled = false })
+	got, err = g.rt.ListAvailableSkills(skillsSrv)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}

@@ -126,6 +126,28 @@ func (r *Runtime) AvailableSkill(serverName, skillPath string) (*AvailableSkill,
 	return availableSkillOf(serverName, rec), nil
 }
 
+// ListAvailableSkills returns the approved copies of every skill of a server
+// that is available to agents, sorted by path. Nothing else about the server's
+// skills is visible through it. A server that is excluded, or the feature
+// being off, gives an empty list.
+func (r *Runtime) ListAvailableSkills(serverName string) ([]*AvailableSkill, error) {
+	cfg := r.Config()
+	if cfg == nil || !cfg.EnableSkills || !skillsServerExposed(cfg, skillsServerConfig(cfg, serverName)) {
+		return nil, nil
+	}
+	recs, err := r.ListSkillRecords(serverName)
+	if err != nil {
+		return nil, err
+	}
+	var out []*AvailableSkill
+	for _, rec := range recs {
+		if rec.Approved != nil && skillAvailableIn(cfg, serverName, rec) {
+			out = append(out, availableSkillOf(serverName, rec))
+		}
+	}
+	return out, nil
+}
+
 // AvailableSkillFile returns one text file of the approved copy of an
 // available skill, re-verified against its digest and size. relPath is matched
 // exactly against the approved file set (no path cleaning). Errors:

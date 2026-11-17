@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
@@ -25,6 +26,9 @@ const (
 	// skillContentMaxLimit is both the default and the maximum chunk size of
 	// the content endpoint, in bytes.
 	skillContentMaxLimit = 65536
+	// skillNotAvailableMessage is the one body a scoped caller gets for a skill
+	// or file that is unknown or not available, whatever the reason.
+	skillNotAvailableMessage = "Skill not found"
 )
 
 // writeSkillsError writes an error body that carries a stable error_code.
@@ -129,31 +133,62 @@ func skillEntryFor(serverName string, rec *storage.SkillApprovalRecord, availabl
 	return e
 }
 
+// writeAgentSkillsList answers a scoped caller: the approved copy of each
+// available skill, and nothing about any other skill.
+func (s *Server) writeAgentSkillsList(w http.ResponseWriter, r *http.Request, serverName string) {
+	avail, err := s.controller.ListAvailableSkills(serverName)
+	if err != nil {
+		s.logger.Errorw("Failed to list skills", "server", serverName, "error", err)
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to list skills")
+		return
+	}
+	out := contracts.SkillsAgentListResponse{Enabled: true, Server: serverName, Skills: make([]contracts.SkillAgentEntry, 0, len(avail))}
+	for _, a := range avail {
+		e := contracts.SkillAgentEntry{
+			ID: a.ID, URI: a.URI, Path: a.Path, Name: a.Name, Description: a.Description,
+			Status: storage.SkillStatusApproved, Available: true, ApprovedHash: a.ApprovedHash,
+			Files: make([]contracts.SkillFileInfo, 0, len(a.Files)), TotalSize: a.TotalSize,
+		}
+		for _, f := range a.Files {
+			e.Files = append(e.Files, contracts.SkillFileInfo{Path: f.RelPath, Size: f.Size, Digest: f.Digest, Text: f.Text})
+		}
+		out.Skills = append(out.Skills, e)
+	}
+	s.writeSuccess(w, out)
+}
+
 // handleGetServerSkills godoc
 // @Summary List the skills of a server
-// @Description Administrator only. Lists every skill record mcpproxy holds for one upstream server: status, hashes, files and the availability an agent would see. With enable_skills off the answer is {"enabled": false, "skills": []} and no upstream is contacted. A scoped agent token is refused with 403.
+// @Description Lists the skills of one upstream server. An administrator sees every record: status, hashes, files, scan result and the availability an agent would see. A scoped agent token with the server in its reach sees only the available skills, as the approved copy (id, uri, path, name, description, status "approved", approved_hash, files, total_size; contracts.SkillsAgentListResponse) and nothing about any other skill; a server outside its reach is 404. With enable_skills off the answer is {"enabled": false, "skills": []} and no upstream is contacted.
 // @Tags servers
 // @Produce json
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
 // @Param id path string true "Server ID or name"
 // @Success 200 {object} contracts.SkillsListResponse "Skills of the server"
-// @Failure 403 {object} contracts.ErrorResponse "Administrator credentials required"
-// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found, or outside the caller's reach"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/servers/{id}/skills [get]
 func (s *Server) handleGetServerSkills(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdminRead(w, r, skillsDenialMessage) {
-		return
-	}
 	serverID := chi.URLParam(r, "id")
 	cfg, sc := s.skillsServerConfig(serverID)
-	if sc == nil {
+	// A scoped caller gets the same 404 for a server outside its reach as for
+	// one that does not exist.
+	scoped := auth.IsScopedCaller(r.Context())
+	if sc == nil || (scoped && !canSeeServer(r.Context(), sc.Name)) {
 		s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
 		return
 	}
 	if !cfg.EnableSkills {
+		if scoped {
+			s.writeSuccess(w, contracts.SkillsAgentListResponse{Skills: []contracts.SkillAgentEntry{}})
+			return
+		}
 		s.writeSuccess(w, contracts.SkillsListResponse{Skills: []contracts.SkillEntry{}})
+		return
+	}
+	if scoped {
+		s.writeAgentSkillsList(w, r, sc.Name)
 		return
 	}
 	var out contracts.SkillsListResponse
@@ -246,7 +281,7 @@ func (s *Server) handleRefreshServerSkills(w http.ResponseWriter, r *http.Reques
 
 // handleGetServerSkillContent godoc
 // @Summary Read one text file of a skill
-// @Description Administrator only. Returns a chunk of one stored text file of a skill. Offsets are byte positions; a chunk never splits a UTF-8 character, so it can be a few bytes shorter than limit. next_offset is absent at the end of the file. 404 for an unknown skill or file (or with enable_skills off), 415 for a binary file, 409 stored_copy_damaged when the stored bytes no longer match their digest.
+// @Description Returns a chunk of one stored text file of a skill. An administrator reads the current copy by default; a scoped agent token with the server in its reach reads the approved copy of an available skill only (copy is forced to approved), and gets one 404 for every other skill or file. A server outside its reach is 404. Offsets are byte positions; a chunk never splits a UTF-8 character, so it can be a few bytes shorter than limit. next_offset is absent at the end of the file. 404 for an unknown skill or file (or with enable_skills off), 415 for a binary file, 409 stored_copy_damaged when the stored bytes no longer match their digest.
 // @Tags servers
 // @Produce json
 // @Security ApiKeyAuth
@@ -259,23 +294,24 @@ func (s *Server) handleRefreshServerSkills(w http.ResponseWriter, r *http.Reques
 // @Param limit query int false "Maximum bytes (default and maximum 65536)"
 // @Success 200 {object} contracts.SkillContentResponse "A chunk of the file"
 // @Failure 400 {object} contracts.ErrorResponse "Bad parameters"
-// @Failure 403 {object} contracts.ErrorResponse "Administrator credentials required"
 // @Failure 404 {object} contracts.ErrorResponse "Server, skill or file not found"
 // @Failure 409 {object} contracts.SkillsErrorResponse "stored_copy_damaged"
 // @Failure 415 {object} contracts.ErrorResponse "The file is binary"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/servers/{id}/skills/content [get]
 func (s *Server) handleGetServerSkillContent(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdminRead(w, r, skillsDenialMessage) {
-		return
-	}
 	serverID := chi.URLParam(r, "id")
 	cfg, sc := s.skillsServerConfig(serverID)
-	if sc == nil {
+	scoped := auth.IsScopedCaller(r.Context())
+	if sc == nil || (scoped && !canSeeServer(r.Context(), sc.Name)) {
 		s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
 		return
 	}
 	if !cfg.EnableSkills {
+		if scoped {
+			s.writeError(w, r, http.StatusNotFound, skillNotAvailableMessage)
+			return
+		}
 		s.writeError(w, r, http.StatusNotFound, "Skills are disabled (enable_skills is off)")
 		return
 	}
@@ -319,7 +355,22 @@ func (s *Server) handleGetServerSkillContent(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	data, meta, err := s.controller.SkillFileText(serverID, skillPath, file, approved)
+	var (
+		data []byte
+		meta storage.SkillFile
+		err  error
+	)
+	if scoped {
+		// copy is forced to approved, and only an available skill's approved
+		// files exist: every other case is the one not-found answer.
+		data, meta, _, err = s.controller.AvailableSkillFile(sc.Name, skillPath, file)
+		if errors.Is(err, internalRuntime.ErrSkillNotFound) || errors.Is(err, internalRuntime.ErrSkillFileNotFound) {
+			s.writeError(w, r, http.StatusNotFound, skillNotAvailableMessage)
+			return
+		}
+	} else {
+		data, meta, err = s.controller.SkillFileText(serverID, skillPath, file, approved)
+	}
 	switch {
 	case errors.Is(err, internalRuntime.ErrSkillNotFound), errors.Is(err, internalRuntime.ErrSkillFileNotFound):
 		s.writeError(w, r, http.StatusNotFound, err.Error())

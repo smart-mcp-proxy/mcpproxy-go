@@ -4877,6 +4877,18 @@ func (s *Server) SkillFileText(serverName, skillPath, relPath string, approvedCo
 	return s.runtime.SkillFileText(serverName, skillPath, relPath, approvedCopy)
 }
 
+// ListAvailableSkills returns the approved copies of a server's skills that
+// agents may have.
+func (s *Server) ListAvailableSkills(serverName string) ([]*runtime.AvailableSkill, error) {
+	return s.runtime.ListAvailableSkills(serverName)
+}
+
+// AvailableSkillFile returns one text file of the approved copy of an
+// available skill.
+func (s *Server) AvailableSkillFile(serverName, skillPath, relPath string) ([]byte, storage.SkillFile, *runtime.AvailableSkill, error) {
+	return s.runtime.AvailableSkillFile(serverName, skillPath, relPath)
+}
+
 // SkillAvailable reports whether an agent may have the skill.
 func (s *Server) SkillAvailable(serverName string, rec *storage.SkillApprovalRecord) bool {
 	return s.runtime.SkillAvailable(serverName, rec)

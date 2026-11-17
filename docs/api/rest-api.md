@@ -1709,7 +1709,7 @@ Neither route enforces the binding guard; the MCP `credentials` tool does (see
 
 ### Skills
 
-Spec 125. The endpoints below are administrator-only in this release (the API key, the socket or an administrator session): a scoped agent token gets `403` and nothing is read. Skills are not offered to agents yet. See [Skills over MCP](../features/skills.md).
+Spec 125. The two read endpoints (`GET /servers/{id}/skills` and `.../skills/content`) answer a scoped agent token whose reach includes the server, with the approved copy of the skills that are available to agents and nothing about any other skill: no counts, no scan result, no current hash, no refresh or error detail, and one `404` for every skill or file that is unknown or held. For such a caller `copy` is always `approved`. A server outside the token's reach is `404`, as for the server itself. Refresh, approve, block and unblock are administrator-only (the API key, the socket or an administrator session): a scoped agent token gets `403` and nothing is read. See [Skills over MCP](../features/skills.md).
 
 #### GET /api/v1/servers/{id}/skills
 
