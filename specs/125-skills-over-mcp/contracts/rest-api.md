@@ -48,7 +48,7 @@ A skill is **available** when the feature is on, its server is enabled, not quar
 
 ## `GET /servers/{id}/skills/content?skill=<path>&file=<relpath>&copy=current|approved&offset=<n>&limit=<n>`
 
-Admin only until PR-3; afterwards a scoped caller may read the approved copy of an available skill. `file` defaults to `SKILL.md`, `copy` to `current` for admin and is forced to `approved` for a scoped caller. Returns `{"text", "offset", "next_offset" (absent at the end), "size", "digest"}`. 404 for an unknown skill or file, 415 for a binary file.
+Admin only until PR-3; afterwards a scoped caller may read the approved copy of an available skill. `file` defaults to `SKILL.md`, `copy` to `current` for admin and is forced to `approved` for a scoped caller. Returns `{"text", "offset", "next_offset" (absent at the end), "size", "digest"}`. 404 for an unknown skill or file, 415 for a binary file. For a scoped caller the text is what the output sanitisation policy lets out (as for `load_skill`), `403 output_blocked` when it lets nothing out, and a damaged stored copy is the same 404 as an unknown skill (an administrator gets `409 stored_copy_damaged`). Every scoped read writes a `skill_access` row.
 
 ## `POST /servers/{id}/skills/refresh`
 

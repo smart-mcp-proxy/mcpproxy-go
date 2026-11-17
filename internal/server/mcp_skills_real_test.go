@@ -380,8 +380,9 @@ func TestRealSkills_DamagedStoredCopyIsReportedThenTheSkillIsUnusable(t *testing
 
 	out, isErr := g.call(adminCtx(), toolLoadSkill, map[string]any{"id": id})
 	assert.True(t, isErr)
-	assert.Equal(t, "skill unavailable: its stored copy failed verification", out)
+	assert.Equal(t, "skill not found: "+id, out, "the call is refused with the one refusal; the damage is on the record")
 	assert.NotContains(t, out, "evil")
+	assert.Contains(t, g.rec(t, "pdf").UnusableReason, "stored_copy_damaged")
 
 	out, isErr = g.call(adminCtx(), toolLoadSkill, map[string]any{"id": id})
 	assert.True(t, isErr)

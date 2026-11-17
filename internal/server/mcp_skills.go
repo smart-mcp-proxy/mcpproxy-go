@@ -365,15 +365,19 @@ type skillSearchResponse struct {
 
 // renderSkillSearch renders a search answer. Never a body: only the metadata a
 // caller needs to pick one.
-func renderSkillSearch(hits []runtime.AvailableSkill, total int) string {
+func renderSkillSearch(hits []runtime.AvailableSkill, total int, clean func(string) string) string {
+	if clean == nil {
+		clean = func(s string) string { return s }
+	}
+	word := func(s string, max int) string { return oneLine(clean(oneLine(s, max)), max) }
 	resp := skillSearchResponse{Skills: make([]skillSearchEntry, 0, len(hits)), Total: total, Usage: skillSearchUsage}
 	for i := range hits {
 		h := &hits[i]
 		resp.Skills = append(resp.Skills, skillSearchEntry{
 			ID:          h.ID,
-			Name:        oneLine(h.Name, skillNameMax),
+			Name:        word(h.Name, skillNameMax),
 			Server:      oneLine(h.Server, skillServerMax),
-			Description: oneLine(h.Description, skillDescriptionMax),
+			Description: word(h.Description, skillDescriptionMax),
 			Files:       len(h.Files),
 			Size:        h.TotalSize,
 		})
@@ -437,7 +441,9 @@ func (p *MCPProxyServer) handleRetrieveSkills(ctx context.Context, request mcp.C
 	act.DurationMs = time.Since(start).Milliseconds()
 	p.emitSkillAccess(ctx, act)
 
-	return mcp.NewToolResultText(renderSkillSearch(hits, total)), nil
+	// Names and descriptions are written by upstream servers and reach the
+	// model like skill text does: they pass the same output policy.
+	return mcp.NewToolResultText(renderSkillSearch(hits, total, p.skillWordCleaner(p.skillPolicy()))), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -627,8 +633,10 @@ func (p *MCPProxyServer) serveSkillText(ctx context.Context, request mcp.CallToo
 		return finish(runtime.SkillAccessBinary,
 			mcp.NewToolResultError("binary files are not served: "+echoSkillID(file)))
 	case errors.Is(err, runtime.ErrSkillStoredCopyDamaged):
-		return finish(runtime.SkillAccessDamaged,
-			mcp.NewToolResultError("skill unavailable: its stored copy failed verification"))
+		// The call is refused and the skill is unusable from now on (FR-015).
+		// The caller gets the one refusal: the damage is reported where an
+		// administrator reads it, in this row and on the skill's record.
+		return finish(runtime.SkillAccessDamaged, mcp.NewToolResultError(skillNotFoundText(id)))
 	default:
 		if err != nil && !errors.Is(err, runtime.ErrSkillNotFound) {
 			p.logger.Warn("skill read failed", zap.String("server", serverName), zap.Error(err))
@@ -666,15 +674,7 @@ func (p *MCPProxyServer) serveSkillText(ctx context.Context, request mcp.CallToo
 		return finish(runtime.SkillAccessBlocked,
 			mcp.NewToolResultError("skill output blocked by the output sanitisation policy"))
 	}
-	words := []string{hdr.skillName, hdr.file}
-	for i := range hdr.files {
-		words = append(words, hdr.files[i].RelPath)
-	}
-	clean, blocked, reason := p.skillHeaderPolicy(pol, words)
-	if blocked {
-		return blockedResult(reason)
-	}
-	hdr.clean = clean
+	hdr.clean = p.skillWordCleaner(pol)
 	served := p.servedSkillText(pol, serverName, meta.Digest, data)
 	if served.blocked {
 		return blockedResult(served.reason)
@@ -690,7 +690,8 @@ func (p *MCPProxyServer) serveSkillText(ctx context.Context, request mcp.CallToo
 
 	chunk, from, next, done := chunkUTF8(data, offset, skillChunkLimit(limit))
 	header := hdr.render(from, next, len(data), len(chunk) > 0, done)
-	text := spotlightSkillPart(pol, string(chunk), serverName, hdr.skillName)
+	// The fence names the skill with the word the header shows: after the policy.
+	text := spotlightSkillPart(pol, string(chunk), serverName, hdr.word(hdr.skillName, skillNameMax))
 
 	act.Offset = int64(from)
 	act.Bytes = int64(len(chunk))

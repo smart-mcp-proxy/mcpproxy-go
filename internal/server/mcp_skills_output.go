@@ -7,7 +7,9 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // Output sanitisation for skill text (FR-024).
@@ -145,32 +147,72 @@ func (p *MCPProxyServer) sanitiseWholeSkillText(pol skillOutputPolicy, text stri
 	return e
 }
 
-// skillHeaderPolicy applies the policy to the upstream-written words of a
-// header (skill name, file names): they reach the model like the text does.
-// blocked reports a critical secret among them under a blocking policy; clean
-// redacts and strips one of them under the other policies. The lines mcpproxy
-// writes itself (version, byte range) are never passed through it: a content
-// hash must not be mistaken for a secret and cut out of the continuation.
-func (p *MCPProxyServer) skillHeaderPolicy(pol skillOutputPolicy, words []string) (clean func(string) string, blocked bool, reason string) {
+// skillWordWithheld stands in for an upstream-written word a blocking policy
+// does not let out.
+const skillWordWithheld = "[withheld by the output sanitisation policy]"
+
+// skillWordCleaner applies the policy to one upstream-written word of an
+// answer: a skill name, a description, a file name. These reach the model
+// like the text does. Under a blocking policy a word with a critical secret is
+// replaced whole; under the other policies it is redacted and stripped. The
+// lines mcpproxy writes itself (version, byte range) are never passed through
+// it: a content hash must not be mistaken for a secret and cut out of the
+// continuation.
+func (p *MCPProxyServer) skillWordCleaner(pol skillOutputPolicy) func(string) string {
 	same := func(s string) string { return s }
 	if !pol.mutates {
-		return same, false, ""
+		return same
 	}
 	if pol.cfg.IsBlock() {
-		if p.sanitisationDetector != nil && hasCriticalDetection(p.sanitisationDetector, strings.Join(words, "\n")) {
-			return same, true, pol.decide(true).reason
+		if p.sanitisationDetector == nil {
+			return same
 		}
-		return same, false, ""
+		return func(s string) string {
+			if hasCriticalDetection(p.sanitisationDetector, s) {
+				return skillWordWithheld
+			}
+			return s
+		}
 	}
 	d := pol.decide(false)
 	if !d.redact && !d.strip {
-		return same, false, ""
+		return same
 	}
 	strip := pol.cfg.EnabledStripClasses()
 	return func(s string) string {
 		out, _ := p.sanitiseTextValue(s, d, strip, map[string]struct{}{}, map[string]struct{}{})
 		return out
-	}, false, ""
+	}
+}
+
+// CleanSkillForAgents returns a copy of sk whose upstream-written words (name,
+// description, file paths) have passed the output policy. It is what a scoped
+// REST caller is shown, so that door and the agent tools agree.
+func (p *MCPProxyServer) CleanSkillForAgents(sk *runtime.AvailableSkill) *runtime.AvailableSkill {
+	clean := p.skillWordCleaner(p.skillPolicy())
+	out := *sk
+	out.Name = clean(sk.Name)
+	out.Description = clean(sk.Description)
+	out.Files = append([]storage.SkillFile(nil), sk.Files...)
+	for i := range out.Files {
+		out.Files[i].RelPath = clean(out.Files[i].RelPath)
+	}
+	return &out
+}
+
+// SkillTextForAgents returns one approved file as the output policy lets it
+// out, for a door other than the agent tools (a scoped REST read). The second
+// result is a short note for the activity log when the policy changed the
+// text.
+func (p *MCPProxyServer) SkillTextForAgents(serverName, digest string, data []byte) (text []byte, action, summary string, err error) {
+	served := p.servedSkillText(p.skillPolicy(), serverName, digest, data)
+	if served.blocked {
+		return nil, "blocked", served.reason, runtime.ErrSkillOutputBlocked
+	}
+	if served.text != nil {
+		data = served.text
+	}
+	return data, served.action, served.summary, nil
 }
 
 // spotlightLabel is an upstream name made safe for the spotlight fence: one

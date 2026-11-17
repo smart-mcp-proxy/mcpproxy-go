@@ -17,6 +17,10 @@ import (
 // contacts an upstream (FR-008b). Each accessor reads the records once and
 // decides availability on that same record.
 
+// ErrSkillOutputBlocked is returned for skill text the output sanitisation
+// policy does not let out.
+var ErrSkillOutputBlocked = errors.New("skill output blocked by the output sanitisation policy")
+
 // SkillReach says whether a caller may reach a server; nil means every server.
 type SkillReach func(serverName string) bool
 

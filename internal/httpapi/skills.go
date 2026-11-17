@@ -321,8 +321,9 @@ func (s *Server) handleRefreshServerSkills(w http.ResponseWriter, r *http.Reques
 // @Param limit query int false "Maximum bytes (default and maximum 65536)"
 // @Success 200 {object} contracts.SkillContentResponse "A chunk of the file"
 // @Failure 400 {object} contracts.ErrorResponse "Bad parameters"
+// @Failure 403 {object} contracts.SkillsErrorResponse "output_blocked: the output sanitisation policy withholds the text (scoped caller)"
 // @Failure 404 {object} contracts.ErrorResponse "Server, skill or file not found"
-// @Failure 409 {object} contracts.SkillsErrorResponse "stored_copy_damaged"
+// @Failure 409 {object} contracts.SkillsErrorResponse "stored_copy_damaged (administrator)"
 // @Failure 415 {object} contracts.ErrorResponse "The file is binary"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/servers/{id}/skills/content [get]
@@ -344,13 +345,43 @@ func (s *Server) handleGetServerSkillContent(w http.ResponseWriter, r *http.Requ
 	}
 	q := r.URL.Query()
 	skillPath := q.Get("skill")
-	if skillPath == "" {
-		s.writeError(w, r, http.StatusBadRequest, "skill query parameter is required")
-		return
-	}
 	file := q.Get("file")
 	if file == "" {
 		file = "SKILL.md"
+	}
+	offset := int64(0)
+
+	// record writes the access row of a scoped read, whatever its outcome; an
+	// administrator's read of its own store is not an agent access.
+	var (
+		data  []byte
+		meta  storage.SkillFile
+		sk    *internalRuntime.AvailableSkill
+		err   error
+		start = time.Now()
+	)
+	record := func(outcome string, n int64, delivered string) {
+		if !scoped {
+			return
+		}
+		a := internalRuntime.SkillAccessActivity{
+			Action: internalRuntime.SkillActionRead, Outcome: outcome, Server: sc.Name,
+			SkillID: cutSkillActivityText(sc.Name + ":" + skillPath), File: cutSkillActivityText(file),
+			Offset: offset, Bytes: n, TotalSize: int64(len(data)), DetectionText: delivered,
+		}
+		if sk != nil {
+			a.Hash, a.SkillName = sk.ApprovedHash, cutSkillActivityText(sk.Name)
+		}
+		s.recordAgentSkillAccess(r, start, a)
+	}
+	badRequest := func(msg string) {
+		record(internalRuntime.SkillAccessInvalid, 0, "")
+		s.writeError(w, r, http.StatusBadRequest, msg)
+	}
+
+	if skillPath == "" {
+		badRequest("skill query parameter is required")
+		return
 	}
 	approved := false
 	switch q.Get("copy") {
@@ -358,23 +389,22 @@ func (s *Server) handleGetServerSkillContent(w http.ResponseWriter, r *http.Requ
 	case "approved":
 		approved = true
 	default:
-		s.writeError(w, r, http.StatusBadRequest, "copy must be current or approved")
+		badRequest("copy must be current or approved")
 		return
 	}
-	offset := int64(0)
 	if v := q.Get("offset"); v != "" {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil || n < 0 {
-			s.writeError(w, r, http.StatusBadRequest, "offset must be a non-negative integer")
+		n, perr := strconv.ParseInt(v, 10, 64)
+		if perr != nil || n < 0 {
+			badRequest("offset must be a non-negative integer")
 			return
 		}
 		offset = n
 	}
 	limit := int64(skillContentMaxLimit)
 	if v := q.Get("limit"); v != "" {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil || n < 1 {
-			s.writeError(w, r, http.StatusBadRequest, "limit must be a positive integer")
+		n, perr := strconv.ParseInt(v, 10, 64)
+		if perr != nil || n < 1 {
+			badRequest("limit must be a positive integer")
 			return
 		}
 		if n < limit {
@@ -382,34 +412,25 @@ func (s *Server) handleGetServerSkillContent(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	var (
-		data []byte
-		meta storage.SkillFile
-		err  error
-	)
-	// record writes the access row of a scoped read; an administrator's read
-	// of its own store is not an agent access.
-	record := func(string, int64, int64) {}
 	if scoped {
-		start := time.Now()
 		// copy is forced to approved, and only an available skill's approved
-		// files exist: every other case is the one not-found answer.
-		var sk *internalRuntime.AvailableSkill
+		// files exist. The text is what the output policy lets out. Every
+		// reason the skill cannot be had is the one not-found answer: a
+		// damaged stored copy too, which is reported on the skill's record and
+		// in the access row, where an administrator reads it.
 		data, meta, sk, err = s.controller.AvailableSkillFile(sc.Name, skillPath, file)
-		record = func(outcome string, from, n int64) {
-			a := internalRuntime.SkillAccessActivity{
-				Action: internalRuntime.SkillActionRead, Outcome: outcome, Server: sc.Name,
-				SkillID: cutSkillActivityText(sc.Name + ":" + skillPath), File: cutSkillActivityText(file),
-				Offset: from, Bytes: n, TotalSize: int64(len(data)),
-			}
-			if sk != nil {
-				a.Hash, a.SkillName = sk.ApprovedHash, cutSkillActivityText(sk.Name)
-			}
-			s.recordAgentSkillAccess(r, start, a)
-		}
-		if errors.Is(err, internalRuntime.ErrSkillNotFound) || errors.Is(err, internalRuntime.ErrSkillFileNotFound) {
-			record(internalRuntime.SkillAccessNotFound, offset, 0)
+		switch {
+		case errors.Is(err, internalRuntime.ErrSkillNotFound), errors.Is(err, internalRuntime.ErrSkillFileNotFound):
+			record(internalRuntime.SkillAccessNotFound, 0, "")
 			s.writeError(w, r, http.StatusNotFound, skillNotAvailableMessage)
+			return
+		case errors.Is(err, internalRuntime.ErrSkillStoredCopyDamaged):
+			record(internalRuntime.SkillAccessDamaged, 0, "")
+			s.writeError(w, r, http.StatusNotFound, skillNotAvailableMessage)
+			return
+		case errors.Is(err, internalRuntime.ErrSkillOutputBlocked):
+			record(internalRuntime.SkillAccessBlocked, 0, "")
+			s.writeSkillsError(w, r, http.StatusForbidden, "output_blocked", err.Error())
 			return
 		}
 	} else {
@@ -420,11 +441,10 @@ func (s *Server) handleGetServerSkillContent(w http.ResponseWriter, r *http.Requ
 		s.writeError(w, r, http.StatusNotFound, err.Error())
 		return
 	case errors.Is(err, internalRuntime.ErrSkillFileBinary):
-		record(internalRuntime.SkillAccessBinary, offset, 0)
+		record(internalRuntime.SkillAccessBinary, 0, "")
 		s.writeError(w, r, http.StatusUnsupportedMediaType, err.Error())
 		return
 	case errors.Is(err, internalRuntime.ErrSkillStoredCopyDamaged):
-		record(internalRuntime.SkillAccessDamaged, offset, 0)
 		s.writeSkillsError(w, r, http.StatusConflict, "stored_copy_damaged", err.Error())
 		return
 	case err != nil:
@@ -437,10 +457,10 @@ func (s *Server) handleGetServerSkillContent(w http.ResponseWriter, r *http.Requ
 	text, next, more, cerr := skills.Chunk(data, offset, limit)
 	switch {
 	case errors.Is(cerr, skills.ErrChunkOffsetPastEnd):
-		s.writeError(w, r, http.StatusBadRequest, "offset is past the end of the file")
+		badRequest("offset is past the end of the file")
 		return
 	case errors.Is(cerr, skills.ErrChunkOffsetInsideRune):
-		s.writeError(w, r, http.StatusBadRequest, "offset is inside a UTF-8 character")
+		badRequest("offset is inside a UTF-8 character")
 		return
 	}
 	resp := contracts.SkillContentResponse{
@@ -452,7 +472,7 @@ func (s *Server) handleGetServerSkillContent(w http.ResponseWriter, r *http.Requ
 	if more {
 		resp.NextOffset = &next
 	}
-	record(internalRuntime.SkillAccessSuccess, offset, int64(len(text)))
+	record(internalRuntime.SkillAccessSuccess, int64(len(text)), string(text))
 	s.writeSuccess(w, resp)
 }
 

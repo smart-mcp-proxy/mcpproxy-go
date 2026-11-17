@@ -532,8 +532,8 @@ func TestReadSkillFile_DamagedStoredCopyIsReportedThenTheSkillIsGone(t *testing.
 
 	res := fx.load(t, context.Background(), map[string]any{"id": "hf:cli"})
 	assert.True(t, res.IsError)
-	assert.Equal(t, "skill unavailable: its stored copy failed verification", skillResultText(t, res))
-	assert.Equal(t, runtime.SkillAccessDamaged, fx.lastRow(t).Outcome)
+	assert.Equal(t, "skill not found: hf:cli", skillResultText(t, res), "one refusal for every reason")
+	assert.Equal(t, runtime.SkillAccessDamaged, fx.lastRow(t).Outcome, "the reason is in the administrator's activity row")
 
 	res = fx.load(t, context.Background(), map[string]any{"id": "hf:cli"})
 	assert.Equal(t, "skill not found: hf:cli", skillResultText(t, res), "the skill is unusable now")
@@ -731,7 +731,7 @@ func TestRetrieveSkills_TwentyFiveEntriesStayCompact(t *testing.T) {
 			Files:       make([]storage.SkillFile, 4), TotalSize: 34197,
 		}
 	}
-	text := renderSkillSearch(hits, 25)
+	text := renderSkillSearch(hits, 25, nil)
 	assert.LessOrEqual(t, len(text), 8000, "SC-003: about 2,000 tokens for 25 entries")
 	var out skillSearchResponse
 	require.NoError(t, json.Unmarshal([]byte(text), &out))

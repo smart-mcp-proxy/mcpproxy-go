@@ -21,7 +21,7 @@ func (fx *skillFixture) policy(action string) {
 	fx.proxy.sanitisationDetector = security.NewDetector(config.DefaultSensitiveDataDetectionConfig())
 }
 
-var continueRe = regexp.MustCompile(`Continue with offset=(\d+) and version="([^"]+)"`)
+var skillContinueRe = regexp.MustCompile(`Continue with offset=(\d+) and version="([^"]+)"`)
 
 // readAll follows the continuation of a load until the end and returns the
 // joined text of all parts.
@@ -35,7 +35,7 @@ func (fx *skillFixture) readAll(t *testing.T, id string, limit int) string {
 		header, part, ok := strings.Cut(skillResultText(t, res), "\n---\n")
 		require.True(t, ok)
 		joined.WriteString(part)
-		m := continueRe.FindStringSubmatch(header)
+		m := skillContinueRe.FindStringSubmatch(header)
 		if m == nil {
 			return joined.String()
 		}
@@ -110,10 +110,49 @@ func TestSkillHeader_UpstreamWordsPassTheOutputPolicy(t *testing.T) {
 	assert.Contains(t, text, "Version: sk1-"+strings.Repeat("ab12", 16))
 	assert.Contains(t, text, `version="sk1-`+strings.Repeat("ab12", 16)+`"`)
 
+	// A blocking policy withholds the word, not the whole (harmless) text.
 	fx.policy("block")
 	res := fx.load(t, context.Background(), map[string]any{"id": "hf:s"})
-	require.True(t, res.IsError)
-	assert.Equal(t, runtime.SkillAccessBlocked, fx.lastRow(t).Outcome)
+	require.False(t, res.IsError)
+	text = skillResultText(t, res)
+	assert.NotContains(t, text, skillTestSecret)
+	assert.Contains(t, text, skillWordWithheld)
+	assert.Contains(t, text, "harmless")
+}
+
+// The spotlight fence names the skill with the word the header shows: a name
+// the policy redacts is not repeated in the fence.
+func TestSkillText_SpotlightFenceUsesThePolicyCleanedName(t *testing.T) {
+	fx := newSkillFixture(t)
+	fx.cat.add("hf", "s", skillTestSecret, "d", "sk1-a", map[string]string{"SKILL.md": "body"})
+	fx.proxy.config.OutputSanitisation = &config.OutputSanitisationConfig{ResponseAction: "redact", SpotlightUntrusted: true, MaxRedactions: 100}
+	fx.proxy.sanitisationDetector = security.NewDetector(config.DefaultSensitiveDataDetectionConfig())
+
+	text := skillResultText(t, fx.load(t, context.Background(), map[string]any{"id": "hf:s"}))
+	assert.NotContains(t, text, skillTestSecret)
+	assert.Contains(t, text, "«untrusted:hf/")
+	assert.Contains(t, text, "body")
+}
+
+// Names and descriptions in a search answer are upstream text too.
+func TestRetrieveSkills_NamesAndDescriptionsPassTheOutputPolicy(t *testing.T) {
+	fx := newSkillFixture(t)
+	fx.cat.add("hf", "s", "s", "pdf helper, key "+skillTestSecret, "sk1-a", map[string]string{"SKILL.md": "body"})
+
+	fx.policy("redact")
+	res, out := fx.search(t, context.Background(), map[string]any{"query": "pdf"})
+	require.False(t, res.IsError)
+	require.Len(t, out.Skills, 1)
+	assert.NotContains(t, skillResultText(t, res), skillTestSecret)
+	assert.Contains(t, out.Skills[0].Description, "pdf helper")
+
+	fx.policy("block")
+	res, out = fx.search(t, context.Background(), map[string]any{"query": "pdf"})
+	require.False(t, res.IsError)
+	require.Len(t, out.Skills, 1)
+	assert.NotContains(t, skillResultText(t, res), skillTestSecret)
+	assert.Equal(t, skillWordWithheld, out.Skills[0].Description)
+	assert.Equal(t, "hf:s", out.Skills[0].ID, "the id stays usable")
 }
 
 // The spotlight fence names the skill; a name cannot close the fence or start

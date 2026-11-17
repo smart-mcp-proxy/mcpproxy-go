@@ -4882,8 +4882,18 @@ func (s *Server) SkillFileText(serverName, skillPath, relPath string, approvedCo
 
 // ListAvailableSkills returns the approved copies of a server's skills that
 // agents may have.
+//
+// This is the door of a scoped REST caller, so the upstream-written words pass
+// the output policy the agent tools apply.
 func (s *Server) ListAvailableSkills(serverName string) ([]*runtime.AvailableSkill, error) {
-	return s.runtime.ListAvailableSkills(serverName)
+	list, err := s.runtime.ListAvailableSkills(serverName)
+	if err != nil || s.mcpProxy == nil {
+		return list, err
+	}
+	for i := range list {
+		list[i] = s.mcpProxy.CleanSkillForAgents(list[i])
+	}
+	return list, nil
 }
 
 // EmitActivitySkillAccess records one skill access in the activity log.
@@ -4893,8 +4903,20 @@ func (s *Server) EmitActivitySkillAccess(a runtime.SkillAccessActivity) {
 
 // AvailableSkillFile returns one text file of the approved copy of an
 // available skill.
+//
+// The text is what the output policy lets out (runtime.ErrSkillOutputBlocked
+// when it lets nothing out), computed on the whole file as for the agent
+// tools: a scoped REST read and load_skill give the same text.
 func (s *Server) AvailableSkillFile(serverName, skillPath, relPath string) ([]byte, storage.SkillFile, *runtime.AvailableSkill, error) {
-	return s.runtime.AvailableSkillFile(serverName, skillPath, relPath)
+	data, meta, sk, err := s.runtime.AvailableSkillFile(serverName, skillPath, relPath)
+	if err != nil || s.mcpProxy == nil {
+		return data, meta, sk, err
+	}
+	text, _, _, perr := s.mcpProxy.SkillTextForAgents(serverName, meta.Digest, data)
+	if perr != nil {
+		return nil, meta, sk, perr
+	}
+	return text, meta, s.mcpProxy.CleanSkillForAgents(sk), nil
 }
 
 // SkillAvailable reports whether an agent may have the skill.

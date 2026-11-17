@@ -11054,6 +11054,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad parameters
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillsErrorResponse'
+          description: 'output_blocked: the output sanitisation policy withholds the
+            text (scoped caller)'
         "404":
           content:
             application/json:
@@ -11065,7 +11072,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.SkillsErrorResponse'
-          description: stored_copy_damaged
+          description: stored_copy_damaged (administrator)
         "415":
           content:
             application/json:

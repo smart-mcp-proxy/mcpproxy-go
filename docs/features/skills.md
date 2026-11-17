@@ -214,11 +214,11 @@ Call the tool again with that `offset` and `version`. The header is repeated on 
 ### What an agent can and cannot get
 
 - **Approved content only.** The text comes from the copy that was approved and is checked against its SHA-256 before every answer. If the server has changed the skill since, the agent keeps getting nothing new until you approve the change: a changed skill is held, and its id answers `skill not found`.
-- **One refusal.** A skill that is unknown, pending, changed, blocked, unusable, no longer listed, on a server that is disabled, quarantined or excluded, or on a server outside the caller's reach, gives the same answer: `skill not found: <id>`. An agent cannot tell these cases apart, and cannot learn that a held skill exists.
+- **One refusal.** A skill that is unknown, pending, changed, blocked, unusable, no longer listed, on a server that is disabled, quarantined or excluded, or on a server outside the caller's reach, gives the same answer: `skill not found: <id>`. So does a skill whose stored copy fails its check at the moment it is read. An agent cannot tell these cases apart, and cannot learn that a held skill exists. You see the reason in the activity log and on the skill's record.
 - **Server reach decides.** An agent token, a profile and a pinned profile limit skills exactly as they limit which servers' tools exist for the caller. A profile's tool rules (tier cap, per-tool allow and deny) do not apply to skills: the three tools only read.
 - **Text files only.** A binary file is listed but not served: `binary files are not served: <path>`. Scripts are served as text. MCPProxy never runs a skill's file.
 - **No permissions from a skill.** `allowed-tools`, hooks and similar requests in a skill are ignored, and the header says so. MCPProxy does not copy skills into a client's local skills folder.
-- **The usual output checks.** Answers pass the same sanitisation and sensitive-data detection as tool results.
+- **The usual output checks.** Answers pass the same output sanitisation and sensitive-data detection as tool results. The policy is applied to the whole file before it is cut into parts, so a secret cannot be fetched in two halves, and to the names, descriptions and file names in an answer. With a policy that redacts or strips, sizes and offsets are those of the text as served. With a blocking policy, a file with a critical secret is refused (`skill output blocked by the output sanitisation policy`).
 
 ### Where the tools are offered
 
@@ -226,7 +226,7 @@ On every MCP endpoint that offers `retrieve_tools`, and on the direct endpoint (
 
 ### Activity
 
-Every search, load and file read is recorded as `skill_access` with the action (`search`, `load`, `read`), the id, the outcome (`success`, `not_found`, `binary`, `damaged`, `stale_version`, `blocked`), the sizes and the caller. The skill text is not copied into the activity log. A scoped agent token that reads skills over REST is recorded the same way (action `list` or `read`, source `api`). Searches, and attempts on a server outside the caller's reach, are visible to administrators only.
+Every search, load and file read is recorded as `skill_access` with the action (`search`, `load`, `read`), the id, the outcome (`success`, `not_found`, `binary`, `damaged`, `stale_version`, `blocked`, `invalid`), the sizes and the caller. The skill text is not copied into the activity log. A scoped agent token that reads skills over REST is recorded the same way (action `list` or `read`, source `api`). These rows are visible to administrators only: a row names the id a caller asked for, which can be a skill that is held.
 
 ```bash
 mcpproxy activity list --type skill_access
@@ -294,7 +294,7 @@ A refresh also runs by itself when a server connects, on the periodic discovery 
 
 ## REST API
 
-Approve, block, unblock and refresh require administrator credentials (the API key, the socket or an administrator session); a scoped agent token gets `403`. The two `GET` endpoints also answer a scoped agent token whose reach includes the server: it gets the available skills only, from the approved copy, and no entry, count or finding for any other skill. A server outside its reach answers `404`. In the server edition, a non-administrator user session is refused (`403`) on all skills endpoints in this release. The same shapes are in [REST API: Skills](../api/rest-api.md#skills).
+Approve, block, unblock and refresh require administrator credentials (the API key, the socket or an administrator session); a scoped agent token gets `403`. The two `GET` endpoints also answer a scoped agent token whose reach includes the server: it gets the available skills only, from the approved copy, and no entry, count or finding for any other skill. A server outside its reach answers `404`. The text and names it gets have passed the output sanitisation policy, as for the agent tools (`403 output_blocked` when the policy withholds a file), and a damaged stored copy is the same `404` as an unknown skill. In the server edition, a non-administrator user session is refused (`403`) on all skills endpoints in this release. The same shapes are in [REST API: Skills](../api/rest-api.md#skills).
 
 | Endpoint | Purpose |
 |----------|---------|
@@ -324,4 +324,4 @@ Approve, block, unblock and refresh require administrator credentials (the API k
 
 **A clean skill stays `pending` on a `scan` server.** Look at `scan.complete`. A scan that is not complete (`size_cap`, `time_limit`, `coverage`, `interrupted`) does not approve. A skill shown as "not scanned" is waiting for its turn: one refresh scans for about 45 seconds and the next one continues. Approve the skill yourself after reading it.
 
-**`409 stored_copy_damaged` when reading a file.** The stored bytes no longer match their digest. Run `mcpproxy skills refresh <server>` to read the skill again.
+**`409 stored_copy_damaged` when reading a file.** The stored bytes no longer match their digest. Run `mcpproxy skills refresh <server>` to read the skill again. An agent gets `skill not found` for such a skill; the activity log shows the outcome `damaged`.

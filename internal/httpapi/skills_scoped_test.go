@@ -209,8 +209,9 @@ func TestSkills_ScopedRESTReadsAreRecordedAsSkillAccess(t *testing.T) {
 		require.Equal(t, "api", a.Source)
 		require.Equal(t, "alpha", a.Server)
 		require.NotEmpty(t, a.Attribution.TokenName, "the row names the token that read")
-		require.Empty(t, a.DetectionText)
 	}
+	require.Equal(t, "approved text", rows[1].DetectionText, "the delivered text is scanned for sensitive data like a tool answer")
+	require.Empty(t, rows[2].DetectionText)
 	require.Equal(t, internalRuntime.SkillActionList, rows[0].Action)
 	require.Equal(t, 1, rows[0].Results, "only the available skill is counted")
 
@@ -229,4 +230,55 @@ func TestSkills_ScopedRESTReadsAreRecordedAsSkillAccess(t *testing.T) {
 	require.Equal(t, http.StatusOK, skillsDo(t, srv, http.MethodGet, "/api/v1/servers/alpha/skills", scopeAdminAPIKey).Code)
 	require.Equal(t, http.StatusOK, skillsDo(t, srv, http.MethodGet, contentURL(url.Values{"skill": {"ok"}}), scopeAdminAPIKey).Code)
 	require.Len(t, ctrl.accessRows(), 4)
+}
+
+// A scoped read with unusable parameters reads nothing and is still recorded.
+func TestSkills_ScopedRESTInvalidReadsAreRecorded(t *testing.T) {
+	ctrl, srv, token := scopedSkillsServer(t)
+	for _, q := range []url.Values{
+		{},                                   // no skill
+		{"skill": {"ok"}, "copy": {"bogus"}}, // bad copy
+		{"skill": {"ok"}, "offset": {"-1"}},
+		{"skill": {"ok"}, "limit": {"0"}},
+		{"skill": {"ok"}, "offset": {"99999"}}, // past the end, known only after the read
+	} {
+		rec := skillsDo(t, srv, http.MethodGet, contentURL(q), token)
+		require.Equal(t, http.StatusBadRequest, rec.Code, "%v", q)
+	}
+	rows := ctrl.accessRows()
+	require.Len(t, rows, 5)
+	for _, a := range rows {
+		require.Equal(t, internalRuntime.SkillAccessInvalid, a.Outcome)
+		require.Empty(t, a.DetectionText)
+	}
+
+	// An administrator's bad request writes no row.
+	require.Equal(t, http.StatusBadRequest, skillsDo(t, srv, http.MethodGet, contentURL(url.Values{"skill": {"ok"}, "copy": {"bogus"}}), scopeAdminAPIKey).Code)
+	require.Len(t, ctrl.accessRows(), 5)
+}
+
+// What the output policy withholds is refused, and a damaged stored copy is
+// the same not-found answer as an unknown skill: a scoped caller cannot tell
+// that the skill was there a moment ago.
+func TestSkills_ScopedRESTBlockedAndDamaged(t *testing.T) {
+	ctrl, srv, token := scopedSkillsServer(t)
+	unknown := skillsDo(t, srv, http.MethodGet, contentURL(url.Values{"skill": {"nope"}}), token)
+	require.Equal(t, http.StatusNotFound, unknown.Code)
+
+	ctrl.availErr = internalRuntime.ErrSkillStoredCopyDamaged
+	rec := skillsDo(t, srv, http.MethodGet, contentURL(url.Values{"skill": {"ok"}}), token)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Equal(t, scopeDecodeError(t, unknown), scopeDecodeError(t, rec))
+
+	ctrl.availErr = internalRuntime.ErrSkillOutputBlocked
+	rec = skillsDo(t, srv, http.MethodGet, contentURL(url.Values{"skill": {"ok"}}), token)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Contains(t, rec.Body.String(), "output_blocked")
+	require.NotContains(t, rec.Body.String(), "approved text")
+
+	rows := ctrl.accessRows()
+	require.Len(t, rows, 3)
+	require.Equal(t, internalRuntime.SkillAccessNotFound, rows[0].Outcome)
+	require.Equal(t, internalRuntime.SkillAccessDamaged, rows[1].Outcome)
+	require.Equal(t, internalRuntime.SkillAccessBlocked, rows[2].Outcome)
 }

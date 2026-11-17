@@ -33,7 +33,9 @@ type skillsTestController struct {
 	refreshErr   error
 	files        map[string][]byte // "<skill>|<rel>|<current|approved>"
 	accesses     []internalRuntime.SkillAccessActivity
-	fileErr      error
+	// availErr, when set, is what AvailableSkillFile answers for a known file.
+	availErr error
+	fileErr  error
 
 	// approveFn / blockFn stand in for the runtime approval writers (PR-2).
 	approveFn func(ctx context.Context, server string, skills []string, expected map[string]string, by string, inc int64) (int, error)
@@ -145,6 +147,9 @@ func (c *skillsTestController) AvailableSkillFile(server, skill, rel string) ([]
 			if f.RelPath == rel {
 				if !f.Text {
 					return nil, f, a, internalRuntime.ErrSkillFileBinary
+				}
+				if c.availErr != nil {
+					return nil, f, a, c.availErr
 				}
 				return c.files[skill+"|"+rel+"|approved"], f, a, nil
 			}
