@@ -82,6 +82,17 @@ type skillsLimits struct {
 	scanPerRefresh  time.Duration
 	scanPerSkill    time.Duration
 	followUpDelay   time.Duration
+	// scanClock replaces time.Now for the per-refresh scan budget. Tests set
+	// it: a budget measured on the real clock cannot be made to run out after
+	// exactly one skill on a platform whose clock ticks coarsely (Windows).
+	scanClock func() time.Time
+}
+
+func (l skillsLimits) now() time.Time {
+	if l.scanClock != nil {
+		return l.scanClock()
+	}
+	return time.Now()
 }
 
 func (l skillsLimits) scanRefresh() time.Duration {

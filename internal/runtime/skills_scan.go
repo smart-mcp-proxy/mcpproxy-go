@@ -250,7 +250,7 @@ func scanStateOf(s *storage.SkillScan, currentHash string) skillScanState {
 func (r *Runtime) scanSkillOutcomes(ctx context.Context, serverName string, outcomes []skillOutcome) (firstScans, unscanned, pending int) {
 	sm := r.storageManager
 	budget := r.skills.limits.scanRefresh()
-	start := time.Now()
+	start := r.skills.limits.now()
 	scanned := 0
 	for _, retries := range []bool{false, true} {
 		for i := range outcomes {
@@ -265,7 +265,7 @@ func (r *Runtime) scanSkillOutcomes(ctx context.Context, serverName string, outc
 				}
 			}
 			if sm == nil || ctx.Err() != nil || !r.skillsEligible(serverName) ||
-				(scanned > 0 && time.Since(start) >= budget) {
+				(scanned > 0 && r.skills.limits.now().Sub(start) >= budget) {
 				skip()
 				continue
 			}

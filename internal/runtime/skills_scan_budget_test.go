@@ -20,11 +20,24 @@ import (
 // only spend a bounded time scanning. What it does not get to is scanned by
 // the refreshes that follow; nothing scanned is lost in between.
 
+// oneSkillPerRefresh makes the scan budget run out after exactly one skill,
+// on every platform: the budget is read on a clock that advances one second
+// per reading, not on the real one (whose tick is too coarse on Windows for
+// a tiny budget to have passed after one fake scan).
+func oneSkillPerRefresh(g *skillsRig) {
+	var ticks atomic.Int64
+	base := time.Unix(1_700_000_000, 0)
+	g.rt.skills.limits.scanPerRefresh = time.Millisecond
+	g.rt.skills.limits.scanClock = func() time.Time {
+		return base.Add(time.Duration(ticks.Add(1)) * time.Second)
+	}
+}
+
 func TestSkillsRefresh_ScanBudgetSpreadsScansOverRefreshes(t *testing.T) {
 	g := newSkillsRig(t, skillsRigOpts{enable: true, trust: "scan"})
 	var n atomic.Int32
 	g.rt.skills.scanFunc = countingScan(&n, "clean", true)
-	g.rt.skills.limits.scanPerRefresh = time.Nanosecond // spent by the first skill
+	oneSkillPerRefresh(g)
 	for _, p := range []string{"a", "b", "c"} {
 		g.fx.AddSkill(skillstest.Skill{Path: p})
 	}
@@ -59,7 +72,7 @@ func TestSkillsRefresh_ScanBudgetSchedulesAFollowUp(t *testing.T) {
 	g := newSkillsRig(t, skillsRigOpts{enable: true, trust: "scan", autoTrig: true})
 	var n atomic.Int32
 	g.rt.skills.scanFunc = countingScan(&n, "clean", true)
-	g.rt.skills.limits.scanPerRefresh = time.Nanosecond
+	oneSkillPerRefresh(g)
 	g.rt.skills.limits.followUpDelay = time.Millisecond
 	for _, p := range []string{"a", "b", "c"} {
 		g.fx.AddSkill(skillstest.Skill{Path: p})
@@ -127,7 +140,7 @@ func TestSkillsRefresh_FollowUpsEndWhenOnlyDegradedRetriesRemain(t *testing.T) {
 	g := newSkillsRig(t, skillsRigOpts{enable: true, trust: "scan", autoTrig: true})
 	var n atomic.Int32
 	g.rt.skills.scanFunc = countingScan(&n, "clean", false)
-	g.rt.skills.limits.scanPerRefresh = time.Nanosecond
+	oneSkillPerRefresh(g)
 	g.rt.skills.limits.followUpDelay = time.Millisecond
 	for _, p := range []string{"a", "b", "c"} {
 		g.fx.AddSkill(skillstest.Skill{Path: p})
@@ -197,7 +210,7 @@ func TestSkillsRefresh_NeverScannedSkillsComeBeforeDegradedRetries(t *testing.T)
 		mu.Unlock()
 		return "clean", nil, !strings.HasPrefix(name, "a/") // a's scan is always degraded
 	}
-	g.rt.skills.limits.scanPerRefresh = time.Nanosecond // one skill per refresh
+	oneSkillPerRefresh(g)
 	g.fx.AddSkill(skillstest.Skill{Path: "a"})
 	g.fx.AddSkill(skillstest.Skill{Path: "b"})
 	g.fx.AddSkill(skillstest.Skill{Path: "c"})
