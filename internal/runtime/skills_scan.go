@@ -232,54 +232,65 @@ func scanStateOf(s *storage.SkillScan, currentHash string) skillScanState {
 // scanSkillOutcomes scans the usable skills of one refresh that have no scan
 // of their current content, reading each skill's text back from the store so
 // only one skill is in memory at a time. It stops starting new scans once the
-// refresh's scan time is spent (the first skill is always scanned). settled
-// counts the scans that will not be repeated for the same content, pending
-// the skills left without a scan. A scan that has to be repeated (degraded
-// coverage) is recorded but is not progress: a follow-up refresh would only
-// scan the same skills again.
+// refresh's scan time is spent (the first skill is always scanned).
+//
+// Skills that were never scanned come first; a scan that has to be repeated
+// (degraded coverage) is retried only with the time that is left, and keeps
+// its earlier result until then. Otherwise one skill whose scan stays degraded
+// and takes the whole budget would be retried first on every refresh, and the
+// skills listed after it would never be scanned.
+//
+// settled counts the scans that will not be repeated for the same content,
+// pending the skills left without such a scan. A scan that has to be repeated
+// is recorded but is not progress: a follow-up refresh would only scan the
+// same skills again.
 func (r *Runtime) scanSkillOutcomes(ctx context.Context, serverName string, outcomes []skillOutcome) (settled, pending int) {
 	sm := r.storageManager
 	budget := r.skills.limits.scanRefresh()
 	start := time.Now()
 	scanned := 0
-	for i := range outcomes {
-		o := &outcomes[i]
-		if !o.usable || !o.needScan {
-			continue
-		}
-		if sm == nil || ctx.Err() != nil || !r.skillsEligible(serverName) ||
-			(scanned > 0 && time.Since(start) >= budget) {
-			pending++
-			continue
-		}
-		texts := make([]skillTextFile, 0, len(o.files))
-		readable := true
-		for _, f := range o.files {
-			if !f.Text || !f.Stored {
+	for _, retries := range []bool{false, true} {
+		for i := range outcomes {
+			o := &outcomes[i]
+			if !o.usable || !o.needScan || o.scanRetry != retries {
 				continue
 			}
-			data, err := sm.GetSkillFile(serverName, f.Digest)
-			if err != nil {
-				readable = false
-				break
+			if sm == nil || ctx.Err() != nil || !r.skillsEligible(serverName) ||
+				(scanned > 0 && time.Since(start) >= budget) {
+				pending++
+				continue
 			}
-			texts = append(texts, skillTextFile{relPath: f.RelPath, data: data})
-		}
-		if !readable {
-			pending++
-			continue
-		}
-		res := r.scanSkillText(ctx, serverName, o.path, texts)
-		if res.Incomplete == storage.SkillScanIncompleteInterrupted {
-			// Stopped from outside (shutdown): nothing worth recording.
-			pending++
-			continue
-		}
-		res.Hash = o.hash
-		o.scan = res
-		scanned++
-		if res.Incomplete != storage.SkillScanIncompleteCoverage {
-			settled++
+			texts := make([]skillTextFile, 0, len(o.files))
+			readable := true
+			for _, f := range o.files {
+				if !f.Text || !f.Stored {
+					continue
+				}
+				data, err := sm.GetSkillFile(serverName, f.Digest)
+				if err != nil {
+					readable = false
+					break
+				}
+				texts = append(texts, skillTextFile{relPath: f.RelPath, data: data})
+			}
+			if !readable {
+				pending++
+				continue
+			}
+			res := r.scanSkillText(ctx, serverName, o.path, texts)
+			if res.Incomplete == storage.SkillScanIncompleteInterrupted {
+				// Stopped from outside (shutdown): nothing worth recording.
+				pending++
+				continue
+			}
+			res.Hash = o.hash
+			o.scan = res
+			scanned++
+			if res.Incomplete == storage.SkillScanIncompleteCoverage {
+				pending++
+			} else {
+				settled++
+			}
 		}
 	}
 	return settled, pending

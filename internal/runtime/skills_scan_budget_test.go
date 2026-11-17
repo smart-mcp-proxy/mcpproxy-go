@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -138,7 +139,7 @@ func TestSkillsRefresh_DegradedScansDoNotScheduleAFollowUp(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	g.rt.skills.wait()
 	assert.Equal(t, lists+1, g.fx.Count("skills/list"), "no refresh follows one that settled nothing")
-	assert.Equal(t, 2, g.rt.SkillsStatus(skillsSrv).ScansPending)
+	assert.Equal(t, 3, g.rt.SkillsStatus(skillsSrv).ScansPending, "one degraded, two not reached")
 }
 
 // A background trigger that arrives while a refresh runs is not lost by
@@ -170,4 +171,46 @@ func TestSkillsRefresh_TriggerDuringARefreshRunsOneMore(t *testing.T) {
 	require.Eventually(t, func() bool { return g.fx.Count("skills/list") == lists+2 }, 10*time.Second, 10*time.Millisecond)
 	g.rt.skills.wait()
 	assert.Equal(t, lists+2, g.fx.Count("skills/list"), "exactly one more refresh")
+}
+
+// One skill whose scan stays degraded and takes the whole budget must not be
+// retried ahead of skills that were never scanned: they would never get a
+// scan.
+func TestSkillsRefresh_NeverScannedSkillsComeBeforeDegradedRetries(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true, trust: "scan"})
+	var order []string
+	var mu sync.Mutex
+	g.rt.skills.scanFunc = func(_, name, _ string) (string, []scanner.ScanFinding, bool) {
+		mu.Lock()
+		order = append(order, name)
+		mu.Unlock()
+		return "clean", nil, !strings.HasPrefix(name, "a/") // a's scan is always degraded
+	}
+	g.rt.skills.limits.scanPerRefresh = time.Nanosecond // one skill per refresh
+	g.fx.AddSkill(skillstest.Skill{Path: "a"})
+	g.fx.AddSkill(skillstest.Skill{Path: "b"})
+	g.fx.AddSkill(skillstest.Skill{Path: "c"})
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, g.refresh(t))
+	}
+	recs := g.records(t)
+	require.NotNil(t, recs["a"].Scan)
+	assert.Equal(t, storage.SkillScanIncompleteCoverage, recs["a"].Scan.Incomplete, "a keeps its degraded result while it waits for its retry")
+	assert.Equal(t, storage.SkillStatusPending, recs["a"].Status)
+	for _, p := range []string{"b", "c"} {
+		require.NotNil(t, recs[p].Scan, "%s was scanned although a comes first in the listing and stays degraded", p)
+		assert.True(t, recs[p].Scan.Complete, p)
+		assert.Equal(t, storage.SkillStatusApproved, recs[p].Status, p)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"a/SKILL.md#0", "b/SKILL.md#0", "c/SKILL.md#0"}, order)
+
+	// With nothing left unscanned, the degraded one is retried.
+	mu.Unlock()
+	require.NoError(t, g.refresh(t))
+	mu.Lock()
+	assert.Equal(t, "a/SKILL.md#0", order[len(order)-1])
+	assert.Len(t, order, 4)
 }

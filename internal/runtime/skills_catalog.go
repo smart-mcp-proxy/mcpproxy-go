@@ -333,7 +333,9 @@ type skillOutcome struct {
 	frontmatter                  json.RawMessage
 	scan                         *storage.SkillScan
 	// needScan: usable, and no earlier scan of this very content stands.
-	needScan bool
+	// scanRetry: an earlier scan of this very content exists but has to be
+	// repeated (degraded coverage); it stays on the record until the retry.
+	needScan, scanRetry bool
 }
 
 // skillsBudget tracks the refresh-wide budgets across skills.
@@ -944,9 +946,12 @@ func (r *Runtime) readSkill(ctx context.Context, serverName string, inc int64, e
 
 	// A finished scan of this very content is never repeated; anything else
 	// is scanned after the reads, from the stored text (scanSkillOutcomes).
-	if reuseScan {
+	switch {
+	case reuseScan:
 		o.scan = prev.Scan
-	} else {
+	case prev != nil && prev.Scan != nil && prev.Scan.Hash == o.hash:
+		o.scan, o.needScan, o.scanRetry = prev.Scan, true, true
+	default:
 		o.needScan = true
 	}
 	return o, nil
