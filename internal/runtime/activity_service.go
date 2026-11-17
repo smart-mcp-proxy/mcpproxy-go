@@ -488,6 +488,8 @@ func (s *ActivityService) handleEvent(evt Event) {
 	// Spec 032: Tool-level quarantine events
 	case EventTypeActivityToolQuarantineChange:
 		s.handleToolQuarantineChange(evt)
+	case EventTypeActivitySkillQuarantineChange:
+		s.handleSkillQuarantineChange(evt)
 	// Spec 077 US4: one settled activity record per server per scan replaces the
 	// former per-scanner started/completed/failed storm (Spec 039).
 	case EventTypeSecurityScanSettled:
@@ -1448,6 +1450,38 @@ func (s *ActivityService) handleToolQuarantineChange(evt Event) {
 			zap.Error(err),
 			zap.String("server_name", serverName),
 			zap.String("tool_name", toolName),
+			zap.String("action", action))
+	}
+}
+
+// handleSkillQuarantineChange persists a skill approval state change (Spec 125).
+func (s *ActivityService) handleSkillQuarantineChange(evt Event) {
+	serverName := getStringPayload(evt.Payload, "server_name")
+	action := getStringPayload(evt.Payload, "action")
+	metadata := map[string]interface{}{
+		"action":        action,
+		"skill":         getStringPayload(evt.Payload, "skill"),
+		"skill_uri":     getStringPayload(evt.Payload, "skill_uri"),
+		"previous_hash": getStringPayload(evt.Payload, "previous_hash"),
+		"current_hash":  getStringPayload(evt.Payload, "current_hash"),
+		"reason":        getStringPayload(evt.Payload, "reason"),
+		"approved_by":   getStringPayload(evt.Payload, "approved_by"),
+	}
+	copyActorMetadata(evt.Payload, metadata)
+
+	record := &storage.ActivityRecord{
+		Type:       storage.ActivityTypeSkillQuarantineChange,
+		ServerName: serverName,
+		Status:     action,
+		Metadata:   metadata,
+		Timestamp:  evt.Timestamp,
+		RequestID:  getStringPayload(evt.Payload, "request_id"),
+	}
+	if err := s.storage.SaveActivity(record); err != nil {
+		s.logger.Error("Failed to save skill quarantine activity",
+			zap.Error(err),
+			zap.String("server_name", serverName),
+			zap.String("skill", getStringPayload(evt.Payload, "skill")),
 			zap.String("action", action))
 	}
 }

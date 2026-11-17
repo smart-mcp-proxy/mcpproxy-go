@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"time"
 
 	"go.uber.org/zap"
@@ -100,6 +101,27 @@ func enforceSkillInvariant(rec *storage.SkillApprovalRecord, logger *zap.Logger)
 			zap.String("current_hash", rec.CurrentHash), zap.String("approved_hash", rec.ApprovedHash))
 	}
 	return true
+}
+
+// emitSkillQuarantineChangeCtx publishes the activity event behind one
+// skill_quarantine_change row. The caller of ctx rides on the event
+// (RequestActor); a refresh has none, and its rows say actor_kind "system".
+// Never call it while holding the approval lock.
+func (r *Runtime) emitSkillQuarantineChangeCtx(ctx context.Context, serverName, skillPath, skillURI, action, previousHash, currentHash, reason, approvedBy string) {
+	payload := map[string]any{
+		"server_name":   serverName,
+		"skill":         skillPath,
+		"skill_uri":     skillURI,
+		"action":        action,
+		"previous_hash": previousHash,
+		"current_hash":  currentHash,
+		"reason":        reason,
+		"approved_by":   approvedBy,
+	}
+	if _, ok := stampActor(ctx, payload); !ok {
+		payload["actor_kind"] = "system"
+	}
+	r.publishEvent(newEvent(EventTypeActivitySkillQuarantineChange, payload))
 }
 
 // applySkillDecision writes a decision onto rec (already merged with its

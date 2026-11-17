@@ -181,6 +181,10 @@ var adminConfigEventTypes = map[internalRuntime.EventType]struct{}{
 	// server, available or not (Spec 125 FR-019a): until agents are offered
 	// skills it is an administrator-only invalidation.
 	internalRuntime.EventTypeSkillsChanged: {},
+	// A skill's approval change names a skill that may be unapproved (Spec 125
+	// FR-019a); it also carries a server name, but a scoped caller must not
+	// learn of an unapproved skill even on a server it can see.
+	internalRuntime.EventTypeActivitySkillQuarantineChange: {},
 }
 
 // identityBearingEventTypes are the event types whose payload is ABOUT one
