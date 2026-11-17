@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -419,4 +420,74 @@ func TestActivityService_SkillQuarantineChangeRecord(t *testing.T) {
 	assert.Equal(t, "system", rec.Metadata["actor_kind"])
 	assert.Contains(t, storage.ValidActivityTypes, "skill_quarantine_change")
 	assert.True(t, storage.IsAdminOnlyActivityType(rec.Type))
+}
+
+// The story's own test (spec 125, User Story 2), in the default trust mode:
+// a flagged skill is held with its findings, a person approves it, the server
+// changes one byte, and the skill is held again until the change is approved
+// - with a clean scan too.
+func TestSkillsGate_ApproveChangeHoldApproveAgain(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true, trust: "scan"})
+	flagged := true
+	g.rt.skills.scanFunc = func(_, name, _ string) (string, []scanner.ScanFinding, bool) {
+		if flagged && strings.Contains(name, "/run.sh#") {
+			return "warnings", []scanner.ScanFinding{{RuleID: "exfil.composite", Severity: "high", Evidence: "curl"}}, true
+		}
+		return "clean", nil, true
+	}
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf", Files: map[string][]byte{"run.sh": []byte("echo one")}})
+	g.fx.AddSkill(skillstest.Skill{Path: "doc"})
+	require.NoError(t, g.refresh(t))
+
+	recs := g.records(t)
+	assert.Equal(t, storage.SkillStatusApproved, recs["doc"].Status, "new, clean and complete: approved by the scan")
+	assert.Equal(t, "scan", recs["doc"].ApprovedBy)
+	pdf := recs["pdf"]
+	require.Equal(t, storage.SkillStatusPending, pdf.Status, "new with a finding: held")
+	require.Len(t, pdf.Scan.Findings, 1)
+	assert.Equal(t, "run.sh", pdf.Scan.Findings[0].File, "the finding is listed against its file")
+	assert.False(t, g.rt.SkillAvailable(skillsSrv, pdf))
+
+	n, err := g.rt.ApproveSkillsReviewedAt(adminCtx(), skillsSrv, []string{"pdf"}, hashes(t, g, "pdf"), "api", 0)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	reviewed := hashes(t, g, "pdf")
+	assert.True(t, g.rt.SkillAvailable(skillsSrv, g.records(t)["pdf"]))
+
+	// The server changes one byte. Until the refresh the approved text is what
+	// is served, and the skill stays available.
+	flagged = false
+	g.fx.Mutate("pdf", "run.sh", []byte("echo two"))
+	text, _, err := g.rt.SkillFileText(skillsSrv, "pdf", "run.sh", true)
+	require.NoError(t, err)
+	assert.Equal(t, "echo one", string(text))
+	assert.True(t, g.rt.SkillAvailable(skillsSrv, g.records(t)["pdf"]))
+
+	// After the refresh it is held, although the new content scans clean.
+	require.NoError(t, g.refresh(t))
+	pdf = g.records(t)["pdf"]
+	require.Equal(t, storage.SkillStatusChanged, pdf.Status)
+	require.NotNil(t, pdf.Scan)
+	assert.True(t, pdf.Scan.Complete)
+	assert.Empty(t, pdf.Scan.Findings)
+	assert.False(t, g.rt.SkillAvailable(skillsSrv, pdf))
+	text, _, err = g.rt.SkillFileText(skillsSrv, "pdf", "run.sh", true)
+	require.NoError(t, err)
+	assert.Equal(t, "echo one", string(text), "the approved copy is kept for the comparison")
+
+	// An approval made against the earlier review is refused, nothing written.
+	_, err = g.rt.ApproveSkillsReviewedAt(adminCtx(), skillsSrv, []string{"pdf"}, reviewed, "api", 0)
+	var stale *StaleSkillReviewError
+	require.ErrorAs(t, err, &stale)
+	assert.Equal(t, []string{"pdf"}, stale.Changed)
+	assert.Equal(t, storage.SkillStatusChanged, g.records(t)["pdf"].Status)
+
+	n, err = g.rt.ApproveSkillsReviewedAt(adminCtx(), skillsSrv, []string{"pdf"}, hashes(t, g, "pdf"), "api", 0)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	pdf = g.records(t)["pdf"]
+	assert.True(t, g.rt.SkillAvailable(skillsSrv, pdf))
+	text, _, err = g.rt.SkillFileText(skillsSrv, "pdf", "run.sh", true)
+	require.NoError(t, err)
+	assert.Equal(t, "echo two", string(text), "the approved copy is now the new content")
 }
