@@ -214,6 +214,34 @@ Create `.vscode/mcp.json` in your workspace:
 
 **📚 Reference:** [VS Code MCP Documentation](https://code.visualstudio.com/docs/copilot/chat/mcp-servers)
 
+**GitHub Copilot config (VS Code agents and Copilot CLI)**
+
+Current VS Code versions run agents on the Copilot harness, which reads the
+Copilot user config instead of the files above. The Copilot CLI reads the same
+file. Let MCPProxy write it:
+
+```bash
+mcpproxy connect copilot
+```
+
+Or add the entry to `~/.copilot/mcp-config.json` by hand (the key is
+`mcpServers`, not `servers`):
+
+```json
+{
+  "mcpServers": {
+    "mcpproxy": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp",
+      "tools": ["*"]
+    }
+  }
+}
+```
+
+See [VS Code and GitHub Copilot](/features/connect-clients#vs-code-and-github-copilot)
+for which of the two files your installation reads.
+
 ---
 
 ### 🧩 OpenCode

@@ -206,10 +206,30 @@ func FindClient(clientID string) *ClientDef {
 	return nil
 }
 
+// copilotHomeOverride returns the directory COPILOT_HOME names, or "" when the
+// default ~/.copilot applies. Copilot CLI and VS Code read their user config
+// from $COPILOT_HOME/mcp-config.json when the variable is set and do not also
+// check ~/.copilot, so an entry written to the default would be ignored.
+//
+// A relative value is not followed: it resolves against the working directory
+// of the process reading it, and the core does not share the client's.
+func copilotHomeOverride() string {
+	dir := strings.TrimSpace(os.Getenv("COPILOT_HOME"))
+	if dir == "" || !filepath.IsAbs(dir) {
+		return ""
+	}
+	return filepath.Clean(dir)
+}
+
 // ConfigPath returns the expected configuration file path for the given client
 // on the current operating system. homeDir overrides os.UserHomeDir when non-empty
 // (useful for testing).
 func ConfigPath(clientID, homeDir string) string {
+	if clientID == "copilot" && homeDir == "" {
+		if dir := copilotHomeOverride(); dir != "" {
+			return filepath.Join(dir, "mcp-config.json")
+		}
+	}
 	if homeDir == "" {
 		var err error
 		homeDir, err = os.UserHomeDir()
@@ -257,8 +277,9 @@ func ConfigPath(clientID, homeDir string) string {
 		}
 
 	case "copilot":
-		// The Copilot user config, read by current VS Code versions and by the
-		// Copilot CLI: a fixed dotfile under $HOME on every OS.
+		// The Copilot user config, read by VS Code's Copilot harness and by the
+		// Copilot CLI: a dotfile under $HOME on every OS, unless COPILOT_HOME
+		// moves it (handled above, before the home directory is resolved).
 		return filepath.Join(homeDir, ".copilot", "mcp-config.json")
 
 	case "codex":
