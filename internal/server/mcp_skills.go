@@ -98,15 +98,6 @@ func (p *MCPProxyServer) skillsEnabled() bool {
 	return cfg != nil && cfg.EnableSkills
 }
 
-// isSkillToolName reports whether name is one of the three skill tools.
-func isSkillToolName(name string) bool {
-	switch name {
-	case toolRetrieveSkills, toolLoadSkill, toolReadSkillFile:
-		return true
-	}
-	return false
-}
-
 // buildSkillTools returns the three tools with their handlers while
 // enable_skills is on, and nothing while it is off. One definition feeds every
 // surface, so the schemas cannot drift.
