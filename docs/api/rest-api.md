@@ -1709,7 +1709,7 @@ Neither route enforces the binding guard; the MCP `credentials` tool does (see
 
 ### Skills
 
-Spec 125. The three endpoints below are administrator-only in this release (the API key, the socket or an administrator session): a scoped agent token gets `403` and nothing is read. Skills are not offered to agents yet. See [Skills over MCP](../features/skills.md).
+Spec 125. The endpoints below are administrator-only in this release (the API key, the socket or an administrator session): a scoped agent token gets `403` and nothing is read. Skills are not offered to agents yet. See [Skills over MCP](../features/skills.md).
 
 #### GET /api/v1/servers/{id}/skills
 
@@ -1720,6 +1720,7 @@ Every skill record of one server. With `enable_skills` off the answer is `200` w
   "success": true,
   "data": {
     "enabled": true,
+    "incarnation": 3,
     "server": "hf",
     "supported": true,
     "expose_skills": null,
@@ -1740,16 +1741,23 @@ Every skill record of one server. With `enable_skills` off the answer is `200` w
         "unusable_reason": "",
         "current_hash": "sk1-...",
         "approved_hash": "",
+        "approved_by": "",
         "files": [{"path": "SKILL.md", "size": 34197, "digest": "sha256:...", "text": true}],
         "total_size": 34197,
-        "scan": {"verdict": "", "complete": false, "findings": []}
+        "scan": {"verdict": "", "complete": false, "incomplete": "", "findings_truncated": false, "findings": []}
       }
     ]
   }
 }
 ```
 
-`available` is true only for an approved, unblocked, listed skill on an enabled server; in this release no skill is approved, so it is always false.
+`available` is true only for an approved, unblocked, listed skill on an enabled server.
+
+Fields added with the approval gate:
+
+- `incarnation` (top level) identifies the server this listing was read from. Send it back as `expected_incarnation` on approve, block and unblock.
+- `approved_at` (omitted for a skill that was never approved) and `approved_by`; `approved_files` (omitted without an approved copy) is the file list of the approved copy, in the shape of `files`.
+- `scan` describes the scan of the skill's **current** content only. It is reported when the scan was made of exactly `current_hash`; a scan of older content is not shown (`verdict` empty, no `scanned_at`). `incomplete` says why `complete` is false: `size_cap`, `time_limit`, `coverage` or `interrupted`. `scanned_at` is omitted when there is no scan of the current content. `findings_truncated` is true when more findings existed than `findings` lists. Each finding has `file`, `offset` (byte position), `rule`, `severity` and `evidence`.
 
 #### GET /api/v1/servers/{id}/skills/content
 
@@ -1764,6 +1772,36 @@ Query: `skill` (required, the skill path), `file` (default `SKILL.md`), `copy` (
 #### POST /api/v1/servers/{id}/skills/refresh
 
 Reads the server's skills again, verifies every file and returns the same payload as the list endpoint. A refresh already running for the server is joined. `409` with `error_code` `skills_disabled` when `enable_skills` is off (or is turned off while the refresh runs), `409` `skills_not_supported` when the server does not announce the skills extension, and `409` `refresh_superseded` when the server reconnected during the refresh, in which case its skills are read again after the reconnect.
+
+#### POST /api/v1/servers/{id}/skills/approve
+
+Administrator only. Approves skills for exactly the content that was reviewed. Body:
+
+```json
+{"skills": ["hf-cli"], "expected_hashes": {"hf-cli": "sk1-..."}, "expected_incarnation": 3}
+```
+
+`skills` holds 1 to 200 skill paths (the part of the id after `<server>:`). `expected_hashes` maps each path to the `current_hash` the reviewer saw; a skill without an entry is refused as unreviewed. `expected_incarnation` is the listing's `incarnation`; `0` or absent binds to the server as it is when the request starts. A skill that is already approved for its current content is left as it is and not counted. The blocked mark is never touched. The approver is recorded as `api`, as for tool approvals.
+
+```json
+{"success": true, "data": {"approved": 1}}
+```
+
+Errors (nothing is written for any of them):
+
+| Status | `error_code` | Meaning |
+|--------|--------------|---------|
+| `400` | | Body is not JSON, has unknown fields or trailing data, is over 1 MiB, `skills` is empty, has an empty name or more than 200 names, or `expected_incarnation` is negative |
+| `403` | | A scoped agent token |
+| `404` | | Unknown server, or a named skill has no record |
+| `409` | `skills_disabled` | `enable_skills` is off |
+| `409` | `review_out_of_date` | A current hash differs from the expected one, or a skill has no expected hash. The body carries `changed` and `unreviewed` (both always present, `[]` when empty) |
+| `409` | | `server_replaced: ...` when the server was removed or replaced since the review (same body as the tool approval endpoint) |
+| `422` | `skill_unusable` | A named skill cannot be approved (a failed check, or a dynamic file list). The body carries `skills` |
+
+#### POST /api/v1/servers/{id}/skills/block and /unblock
+
+Administrator only. Set or clear the blocked mark. A blocked skill is never offered to an agent, and no refresh, content change or automatic approval clears the mark. Unblocking does not approve: a skill that is not approved stays unavailable. Body: `{"skills": ["hf-cli"], "expected_incarnation": 3}`; `expected_incarnation` is optional. Answer: `{"success": true, "data": {"changed": 1}}` with the number of skills whose mark changed. The same `400`, `403`, `404`, `409 skills_disabled` and `409 server_replaced` answers as approve apply.
 
 ### Real-time Updates
 

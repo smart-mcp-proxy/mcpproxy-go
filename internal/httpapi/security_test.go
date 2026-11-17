@@ -370,6 +370,12 @@ func (m *baseController) SkillFileText(_, _, _ string, _ bool) ([]byte, storage.
 }
 func (m *baseController) SkillAvailable(_ string, _ *storage.SkillApprovalRecord) bool { return false }
 func (m *baseController) RefreshServerSkills(_ context.Context, _ string) error        { return nil }
+func (m *baseController) ApproveSkillsReviewedAt(_ context.Context, _ string, _ []string, _ map[string]string, _ string, _ int64) (int, error) {
+	return 0, nil
+}
+func (m *baseController) SetSkillsBlockedAt(_ context.Context, _ string, _ []string, _ bool, _ string, _ int64) (int, error) {
+	return 0, nil
+}
 
 func (m *baseController) ListToolApprovals(_ string) ([]*storage.ToolApprovalRecord, error) {
 	return nil, nil

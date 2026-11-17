@@ -110,7 +110,9 @@ func (v workSessionReach) ownsRow(rec *storage.ActivityRecord) bool {
 	if !v.scoped || rec.Type == storage.ActivityTypeUpstreamEvent {
 		return true
 	}
-	if v.ac == nil {
+	// Spec 125 FR-019a: an administrator-only row type is never a scoped
+	// caller's row, whatever identity it carries.
+	if v.ac == nil || storage.IsAdminOnlyActivityType(rec.Type) {
 		return false
 	}
 	if v.ac.Type == auth.AuthTypeAgent {

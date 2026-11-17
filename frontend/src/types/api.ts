@@ -1013,6 +1013,8 @@ export type ActivityType =
   | 'profile_change'
   /** Spec 124: an upstream server's connection was lost or restored, its process exited, its OAuth refresh failed or it needs a new login. */
   | 'upstream_event'
+  /** Spec 125: a skill's approval state change (administrator-only). */
+  | 'skill_quarantine_change'
 
 export type ActivitySource = 'mcp' | 'cli' | 'api'
 

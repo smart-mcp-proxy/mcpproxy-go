@@ -98,9 +98,28 @@ func skillEntryFor(serverName string, rec *storage.SkillApprovalRecord, availabl
 		e.Files = append(e.Files, contracts.SkillFileInfo{Path: f.RelPath, Size: f.Size, Digest: f.Digest, Text: f.Text})
 		e.TotalSize += f.Size
 	}
-	if rec.Scan != nil {
+	if rec.Approved != nil {
+		e.ApprovedFiles = make([]contracts.SkillFileInfo, 0, len(rec.Approved.Files))
+		for _, f := range rec.Approved.Files {
+			e.ApprovedFiles = append(e.ApprovedFiles, contracts.SkillFileInfo{Path: f.RelPath, Size: f.Size, Digest: f.Digest, Text: f.Text})
+		}
+	}
+	e.ApprovedBy = rec.ApprovedBy
+	if !rec.ApprovedAt.IsZero() {
+		t := rec.ApprovedAt.UTC()
+		e.ApprovedAt = &t
+	}
+	// A scan of older content says nothing about the current content, so it
+	// is reported only when it was made of exactly the current hash.
+	if rec.Scan != nil && rec.Scan.Hash == rec.CurrentHash {
 		e.Scan.Verdict = rec.Scan.Verdict
 		e.Scan.Complete = rec.Scan.Complete
+		e.Scan.Incomplete = rec.Scan.Incomplete
+		e.Scan.FindingsTruncated = rec.Scan.FindingsTruncated
+		if !rec.Scan.ScannedAt.IsZero() {
+			t := rec.Scan.ScannedAt.UTC()
+			e.Scan.ScannedAt = &t
+		}
 		for _, f := range rec.Scan.Findings {
 			e.Scan.Findings = append(e.Scan.Findings, contracts.SkillScanFinding{
 				File: f.File, Offset: f.Offset, Rule: f.Rule, Severity: f.Severity, Evidence: f.Evidence,
@@ -137,7 +156,17 @@ func (s *Server) handleGetServerSkills(w http.ResponseWriter, r *http.Request) {
 		s.writeSuccess(w, contracts.SkillsListResponse{Skills: []contracts.SkillEntry{}})
 		return
 	}
-	out, err := s.buildSkillsList(serverID, sc)
+	var out contracts.SkillsListResponse
+	inc, err := s.readAtSettledIncarnation(serverID, func() error {
+		var rerr error
+		out, rerr = s.buildSkillsList(serverID, sc)
+		return rerr
+	})
+	if errors.Is(err, errIncarnationUnsettled) {
+		s.writeSkillsError(w, r, http.StatusConflict, "server_replaced", "the server was removed or replaced while its skills were read; retry")
+		return
+	}
+	out.Incarnation = inc
 	if err != nil {
 		s.logger.Errorw("Failed to list skills", "server", serverID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to list skills: %v", err))
@@ -194,11 +223,24 @@ func (s *Server) handleRefreshServerSkills(w http.ResponseWriter, r *http.Reques
 		s.writeSkillsError(w, r, http.StatusConflict, "skills_not_supported", fmt.Sprintf("server %s does not announce the skills extension", serverID))
 		return
 	}
-	out, err := s.buildSkillsList(serverID, sc)
+	// The records and the incarnation are read as one answer, as in the
+	// listing: an incarnation read after the records could be the one of a
+	// server added again under the same name.
+	var out contracts.SkillsListResponse
+	inc, err := s.readAtSettledIncarnation(serverID, func() error {
+		var rerr error
+		out, rerr = s.buildSkillsList(serverID, sc)
+		return rerr
+	})
+	if errors.Is(err, errIncarnationUnsettled) {
+		s.writeSkillsError(w, r, http.StatusConflict, "server_replaced", "the server was removed or replaced while its skills were read; retry")
+		return
+	}
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to list skills: %v", err))
 		return
 	}
+	out.Incarnation = inc
 	s.writeSuccess(w, out)
 }
 

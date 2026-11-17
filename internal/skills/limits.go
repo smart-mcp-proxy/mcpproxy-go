@@ -19,7 +19,7 @@ const (
 	MaxStoredTextPerServer = 64 << 20
 	MaxReadPerRefresh      = 256 << 20
 	MaxFrontmatterBytes    = 64 << 10
-	MaxScanBytesPerSkill   = 2 << 20
+	MaxScanBytesPerSkill   = 1 << 20
 	MaxURIBytes            = 2048
 )
 

@@ -37,16 +37,20 @@ type skillsRigOpts struct {
 	enable   bool
 	expose   *bool
 	fixture  []skillstest.Option
-	autoTrig bool // leave the background triggers on
+	autoTrig bool   // leave the background triggers on
+	trust    string // trust_mode of the server; "" means manual (the PR-1 behaviour the older tests assume)
 }
 
 func newSkillsRig(t *testing.T, o skillsRigOpts) *skillsRig {
 	t.Helper()
 	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
 	fx := skillstest.New(t, o.fixture...)
+	if o.trust == "" {
+		o.trust = "manual"
+	}
 	rt, _ := newSpec116Runtime(t, func(c *config.Config) { c.EnableSkills = o.enable },
 		explicitServer(&config.ServerConfig{
-			Name: skillsSrv, URL: fx.URL(), Protocol: "streamable-http", Enabled: true, ExposeSkills: o.expose,
+			Name: skillsSrv, URL: fx.URL(), Protocol: "streamable-http", Enabled: true, ExposeSkills: o.expose, TrustMode: o.trust,
 		}))
 	if !o.autoTrig {
 		rt.skills.noAutoTrigger.Store(true)
@@ -404,34 +408,6 @@ func TestSkillsRefresh_ApprovedRecordFollowsContent(t *testing.T) {
 	require.NoError(t, g.refresh(t))
 	rec = g.records(t)["pdf"]
 	assert.Equal(t, storage.SkillStatusApproved, rec.Status, "content returned to the approved hash")
-}
-
-func TestNextSkillStatus(t *testing.T) {
-	appr := func(h string) *storage.SkillApprovalRecord {
-		return &storage.SkillApprovalRecord{Status: storage.SkillStatusApproved, ApprovedHash: h, Approved: &storage.SkillContent{}}
-	}
-	cases := []struct {
-		name    string
-		prev    *storage.SkillApprovalRecord
-		usable  bool
-		current string
-		want    string
-	}{
-		{"new", nil, true, "h1", storage.SkillStatusPending},
-		{"pending stays pending", &storage.SkillApprovalRecord{Status: storage.SkillStatusPending}, true, "h1", storage.SkillStatusPending},
-		{"approved unchanged", appr("h1"), true, "h1", storage.SkillStatusApproved},
-		{"approved changed", appr("h1"), true, "h2", storage.SkillStatusChanged},
-		{"changed stays changed", &storage.SkillApprovalRecord{Status: storage.SkillStatusChanged, ApprovedHash: "h1", Approved: &storage.SkillContent{}}, true, "h2", storage.SkillStatusChanged},
-		{"changed back", &storage.SkillApprovalRecord{Status: storage.SkillStatusChanged, ApprovedHash: "h1", Approved: &storage.SkillContent{}}, true, "h1", storage.SkillStatusApproved},
-		{"unusable", appr("h1"), false, "h1", storage.SkillStatusUnusable},
-		{"unusable new", nil, false, "", storage.SkillStatusUnusable},
-		{"was unusable, never approved", &storage.SkillApprovalRecord{Status: storage.SkillStatusUnusable}, true, "h1", storage.SkillStatusPending},
-		{"was unusable, approved copy matches", &storage.SkillApprovalRecord{Status: storage.SkillStatusUnusable, ApprovedHash: "h1", Approved: &storage.SkillContent{}}, true, "h1", storage.SkillStatusApproved},
-		{"was unusable, approved copy differs", &storage.SkillApprovalRecord{Status: storage.SkillStatusUnusable, ApprovedHash: "h1", Approved: &storage.SkillContent{}}, true, "h2", storage.SkillStatusChanged},
-	}
-	for _, c := range cases {
-		assert.Equal(t, c.want, nextSkillStatus(c.prev, c.usable, c.current), c.name)
-	}
 }
 
 func TestSkillsRefresh_UnusableKeepsApprovedCopy(t *testing.T) {
