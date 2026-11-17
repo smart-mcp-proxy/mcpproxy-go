@@ -6,6 +6,8 @@ Authentication as for the rest of the API. "Admin" = the API key, the socket, or
 
 A skill is **available** when the feature is on, its server is enabled, not quarantined and not excluded (`expose_skills: false`), and the skill is approved, not blocked and listed. An admin sees every skill of a server it can see. Any other caller sees available skills of servers in its reach and nothing else: no entry, no count, no review or attention row, no event for a skill that is not available. This holds on the endpoints below and on the existing review, attention and SSE endpoints (from PR-2).
 
+**Server edition.** A tenant user session (cookie or bearer JWT of a non-administrator user) is refused with `403` on every skills endpoint in this spec, reads included: skills are a personal-edition feature for now, and a user's reach over shared and personal servers is not defined for skills yet. "Any other caller" above therefore means a scoped agent token.
+
 ## `GET /servers/{id}/skills`
 
 - Admin: every record of the server.

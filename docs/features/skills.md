@@ -293,7 +293,7 @@ A refresh also runs by itself when a server connects, on the periodic discovery 
 
 ## REST API
 
-Approve, block, unblock and refresh require administrator credentials (the API key, the socket or an administrator session); a scoped agent token gets `403`. The two `GET` endpoints also answer a scoped agent token whose reach includes the server: it gets the available skills only, from the approved copy, and no entry, count or finding for any other skill. A server outside its reach answers `404`. The same shapes are in [REST API: Skills](../api/rest-api.md#skills).
+Approve, block, unblock and refresh require administrator credentials (the API key, the socket or an administrator session); a scoped agent token gets `403`. The two `GET` endpoints also answer a scoped agent token whose reach includes the server: it gets the available skills only, from the approved copy, and no entry, count or finding for any other skill. A server outside its reach answers `404`. In the server edition, a non-administrator user session is refused (`403`) on all skills endpoints in this release. The same shapes are in [REST API: Skills](../api/rest-api.md#skills).
 
 | Endpoint | Purpose |
 |----------|---------|
