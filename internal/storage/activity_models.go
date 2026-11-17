@@ -34,6 +34,11 @@ const (
 	ActivityTypeConfigChange ActivityType = "config_change"
 	// ActivityTypeToolQuarantineChange represents a tool-level quarantine state change (Spec 032)
 	ActivityTypeToolQuarantineChange ActivityType = "tool_quarantine_change"
+	// ActivityTypeSkillQuarantineChange represents a skill approval state change
+	// (Spec 125). Metadata: action, skill, skill_uri, previous_hash,
+	// current_hash, reason, approved_by, actor_kind, actor_name, surface.
+	// Administrator-only: it names skills that may not be approved.
+	ActivityTypeSkillQuarantineChange ActivityType = "skill_quarantine_change"
 	// ActivityTypeSecurityScan represents a security scan event (Spec 039)
 	ActivityTypeSecurityScan ActivityType = "security_scan"
 	// ActivityTypeCredentialBroker represents a per-user credential brokering
@@ -73,11 +78,19 @@ var ValidActivityTypes = []string{
 	string(ActivityTypeInternalToolCall),
 	string(ActivityTypeConfigChange),
 	string(ActivityTypeToolQuarantineChange),
+	string(ActivityTypeSkillQuarantineChange),
 	string(ActivityTypeSecurityScan),
 	string(ActivityTypeCredentialBroker),
 	string(ActivityTypePreflight),
 	string(ActivityTypePromptGet),
 	string(ActivityTypeProfileChange),
+}
+
+// IsAdminOnlyActivityType reports whether rows of the type may be read by
+// administrators only. A skill approval row names a skill that may be
+// unapproved, even on a server a scoped caller may see (Spec 125 FR-019a).
+func IsAdminOnlyActivityType(t ActivityType) bool {
+	return t == ActivityTypeSkillQuarantineChange
 }
 
 // Activity status vocabulary. Activity status is a CLOSED vocabulary: every
@@ -477,6 +490,11 @@ type ActivityFilter struct {
 	// operator-plane events with no server to be entitled to.
 	AllowedServers []string
 
+	// ExcludeAdminOnlyTypes drops the record types only an administrator may
+	// read (AdminOnlyActivityTypes). Like AllowedServers it is an authorization
+	// term inside the predicate, so a page and its `total` agree.
+	ExcludeAdminOnlyTypes bool
+
 	// UserID is an AUTHORIZATION filter (Spec 107 FR-002, T086), evaluated
 	// beside AllowedServers: empty means unrestricted (every existing caller
 	// of ListActivities/StreamActivities), a non-empty value restricts
@@ -572,6 +590,9 @@ func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 	// Authorization filter first: a caller must never be able to widen its own
 	// visibility with any of the query-string filters below it.
 	if !f.serverAllowed(record.ServerName) {
+		return false
+	}
+	if f.ExcludeAdminOnlyTypes && IsAdminOnlyActivityType(record.Type) {
 		return false
 	}
 	if f.UserID != "" && record.UserID != f.UserID {

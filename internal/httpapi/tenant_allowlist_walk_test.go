@@ -352,6 +352,25 @@ func TestTenantSessionNamedMustRefuseSurvivesEncodedServerName(t *testing.T) {
 	require.Contains(t, w.Body.String(), tenantForbiddenErrorField)
 }
 
+// The skills catalog (Spec 125) is administrator-only: a tenant session gets
+// the fixed 403 on every skills route under a server it is entitled to, for a
+// plain and for a percent-encoded server name, and for any deeper path.
+func TestTenantSessionSkillsRoutesAreRefused(t *testing.T) {
+	srv := newTenantWalkServer(t)
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/servers/" + tenantEntitledServer + "/skills"},
+		{http.MethodGet, "/api/v1/servers/" + tenantEntitledServer + "/skills/content?skill=x"},
+		{http.MethodPost, "/api/v1/servers/" + tenantEntitledServer + "/skills/refresh"},
+		{http.MethodGet, "/api/v1/servers/io.github.owner%2Frepo/skills"},
+		{http.MethodGet, "/api/v1/servers/io.github.owner%2Frepo/skills/content"},
+		{http.MethodGet, "/api/v1/servers/" + tenantEntitledServer + "/skills/anything/deeper"},
+	} {
+		w := doTenantRequest(t, srv, tc.method, tc.path, false)
+		require.Equalf(t, http.StatusForbidden, w.Code, "%s %s: got %d body=%s", tc.method, tc.path, w.Code, w.Body.String())
+		require.Contains(t, w.Body.String(), tenantForbiddenErrorField)
+	}
+}
+
 // TestTenantSessionCanRevealSecretsFalse: session principals never satisfy
 // CanRevealSecrets (constraint 11) — pinned directly against the AuthContext
 // the resolver hands back, independent of any specific route's behaviour.

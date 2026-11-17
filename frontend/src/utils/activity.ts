@@ -39,7 +39,8 @@ export const ACTIVITY_TYPE_LABELS: Record<string, string> = {
   'security_scan': 'Security Scan', // Spec 077
   'credential_broker': 'Credential Broker', // Spec 074, server edition only
   'prompt_get': 'Prompt Fetch',
-  'profile_change': 'Profile Change' // Spec 108: client binding / credential change
+  'profile_change': 'Profile Change', // Spec 108: client binding / credential change
+  'skill_quarantine_change': 'Skill Approval Change' // Spec 125: a skill's approval state (administrator-only)
 }
 
 const typeLabels = ACTIVITY_TYPE_LABELS
@@ -95,7 +96,8 @@ const typeIcons: Record<string, string> = {
   'security_scan': '🔎',
   'credential_broker': '🔑',
   'prompt_get': '💬',
-  'profile_change': '🪪'
+  'profile_change': '🪪',
+  'skill_quarantine_change': '📚'
 }
 
 // Status labels

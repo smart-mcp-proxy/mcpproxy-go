@@ -467,6 +467,12 @@ type Config struct {
 	// aggregation performed by RefreshPrompts. Hot-reloadable.
 	AggregateUpstreamPrompts bool `json:"aggregate_upstream_prompts" mapstructure:"aggregate-upstream-prompts"`
 
+	// EnableSkills, when true, makes mcpproxy read the skills that upstream
+	// servers expose through the MCP skills extension. OFF by default. Unlike
+	// EnablePrompts this is hot-reloadable. No CLI flag, no environment
+	// variable.
+	EnableSkills bool `json:"enable_skills" mapstructure:"enable-skills"`
+
 	// Repository detection settings
 	CheckServerRepo bool `json:"check_server_repo" mapstructure:"check-server-repo"`
 
@@ -779,6 +785,11 @@ type ServerConfig struct {
 	// default-aggregate behavior (included if the server advertises
 	// Capabilities.Prompts); false excludes it regardless of capability.
 	ExposePrompts *bool `json:"expose_prompts,omitempty" mapstructure:"expose-prompts"`
+
+	// ExposeSkills overrides whether this server's skills (MCP skills
+	// extension) are read when Config.EnableSkills is on. nil (default)
+	// inherits (included if the server supports skills); false excludes it.
+	ExposeSkills *bool `json:"expose_skills,omitempty" mapstructure:"expose-skills"`
 
 	// ForwardHeaders lists inbound MCP-client header NAMES (never values) that
 	// are copied into this server's upstream tools/call requests (Spec 112).
@@ -1882,6 +1893,9 @@ func DefaultConfig() *Config {
 
 		// Upstream prompt aggregation OFF by default (opt-in) — see field doc.
 		AggregateUpstreamPrompts: false,
+
+		// Upstream skills OFF by default (opt-in).
+		EnableSkills: false,
 
 		// Repository detection enabled by default
 		CheckServerRepo: true,

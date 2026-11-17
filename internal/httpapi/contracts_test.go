@@ -398,6 +398,27 @@ func (m *MockServerController) UpdateServer(_ context.Context, _ string, _ *conf
 	return nil
 }
 
+// Skills over MCP (Spec 125, PR-1)
+func (m *MockServerController) SkillsStatus(_ string) internalRuntime.SkillsServerStatus {
+	return internalRuntime.SkillsServerStatus{}
+}
+func (m *MockServerController) ListSkillRecords(_ string) ([]*storage.SkillApprovalRecord, error) {
+	return nil, nil
+}
+func (m *MockServerController) SkillFileText(_, _, _ string, _ bool) ([]byte, storage.SkillFile, error) {
+	return nil, storage.SkillFile{}, internalRuntime.ErrSkillNotFound
+}
+func (m *MockServerController) SkillAvailable(_ string, _ *storage.SkillApprovalRecord) bool {
+	return false
+}
+func (m *MockServerController) RefreshServerSkills(_ context.Context, _ string) error { return nil }
+func (m *MockServerController) ApproveSkillsReviewedAt(_ context.Context, _ string, _ []string, _ map[string]string, _ string, _ int64) (int, error) {
+	return 0, nil
+}
+func (m *MockServerController) SetSkillsBlockedAt(_ context.Context, _ string, _ []string, _ bool, _ string, _ int64) (int, error) {
+	return 0, nil
+}
+
 // Tool-level quarantine (Spec 032)
 func (m *MockServerController) ListToolApprovals(_ string) ([]*storage.ToolApprovalRecord, error) {
 	return nil, nil

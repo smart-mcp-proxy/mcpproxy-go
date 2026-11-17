@@ -208,6 +208,18 @@ Manage held prompts with the `quarantine_security` MCP tool:
 { "operation": "approve_all_prompts", "name": "github" }
 ```
 
+## Skills are held like tools (spec 125) {#skills}
+
+With `enable_skills` on, MCPProxy reads the agent skills that upstream servers serve through the MCP skills extension. A skill is instruction text an agent follows, so it goes through the same gate as a tool description, with one stricter rule: **a changed skill is always held for a person in `scan` mode**, even when the scan is clean. Only `auto` mode (or `quarantine_enabled: false`) approves a change by itself.
+
+| Trust mode | New skill | Changed skill |
+|------------|-----------|---------------|
+| `manual` | held | held |
+| `scan` (default) | approved after a clean and complete scan of every text file; otherwise held | held |
+| `auto` | approved | approved |
+
+An approval is bound to the skill's content hash (every file's address, digest and size, plus the `SKILL.md` frontmatter) and to the server it was given for. It is removed with the server. A blocked skill stays blocked through refreshes, changes and automatic approvals. A quarantined server's skills are unavailable in every mode. Review commands, the scan result and the activity rows are described in [Skills over MCP: Reviewing skills](./skills.md#reviewing-skills).
+
 ## What quarantine does and does not cover {#what-quarantine-does-and-does-not-cover}
 
 What it does, with quarantine enabled (the default):

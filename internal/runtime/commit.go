@@ -1259,6 +1259,14 @@ func (r *Runtime) afterCommitFunc(tx *CommitTx, res *CommitResult, snap *configs
 		}
 		r.afterServerPurge(res.Purged, res.exemptionsDropped)
 		if res.Published {
+			// Spec 125 D6: enable_skills, or a server's expose_skills, turning
+			// on. Here, and not at the callers, so every way of changing the
+			// configuration (file reload, whole-config apply, a REST or MCP
+			// change to one server) triggers the same refresh. It only starts
+			// goroutines; the commit lock is already released.
+			if tx.base != nil {
+				r.onSkillsConfigChanged(tx.base.Config, tx.next)
+			}
 			r.runCommitWorkers(tx, res, snap)
 			r.notifyTelemetryInOrder(res.Generation, tx.next)
 			if len(res.Changes) > 0 {

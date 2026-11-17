@@ -1720,6 +1720,9 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 			mcp.WithBoolean("expose_prompts",
 				mcp.Description("Per-server prompt-aggregation override (F9): true = include this server's MCP prompts in mcpproxy's aggregated prompts/list; false = exclude them regardless of capability. Omit to leave unchanged (patch) / inherit the default (aggregate if advertised). Only meaningful when aggregate_upstream_prompts is enabled globally. Used with add/update/patch."),
 			),
+			mcp.WithBoolean("expose_skills",
+				mcp.Description("Per-server skills override: true = read this server's skills (MCP skills extension) when enable_skills is on globally; false = exclude it. Omit to leave unchanged (patch) / inherit the default. Used with add/update/patch."),
+			),
 			mcp.WithString("forward_headers_json",
 				mcp.Description("Client header forwarding allowlist (Spec 112) as a JSON array of inbound MCP client header NAMES to copy into this server's tools/call requests, e.g. [\"X-User-Id\",\"X-Tenant-Id\"]. Names only, never values; exact names, case-insensitive, at most 32, no wildcards. Authorization, Host, Cookie, X-API-Key, hop-by-hop and proxy headers are never forwarded. Only HTTP-based upstreams forward. Patch: omit to leave unchanged, '[]' to clear (the array replaces entirely). Used with add/update/patch."),
 			),
@@ -6315,6 +6318,11 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 				serverConfig.ExposePrompts = &b
 			}
 		}
+		if raw, ok := rawArgs["expose_skills"]; ok {
+			if b, ok := raw.(bool); ok {
+				serverConfig.ExposeSkills = &b
+			}
+		}
 	}
 
 	// Spec 112: optional forward_headers allowlist on add, validated at write time.
@@ -6866,6 +6874,13 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 				return nil, opts, fmt.Errorf("invalid expose_prompts: must be a boolean, got %T", raw)
 			}
 			patch.ExposePrompts = &b
+		}
+		if raw, ok := args["expose_skills"]; ok {
+			b, ok := raw.(bool)
+			if !ok {
+				return nil, opts, fmt.Errorf("invalid expose_skills: must be a boolean, got %T", raw)
+			}
+			patch.ExposeSkills = &b
 		}
 	}
 

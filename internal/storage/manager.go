@@ -156,6 +156,7 @@ func upstreamRecordFromConfig(serverConfig *config.ServerConfig) *UpstreamRecord
 		QueueSize:                serverConfig.QueueSize,
 		QueueTimeout:             serverConfig.QueueTimeout,
 		ExposePrompts:            serverConfig.ExposePrompts,
+		ExposeSkills:             serverConfig.ExposeSkills,
 	}
 }
 
@@ -196,6 +197,7 @@ func serverConfigFromRecord(record *UpstreamRecord) *config.ServerConfig {
 		QueueSize:                record.QueueSize,
 		QueueTimeout:             record.QueueTimeout,
 		ExposePrompts:            record.ExposePrompts,
+		ExposeSkills:             record.ExposeSkills,
 	}
 }
 

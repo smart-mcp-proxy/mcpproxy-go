@@ -496,3 +496,25 @@ func TestConvertGenericServersToTyped_Health(t *testing.T) {
 		assert.Nil(t, servers[1].Health)
 	})
 }
+
+// TestConvertServerConfig_ExposeSkills: the per-server expose_skills override
+// round-trips through the direct and generic-map converters; unset stays nil.
+func TestConvertServerConfig_ExposeSkills(t *testing.T) {
+	off := false
+	cfg := &config.ServerConfig{Name: "s", Enabled: true, ExposeSkills: &off}
+	server := ConvertServerConfig(cfg, nil, "ready", true, 0, false)
+	require.NotNil(t, server.ExposeSkills)
+	assert.False(t, *server.ExposeSkills)
+
+	unset := ConvertServerConfig(&config.ServerConfig{Name: "u", Enabled: true}, nil, "ready", true, 0, false)
+	assert.Nil(t, unset.ExposeSkills)
+
+	typed := ConvertGenericServersToTyped([]map[string]interface{}{
+		{"name": "g", "expose_skills": true},
+		{"name": "n"},
+	})
+	require.Len(t, typed, 2)
+	require.NotNil(t, typed[0].ExposeSkills)
+	assert.True(t, *typed[0].ExposeSkills)
+	assert.Nil(t, typed[1].ExposeSkills)
+}
