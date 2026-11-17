@@ -59,6 +59,7 @@ These limits are fixed and not configurable:
 | Files per skill | 512 |
 | Size of one skill | 16 MiB |
 | Skills per server | 200 |
+| Records kept for skills a server no longer lists | 200 per server (oldest dropped first; a blocked skill is always kept) |
 | Size of one listing (all pages) | 16 MiB |
 | Stored text per server | 64 MiB |
 | Name and description kept for display | 256 bytes and 4 KiB (longer text is cut and marked with …) |
@@ -208,7 +209,7 @@ One answer carries at most 60,000 bytes of a file. When the text is longer, the 
 Bytes 0-59999 of 131072. Continue with offset=60000 and version="sk1-…".
 ```
 
-Call the tool again with that `offset` and `version`. The header is repeated on every part, and a part never ends inside a character. `version` is the content the skill was approved for. If a new version is approved while an agent is in the middle of a long file, the next call with the old `version` is refused, so parts of two versions are never joined into one text; the agent loads the skill again from the start.
+Call the tool again with that `offset` and `version`. The header is repeated on every part, and a part never ends inside a character. An agent can ask for smaller parts with `limit`; `tool_response_limit` does not apply to skill text, because a part has its own bound and can always be continued. `version` is the content the skill was approved for. If a new version is approved while an agent is in the middle of a long file, the next call with the old `version` is refused, so parts of two versions are never joined into one text; the agent loads the skill again from the start.
 
 ### What an agent can and cannot get
 
@@ -225,13 +226,13 @@ On every MCP endpoint that offers `retrieve_tools`, and on the direct endpoint (
 
 ### Activity
 
-Every search, load and file read is recorded as `skill_access` with the action (`search`, `load`, `read`), the id, the outcome and the caller. The skill text is not copied into the activity log.
+Every search, load and file read is recorded as `skill_access` with the action (`search`, `load`, `read`), the id, the outcome (`success`, `not_found`, `binary`, `damaged`, `stale_version`, `blocked`), the sizes and the caller. The skill text is not copied into the activity log. A scoped agent token that reads skills over REST is recorded the same way (action `list` or `read`, source `api`). Searches, and attempts on a server outside the caller's reach, are visible to administrators only.
 
 ```bash
 mcpproxy activity list --type skill_access
 ```
 
-To make agents use skills, add a line to the agent's own instructions file; see [Agent Instructions](agent-instructions.md).
+While the tools are offered, the instructions MCPProxy sends to every client name them, and `mcpproxy agent-instructions` adds a skills line to its snippet; see [Agent Instructions](agent-instructions.md).
 
 ## Command line
 
