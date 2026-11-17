@@ -98,6 +98,12 @@ func skillEntryFor(serverName string, rec *storage.SkillApprovalRecord, availabl
 		e.Files = append(e.Files, contracts.SkillFileInfo{Path: f.RelPath, Size: f.Size, Digest: f.Digest, Text: f.Text})
 		e.TotalSize += f.Size
 	}
+	if rec.Approved != nil {
+		e.ApprovedFiles = make([]contracts.SkillFileInfo, 0, len(rec.Approved.Files))
+		for _, f := range rec.Approved.Files {
+			e.ApprovedFiles = append(e.ApprovedFiles, contracts.SkillFileInfo{Path: f.RelPath, Size: f.Size, Digest: f.Digest, Text: f.Text})
+		}
+	}
 	e.ApprovedBy = rec.ApprovedBy
 	if !rec.ApprovedAt.IsZero() {
 		t := rec.ApprovedAt.UTC()

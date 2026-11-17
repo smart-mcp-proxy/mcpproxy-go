@@ -3430,6 +3430,14 @@ components:
           type: string
         approved_by:
           type: string
+        approved_files:
+          description: |-
+            ApprovedFiles is the file set of the approved copy; omitted when the
+            skill has no approved copy. `skills show --diff` compares it with Files.
+          items:
+            $ref: '#/components/schemas/contracts.SkillFileInfo'
+          type: array
+          uniqueItems: false
         approved_hash:
           type: string
         available:

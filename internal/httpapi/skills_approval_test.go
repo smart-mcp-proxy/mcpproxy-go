@@ -275,6 +275,7 @@ func TestSkillsList_PR2Fields(t *testing.T) {
 	_, srv, _ := skillsServer(t, true, func(c *skillsTestController) {
 		cur := skillRec("cur", storage.SkillStatusApproved, "sk1-cur")
 		cur.ApprovedHash, cur.ApprovedAt, cur.ApprovedBy = "sk1-cur", approvedAt, "api"
+		cur.Approved = &storage.SkillContent{Files: []storage.SkillFile{{RelPath: "SKILL.md", Size: 3, Digest: "sha256:aa", Text: true}}}
 		cur.Scan = &storage.SkillScan{
 			Verdict: "warnings", Complete: false, Incomplete: "size_cap", Hash: "sk1-cur",
 			ScannedAt: scannedAt, FindingsTruncated: true,
@@ -296,6 +297,9 @@ func TestSkillsList_PR2Fields(t *testing.T) {
 	c0 := list[0].(map[string]interface{})
 	require.Equal(t, "2026-11-17T08:00:00Z", c0["approved_at"])
 	require.Equal(t, "api", c0["approved_by"])
+	af := c0["approved_files"].([]interface{})
+	require.Len(t, af, 1)
+	require.Equal(t, "sha256:aa", af[0].(map[string]interface{})["digest"])
 	s0 := c0["scan"].(map[string]interface{})
 	require.Equal(t, "size_cap", s0["incomplete"])
 	require.Equal(t, "2026-11-17T07:00:00Z", s0["scanned_at"])
@@ -311,6 +315,7 @@ func TestSkillsList_PR2Fields(t *testing.T) {
 	// Never approved: approved_at omitted.
 	c2 := list[2].(map[string]interface{})
 	require.NotContains(t, c2, "approved_at")
+	require.NotContains(t, c2, "approved_files")
 	require.Equal(t, "", c2["approved_by"])
 }
 

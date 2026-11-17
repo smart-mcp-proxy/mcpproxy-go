@@ -52,11 +52,14 @@ type SkillEntry struct {
 	CurrentHash    string `json:"current_hash"`
 	ApprovedHash   string `json:"approved_hash"`
 	// ApprovedAt is omitted when the skill was never approved.
-	ApprovedAt *time.Time      `json:"approved_at,omitempty"`
-	ApprovedBy string          `json:"approved_by"`
-	Files      []SkillFileInfo `json:"files"`
-	TotalSize  int64           `json:"total_size"`
-	Scan       SkillScanInfo   `json:"scan"`
+	ApprovedAt *time.Time `json:"approved_at,omitempty"`
+	ApprovedBy string     `json:"approved_by"`
+	// ApprovedFiles is the file set of the approved copy; omitted when the
+	// skill has no approved copy. `skills show --diff` compares it with Files.
+	ApprovedFiles []SkillFileInfo `json:"approved_files,omitempty"`
+	Files         []SkillFileInfo `json:"files"`
+	TotalSize     int64           `json:"total_size"`
+	Scan          SkillScanInfo   `json:"scan"`
 }
 
 // SkillsListResponse is the response of GET /api/v1/servers/{id}/skills and
