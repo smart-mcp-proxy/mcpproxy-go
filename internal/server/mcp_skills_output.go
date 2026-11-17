@@ -185,11 +185,24 @@ func (p *MCPProxyServer) skillWordCleaner(pol skillOutputPolicy) func(string) st
 	}
 }
 
+// skillAddressable reports whether a skill can be named to an agent. A skill's
+// id is its path, which the upstream chose; a path the output policy would
+// change cannot be shown without showing what the policy withholds, and cannot
+// be shown changed either, because then it names nothing. Such a skill is left
+// out of every listing.
+func skillAddressable(clean func(string) string, sk *runtime.AvailableSkill) bool {
+	return clean(sk.Path) == sk.Path
+}
+
 // CleanSkillForAgents returns a copy of sk whose upstream-written words (name,
-// description, file paths) have passed the output policy. It is what a scoped
-// REST caller is shown, so that door and the agent tools agree.
+// description, file paths) have passed the output policy, or nil for a skill
+// that cannot be named under the policy (skillAddressable). It is what a
+// scoped REST caller is shown, so that door and the agent tools agree.
 func (p *MCPProxyServer) CleanSkillForAgents(sk *runtime.AvailableSkill) *runtime.AvailableSkill {
 	clean := p.skillWordCleaner(p.skillPolicy())
+	if !skillAddressable(clean, sk) {
+		return nil
+	}
 	out := *sk
 	out.Name = clean(sk.Name)
 	out.Description = clean(sk.Description)

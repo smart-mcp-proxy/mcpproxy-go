@@ -255,47 +255,32 @@ func (r *Runtime) skillIndexFor(cfg *config.Config, gen uint64, servers []string
 	return e.ix, nil
 }
 
-// skillSearchAttempts bounds how often one search is repeated because a hit
-// turned out to be gone.
-const skillSearchAttempts = 3
+// maxSkillSearchMatches bounds how many matches of one search are checked
+// against their records. A search with more matches reports the checked ones:
+// a total that is too low is safe, one that is too high could count a held
+// skill.
+const maxSkillSearchMatches = 1000
 
 // SearchAvailableSkills searches the skills available to a caller. total is the
 // number of matches among the skills available to THIS caller (reach applied),
 // never a wider count; hits are the best limit of them. The index it searches
-// holds the skills of the caller's reachable servers and nothing else. Every
-// returned hit is checked again against its live record, because the index may
-// be a moment old. With the feature off there is nothing: no hits, total 0.
+// holds the skills of the caller's reachable servers and nothing else.
+//
+// The index only proposes: EVERY match, returned or not, is checked against
+// its live record before it is counted, because the index may be a moment
+// older than the records (a block that has been written but not yet announced).
+// A skill that is held now is therefore never returned and never counted. With
+// the feature off there is nothing: no hits, total 0.
 func (r *Runtime) SearchAvailableSkills(query string, limit int, reach SkillReach) (hits []AvailableSkill, total int, err error) {
 	query = cutText(strings.TrimSpace(query), maxSkillQueryBytes)
 	if query == "" || limit <= 0 || r.storageManager == nil {
 		return nil, 0, nil
 	}
-	for attempt := 1; ; attempt++ {
-		var stale bool
-		hits, total, stale, err = r.searchAvailableSkillsOnce(query, limit, reach)
-		if err != nil || !stale {
-			return hits, total, err
-		}
-		// A hit was gone: the index is older than the records. Its count of
-		// the matches that were not returned cannot be trusted either, so the
-		// index is rebuilt and the search repeated.
-		r.skills.bumpIndexGeneration()
-		if attempt == skillSearchAttempts {
-			// Records keep changing under the search. Count only what was
-			// checked: too low is safe, too high would count a held skill.
-			return hits, len(hits), nil
-		}
-	}
-}
-
-// searchAvailableSkillsOnce is one search against the caller's index. stale
-// reports that a returned hit no longer has an available record.
-func (r *Runtime) searchAvailableSkillsOnce(query string, limit int, reach SkillReach) (hits []AvailableSkill, total int, stale bool, err error) {
 	s := &r.skills
 	s.idxMu.Lock()
 	if s.idxDone {
 		s.idxMu.Unlock()
-		return nil, 0, false, nil
+		return nil, 0, nil
 	}
 	// The generation is read before the configuration and the records: a
 	// change that lands after this point moves the generation past the one
@@ -304,7 +289,7 @@ func (r *Runtime) searchAvailableSkillsOnce(query string, limit int, reach Skill
 	cfg := r.Config()
 	if cfg == nil || !cfg.EnableSkills {
 		s.idxMu.Unlock()
-		return nil, 0, false, nil
+		return nil, 0, nil
 	}
 	var servers []string
 	for _, sc := range cfg.Servers {
@@ -314,23 +299,24 @@ func (r *Runtime) searchAvailableSkillsOnce(query string, limit int, reach Skill
 	}
 	if len(servers) == 0 {
 		s.idxMu.Unlock()
-		return nil, 0, false, nil
+		return nil, 0, nil
 	}
 	sort.Strings(servers)
 	ix, err := r.skillIndexFor(cfg, gen, servers)
 	if err != nil {
 		s.idxMu.Unlock()
-		return nil, 0, false, err
+		return nil, 0, err
 	}
 	// Searching under the lock keeps Close from releasing the index mid-search.
-	raw, total, err := ix.Search(query, limit)
+	raw, _, err := ix.Search(query, maxSkillSearchMatches)
 	s.idxMu.Unlock()
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, err
 	}
 
-	// One record read per returned hit, by its key: the cost of a search does
-	// not grow with the records a server has accumulated.
+	// One keyed record read per match: the cost of a search is bounded by the
+	// matches, not by the records a server has accumulated.
+	stale := false
 	for _, h := range raw {
 		rec, gerr := r.storageManager.GetSkillApproval(h.Server, h.URI)
 		if gerr != nil || rec == nil || rec.Approved == nil || rec.SkillPath != h.Path ||
@@ -338,7 +324,14 @@ func (r *Runtime) searchAvailableSkillsOnce(query string, limit int, reach Skill
 			stale = true
 			continue
 		}
-		hits = append(hits, *availableSkillOf(h.Server, rec))
+		total++
+		if len(hits) < limit {
+			hits = append(hits, *availableSkillOf(h.Server, rec))
+		}
 	}
-	return hits, total, stale, nil
+	if stale {
+		// The index is older than the records: the next search rebuilds it.
+		s.bumpIndexGeneration()
+	}
+	return hits, total, nil
 }

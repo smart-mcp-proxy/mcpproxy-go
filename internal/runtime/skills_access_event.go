@@ -16,6 +16,7 @@ const (
 	SkillAccessStaleVersion = "stale_version"
 	SkillAccessBlocked      = "blocked" // the output sanitisation policy withheld the text
 	SkillAccessInvalid      = "invalid" // the call's parameters were unusable; nothing was read
+	SkillAccessError        = "error"   // the read failed inside mcpproxy
 )
 
 // Skill access actions.

@@ -207,3 +207,27 @@ func TestSkillTools_InvalidCallsAreRecorded(t *testing.T) {
 	assert.Equal(t, runtime.SkillAccessInvalid, fx.lastRow(t).Outcome)
 	assert.Equal(t, runtime.SkillActionSearch, fx.lastRow(t).Action)
 }
+
+// A skill's id is its path, which the upstream chose. A path the policy would
+// change cannot be shown as it is, nor changed (it would name nothing): the
+// skill is left out of the answer and of the count.
+func TestRetrieveSkills_ASkillWhosePathThePolicyWouldChangeIsLeftOut(t *testing.T) {
+	fx := newSkillFixture(t)
+	fx.cat.add("hf", skillTestSecret+"/helper", "helper", "pdf helper", "sk1-a", map[string]string{"SKILL.md": "body"})
+	fx.cat.add("hf", "plain", "plain", "pdf helper too", "sk1-b", map[string]string{"SKILL.md": "body"})
+
+	res, out := fx.search(t, context.Background(), map[string]any{"query": "pdf"})
+	require.False(t, res.IsError)
+	require.Len(t, out.Skills, 2, "no mutating policy: both are listed")
+
+	for _, action := range []string{"redact", "block"} {
+		fx.policy(action)
+		res, out = fx.search(t, context.Background(), map[string]any{"query": "pdf"})
+		require.False(t, res.IsError, action)
+		assert.NotContains(t, skillResultText(t, res), skillTestSecret, action)
+		require.Len(t, out.Skills, 1, action)
+		assert.Equal(t, "hf:plain", out.Skills[0].ID, action)
+		assert.Equal(t, 1, out.Total, action)
+		assert.Equal(t, 1, fx.lastRow(t).Matches, action)
+	}
+}

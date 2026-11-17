@@ -4890,10 +4890,13 @@ func (s *Server) ListAvailableSkills(serverName string) ([]*runtime.AvailableSki
 	if err != nil || s.mcpProxy == nil {
 		return list, err
 	}
-	for i := range list {
-		list[i] = s.mcpProxy.CleanSkillForAgents(list[i])
+	out := list[:0]
+	for _, sk := range list {
+		if c := s.mcpProxy.CleanSkillForAgents(sk); c != nil {
+			out = append(out, c)
+		}
 	}
-	return list, nil
+	return out, nil
 }
 
 // EmitActivitySkillAccess records one skill access in the activity log.
@@ -4916,7 +4919,10 @@ func (s *Server) AvailableSkillFile(serverName, skillPath, relPath string) ([]by
 	if perr != nil {
 		return nil, meta, sk, perr
 	}
-	return text, meta, s.mcpProxy.CleanSkillForAgents(sk), nil
+	if c := s.mcpProxy.CleanSkillForAgents(sk); c != nil {
+		sk = c
+	}
+	return text, meta, sk, nil
 }
 
 // SkillAvailable reports whether an agent may have the skill.

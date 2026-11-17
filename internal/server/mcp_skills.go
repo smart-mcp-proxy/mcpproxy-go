@@ -437,13 +437,24 @@ func (p *MCPProxyServer) handleRetrieveSkills(ctx context.Context, request mcp.C
 	if len(hits) > limit {
 		hits = hits[:limit]
 	}
+	// Names, descriptions and ids are written by upstream servers and reach
+	// the model like skill text does: they pass the same output policy. A
+	// skill whose id the policy would change is left out.
+	clean := p.skillWordCleaner(p.skillPolicy())
+	kept := hits[:0]
+	for i := range hits {
+		if !skillAddressable(clean, &hits[i]) {
+			total--
+			continue
+		}
+		kept = append(kept, hits[i])
+	}
+	hits = kept
 	act.Results, act.Matches = len(hits), total
 	act.DurationMs = time.Since(start).Milliseconds()
 	p.emitSkillAccess(ctx, act)
 
-	// Names and descriptions are written by upstream servers and reach the
-	// model like skill text does: they pass the same output policy.
-	return mcp.NewToolResultText(renderSkillSearch(hits, total, p.skillWordCleaner(p.skillPolicy()))), nil
+	return mcp.NewToolResultText(renderSkillSearch(hits, total, clean)), nil
 }
 
 // ---------------------------------------------------------------------------

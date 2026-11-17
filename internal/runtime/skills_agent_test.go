@@ -546,6 +546,33 @@ func TestSearchAvailableSkills_AStaleHitNeverLeavesAHeldSkillInTheTotal(t *testi
 	assert.Zero(t, total, "a blocked skill is not counted, also when it was not among the returned hits")
 }
 
+// Every match is checked against its record, not only the returned ones: a
+// skill blocked behind the index's back is not counted even when the returned
+// hit is fine.
+func TestSearchAvailableSkills_AHeldSkillBeyondTheReturnedPageIsNotCounted(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf", Files: map[string][]byte{"SKILL.md": skillMD("pdf", "pdf pdf pdf", "b")}})
+	g.fx.AddSkill(skillstest.Skill{Path: "other", Files: map[string][]byte{"SKILL.md": skillMD("other", "also about pdf", "b")}})
+	require.NoError(t, g.refresh(t))
+	g.approve(t, "pdf", "other")
+	hits, total, err := g.rt.SearchAvailableSkills("pdf", 1, nil)
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	require.Equal(t, skillsSrv+":pdf", hits[0].ID, "the fixture ranks pdf first")
+	require.Equal(t, 2, total)
+
+	// The second-ranked skill is blocked; nothing tells the index.
+	rec := g.records(t)["other"]
+	rec.Blocked = true
+	require.NoError(t, g.rt.storageManager.SaveSkillApproval(rec))
+
+	hits, total, err = g.rt.SearchAvailableSkills("pdf", 1, nil)
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	assert.Equal(t, skillsSrv+":pdf", hits[0].ID)
+	assert.Equal(t, 1, total, "the blocked skill was not among the returned hits and is still not counted")
+}
+
 func TestSkillsByPath_AgreesWithSkillByPath(t *testing.T) {
 	rec := func(uri, path string, listed bool) *storage.SkillApprovalRecord {
 		return &storage.SkillApprovalRecord{SkillURI: uri, SkillPath: path, Listed: listed}

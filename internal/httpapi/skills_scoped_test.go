@@ -282,3 +282,25 @@ func TestSkills_ScopedRESTBlockedAndDamaged(t *testing.T) {
 	require.Equal(t, internalRuntime.SkillAccessDamaged, rows[1].Outcome)
 	require.Equal(t, internalRuntime.SkillAccessBlocked, rows[2].Outcome)
 }
+
+// A scoped read that ends before a skill is looked up is recorded too.
+func TestSkills_ScopedRESTReadsWithTheFeatureOffAreRecorded(t *testing.T) {
+	ctrl, srv, token := skillsServer(t, false, scopedSkillsFixture)
+
+	require.Equal(t, http.StatusOK, skillsDo(t, srv, http.MethodGet, "/api/v1/servers/alpha/skills", token).Code)
+	require.Equal(t, http.StatusNotFound, skillsDo(t, srv, http.MethodGet, contentURL(url.Values{"skill": {"ok"}}), token).Code)
+
+	rows := ctrl.accessRows()
+	require.Len(t, rows, 2)
+	require.Equal(t, internalRuntime.SkillActionList, rows[0].Action)
+	require.Equal(t, internalRuntime.SkillAccessSuccess, rows[0].Outcome)
+	require.Zero(t, rows[0].Results)
+	require.Equal(t, internalRuntime.SkillActionRead, rows[1].Action)
+	require.Equal(t, internalRuntime.SkillAccessNotFound, rows[1].Outcome)
+	require.Equal(t, "alpha:ok", rows[1].SkillID)
+
+	// An administrator's reads write none.
+	skillsDo(t, srv, http.MethodGet, "/api/v1/servers/alpha/skills", scopeAdminAPIKey)
+	skillsDo(t, srv, http.MethodGet, contentURL(url.Values{"skill": {"ok"}}), scopeAdminAPIKey)
+	require.Len(t, ctrl.accessRows(), 2)
+}

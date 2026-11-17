@@ -158,12 +158,14 @@ func (s *Server) recordAgentSkillAccess(r *http.Request, start time.Time, a inte
 func (s *Server) writeAgentSkillsList(w http.ResponseWriter, r *http.Request, serverName string) {
 	start := time.Now()
 	avail, err := s.controller.ListAvailableSkills(serverName)
-	if err == nil {
-		s.recordAgentSkillAccess(r, start, internalRuntime.SkillAccessActivity{
-			Action: internalRuntime.SkillActionList, Outcome: internalRuntime.SkillAccessSuccess,
-			Server: serverName, Results: len(avail), Matches: len(avail),
-		})
+	outcome := internalRuntime.SkillAccessSuccess
+	if err != nil {
+		outcome = internalRuntime.SkillAccessError
 	}
+	s.recordAgentSkillAccess(r, start, internalRuntime.SkillAccessActivity{
+		Action: internalRuntime.SkillActionList, Outcome: outcome,
+		Server: serverName, Results: len(avail), Matches: len(avail),
+	})
 	if err != nil {
 		s.logger.Errorw("Failed to list skills", "server", serverName, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to list skills")
@@ -202,12 +204,23 @@ func (s *Server) handleGetServerSkills(w http.ResponseWriter, r *http.Request) {
 	// A scoped caller gets the same 404 for a server outside its reach as for
 	// one that does not exist.
 	scoped := auth.IsScopedCaller(r.Context())
+	start := time.Now()
+	// recordList writes the access row of a scoped listing that ends here.
+	recordList := func(outcome string) {
+		if scoped {
+			s.recordAgentSkillAccess(r, start, internalRuntime.SkillAccessActivity{
+				Action: internalRuntime.SkillActionList, Outcome: outcome, Server: cutSkillActivityText(serverID),
+			})
+		}
+	}
 	if sc == nil || (scoped && !canSeeServer(r.Context(), sc.Name)) {
+		recordList(internalRuntime.SkillAccessNotFound)
 		s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
 		return
 	}
 	if !cfg.EnableSkills {
 		if scoped {
+			recordList(internalRuntime.SkillAccessSuccess)
 			s.writeSuccess(w, contracts.SkillsAgentListResponse{Skills: []contracts.SkillAgentEntry{}})
 			return
 		}
@@ -331,18 +344,6 @@ func (s *Server) handleGetServerSkillContent(w http.ResponseWriter, r *http.Requ
 	serverID := chi.URLParam(r, "id")
 	cfg, sc := s.skillsServerConfig(serverID)
 	scoped := auth.IsScopedCaller(r.Context())
-	if sc == nil || (scoped && !canSeeServer(r.Context(), sc.Name)) {
-		s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
-		return
-	}
-	if !cfg.EnableSkills {
-		if scoped {
-			s.writeError(w, r, http.StatusNotFound, skillNotAvailableMessage)
-			return
-		}
-		s.writeError(w, r, http.StatusNotFound, "Skills are disabled (enable_skills is off)")
-		return
-	}
 	q := r.URL.Query()
 	skillPath := q.Get("skill")
 	file := q.Get("file")
@@ -350,6 +351,10 @@ func (s *Server) handleGetServerSkillContent(w http.ResponseWriter, r *http.Requ
 		file = "SKILL.md"
 	}
 	offset := int64(0)
+	serverName := serverID
+	if sc != nil {
+		serverName = sc.Name
+	}
 
 	// record writes the access row of a scoped read, whatever its outcome; an
 	// administrator's read of its own store is not an agent access.
@@ -365,14 +370,29 @@ func (s *Server) handleGetServerSkillContent(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		a := internalRuntime.SkillAccessActivity{
-			Action: internalRuntime.SkillActionRead, Outcome: outcome, Server: sc.Name,
-			SkillID: cutSkillActivityText(sc.Name + ":" + skillPath), File: cutSkillActivityText(file),
+			Action: internalRuntime.SkillActionRead, Outcome: outcome, Server: cutSkillActivityText(serverName),
+			SkillID: cutSkillActivityText(serverName + ":" + skillPath), File: cutSkillActivityText(file),
 			Offset: offset, Bytes: n, TotalSize: int64(len(data)), DetectionText: delivered,
 		}
 		if sk != nil {
 			a.Hash, a.SkillName = sk.ApprovedHash, cutSkillActivityText(sk.Name)
 		}
 		s.recordAgentSkillAccess(r, start, a)
+	}
+
+	if sc == nil || (scoped && !canSeeServer(r.Context(), sc.Name)) {
+		record(internalRuntime.SkillAccessNotFound, 0, "")
+		s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
+		return
+	}
+	if !cfg.EnableSkills {
+		if scoped {
+			record(internalRuntime.SkillAccessNotFound, 0, "")
+			s.writeError(w, r, http.StatusNotFound, skillNotAvailableMessage)
+			return
+		}
+		s.writeError(w, r, http.StatusNotFound, "Skills are disabled (enable_skills is off)")
+		return
 	}
 	badRequest := func(msg string) {
 		record(internalRuntime.SkillAccessInvalid, 0, "")
@@ -448,6 +468,7 @@ func (s *Server) handleGetServerSkillContent(w http.ResponseWriter, r *http.Requ
 		s.writeSkillsError(w, r, http.StatusConflict, "stored_copy_damaged", err.Error())
 		return
 	case err != nil:
+		record(internalRuntime.SkillAccessError, 0, "")
 		s.logger.Errorw("Failed to read skill file", "server", serverID, "skill", skillPath, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to read skill file: %v", err))
 		return

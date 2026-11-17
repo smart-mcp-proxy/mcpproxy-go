@@ -226,7 +226,7 @@ On every MCP endpoint that offers `retrieve_tools`, and on the direct endpoint (
 
 ### Activity
 
-Every search, load and file read is recorded as `skill_access` with the action (`search`, `load`, `read`), the id, the outcome (`success`, `not_found`, `binary`, `damaged`, `stale_version`, `blocked`, `invalid`), the sizes and the caller. The skill text is not copied into the activity log. A scoped agent token that reads skills over REST is recorded the same way (action `list` or `read`, source `api`). These rows are visible to administrators only: a row names the id a caller asked for, which can be a skill that is held.
+Every search, load and file read is recorded as `skill_access` with the action (`search`, `load`, `read`), the id, the outcome (`success`, `not_found`, `binary`, `damaged`, `stale_version`, `blocked`, `invalid`, `error`), the sizes and the caller. The skill text is not copied into the activity log. A scoped agent token that reads skills over REST is recorded the same way (action `list` or `read`, source `api`). These rows are visible to administrators only: a row names the id a caller asked for, which can be a skill that is held.
 
 ```bash
 mcpproxy activity list --type skill_access
