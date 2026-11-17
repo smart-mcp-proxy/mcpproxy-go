@@ -231,3 +231,68 @@ func TestRetrieveSkills_ASkillWhosePathThePolicyWouldChangeIsLeftOut(t *testing.
 		assert.Equal(t, 1, fx.lastRow(t).Matches, action)
 	}
 }
+
+// The detector reads at most its payload limit of one input (1 MiB by
+// default; 2 KiB here, to keep the test fast). A blocking policy must still
+// see a secret that lies beyond it, and one that lies across the boundary of
+// two scan windows.
+func TestSkillText_BlockingPolicySeesTheWholeFile(t *testing.T) {
+	fx := newSkillFixture(t)
+	const limitKB = 2
+	line := strings.Repeat("harmless words ", 6) + "\n"
+	beyond := strings.Repeat(line, (3*limitKB<<10)/len(line)) + "key " + skillTestSecret + "\n"
+	// The secret straddles the first window boundary.
+	straddle := strings.Repeat("a ", (limitKB<<10)/2-5) + skillTestSecret + " tail"
+	fx.cat.add("hf", "s", "s", "d", "sk1-a", map[string]string{
+		"SKILL.md": "body", "beyond.txt": beyond, "straddle.txt": straddle, "clean.txt": strings.Repeat(line, 100),
+	})
+	detection := config.DefaultSensitiveDataDetectionConfig()
+	detection.MaxPayloadSizeKB = limitKB
+	fx.proxy.config.SensitiveDataDetection = detection
+	fx.proxy.config.OutputSanitisation = &config.OutputSanitisationConfig{ResponseAction: "block"}
+	fx.proxy.sanitisationDetector = security.NewDetector(detection)
+	require.False(t, hasCriticalDetection(fx.proxy.sanitisationDetector, beyond),
+		"the fixture must place the secret beyond what one detector scan reads")
+
+	for _, args := range []map[string]any{
+		{"id": "hf:s", "path": "beyond.txt"},
+		{"id": "hf:s", "path": "beyond.txt", "offset": float64(2 * limitKB << 10)},
+		{"id": "hf:s", "path": "straddle.txt"},
+		{"id": "hf:s", "path": "straddle.txt", "offset": float64(limitKB << 10)},
+	} {
+		res := fx.readFile(t, context.Background(), args)
+		require.True(t, res.IsError, "%v", args)
+		assert.Equal(t, "skill output blocked by the output sanitisation policy", skillResultText(t, res), "%v", args)
+	}
+	// A file with nothing in it is still served, at any offset.
+	res := fx.readFile(t, context.Background(), map[string]any{"id": "hf:s", "path": "clean.txt", "offset": float64(2 * limitKB << 10)})
+	require.False(t, res.IsError, skillResultText(t, res))
+}
+
+// A file too large to check within one call is not let out under a policy that
+// has to read it; without such a policy it is served as always.
+func TestSkillText_AFileTooLargeToCheckIsWithheldUnderAReadingPolicy(t *testing.T) {
+	fx := newSkillFixture(t)
+	fx.cat.add("hf", "s", "s", "d", "sk1-a", map[string]string{"SKILL.md": "body", "big.txt": strings.Repeat("x", skillPolicyMaxBytes+1)})
+
+	res := fx.readFile(t, context.Background(), map[string]any{"id": "hf:s", "path": "big.txt"})
+	require.False(t, res.IsError, "no reading policy: served")
+
+	for _, action := range []string{"block", "redact"} {
+		fx.policy(action)
+		res = fx.readFile(t, context.Background(), map[string]any{"id": "hf:s", "path": "big.txt"})
+		require.True(t, res.IsError, action)
+		assert.Equal(t, runtime.SkillAccessBlocked, fx.lastRow(t).Outcome, action)
+		res = fx.load(t, context.Background(), map[string]any{"id": "hf:s"})
+		require.False(t, res.IsError, "%s: the small file of the same skill is served", action)
+	}
+}
+
+func TestSkillAddressable_CoversTheAddress(t *testing.T) {
+	fx := newSkillFixture(t)
+	fx.policy("redact")
+	clean := fx.proxy.skillWordCleaner(fx.proxy.skillPolicy())
+	assert.True(t, skillAddressable(clean, &runtime.AvailableSkill{Path: "pdf", URI: "skill://pdf/SKILL.md"}))
+	assert.False(t, skillAddressable(clean, &runtime.AvailableSkill{Path: "pdf", URI: skillTestSecret + "://pdf/SKILL.md"}))
+	assert.False(t, skillAddressable(clean, &runtime.AvailableSkill{Path: skillTestSecret, URI: "skill://x/SKILL.md"}))
+}

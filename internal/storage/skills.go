@@ -233,10 +233,7 @@ func (b *BoltDB) ListSkillApprovals(serverName string) ([]*SkillApprovalRecord, 
 
 func listSkillApprovalsTx(tx *bbolt.Tx, serverName string) ([]*SkillApprovalRecord, error) {
 	var records []*SkillApprovalRecord
-	err := tx.Bucket([]byte(SkillApprovalBucket)).ForEach(func(k, v []byte) error {
-		if serverName != "" && !bytes.HasPrefix(k, []byte(serverName+":")) {
-			return nil
-		}
+	add := func(v []byte) error {
 		r := &SkillApprovalRecord{}
 		if err := r.UnmarshalBinary(v); err != nil {
 			return err
@@ -246,8 +243,21 @@ func listSkillApprovalsTx(tx *bbolt.Tx, serverName string) ([]*SkillApprovalReco
 		}
 		records = append(records, r)
 		return nil
-	})
-	return records, err
+	}
+	bucket := tx.Bucket([]byte(SkillApprovalBucket))
+	if serverName == "" {
+		return records, bucket.ForEach(func(_, v []byte) error { return add(v) })
+	}
+	// Keys are "server:<address>": seek to the server's keys and stop after
+	// them, so one server's listing does not walk every other server's.
+	prefix := []byte(serverName + ":")
+	c := bucket.Cursor()
+	for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+		if err := add(v); err != nil {
+			return nil, err
+		}
+	}
+	return records, nil
 }
 
 // DeleteSkillApproval deletes one record (absent is not an error).

@@ -1086,7 +1086,7 @@ func (r *Runtime) readSkillFileOf(serverName string, rec *storage.SkillApprovalR
 			detail += ": " + u.Error()
 		}
 		if markDamaged {
-			r.markSkillStoredCopyDamaged(serverName, rec.SkillURI, detail)
+			r.markSkillStoredCopyDamaged(serverName, rec.SkillURI, *file, detail)
 		}
 		return nil, *file, fmt.Errorf("%w: %s", ErrSkillStoredCopyDamaged, detail)
 	}
@@ -1150,17 +1150,32 @@ func skillsByPath(recs []*storage.SkillApprovalRecord) map[string]*storage.Skill
 	return out
 }
 
-func (r *Runtime) markSkillStoredCopyDamaged(serverName, skillURI, detail string) {
+// markSkillStoredCopyDamaged makes a skill unusable because a file of its
+// approved copy failed verification when it was read. The read happened
+// outside the approval lock, so the finding is checked again under it: the
+// record must still approve that very file, and the stored bytes must still
+// fail. A refresh that approved a new version in between (and collected the
+// old version's bytes) therefore withdraws nothing.
+func (r *Runtime) markSkillStoredCopyDamaged(serverName, skillURI string, file storage.SkillFile, detail string) {
 	inc, ok := r.ServerIncarnation(serverName)
 	if !ok {
 		return
 	}
 	var counts map[string]int
+	marked := false
 	err := r.WithServerApprovalLockAt(serverName, inc, func() error {
 		rec, err := r.storageManager.GetSkillApproval(serverName, skillURI)
 		if err != nil {
 			return err
 		}
+		if !approvesFile(rec, file) {
+			return nil // another version is approved now
+		}
+		if data, gerr := r.storageManager.GetSkillFile(serverName, file.Digest); gerr == nil &&
+			skills.VerifyFile(skills.FileRef{URI: file.URI, Digest: file.Digest, Size: file.Size}, data) == nil {
+			return nil // the bytes are there and right: the first read raced a write
+		}
+		marked = true
 		rec.Status = storage.SkillStatusUnusable
 		rec.UnusableReason = skills.ReasonStoredCopyDamaged + ": " + detail
 		rec.UpdatedAt = time.Now()
@@ -1176,7 +1191,23 @@ func (r *Runtime) markSkillStoredCopyDamaged(serverName, skillURI, detail string
 			zap.String("server", serverName), zap.String("skill", skillURI), zap.Error(err))
 		return
 	}
-	r.publishSkillsChanged(serverName, counts)
+	if marked {
+		r.publishSkillsChanged(serverName, counts)
+	}
+}
+
+// approvesFile reports whether the record's approved copy contains exactly
+// this file (same path, same digest).
+func approvesFile(rec *storage.SkillApprovalRecord, file storage.SkillFile) bool {
+	if rec == nil || rec.Approved == nil {
+		return false
+	}
+	for i := range rec.Approved.Files {
+		if rec.Approved.Files[i].RelPath == file.RelPath && rec.Approved.Files[i].Digest == file.Digest {
+			return true
+		}
+	}
+	return false
 }
 
 // --- triggers ---

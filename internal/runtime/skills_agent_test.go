@@ -594,3 +594,33 @@ func TestSkillsByPath_AgreesWithSkillByPath(t *testing.T) {
 		assert.Same(t, want, got[p], p)
 	}
 }
+
+// A read happens outside the approval lock. When another version was approved
+// in between and the old version's bytes were collected, the failed read must
+// not withdraw the healthy new approval.
+func TestMarkSkillStoredCopyDamaged_OnlyTheApprovedFileThatStillFails(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf"})
+	require.NoError(t, g.refresh(t))
+	g.approve(t, "pdf")
+	rec := g.records(t)["pdf"]
+	require.NotEmpty(t, rec.Approved.Files)
+	current := rec.Approved.Files[0]
+
+	// A file of an older approved version: not in the approved copy any more.
+	old := current
+	old.Digest = "sha256:" + strings.Repeat("0", 64)
+	g.rt.markSkillStoredCopyDamaged(skillsSrv, rec.SkillURI, old, "stale read")
+	assert.Equal(t, storage.SkillStatusApproved, g.records(t)["pdf"].Status, "another version is approved now: nothing is withdrawn")
+
+	// The approved file, whose bytes are there and right: the read raced a write.
+	g.rt.markSkillStoredCopyDamaged(skillsSrv, rec.SkillURI, current, "raced")
+	assert.Equal(t, storage.SkillStatusApproved, g.records(t)["pdf"].Status)
+
+	// The approved file, really damaged.
+	require.NoError(t, g.rt.storageManager.PutSkillFile(skillsSrv, current.Digest, []byte("evil")))
+	g.rt.markSkillStoredCopyDamaged(skillsSrv, rec.SkillURI, current, "damaged")
+	got := g.records(t)["pdf"]
+	assert.Equal(t, storage.SkillStatusUnusable, got.Status)
+	assert.Contains(t, got.UnusableReason, skills.ReasonStoredCopyDamaged)
+}

@@ -126,8 +126,55 @@ func (p *MCPProxyServer) servedSkillText(pol skillOutputPolicy, serverName, dige
 	return e
 }
 
+// skillScanOverlap is how far two neighbouring scan windows overlap, so that a
+// secret lying across a window boundary is whole in one of them.
+const skillScanOverlap = 8 << 10
+
+// criticalAnywhere reports a critical secret anywhere in text. The detector
+// reads at most its configured payload size of one input and ignores the rest,
+// while a skill file may be many times larger: the text is scanned in
+// overlapping windows no larger than that size.
+func (p *MCPProxyServer) criticalAnywhere(text string) bool {
+	window := 256 << 10
+	if live := p.currentConfig(); live != nil {
+		if max := live.SensitiveDataDetection.GetMaxPayloadSize(); max < window {
+			window = max
+		}
+	}
+	if window < 1 {
+		window = 1
+	}
+	overlap := skillScanOverlap
+	if overlap > window/2 {
+		overlap = window / 2
+	}
+	for start := 0; ; start += window - overlap {
+		end := start + window
+		if end > len(text) {
+			end = len(text)
+		}
+		if hasCriticalDetection(p.sanitisationDetector, text[start:end]) {
+			return true
+		}
+		if end == len(text) {
+			return false
+		}
+	}
+}
+
+// skillPolicyMaxBytes is the largest file a policy that reads the text (block,
+// redact) is applied to. The detector needs seconds per mebibyte; a larger
+// file cannot be checked within one call, and what cannot be checked is not
+// let out under such a policy.
+const skillPolicyMaxBytes = 4 << 20
+
+const skillTooLargeForPolicy = "the file is larger than the output sanitisation policy can check"
+
 func (p *MCPProxyServer) sanitiseWholeSkillText(pol skillOutputPolicy, text string) skillServed {
-	critical := pol.cfg.IsBlock() && p.sanitisationDetector != nil && hasCriticalDetection(p.sanitisationDetector, text)
+	if len(text) > skillPolicyMaxBytes && (pol.cfg.IsBlock() || pol.cfg.IsRedact()) && p.sanitisationDetector != nil {
+		return skillServed{blocked: true, reason: skillTooLargeForPolicy}
+	}
+	critical := pol.cfg.IsBlock() && p.sanitisationDetector != nil && p.criticalAnywhere(text)
 	d := pol.decide(critical)
 	if d.block {
 		return skillServed{blocked: true, reason: d.reason}
@@ -191,7 +238,9 @@ func (p *MCPProxyServer) skillWordCleaner(pol skillOutputPolicy) func(string) st
 // be shown changed either, because then it names nothing. Such a skill is left
 // out of every listing.
 func skillAddressable(clean func(string) string, sk *runtime.AvailableSkill) bool {
-	return clean(sk.Path) == sk.Path
+	// The address is upstream text as well (its scheme and host are the
+	// upstream's choice) and is shown by the scoped REST list.
+	return clean(sk.Path) == sk.Path && clean(sk.URI) == sk.URI
 }
 
 // CleanSkillForAgents returns a copy of sk whose upstream-written words (name,

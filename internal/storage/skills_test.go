@@ -218,3 +218,28 @@ func TestPurge_SkillBucketsExactServer(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, gone)
 }
+
+// One server's listing reads that server's keys only, also when another
+// server's name starts with it.
+func TestListSkillApprovals_OneServerOnly(t *testing.T) {
+	m := newPurgeTestManager(t)
+	for _, s := range []string{"a", "ab", "b"} {
+		for _, u := range []string{"skill://one/SKILL.md", "skill://two/SKILL.md"} {
+			require.NoError(t, m.SaveSkillApproval(skillRec(s, u, nil, nil)))
+		}
+	}
+	for _, s := range []string{"a", "ab", "b"} {
+		recs, err := m.ListSkillApprovals(s)
+		require.NoError(t, err)
+		require.Len(t, recs, 2, s)
+		for _, r := range recs {
+			assert.Equal(t, s, r.ServerName)
+		}
+	}
+	none, err := m.ListSkillApprovals("c")
+	require.NoError(t, err)
+	assert.Empty(t, none)
+	all, err := m.ListSkillApprovals("")
+	require.NoError(t, err)
+	assert.Len(t, all, 6)
+}

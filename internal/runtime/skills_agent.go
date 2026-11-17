@@ -168,6 +168,17 @@ func (r *Runtime) AvailableSkillFile(serverName, skillPath, relPath string) ([]b
 		return nil, storage.SkillFile{}, nil, skillNotFound(serverName, skillPath)
 	}
 	data, file, err := r.readSkillFileOf(serverName, rec, rec.Approved, relPath, true)
+	if errors.Is(err, ErrSkillStoredCopyDamaged) {
+		// The record was read before the bytes. If another version was
+		// approved in between, the bytes of the version read here may be gone
+		// for a good reason: read once more, from the record as it is now.
+		// A skill that is not available any more (the damage was real and
+		// it is unusable now) keeps the damaged answer of this read.
+		if again, aerr := r.availableRecord(serverName, skillPath); aerr == nil && again != nil && again.ApprovedHash != rec.ApprovedHash {
+			rec = again
+			data, file, err = r.readSkillFileOf(serverName, rec, rec.Approved, relPath, true)
+		}
+	}
 	if errors.Is(err, ErrSkillFileNotFound) {
 		return nil, storage.SkillFile{}, nil, skillNotFound(serverName, skillPath)
 	}
