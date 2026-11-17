@@ -16,9 +16,9 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
-// Spec 125 (skills over MCP), PR-1: `mcpproxy skills list|show|refresh`.
-// Daemon-only and administrator-only, like the REST endpoints they read:
-// nothing here is offered to agents yet.
+// Spec 125 (skills over MCP): `mcpproxy skills list|show|refresh` (PR-1) and
+// `approve|block|unblock` (PR-2). Daemon-only and administrator-only, like the
+// REST endpoints they call: nothing here is offered to agents yet.
 
 const skillsCallTimeout = 30 * time.Second
 
@@ -31,8 +31,9 @@ func GetSkillsCommand() *cobra.Command {
 		Short: "Inspect the skills that upstream servers serve (administrators)",
 		Long: `Inspect the agent skills that upstream MCP servers serve through the skills
 extension. mcpproxy reads each skill, checks the size and SHA-256 of every file
-and keeps a record you can list and read. This release only shows them to
-administrators; skills are not offered to agents yet.
+and keeps a record you can list and read. A skill stays held until an
+administrator approves the exact content that was reviewed; skills are not
+offered to agents yet.
 
 Skills over MCP is off by default. Set enable_skills: true in the configuration
 to turn it on, and expose_skills: false on a server to exclude that server.
@@ -42,9 +43,14 @@ Examples:
   mcpproxy skills list --server hf
   mcpproxy skills show hf:hf-cli
   mcpproxy skills show hf:hf-cli --file references/auth.md
-  mcpproxy skills refresh hf`,
+  mcpproxy skills show hf:hf-cli --diff
+  mcpproxy skills refresh hf
+  mcpproxy skills approve hf:hf-cli
+  mcpproxy skills approve --server hf --all --yes
+  mcpproxy skills block hf:hf-cli`,
 	}
-	cmd.AddCommand(newSkillsListCmd(), newSkillsShowCmd(), newSkillsRefreshCmd())
+	cmd.AddCommand(newSkillsListCmd(), newSkillsShowCmd(), newSkillsRefreshCmd(),
+		newSkillsApproveCmd(), newSkillsBlockCmd(true), newSkillsBlockCmd(false))
 	silenceUsageOnRun(cmd)
 	return cmd
 }
@@ -70,25 +76,40 @@ Examples:
 
 func newSkillsShowCmd() *cobra.Command {
 	var file string
-	var approved bool
+	var approved, diff bool
 	cmd := &cobra.Command{
 		Use:   "show <server>:<skill>",
-		Short: "Show one skill and the text of one of its files",
-		Long: `Show a skill: name, description, status, content hash and its files, then the
-text of one file (SKILL.md unless --file is given). Long files are read in
-chunks until the end. A binary file cannot be shown.
+		Short: "Show one skill and the text of one of its files, or what changed since approval",
+		Long: `Show a skill: name, description, status, content hash, who approved it and the
+scan result, its files, then the text of one file (SKILL.md unless --file is
+given). Long files are read in chunks until the end. A binary file cannot be
+shown.
+
+With --diff, show what changed since the last approval instead: the files that
+were added, removed or changed, and for every text file that changed a unified
+diff of the approved copy against the current copy (each file is cut at 1 MiB;
+binary files are named but not compared). A skill that was never approved has
+nothing to compare.
 
 Examples:
   mcpproxy skills show hf:hf-cli
   mcpproxy skills show hf:hf-cli --file references/auth.md
-  mcpproxy skills show hf:hf-cli --approved`,
+  mcpproxy skills show hf:hf-cli --approved
+  mcpproxy skills show hf:hf-cli --diff`,
 		Args: argsOrHelpJSON(cobra.ExactArgs(1)),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if diff {
+				if cmd.Flags().Changed("file") || approved {
+					return newFlagValidationError("--diff cannot be combined with --file or --approved")
+				}
+				return termSafeErr(runSkillsShowDiff(args[0]))
+			}
 			return termSafeErr(runSkillsShow(args[0], file, approved))
 		},
 	}
 	cmd.Flags().StringVar(&file, "file", "", "File inside the skill (default SKILL.md)")
 	cmd.Flags().BoolVar(&approved, "approved", false, "Read the approved copy instead of the current one")
+	cmd.Flags().BoolVar(&diff, "diff", false, "Show what changed since the last approval")
 	return cmd
 }
 
@@ -165,7 +186,7 @@ func printSkillsTable(lists []*contracts.SkillsListResponse) error {
 	var notes []string
 	for _, l := range lists {
 		for _, e := range l.Skills {
-			rows = append(rows, []string{termSafe(l.Server), termSafe(e.Path), termSafe(skillStatusCell(e)), strconv.Itoa(len(e.Files)), humanBytes(e.TotalSize)})
+			rows = append(rows, []string{termSafe(l.Server), termSafe(e.Path), termSafe(skillStatusCell(e)), strconv.Itoa(len(e.Files)), humanBytes(e.TotalSize), termSafe(skillScanLabel(e))})
 		}
 		if l.Error != "" {
 			notes = append(notes, termSafe(l.Server+": "+l.Error))
@@ -176,7 +197,7 @@ func printSkillsTable(lists []*contracts.SkillsListResponse) error {
 	}
 	if len(rows) == 0 {
 		fmt.Println("No skills found.")
-	} else if err := printTable([]string{"SERVER", "SKILL", "STATUS", "FILES", "SIZE"}, rows); err != nil {
+	} else if err := printTable([]string{"SERVER", "SKILL", "STATUS", "FILES", "SIZE", "SCAN"}, rows); err != nil {
 		return err
 	}
 	for _, n := range notes {
@@ -186,10 +207,40 @@ func printSkillsTable(lists []*contracts.SkillsListResponse) error {
 }
 
 func skillStatusCell(e contracts.SkillEntry) string {
-	if e.Status == "unusable" && e.UnusableReason != "" {
-		return "unusable (" + e.UnusableReason + ")"
+	st := e.Status
+	if st == "unusable" && e.UnusableReason != "" {
+		st = "unusable (" + e.UnusableReason + ")"
 	}
-	return e.Status
+	if e.Blocked {
+		st += ", blocked"
+	}
+	return st
+}
+
+// skillScanLabel says what the scan of the skill's current content found, in
+// the words an approval review needs: the verdict, "scan incomplete" (with the
+// reason) when the scan did not cover everything, or "not scanned", and the
+// number of findings.
+func skillScanLabel(e contracts.SkillEntry) string {
+	sc := e.Scan
+	if sc.Verdict == "" && sc.ScannedAt == nil {
+		return "not scanned"
+	}
+	label := sc.Verdict
+	if !sc.Complete {
+		label = "scan incomplete"
+		if sc.Incomplete != "" {
+			label += " (" + sc.Incomplete + ")"
+		}
+		if sc.Verdict != "" {
+			label += ", " + sc.Verdict
+		}
+	}
+	more := ""
+	if sc.FindingsTruncated {
+		more = "+"
+	}
+	return label + fmt.Sprintf(", %d%s finding(s)", len(sc.Findings), more)
 }
 
 // termSafe makes text that came from an upstream server safe to print on one
@@ -347,34 +398,13 @@ func runSkillsShow(target, file string, approved bool) error {
 		return fmt.Errorf("%w: %s", err, target)
 	}
 
-	var text strings.Builder
-	offset := int64(0)
-	var digest string
-	var size int64
-	for first := true; ; first = false {
-		chunk, err := s.client.GetServerSkillContent(ctx, server, skill, file, approved, offset)
-		if err != nil {
-			return err
-		}
-		// Every chunk names the version it was cut from. A refresh between two
-		// requests would otherwise be shown as text no version contains.
-		if first {
-			digest, size = chunk.Digest, chunk.Size
-		} else if chunk.Digest != digest || chunk.Size != size {
-			return fmt.Errorf("%s changed while it was being read; run the command again", termSafe(file))
-		}
-		text.WriteString(chunk.Text)
-		if chunk.NextOffset == nil {
-			break
-		}
-		if *chunk.NextOffset <= offset {
-			return fmt.Errorf("the daemon did not advance the read offset (%d); stopping", offset)
-		}
-		offset = *chunk.NextOffset
+	body, _, err := readSkillFile(ctx, s.client, server, skill, file, approved, 0)
+	if err != nil {
+		return err
 	}
 
 	if structuredOutput() {
-		return printJSONValue(skillShowDoc{SkillEntry: *entry, File: file, Copy: copyName, Text: text.String()})
+		return printJSONValue(skillShowDoc{SkillEntry: *entry, File: file, Copy: copyName, Text: body})
 	}
 	fmt.Printf("Skill:        %s\n", termSafe(entry.ID))
 	fmt.Printf("Name:         %s\n", termSafe(entry.Name))
@@ -384,7 +414,28 @@ func runSkillsShow(target, file string, approved bool) error {
 	if entry.ApprovedHash != "" {
 		fmt.Printf("Approved:     %s\n", termSafe(entry.ApprovedHash))
 	}
-	fmt.Printf("Available:    %t\n\n", entry.Available)
+	if entry.ApprovedAt != nil || entry.ApprovedBy != "" {
+		when := "-"
+		if entry.ApprovedAt != nil {
+			when = entry.ApprovedAt.UTC().Format(time.RFC3339)
+		}
+		fmt.Printf("Approved by:  %s at %s\n", termSafe(dash(entry.ApprovedBy)), when)
+	}
+	fmt.Printf("Scan:         %s\n", termSafe(skillScanLabel(*entry)))
+	if entry.Scan.ScannedAt != nil {
+		fmt.Printf("Scanned at:   %s\n", entry.Scan.ScannedAt.UTC().Format(time.RFC3339))
+	}
+	fmt.Printf("Available:    %t\n", entry.Available)
+	if len(entry.Scan.Findings) > 0 {
+		fmt.Println("Findings:")
+		for _, f := range entry.Scan.Findings {
+			fmt.Printf("  - %s %s in %s at byte %d: %s\n", termSafe(f.Severity), termSafe(f.Rule), termSafe(f.File), f.Offset, termSafe(f.Evidence))
+		}
+		if entry.Scan.FindingsTruncated {
+			fmt.Println("  (more findings exist than are listed)")
+		}
+	}
+	fmt.Println()
 	rows := make([][]string, 0, len(entry.Files))
 	for _, f := range entry.Files {
 		kind := "text"
@@ -396,8 +447,8 @@ func runSkillsShow(target, file string, approved bool) error {
 	if err := printTable([]string{"FILE", "SIZE", "TYPE", "DIGEST"}, rows); err != nil {
 		return err
 	}
-	fmt.Printf("\n--- %s (%s copy) ---\n%s", termSafe(file), copyName, termSafeText(text.String()))
-	if !strings.HasSuffix(text.String(), "\n") {
+	fmt.Printf("\n--- %s (%s copy) ---\n%s", termSafe(file), copyName, termSafeText(body))
+	if !strings.HasSuffix(body, "\n") {
 		fmt.Println()
 	}
 	return nil
