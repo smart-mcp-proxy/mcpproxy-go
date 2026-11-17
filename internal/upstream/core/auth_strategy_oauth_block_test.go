@@ -60,7 +60,7 @@ func TestAuthStrategies_OAuthBlockDropsNoAuth(t *testing.T) {
 }
 
 // MCPPROXY_DISABLE_OAUTH (test fixtures) must keep the historical chain even
-// with an oauth block: the ladder never consulted oauth.ShouldUseOAuth, so the
+// with an oauth block: the ladder never consulted oauth.ManualLoginApplicable, so the
 // env gate has to be honoured here or fixtures would run DCR under -race.
 func TestAuthStrategies_DisableOAuthEnvKeepsHistoricalChain(t *testing.T) {
 	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")

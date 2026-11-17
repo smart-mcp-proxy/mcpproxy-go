@@ -68,7 +68,7 @@ func (c *Client) sseAuthStrategies() []authStrategy {
 // an oauth block as decisive over a static Authorization header).
 //
 // MCPPROXY_DISABLE_OAUTH keeps the historical chain: the ladder never consulted
-// oauth.ShouldUseOAuth, so the fixture gate has to be honoured here too.
+// oauth.ManualLoginApplicable, so the fixture gate has to be honoured here too.
 func (c *Client) oauthRequiredByConfig() bool {
 	if os.Getenv("MCPPROXY_DISABLE_OAUTH") == "true" {
 		return false
