@@ -297,6 +297,10 @@ type ServerController interface {
 	SkillFileText(serverName, skillPath, relPath string, approvedCopy bool) ([]byte, storage.SkillFile, error)
 	SkillAvailable(serverName string, rec *storage.SkillApprovalRecord) bool
 	RefreshServerSkills(ctx context.Context, serverName string) error
+	// Spec 125 PR-2: the approval gate. Both are review- and
+	// incarnation-bound in the runtime; ctx carries the actor.
+	ApproveSkillsReviewedAt(ctx context.Context, serverName string, skillPaths []string, expected map[string]string, approvedBy string, expectedIncarnation int64) (int, error)
+	SetSkillsBlockedAt(ctx context.Context, serverName string, skillPaths []string, blocked bool, by string, expectedIncarnation int64) (int, error)
 
 	// Onboarding wizard (Spec 046)
 	GetOnboardingState() (*storage.OnboardingState, error)
@@ -1158,6 +1162,10 @@ func (s *Server) setupRoutes() {
 			r.Get("/skills", s.handleGetServerSkills)
 			r.Get("/skills/content", s.handleGetServerSkillContent)
 			r.Post("/skills/refresh", s.handleRefreshServerSkills)
+			// Spec 125 PR-2: the approval gate, administrator-only.
+			r.Post("/skills/approve", s.handleApproveServerSkills)
+			r.Post("/skills/block", s.handleBlockServerSkills)
+			r.Post("/skills/unblock", s.handleUnblockServerSkills)
 			r.Get("/review", s.handleGetServerReview)
 			r.Get("/logs", s.handleGetServerLogs)
 			// Spec 044: per-server diagnostics with stable error_code.

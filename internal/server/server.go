@@ -4887,6 +4887,17 @@ func (s *Server) RefreshServerSkills(ctx context.Context, serverName string) err
 	return s.runtime.RefreshServerSkills(ctx, serverName)
 }
 
+// ApproveSkillsReviewedAt approves skills bound to the reviewed content hashes
+// and server incarnation (Spec 125 PR-2).
+func (s *Server) ApproveSkillsReviewedAt(ctx context.Context, serverName string, skillPaths []string, expected map[string]string, approvedBy string, expectedIncarnation int64) (int, error) {
+	return s.runtime.ApproveSkillsReviewedAt(ctx, serverName, skillPaths, expected, approvedBy, expectedIncarnation)
+}
+
+// SetSkillsBlockedAt sets or clears the blocked mark on skills (Spec 125 PR-2).
+func (s *Server) SetSkillsBlockedAt(ctx context.Context, serverName string, skillPaths []string, blocked bool, by string, expectedIncarnation int64) (int, error) {
+	return s.runtime.SetSkillsBlockedAt(ctx, serverName, skillPaths, blocked, by, expectedIncarnation)
+}
+
 // ListToolApprovals returns tool approval records for a server (Spec 032).
 func (s *Server) ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error) {
 	return s.runtime.ListToolApprovals(serverName)

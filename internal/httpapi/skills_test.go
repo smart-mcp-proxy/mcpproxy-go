@@ -33,6 +33,33 @@ type skillsTestController struct {
 	refreshErr   error
 	files        map[string][]byte // "<skill>|<rel>|<current|approved>"
 	fileErr      error
+
+	// approveFn / blockFn stand in for the runtime approval writers (PR-2).
+	approveFn func(ctx context.Context, server string, skills []string, expected map[string]string, by string, inc int64) (int, error)
+	blockFn   func(ctx context.Context, server string, skills []string, blocked bool, by string, inc int64) (int, error)
+	// incarnations answers ServerIncarnation (the optional reader capability).
+	incarnations map[string]int64
+}
+
+func (c *skillsTestController) ServerIncarnation(name string) (int64, bool) {
+	inc, ok := c.incarnations[name]
+	return inc, ok
+}
+
+func (c *skillsTestController) ApproveSkillsReviewedAt(ctx context.Context, server string, skills []string, expected map[string]string, by string, inc int64) (int, error) {
+	c.record("ApproveSkillsReviewedAt")
+	if c.approveFn == nil {
+		return 0, nil
+	}
+	return c.approveFn(ctx, server, skills, expected, by, inc)
+}
+
+func (c *skillsTestController) SetSkillsBlockedAt(ctx context.Context, server string, skills []string, blocked bool, by string, inc int64) (int, error) {
+	c.record("SetSkillsBlockedAt")
+	if c.blockFn == nil {
+		return 0, nil
+	}
+	return c.blockFn(ctx, server, skills, blocked, by, inc)
 }
 
 func (c *skillsTestController) record(call string) {

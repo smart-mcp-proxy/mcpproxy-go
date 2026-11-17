@@ -98,9 +98,22 @@ func skillEntryFor(serverName string, rec *storage.SkillApprovalRecord, availabl
 		e.Files = append(e.Files, contracts.SkillFileInfo{Path: f.RelPath, Size: f.Size, Digest: f.Digest, Text: f.Text})
 		e.TotalSize += f.Size
 	}
-	if rec.Scan != nil {
+	e.ApprovedBy = rec.ApprovedBy
+	if !rec.ApprovedAt.IsZero() {
+		t := rec.ApprovedAt.UTC()
+		e.ApprovedAt = &t
+	}
+	// A scan of older content says nothing about the current content, so it
+	// is reported only when it was made of exactly the current hash.
+	if rec.Scan != nil && rec.Scan.Hash == rec.CurrentHash {
 		e.Scan.Verdict = rec.Scan.Verdict
 		e.Scan.Complete = rec.Scan.Complete
+		e.Scan.Incomplete = rec.Scan.Incomplete
+		e.Scan.FindingsTruncated = rec.Scan.FindingsTruncated
+		if !rec.Scan.ScannedAt.IsZero() {
+			t := rec.Scan.ScannedAt.UTC()
+			e.Scan.ScannedAt = &t
+		}
 		for _, f := range rec.Scan.Findings {
 			e.Scan.Findings = append(e.Scan.Findings, contracts.SkillScanFinding{
 				File: f.File, Offset: f.Offset, Rule: f.Rule, Severity: f.Severity, Evidence: f.Evidence,
@@ -137,7 +150,17 @@ func (s *Server) handleGetServerSkills(w http.ResponseWriter, r *http.Request) {
 		s.writeSuccess(w, contracts.SkillsListResponse{Skills: []contracts.SkillEntry{}})
 		return
 	}
-	out, err := s.buildSkillsList(serverID, sc)
+	var out contracts.SkillsListResponse
+	inc, err := s.readAtSettledIncarnation(serverID, func() error {
+		var rerr error
+		out, rerr = s.buildSkillsList(serverID, sc)
+		return rerr
+	})
+	if errors.Is(err, errIncarnationUnsettled) {
+		s.writeSkillsError(w, r, http.StatusConflict, "server_replaced", "the server was removed or replaced while its skills were read; retry")
+		return
+	}
+	out.Incarnation = inc
 	if err != nil {
 		s.logger.Errorw("Failed to list skills", "server", serverID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to list skills: %v", err))
@@ -199,6 +222,7 @@ func (s *Server) handleRefreshServerSkills(w http.ResponseWriter, r *http.Reques
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to list skills: %v", err))
 		return
 	}
+	out.Incarnation = s.serverIncarnationOf(serverID)
 	s.writeSuccess(w, out)
 }
 
