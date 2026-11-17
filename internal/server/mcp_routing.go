@@ -1686,6 +1686,8 @@ func (p *MCPProxyServer) RefreshCodeExecutionAvailability() {
 //     tool under its bare name, and skills are not offered through it by these
 //     tools.
 func (p *MCPProxyServer) RefreshSkillsAvailability() {
+	// The configuration may have changed what the output policy lets out.
+	p.resetSkillOutputState()
 	p.RefreshCallToolModeTools()
 	p.RefreshCodeExecModeTools()
 

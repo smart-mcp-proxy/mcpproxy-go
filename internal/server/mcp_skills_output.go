@@ -100,6 +100,17 @@ func (p *MCPProxyServer) skillSecretDetector() *security.Detector {
 	return p.skillDetector
 }
 
+// resetSkillOutputState forgets what was computed under the configuration that
+// was live until now: the served texts, and the detector skills built for
+// themselves (its patterns and limits come from the detection settings). It
+// runs on every configuration reload.
+func (p *MCPProxyServer) resetSkillOutputState() {
+	p.skillServedMu.Lock()
+	defer p.skillServedMu.Unlock()
+	p.skillServedCache = nil
+	p.skillDetector = nil
+}
+
 // sanitise redacts and strips txt as d says, with the policy's own detector.
 func (pol skillOutputPolicy) sanitise(txt string, d osDecision, cats, classes map[string]struct{}) (string, int) {
 	n := 0
@@ -176,39 +187,56 @@ func (p *MCPProxyServer) servedSkillText(pol skillOutputPolicy, serverName, dige
 	return e
 }
 
-// skillScanOverlap is how far two neighbouring scan windows overlap, so that a
-// secret lying across a window boundary is whole in one of them.
-const skillScanOverlap = 8 << 10
+const (
+	// skillScanWindow is the largest piece of text given to the detector at
+	// once.
+	skillScanWindow = 256 << 10
+	// skillScanOverlap is how far two neighbouring scan windows overlap, so
+	// that a secret lying across a window boundary is whole in one of them.
+	skillScanOverlap = 8 << 10
+	// skillScanMinWindow is the smallest window tried before a text counts as
+	// one that cannot be checked.
+	skillScanMinWindow = 512
+)
 
 // criticalAnywhere reports a critical secret anywhere in text. The detector
-// reads at most its configured payload size of one input and ignores the rest,
-// while a skill file may be many times larger: the text is scanned in
-// overlapping windows no larger than that size.
-func (p *MCPProxyServer) criticalAnywhere(det *security.Detector, text string) bool {
-	window := 256 << 10
-	if live := p.currentConfig(); live != nil {
-		if max := live.SensitiveDataDetection.GetMaxPayloadSize(); max < window {
-			window = max
-		}
-	}
-	if window < 1 {
-		window = 1
-	}
-	overlap := skillScanOverlap
-	if overlap > window/2 {
-		overlap = window / 2
-	}
-	for start := 0; ; start += window - overlap {
+// reads at most its payload limit of one input and says so when it read less
+// than it was given, while a skill file may be many times larger: the text is
+// scanned in overlapping windows, and a window the detector did not read
+// whole is halved and scanned again. The limit that counts is the one the
+// detector itself applies, whatever the configuration says now. A text that
+// cannot be read whole even in the smallest window counts as critical: what
+// cannot be checked is not let out.
+func criticalAnywhere(det *security.Detector, text string) bool {
+	window := skillScanWindow
+	for start := 0; ; {
 		end := start + window
 		if end > len(text) {
 			end = len(text)
 		}
-		if hasCriticalDetection(det, text[start:end]) {
-			return true
+		res := det.Scan("", text[start:end])
+		if res != nil && res.Truncated {
+			if window <= skillScanMinWindow {
+				return true
+			}
+			window /= 2
+			continue
+		}
+		if res != nil && res.Detected {
+			for _, d := range res.Detections {
+				if d.Severity == string(security.SeverityCritical) {
+					return true
+				}
+			}
 		}
 		if end == len(text) {
 			return false
 		}
+		overlap := skillScanOverlap
+		if overlap > window/2 {
+			overlap = window / 2
+		}
+		start = end - overlap
 	}
 }
 
@@ -224,7 +252,7 @@ func (p *MCPProxyServer) sanitiseWholeSkillText(pol skillOutputPolicy, text stri
 	if len(text) > skillPolicyMaxBytes && pol.detector != nil {
 		return skillServed{blocked: true, reason: skillTooLargeForPolicy}
 	}
-	critical := pol.cfg.IsBlock() && p.criticalAnywhere(pol.detector, text)
+	critical := pol.cfg.IsBlock() && criticalAnywhere(pol.detector, text)
 	d := pol.decide(critical)
 	if d.block {
 		return skillServed{blocked: true, reason: d.reason}
@@ -262,7 +290,7 @@ func (p *MCPProxyServer) skillWordCleaner(pol skillOutputPolicy) func(string) st
 	}
 	if pol.cfg.IsBlock() {
 		return func(s string) string {
-			if hasCriticalDetection(pol.detector, s) {
+			if criticalAnywhere(pol.detector, s) {
 				return skillWordWithheld
 			}
 			return s

@@ -269,6 +269,32 @@ func TestSkillText_BlockingPolicySeesTheWholeFile(t *testing.T) {
 	require.False(t, res.IsError, skillResultText(t, res))
 }
 
+// The limit that counts is the one the detector applies, not the one the
+// configuration names now: a detector built with a small limit keeps it after
+// the setting was raised, and the scan must still cover every byte.
+func TestCriticalAnywhere_FollowsTheDetectorsOwnLimit(t *testing.T) {
+	small := config.DefaultSensitiveDataDetectionConfig()
+	small.MaxPayloadSizeKB = 2
+	det := security.NewDetector(small)
+
+	text := strings.Repeat("harmless words ", 700) + "key " + skillTestSecret + " " + strings.Repeat("more words ", 2000)
+	require.Greater(t, len(text), 10000)
+	require.False(t, hasCriticalDetection(det, text), "one scan of the detector reads only its first 2 KiB")
+	assert.True(t, criticalAnywhere(det, text))
+	assert.False(t, criticalAnywhere(det, strings.Repeat("harmless words ", 3000)))
+	assert.False(t, criticalAnywhere(det, ""))
+
+	// The live setting says 1 MiB; the detector in use still reads 2 KiB.
+	fx := newSkillFixture(t)
+	fx.cat.add("hf", "s", "s", "d", "sk1-a", map[string]string{"SKILL.md": text})
+	fx.proxy.config.SensitiveDataDetection = config.DefaultSensitiveDataDetectionConfig()
+	fx.proxy.config.OutputSanitisation = &config.OutputSanitisationConfig{ResponseAction: "block"}
+	fx.proxy.sanitisationDetector = det
+	res := fx.load(t, context.Background(), map[string]any{"id": "hf:s", "offset": float64(9000)})
+	require.True(t, res.IsError)
+	assert.Equal(t, runtime.SkillAccessBlocked, fx.lastRow(t).Outcome)
+}
+
 // A file too large to check within one call is not let out under a policy that
 // has to read it; without such a policy it is served as always.
 func TestSkillText_AFileTooLargeToCheckIsWithheldUnderAReadingPolicy(t *testing.T) {
@@ -323,4 +349,20 @@ func TestSkillText_APolicySwitchedOnAfterStartIsEnforced(t *testing.T) {
 	assert.NotContains(t, skillResultText(t, res), skillTestSecret)
 	require.Len(t, out.Skills, 1)
 	assert.Equal(t, skillWordWithheld, out.Skills[0].Description)
+}
+
+// A configuration reload forgets the served texts and the detector skills built
+// for themselves, so new detection settings apply to the next read.
+func TestSkillOutputState_IsForgottenOnAConfigReload(t *testing.T) {
+	fx := newSkillFixture(t)
+	fx.proxy.config.OutputSanitisation = &config.OutputSanitisationConfig{ResponseAction: "redact", MaxRedactions: 100}
+	first := fx.proxy.skillPolicy().detector
+	require.NotNil(t, first)
+	served := fx.proxy.servedSkillText(fx.proxy.skillPolicy(), "hf", "sha256:abc", []byte("use key "+skillTestSecret))
+	require.NotContains(t, string(served.text), skillTestSecret)
+	require.Len(t, fx.proxy.skillServedCache, 1)
+
+	fx.proxy.RefreshSkillsAvailability()
+	assert.Empty(t, fx.proxy.skillServedCache)
+	assert.NotSame(t, first, fx.proxy.skillPolicy().detector, "a detector is built again from the live settings")
 }
