@@ -321,10 +321,12 @@ jobs:
       # ("panic: test timed out") is no longer enough there. internal/security/
       # scanner also scores the full 1.2k-entry TPA eval corpus (Spec 101 US2,
       # 1047 hard negatives) in several tests and timed out at 20m on
-      # ubuntu-latest; match the Windows leg's 40m.
+      # ubuntu-latest. internal/server has since reached ~2250s on macos-latest
+      # on main and hit the former 40m bound on #1918; match the Windows leg's
+      # 60m.
       - name: Run unit tests (Unix)
         if: matrix.os != 'windows-latest'
-        run: go test -v -race -timeout 40m -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
+        run: go test -v -race -timeout 60m -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
