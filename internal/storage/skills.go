@@ -62,11 +62,32 @@ type SkillScanFinding struct {
 	Evidence string `json:"evidence"`
 }
 
+// Why a skill scan is not complete (SkillScan.Incomplete).
+const (
+	// SkillScanIncompleteSizeCap: the skill has more text than one scan covers.
+	SkillScanIncompleteSizeCap = "size_cap"
+	// SkillScanIncompleteCoverage: the scanner reported degraded coverage.
+	SkillScanIncompleteCoverage = "coverage"
+	// SkillScanIncompleteInterrupted: the scan was stopped before it finished.
+	SkillScanIncompleteInterrupted = "interrupted"
+)
+
 // SkillScan is the scan result recorded for a skill's current content.
 type SkillScan struct {
-	Verdict  string             `json:"verdict"`
-	Complete bool               `json:"complete"`
-	Findings []SkillScanFinding `json:"findings,omitempty"`
+	// Verdict is the worst verdict over every scanned chunk: "clean",
+	// "warnings" or "dangerous".
+	Verdict  string `json:"verdict"`
+	Complete bool   `json:"complete"`
+	// Incomplete says why Complete is false; empty when it is true.
+	Incomplete string `json:"incomplete,omitempty"`
+	// Hash is the content hash (CurrentHash) the scan was made of. A scan
+	// whose Hash differs from the record's CurrentHash says nothing about
+	// the current content.
+	Hash      string             `json:"hash,omitempty"`
+	ScannedAt time.Time          `json:"scanned_at"`
+	Findings  []SkillScanFinding `json:"findings,omitempty"`
+	// FindingsTruncated is set when more findings existed than are stored.
+	FindingsTruncated bool `json:"findings_truncated,omitempty"`
 }
 
 // SkillApprovalRecord is the per-(server, skill URI) review record.
