@@ -88,6 +88,11 @@ const (
 	// Carries no payload — RefreshPrompts re-aggregates from live state.
 	EventTypeUpstreamPromptsChanged EventType = "upstream.prompts_changed"
 
+	// EventTypeSkillsChanged is emitted when a skills refresh (or a damaged
+	// stored copy) changes a server's skill records. Payload:
+	// {server, counts{available, pending, changed, unusable, blocked}} (Spec 125).
+	EventTypeSkillsChanged EventType = "skills.changed"
+
 	// Spec 026: Sensitive data detection event
 	// EventTypeSensitiveDataDetected is emitted when sensitive data is detected in a tool call.
 	EventTypeSensitiveDataDetected EventType = "sensitive_data.detected"

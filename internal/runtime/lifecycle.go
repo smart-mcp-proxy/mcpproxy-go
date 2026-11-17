@@ -324,6 +324,9 @@ func (r *Runtime) backgroundToolIndexing(ctx context.Context) {
 		case <-timer.C:
 			if sweep {
 				_ = r.discoverAndIndexTools(ctx, true)
+				// Spec 125 D6: the periodic sweep also re-reads skills, after and
+				// apart from tool discovery.
+				r.triggerSkillsRefreshAll()
 			}
 		case <-ctx.Done():
 			timer.Stop()
@@ -704,6 +707,9 @@ func (r *Runtime) onUpstreamToolsListChanged(ctx context.Context, serverName str
 // Close replaces the app context with context.Background(), so a follow-up
 // that starts after shutdown would otherwise run uncancelled (Sol r7 P2).
 func (r *Runtime) onServerConnectedDiscovery(serverName string) {
+	// Spec 125 D6: skills are read on their own goroutine, never inside tool
+	// discovery; with enable_skills off this does nothing.
+	r.triggerSkillsRefresh(serverName)
 	r.runCoalescedDiscovery(serverName, func(followUp bool) error {
 		ctx, cancel := context.WithTimeout(r.lifetimeContext(), discoveryRunTimeout)
 		defer cancel()

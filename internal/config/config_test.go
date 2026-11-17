@@ -1456,6 +1456,52 @@ func TestServerConfig_ExposePrompts_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestServerConfig_ExposeSkills_RoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		val  *bool
+	}{
+		{"unset", nil},
+		{"true", BoolPtr(true)},
+		{"false", BoolPtr(false)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := ServerConfig{Name: "test", ExposeSkills: tt.val}
+
+			data, err := json.Marshal(original)
+			require.NoError(t, err)
+			if tt.val == nil {
+				assert.NotContains(t, string(data), "expose_skills", "nil must be omitted")
+			}
+
+			var decoded ServerConfig
+			require.NoError(t, json.Unmarshal(data, &decoded))
+
+			if tt.val == nil {
+				assert.Nil(t, decoded.ExposeSkills)
+			} else {
+				require.NotNil(t, decoded.ExposeSkills)
+				assert.Equal(t, *tt.val, *decoded.ExposeSkills)
+			}
+		})
+	}
+}
+
+func TestConfig_EnableSkills_DefaultOffAndRoundTrip(t *testing.T) {
+	cfg := DefaultConfig()
+	assert.False(t, cfg.EnableSkills, "enable_skills defaults to false")
+
+	data, err := json.Marshal(cfg)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"enable_skills":false`)
+
+	var decoded Config
+	require.NoError(t, json.Unmarshal([]byte(`{"enable_skills":true}`), &decoded))
+	assert.True(t, decoded.EnableSkills)
+}
+
 func TestServerConfig_IsToolAllowedByConfig(t *testing.T) {
 	tests := []struct {
 		name     string

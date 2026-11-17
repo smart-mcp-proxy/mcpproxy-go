@@ -148,6 +148,8 @@ func (b *BoltDB) initBuckets() error {
 			ToolHashBucket,
 			ToolApprovalBucket,
 			PromptApprovalBucket,
+			SkillApprovalBucket,
+			SkillFileBucket,
 			OAuthTokenBucket,
 			MetaBucket,
 			ActivityRecordsBucket,

@@ -190,6 +190,13 @@ components:
         enable_prompts:
           description: Prompts settings
           type: boolean
+        enable_skills:
+          description: |-
+            EnableSkills, when true, makes mcpproxy read the skills that upstream
+            servers expose through the MCP skills extension. OFF by default. Unlike
+            EnablePrompts this is hot-reloadable. No CLI flag, no environment
+            variable.
+          type: boolean
         enable_socket:
           description: 'Enable Unix socket/named pipe for local IPC (default: true)'
           type: boolean
@@ -1254,6 +1261,12 @@ components:
             aggregated into mcpproxy's prompts/list. nil (default) inherits the
             default-aggregate behavior (included if the server advertises
             Capabilities.Prompts); false excludes it regardless of capability.
+          type: boolean
+        expose_skills:
+          description: |-
+            ExposeSkills overrides whether this server's skills (MCP skills
+            extension) are read when Config.EnableSkills is on. nil (default)
+            inherits (included if the server supports skills); false excludes it.
           type: boolean
         forward_headers:
           description: |-
@@ -3191,6 +3204,11 @@ components:
             default aggregation". Surfaced on GET so a caller that PATCHed the override
             can read it back; PATCH/POST accept it via AddServerRequest.
           type: boolean
+        expose_skills:
+          description: |-
+            ExposeSkills mirrors config.ServerConfig.ExposeSkills: the per-server
+            skills override. Tri-state *bool; nil/omitted means "inherit".
+          type: boolean
         forward_headers:
           description: |-
             ForwardHeaders mirrors config.ServerConfig.ForwardHeaders (Spec 112): the
@@ -3389,6 +3407,126 @@ components:
         total_server_tool_list_size:
           description: All upstream tools combined (tokens)
           type: integer
+      type: object
+    contracts.SkillContentResponse:
+      properties:
+        digest:
+          type: string
+        next_offset:
+          description: NextOffset is the byte offset of the next chunk; absent at
+            the end.
+          type: integer
+        offset:
+          type: integer
+        size:
+          type: integer
+        text:
+          type: string
+      type: object
+    contracts.SkillEntry:
+      properties:
+        approved_hash:
+          type: string
+        available:
+          type: boolean
+        blocked:
+          type: boolean
+        current_hash:
+          type: string
+        description:
+          type: string
+        files:
+          items:
+            $ref: '#/components/schemas/contracts.SkillFileInfo'
+          type: array
+          uniqueItems: false
+        id:
+          type: string
+        listed:
+          type: boolean
+        name:
+          type: string
+        path:
+          type: string
+        scan:
+          $ref: '#/components/schemas/contracts.SkillScanInfo'
+        status:
+          type: string
+        total_size:
+          type: integer
+        unusable_reason:
+          type: string
+        uri:
+          type: string
+      type: object
+    contracts.SkillFileInfo:
+      properties:
+        digest:
+          type: string
+        path:
+          type: string
+        size:
+          type: integer
+        text:
+          type: boolean
+      type: object
+    contracts.SkillScanFinding:
+      properties:
+        evidence:
+          type: string
+        file:
+          type: string
+        offset:
+          type: integer
+        rule:
+          type: string
+        severity:
+          type: string
+      type: object
+    contracts.SkillScanInfo:
+      properties:
+        complete:
+          type: boolean
+        findings:
+          items:
+            $ref: '#/components/schemas/contracts.SkillScanFinding'
+          type: array
+          uniqueItems: false
+        verdict:
+          type: string
+      type: object
+    contracts.SkillsErrorResponse:
+      properties:
+        error:
+          type: string
+        error_code:
+          type: string
+        request_id:
+          type: string
+        success:
+          type: boolean
+      type: object
+    contracts.SkillsListResponse:
+      properties:
+        enabled:
+          type: boolean
+        error:
+          type: string
+        expose_skills:
+          type: boolean
+        last_refresh:
+          type: string
+        server:
+          type: string
+        skills:
+          items:
+            $ref: '#/components/schemas/contracts.SkillEntry'
+          type: array
+          uniqueItems: false
+        supported:
+          type: boolean
+        truncated:
+          type: boolean
       type: object
     contracts.SuccessResponse:
       allOf:
@@ -3974,6 +4112,12 @@ components:
             prompts/list. Tri-state *bool mirroring config.ServerConfig.ExposePrompts —
             a nil pointer means "leave unchanged" on PATCH (and "inherit the default
             aggregate behavior" on create); a present value (including false) is applied.
+          type: boolean
+        expose_skills:
+          description: |-
+            ExposeSkills is the per-server skills override (MCP skills extension).
+            Tri-state *bool mirroring config.ServerConfig.ExposeSkills: nil means
+            "leave unchanged" on PATCH and "inherit" on create.
           type: boolean
         forward_headers:
           description: |-
@@ -10558,6 +10702,191 @@ paths:
       summary: Approve a server after security review
       tags:
       - security
+  /api/v1/servers/{id}/skills:
+    get:
+      description: 'Administrator only. Lists every skill record mcpproxy holds for
+        one upstream server: status, hashes, files and the availability an agent would
+        see. With enable_skills off the answer is {"enabled": false, "skills": []}
+        and no upstream is contacted. A scoped agent token is refused with 403.'
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillsListResponse'
+          description: Skills of the server
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server not found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: List the skills of a server
+      tags:
+      - servers
+  /api/v1/servers/{id}/skills/content:
+    get:
+      description: Administrator only. Returns a chunk of one stored text file of
+        a skill. Offsets are byte positions; a chunk never splits a UTF-8 character,
+        so it can be a few bytes shorter than limit. next_offset is absent at the
+        end of the file. 404 for an unknown skill or file (or with enable_skills off),
+        415 for a binary file, 409 stored_copy_damaged when the stored bytes no longer
+        match their digest.
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - description: Skill path, e.g. hf-cli
+        in: query
+        name: skill
+        required: true
+        schema:
+          type: string
+      - description: File path inside the skill (default SKILL.md)
+        in: query
+        name: file
+        schema:
+          type: string
+      - description: current (default) or approved
+        in: query
+        name: copy
+        schema:
+          type: string
+      - description: Byte offset to start at (default 0)
+        in: query
+        name: offset
+        schema:
+          type: integer
+      - description: Maximum bytes (default and maximum 65536)
+        in: query
+        name: limit
+        schema:
+          type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillContentResponse'
+          description: A chunk of the file
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad parameters
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server, skill or file not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillsErrorResponse'
+          description: stored_copy_damaged
+        "415":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: The file is binary
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Read one text file of a skill
+      tags:
+      - servers
+  /api/v1/servers/{id}/skills/refresh:
+    post:
+      description: Administrator only. Reads the server's skills from the upstream
+        again, verifies every file and returns the listing once applied. A refresh
+        that is already running is joined. 409 skills_disabled when enable_skills
+        is off; 409 skills_not_supported when the server does not announce the skills
+        extension.
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillsListResponse'
+          description: Skills of the server after the refresh
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillsErrorResponse'
+          description: skills_disabled, skills_not_supported or refresh_superseded
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Refresh failed
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Refresh the skills of a server
+      tags:
+      - servers
   /api/v1/servers/{id}/tool-calls:
     get:
       description: Retrieves tool call history filtered by upstream server ID. Returns

@@ -1116,6 +1116,55 @@ func TestCopyServerConfig_ExposePrompts(t *testing.T) {
 	})
 }
 
+func TestCopyServerConfig_ExposeSkills(t *testing.T) {
+	src := &ServerConfig{Name: "srv"}
+	if dst := CopyServerConfig(src); dst.ExposeSkills != nil {
+		t.Errorf("ExposeSkills: got %v, want nil", dst.ExposeSkills)
+	}
+
+	v := false
+	src = &ServerConfig{Name: "srv", ExposeSkills: &v}
+	dst := CopyServerConfig(src)
+	if dst.ExposeSkills == nil || *dst.ExposeSkills {
+		t.Errorf("ExposeSkills: got %v, want false", dst.ExposeSkills)
+	}
+	*src.ExposeSkills = true
+	if *dst.ExposeSkills {
+		t.Error("ExposeSkills pointer is shared, not copied by value")
+	}
+}
+
+func TestMergeServerConfig_ExposeSkills(t *testing.T) {
+	t.Run("nil patch leaves base", func(t *testing.T) {
+		v := true
+		base := &ServerConfig{Name: "s", ExposeSkills: &v}
+		merged, diff, err := MergeServerConfig(base, &ServerConfig{Name: "s"}, MergeOptions{GenerateDiff: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if merged.ExposeSkills == nil || !*merged.ExposeSkills {
+			t.Errorf("got %v, want true", merged.ExposeSkills)
+		}
+		if _, ok := diff.Modified["expose_skills"]; ok {
+			t.Error("unexpected diff entry")
+		}
+	})
+	t.Run("patch sets and records diff", func(t *testing.T) {
+		f := false
+		base := &ServerConfig{Name: "s"}
+		merged, diff, err := MergeServerConfig(base, &ServerConfig{Name: "s", ExposeSkills: &f}, MergeOptions{GenerateDiff: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if merged.ExposeSkills == nil || *merged.ExposeSkills {
+			t.Errorf("got %v, want explicit false", merged.ExposeSkills)
+		}
+		if _, ok := diff.Modified["expose_skills"]; !ok {
+			t.Error("missing diff entry for expose_skills")
+		}
+	})
+}
+
 // TestMergeServerConfig_InitTimeout covers MCP-3322: a patch carrying
 // init_timeout sets/replaces the per-server override (and records a diff), while
 // a patch that omits it preserves the existing value.

@@ -567,6 +567,18 @@ mcpproxy connect cursor --profile work --switchable
 mcpproxy connect --all --profile all           # Every supported client, all servers
 ```
 
+### `mcpproxy skills`
+
+Inspect the agent skills that upstream servers serve through the MCP skills extension (Spec 125). Daemon-only and administrator-only. Off unless `enable_skills: true` is set; in this release skills are not offered to agents. See [Skills over MCP](features/skills.md).
+
+```bash
+mcpproxy skills list [--server <name>]                      # SERVER, SKILL, STATUS, FILES, SIZE
+mcpproxy skills show <server>:<skill> [--file <relpath>] [--approved]
+mcpproxy skills refresh <server>                            # read and verify the server's skills again
+```
+
+`list` without `--server` covers every server and adds a line for a server that has an error or a truncated listing. `show` prints the skill's metadata and file table, then the text of one file. All three accept `-o json|yaml`.
+
 ### Profiles, clients, access explanations and token profiles (Spec 108)
 
 The `profile`, `client` (bindings), `access explain` and `token --profile` commands are documented on the published site: <https://docs.mcpproxy.app/cli/profile-commands> (source: `docs/cli/profile-commands.md`).

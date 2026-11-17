@@ -357,6 +357,20 @@ func (m *baseController) StreamActivities(_ context.Context, _ storage.ActivityF
 	close(ch)
 	return ch
 }
+
+// Skills over MCP (Spec 125, PR-1)
+func (m *baseController) SkillsStatus(_ string) runtime.SkillsServerStatus {
+	return runtime.SkillsServerStatus{}
+}
+func (m *baseController) ListSkillRecords(_ string) ([]*storage.SkillApprovalRecord, error) {
+	return nil, nil
+}
+func (m *baseController) SkillFileText(_, _, _ string, _ bool) ([]byte, storage.SkillFile, error) {
+	return nil, storage.SkillFile{}, runtime.ErrSkillNotFound
+}
+func (m *baseController) SkillAvailable(_ string, _ *storage.SkillApprovalRecord) bool { return false }
+func (m *baseController) RefreshServerSkills(_ context.Context, _ string) error        { return nil }
+
 func (m *baseController) ListToolApprovals(_ string) ([]*storage.ToolApprovalRecord, error) {
 	return nil, nil
 }

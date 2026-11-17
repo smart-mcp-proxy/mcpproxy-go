@@ -471,6 +471,15 @@ A profile that sets only `name` and `servers` behaves exactly as before: no cap,
 
 With `require_mcp_auth` off, a change that would let a client bound to a profile escape it by omitting its credential is refused with `409 binding_bypassable_without_auth` (see [Profiles, the binding guard](/features/profiles#the-binding-guard)). **Before downgrading to a pre-profiles-v3 binary, turn `require_mcp_auth` on**; the older binary does not know client credentials or `anonymous_profile`.
 
+### Skills (`enable_skills`) {#skills}
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enable_skills` | boolean | `false` | Read the skills that upstream servers expose through the MCP skills extension. In this release they are shown to administrators only and are not offered to agents. Hot-reloaded. |
+| `mcpServers[].expose_skills` | boolean | follows `enable_skills` | Per-server override. `false` excludes the server: it is not asked for skills. Hot-reloaded. |
+
+See [Skills over MCP](/features/skills).
+
 ### MCP Servers
 
 See [Upstream Servers](/configuration/upstream-servers) for detailed server configuration.
