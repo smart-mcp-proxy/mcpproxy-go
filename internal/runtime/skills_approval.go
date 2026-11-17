@@ -201,7 +201,9 @@ func (r *Runtime) mutateSkillsAt(ctx context.Context, serverName string, paths [
 		for i, c := range changes {
 			upserts[i] = c.rec
 		}
-		if _, err := sm.ApplySkillRefresh(serverName, upserts, nil, nil); err != nil {
+		// Records only: a refresh that is reading right now has staged blobs
+		// no record references yet, and collecting here would delete them.
+		if err := sm.UpdateSkillApprovals(serverName, upserts); err != nil {
 			changes = nil
 			return err
 		}

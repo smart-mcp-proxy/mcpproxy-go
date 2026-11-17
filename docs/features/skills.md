@@ -114,7 +114,7 @@ A skill that declares its files as `dynamic` has no content an approval could co
 - `complete`: whether every text file was scanned in full;
 - `findings`: the rule, the file and the position in the file, with a short excerpt.
 
-A scan is **not complete** when the skill has more than 2 MiB of text (`size_cap`), when the scanner reported reduced coverage (`coverage`), or when it was stopped before the end (`interrupted`). A scan that is not complete never approves a skill in `scan` mode. Binary files are not scanned and not served.
+A scan is **not complete** when the skill has more than 1 MiB of text (`size_cap`), when the scan of one skill took longer than two minutes (`time_limit`), when the scanner reported reduced coverage (`coverage`), or when it was stopped before the end (`interrupted`). A scan that is not complete never approves a skill in `scan` mode. Binary files are not scanned and not served.
 
 The scanner was tuned on tool descriptions. A skill that tells an agent to run commands can be flagged without being hostile; in `scan` mode that only means the skill waits for you.
 
@@ -242,6 +242,6 @@ All of them require administrator credentials; a scoped agent token gets `403`, 
 
 **`409 review_out_of_date` on approve.** The skill changed after you looked at it. Nothing was approved. List and read it again.
 
-**A clean skill stays `pending` on a `scan` server.** Look at `scan.complete`. A scan that is not complete (`size_cap`, `coverage`, `interrupted`) does not approve. Approve the skill yourself after reading it.
+**A clean skill stays `pending` on a `scan` server.** Look at `scan.complete`. A scan that is not complete (`size_cap`, `time_limit`, `coverage`, `interrupted`) does not approve. A skill shown as "not scanned" is waiting for its turn: one refresh scans for about 45 seconds and the next one continues. Approve the skill yourself after reading it.
 
 **`409 stored_copy_damaged` when reading a file.** The stored bytes no longer match their digest. Run `mcpproxy skills refresh <server>` to read the skill again.

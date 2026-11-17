@@ -27,7 +27,7 @@ type SkillScanFinding struct {
 type SkillScanInfo struct {
 	Verdict  string `json:"verdict"`
 	Complete bool   `json:"complete"`
-	// Incomplete says why Complete is false: size_cap, coverage or
+	// Incomplete says why Complete is false: size_cap, time_limit, coverage or
 	// interrupted; empty when the scan is complete.
 	Incomplete string `json:"incomplete"`
 	// ScannedAt is omitted when no scan of the current content exists.

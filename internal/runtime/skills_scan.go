@@ -23,6 +23,14 @@ const (
 	skillScanOverlapBytes = 1 << 10
 	skillScanMaxFindings  = 32
 	skillScanEvidenceMax  = 256
+
+	// The scanner needs about a second for 48 KiB of text (it runs every
+	// signature of the bundle over it). skillsScanPerRefresh is how long one
+	// refresh may spend scanning before it leaves the remaining skills to the
+	// refresh that follows; skillScanPerSkill stops the scan of one skill.
+	skillsScanPerRefresh  = 45 * time.Second
+	skillScanPerSkill     = 2 * time.Minute
+	skillsScanFollowUpGap = 10 * time.Second
 )
 
 type skillScanChunk struct {
@@ -127,7 +135,8 @@ func (r *Runtime) scanSkillText(ctx context.Context, serverName, skillPath strin
 	})
 
 	res := &storage.SkillScan{Verdict: "clean", ScannedAt: time.Now()}
-	var interrupted, degraded, capped bool
+	deadline := res.ScannedAt.Add(r.skills.limits.scanSkill())
+	var interrupted, timedOut, degraded, capped, scannedAny bool
 	budget := int64(skills.MaxScanBytesPerSkill)
 	rank := 0
 
@@ -144,7 +153,14 @@ scanning:
 				interrupted = true
 				break scanning
 			}
-			text := strings.ToValidUTF8(string(ch.data), "�")
+			// The first chunk is always scanned, so a skill is never recorded
+			// as out of time with nothing looked at.
+			if scannedAny && !time.Now().Before(deadline) {
+				timedOut = true
+				break scanning
+			}
+			scannedAny = true
+			text := strings.ToValidUTF8(string(ch.data), "\uFFFD")
 			verdict, findings, coverageOK := scan(serverName, fmt.Sprintf("%s/%s#%d", skillPath, f.relPath, n), text)
 			if !coverageOK {
 				degraded = true
@@ -175,6 +191,8 @@ scanning:
 	switch {
 	case interrupted:
 		res.Incomplete = storage.SkillScanIncompleteInterrupted
+	case timedOut:
+		res.Incomplete = storage.SkillScanIncompleteTimeLimit
 	case degraded:
 		res.Incomplete = storage.SkillScanIncompleteCoverage
 	case capped:
@@ -185,12 +203,18 @@ scanning:
 }
 
 // reusableSkillScan reports whether an earlier scan still stands for content
-// with this hash: the same content, and a scan that finished or hit the size
-// cap (repeating either gives the same answer). An interrupted or degraded
-// scan is retried.
+// with this hash: the same content, and a scan that finished, hit the size cap
+// or ran into its time limit (repeating any of them costs the same again and
+// gives the same answer). An interrupted or degraded scan is retried.
 func reusableSkillScan(prev *storage.SkillApprovalRecord, hash string) bool {
-	return prev != nil && prev.Scan != nil && hash != "" && prev.Scan.Hash == hash &&
-		(prev.Scan.Complete || prev.Scan.Incomplete == storage.SkillScanIncompleteSizeCap)
+	if prev == nil || prev.Scan == nil || hash == "" || prev.Scan.Hash != hash {
+		return false
+	}
+	switch prev.Scan.Incomplete {
+	case "", storage.SkillScanIncompleteSizeCap, storage.SkillScanIncompleteTimeLimit:
+		return true
+	}
+	return false
 }
 
 // scanStateOf reduces a scan to what decideSkill reads. A scan of other
@@ -203,4 +227,53 @@ func scanStateOf(s *storage.SkillScan, currentHash string) skillScanState {
 		clean:    s.Verdict == "clean" && len(s.Findings) == 0 && !s.FindingsTruncated,
 		complete: s.Complete,
 	}
+}
+
+// scanSkillOutcomes scans the usable skills of one refresh that have no scan
+// of their current content, reading each skill's text back from the store so
+// only one skill is in memory at a time. It stops starting new scans once the
+// refresh's scan time is spent (the first skill is always scanned) and
+// reports how many it scanned and how many it left for the next refresh.
+func (r *Runtime) scanSkillOutcomes(ctx context.Context, serverName string, outcomes []skillOutcome) (scanned, pending int) {
+	sm := r.storageManager
+	budget := r.skills.limits.scanRefresh()
+	start := time.Now()
+	for i := range outcomes {
+		o := &outcomes[i]
+		if !o.usable || !o.needScan {
+			continue
+		}
+		if sm == nil || ctx.Err() != nil || !r.skillsEligible(serverName) ||
+			(scanned > 0 && time.Since(start) >= budget) {
+			pending++
+			continue
+		}
+		texts := make([]skillTextFile, 0, len(o.files))
+		readable := true
+		for _, f := range o.files {
+			if !f.Text || !f.Stored {
+				continue
+			}
+			data, err := sm.GetSkillFile(serverName, f.Digest)
+			if err != nil {
+				readable = false
+				break
+			}
+			texts = append(texts, skillTextFile{relPath: f.RelPath, data: data})
+		}
+		if !readable {
+			pending++
+			continue
+		}
+		res := r.scanSkillText(ctx, serverName, o.path, texts)
+		if res.Incomplete == storage.SkillScanIncompleteInterrupted {
+			// Stopped from outside (shutdown): nothing worth recording.
+			pending++
+			continue
+		}
+		res.Hash = o.hash
+		o.scan = res
+		scanned++
+	}
+	return scanned, pending
 }

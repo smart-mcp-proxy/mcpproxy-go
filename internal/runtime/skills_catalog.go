@@ -69,6 +69,9 @@ type SkillsServerStatus struct {
 	Error       string
 	Truncated   bool
 	EntryErrors int
+	// ScansPending is how many usable skills the last refresh left unscanned
+	// because its scan time was spent; a follow-up refresh scans them.
+	ScansPending int
 }
 
 // skillsLimits are the per-refresh and per-server budgets. Zero means the
@@ -76,6 +79,30 @@ type SkillsServerStatus struct {
 type skillsLimits struct {
 	readPerRefresh  int64
 	storedPerServer int64
+	scanPerRefresh  time.Duration
+	scanPerSkill    time.Duration
+	followUpDelay   time.Duration
+}
+
+func (l skillsLimits) scanRefresh() time.Duration {
+	if l.scanPerRefresh > 0 {
+		return l.scanPerRefresh
+	}
+	return skillsScanPerRefresh
+}
+
+func (l skillsLimits) scanSkill() time.Duration {
+	if l.scanPerSkill > 0 {
+		return l.scanPerSkill
+	}
+	return skillScanPerSkill
+}
+
+func (l skillsLimits) followUp() time.Duration {
+	if l.followUpDelay > 0 {
+		return l.followUpDelay
+	}
+	return skillsScanFollowUpGap
 }
 
 func (l skillsLimits) read() int64 {
@@ -107,6 +134,9 @@ type skillsCatalogState struct {
 	// PR-3): an older capture writes nothing.
 	applied map[string]uint64
 	status  map[string]SkillsServerStatus
+	// followUp marks servers whose last refresh left skills unscanned; the
+	// flight starts one more refresh for them when it ends.
+	followUp map[string]bool
 
 	// Tests only: budgets, a seam after the listing returns, and a switch for
 	// the background triggers.
@@ -127,6 +157,7 @@ func (s *skillsCatalogState) init() {
 		s.flights = map[string]*skillsFlight{}
 		s.applied = map[string]uint64{}
 		s.status = map[string]SkillsServerStatus{}
+		s.followUp = map[string]bool{}
 	}
 }
 
@@ -264,8 +295,15 @@ func (r *Runtime) runSkillsFlight(serverName string, f *skillsFlight) {
 	defer func() {
 		st.mu.Lock()
 		delete(st.flights, serverName)
+		again := st.followUp[serverName] && !st.closed
+		delete(st.followUp, serverName)
 		st.mu.Unlock()
 		close(f.done)
+		if again {
+			// After a pause, so a server that keeps changing its skills cannot
+			// keep one core scanning without a break.
+			time.AfterFunc(st.limits.followUp(), func() { r.triggerSkillsRefresh(serverName) })
+		}
 	}()
 	ctx := r.lifetimeContext()
 	if ctx == nil {
@@ -283,6 +321,8 @@ type skillOutcome struct {
 	hash                         string
 	frontmatter                  json.RawMessage
 	scan                         *storage.SkillScan
+	// needScan: usable, and no earlier scan of this very content stands.
+	needScan bool
 }
 
 // skillsBudget tracks the refresh-wide budgets across skills.
@@ -305,10 +345,13 @@ func (r *Runtime) refreshServerSkills(ctx context.Context, serverName string) er
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, skillsRefreshTimeout)
+	// The timeout bounds the upstream requests. The scan that follows them is
+	// local work with its own budget and runs on the caller's context, so a
+	// slow server cannot eat the scan's time and the scan cannot fail a read.
+	netCtx, cancel := context.WithTimeout(ctx, skillsRefreshTimeout)
 	defer cancel()
 
-	err := r.runSkillsRefresh(ctx, serverName)
+	err := r.runSkillsRefresh(netCtx, ctx, serverName)
 	if err != nil && (errors.Is(err, errSkillsSwitchedOff) || !r.skillsEligible(serverName)) {
 		// Whatever stopped it, a refresh of a server whose skills are off by
 		// now gets the answer it would have got at its start: nothing to do.
@@ -327,7 +370,7 @@ func (r *Runtime) refreshServerSkills(ctx context.Context, serverName string) er
 	return err
 }
 
-func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error {
+func (r *Runtime) runSkillsRefresh(ctx, scanCtx context.Context, serverName string) error {
 	um, sm := r.upstreamManager, r.storageManager
 	inc, err := r.CaptureApprovalIncarnation(serverName, 0)
 	if err != nil {
@@ -442,6 +485,10 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 		}
 		outcomes = append(outcomes, o)
 	}
+	// Every skill is read and its text is stored: scan what has no scan yet,
+	// outside any lock and outside the upstream timeout.
+	scanned, scansPending := r.scanSkillOutcomes(scanCtx, serverName, outcomes)
+
 	// A listing entry that did not decode but carried a URI is still a skill
 	// the person should see; without a URI there is nothing to key a record on.
 	for _, ee := range entryErrs {
@@ -554,7 +601,17 @@ func (r *Runtime) runSkillsRefresh(ctx context.Context, serverName string) error
 		s.Error = ""
 		s.Truncated = truncated
 		s.EntryErrors = len(entryErrs) + skipped
+		s.ScansPending = scansPending
 	})
+	// Scan time ran out with skills left: the next refresh scans them (what
+	// was scanned now is on the records and is not scanned again). Only after
+	// progress, so a refresh that scanned nothing cannot loop.
+	if scansPending > 0 && scanned > 0 {
+		r.skills.mu.Lock()
+		r.skills.init()
+		r.skills.followUp[serverName] = true
+		r.skills.mu.Unlock()
+	}
 	// Activity rows are emitted after the approval lock is released.
 	for _, t := range transitions {
 		r.emitSkillTransition(ctx, serverName, t)
@@ -765,7 +822,6 @@ func (r *Runtime) readSkill(ctx context.Context, serverName string, inc int64, e
 	// The text is kept for the scan only when there is no scan of this very
 	// content to reuse: a finished scan is never repeated.
 	reuseScan := reusableSkillScan(prev, o.hash)
-	var texts []skillTextFile
 	for i, ref := range e.Files {
 		sf := &o.files[i]
 		digestHex := strings.TrimPrefix(ref.Digest, "sha256:")
@@ -834,10 +890,6 @@ func (r *Runtime) readSkill(ctx context.Context, serverName string, inc int64, e
 			}
 		}
 
-		if sf.Text && !reuseScan {
-			texts = append(texts, skillTextFile{relPath: sf.RelPath, data: content})
-		}
-
 		if ref.URI == e.URI {
 			if !sf.Text {
 				return unusableOutcome(o, &skills.UnusableError{Code: skills.ReasonFrontmatterInvalid, Detail: "SKILL.md is not text"}), nil
@@ -878,13 +930,12 @@ func (r *Runtime) readSkill(ctx context.Context, serverName string, inc int64, e
 	b.stored += skillStored
 	o.usable = true
 
-	// Every file is verified and its text is in memory: scan it here, outside
-	// any lock. In auto mode the result is evidence only.
+	// A finished scan of this very content is never repeated; anything else
+	// is scanned after the reads, from the stored text (scanSkillOutcomes).
 	if reuseScan {
 		o.scan = prev.Scan
 	} else {
-		o.scan = r.scanSkillText(ctx, serverName, o.path, texts)
-		o.scan.Hash = o.hash
+		o.needScan = true
 	}
 	return o, nil
 }

@@ -3511,7 +3511,7 @@ components:
           type: boolean
         incomplete:
           description: |-
-            Incomplete says why Complete is false: size_cap, coverage or
+            Incomplete says why Complete is false: size_cap, time_limit, coverage or
             interrupted; empty when the scan is complete.
           type: string
         scanned_at:

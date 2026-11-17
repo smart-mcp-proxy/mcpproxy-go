@@ -1757,7 +1757,7 @@ Fields added with the approval gate:
 
 - `incarnation` (top level) identifies the server this listing was read from. Send it back as `expected_incarnation` on approve, block and unblock.
 - `approved_at` (omitted for a skill that was never approved) and `approved_by`; `approved_files` (omitted without an approved copy) is the file list of the approved copy, in the shape of `files`.
-- `scan` describes the scan of the skill's **current** content only. It is reported when the scan was made of exactly `current_hash`; a scan of older content is not shown (`verdict` empty, no `scanned_at`). `incomplete` says why `complete` is false: `size_cap`, `coverage` or `interrupted`. `scanned_at` is omitted when there is no scan of the current content. `findings_truncated` is true when more findings existed than `findings` lists. Each finding has `file`, `offset` (byte position), `rule`, `severity` and `evidence`.
+- `scan` describes the scan of the skill's **current** content only. It is reported when the scan was made of exactly `current_hash`; a scan of older content is not shown (`verdict` empty, no `scanned_at`). `incomplete` says why `complete` is false: `size_cap`, `time_limit`, `coverage` or `interrupted`. `scanned_at` is omitted when there is no scan of the current content. `findings_truncated` is true when more findings existed than `findings` lists. Each finding has `file`, `offset` (byte position), `rule`, `severity` and `evidence`.
 
 #### GET /api/v1/servers/{id}/skills/content
 
