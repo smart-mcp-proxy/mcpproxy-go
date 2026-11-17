@@ -185,7 +185,13 @@ func TestRetire_LauncherControl_LaunchesWhenNotRetired(t *testing.T) {
 		t.Skip("spawns a shell")
 	}
 	dir := t.TempDir()
-	connectUnretired(t, launcherConfig(t, "launcher-ctl", dir))
+	cfg := launcherConfig(t, "launcher-ctl", dir)
+	// The launcher is killed when the wait for its URL ends. On a loaded
+	// runner the shell has not always run its first instruction within the
+	// fixture's 500ms, and then no marker is ever written: give the control
+	// a window the child can run in (still under connectUnretired's 4s).
+	cfg.LauncherWaitTimeout = config.Duration(3 * time.Second)
+	connectUnretired(t, cfg)
 	require.Eventually(t, func() bool { return markers(t, dir) > 0 }, 5*time.Second, 50*time.Millisecond,
 		"control: an unretired launcher runs its command")
 }
