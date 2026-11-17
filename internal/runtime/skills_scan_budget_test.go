@@ -118,3 +118,56 @@ func TestApproveSkills_KeepsBlobsARunningRefreshStaged(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ok)
 }
+
+// A scan with degraded coverage has to be repeated, so it is not progress: a
+// follow-up refresh would scan the same skills again and never get further.
+func TestSkillsRefresh_DegradedScansDoNotScheduleAFollowUp(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true, trust: "scan", autoTrig: true})
+	var n atomic.Int32
+	g.rt.skills.scanFunc = countingScan(&n, "clean", false)
+	g.rt.skills.limits.scanPerRefresh = time.Nanosecond
+	g.rt.skills.limits.followUpDelay = time.Millisecond
+	for _, p := range []string{"a", "b", "c"} {
+		g.fx.AddSkill(skillstest.Skill{Path: p})
+	}
+	// The connect may have started a refresh of its own; let it finish.
+	require.NoError(t, g.refresh(t))
+	g.rt.skills.wait()
+	lists := g.fx.Count("skills/list")
+	require.NoError(t, g.refresh(t))
+	time.Sleep(300 * time.Millisecond)
+	g.rt.skills.wait()
+	assert.Equal(t, lists+1, g.fx.Count("skills/list"), "no refresh follows one that settled nothing")
+	assert.Equal(t, 2, g.rt.SkillsStatus(skillsSrv).ScansPending)
+}
+
+// A background trigger that arrives while a refresh runs is not lost by
+// joining it: that refresh may already have read the configuration, so one
+// more refresh follows it.
+func TestSkillsRefresh_TriggerDuringARefreshRunsOneMore(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true, autoTrig: true})
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf"})
+	require.NoError(t, g.refresh(t))
+	g.rt.skills.wait()
+	lists := g.fx.Count("skills/list")
+
+	inList := make(chan struct{})
+	release := make(chan struct{})
+	var once atomic.Bool
+	g.rt.skills.afterList = func(string) {
+		if once.CompareAndSwap(false, true) {
+			close(inList)
+			<-release
+		}
+	}
+	done := make(chan error, 1)
+	go func() { done <- g.refresh(t) }()
+	<-inList
+	g.rt.triggerSkillsRefresh(skillsSrv) // e.g. the trust mode changed
+	g.rt.triggerSkillsRefresh(skillsSrv) // twice is still one more
+	close(release)
+	require.NoError(t, <-done)
+	require.Eventually(t, func() bool { return g.fx.Count("skills/list") == lists+2 }, 10*time.Second, 10*time.Millisecond)
+	g.rt.skills.wait()
+	assert.Equal(t, lists+2, g.fx.Count("skills/list"), "exactly one more refresh")
+}

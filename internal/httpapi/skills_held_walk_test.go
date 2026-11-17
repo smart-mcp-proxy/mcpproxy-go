@@ -35,7 +35,7 @@ func TestHeldSkillAppearsOnNoReadDoorForAScopedCaller(t *testing.T) {
 		changed.Approved = &cur
 		changed.ApprovedHash = "sk1-old-" + marker
 		c.recs["alpha"] = []*storage.SkillApprovalRecord{rec, changed}
-		c.files["alpha/"+marker+"/SKILL.md"] = []byte("# " + marker)
+		c.files[marker+"|SKILL.md|current"] = []byte("# " + marker)
 	})
 
 	// Positive control: the administrator does see the held skill, so the

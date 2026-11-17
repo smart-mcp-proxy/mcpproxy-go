@@ -1,8 +1,11 @@
 package main
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -386,10 +389,10 @@ func TestSkillsShowDiff_JSON(t *testing.T) {
 	rec.mu.Lock()
 	rec.sequences = map[string][]cannedResponse{
 		"GET /api/v1/servers/alpha/skills/content": {
-			okResp(`{"text":"a\n","offset":0,"size":2,"digest":"sha256:x"}`),
-			okResp(`{"text":"b\n","offset":0,"size":2,"digest":"sha256:y"}`),
-			okResp(`{"text":"n\n","offset":0,"size":2,"digest":"sha256:z"}`),
-			okResp(`{"text":"g\n","offset":0,"size":2,"digest":"sha256:w"}`),
+			okResp(`{"text":"a\n","offset":0,"size":2,"digest":"sha256:old"}`),
+			okResp(`{"text":"b\n","offset":0,"size":2,"digest":"sha256:new"}`),
+			okResp(`{"text":"n\n","offset":0,"size":2,"digest":"sha256:add"}`),
+			okResp(`{"text":"g\n","offset":0,"size":2,"digest":"sha256:gone"}`),
 		},
 	}
 	rec.mu.Unlock()
@@ -411,8 +414,8 @@ func TestSkillsShowDiff_EscapesDiffLines(t *testing.T) {
 	rec.mu.Lock()
 	rec.sequences = map[string][]cannedResponse{
 		"GET /api/v1/servers/alpha/skills/content": {
-			okResp(mustJSON(t, map[string]any{"text": "ok\n", "offset": 0, "size": 3, "digest": "sha256:1"})),
-			okResp(mustJSON(t, map[string]any{"text": "ok\n\x1b[2Jevil \u202egnp.exe\n", "offset": 0, "size": 20, "digest": "sha256:2"})),
+			okResp(mustJSON(t, map[string]any{"text": "ok\n", "offset": 0, "size": 3, "digest": "sha256:old"})),
+			okResp(mustJSON(t, map[string]any{"text": "ok\n\x1b[2Jevil \u202egnp.exe\n", "offset": 0, "size": 20, "digest": "sha256:new"})),
 		},
 	}
 	rec.mu.Unlock()
@@ -432,4 +435,136 @@ func TestSkillsShowDiff_RejectsFileAndApprovedFlags(t *testing.T) {
 	_, _, err = runCLI(t, GetSkillsCommand, "table", "show", "alpha:x", "--diff", "--approved")
 	require.Error(t, err)
 	require.Empty(t, rec.all())
+}
+
+// --- review round 1 ---
+
+// The text shown under a listed content hash must be the text of that
+// listing: a refresh between the listing and the read is refused, not shown.
+func TestSkillsShowDiff_RefusesTextOfAnotherVersionThanTheListing(t *testing.T) {
+	routes, _ := diffFixture(t)
+	rec := newRESTRecorder(t, routes)
+	rec.mu.Lock()
+	rec.sequences = map[string][]cannedResponse{
+		"GET /api/v1/servers/alpha/skills/content": {
+			okResp(`{"text":"approved text\n","offset":0,"size":14,"digest":"sha256:old"}`),
+			okResp(`{"text":"text of a later refresh\n","offset":0,"size":24,"digest":"sha256:later"}`),
+		},
+	}
+	rec.mu.Unlock()
+	out, _, err := runCLI(t, GetSkillsCommand, "table", "show", "alpha:hf-cli", "--diff")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "changed after the skill was listed")
+	require.NotContains(t, out, "text of a later refresh")
+	require.Equal(t, ExitCodeGeneralError, classifyError(err))
+}
+
+func TestSkillsShow_RefusesTextOfAnotherVersionThanTheListing(t *testing.T) {
+	e := pendingSkill("hf-cli", "sk1-a")
+	e.Files = []contracts.SkillFileInfo{skillFile("SKILL.md", 3, "sha256:listed", true)}
+	newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/servers/alpha/skills":         okResp(skillsApproveList(t, 1, e)),
+		"GET /api/v1/servers/alpha/skills/content": okResp(`{"text":"later\n","offset":0,"size":6,"digest":"sha256:later"}`),
+	})
+	out, _, err := runCLI(t, GetSkillsCommand, "table", "show", "alpha:hf-cli")
+	require.Error(t, err)
+	require.NotContains(t, out, "later")
+}
+
+// -o json keeps direction overrides and C1 controls off the terminal and
+// still decodes to the exact text; -o yaml shows them as visible escapes.
+func TestSkillsShowDiff_StructuredOutputIsTerminalSafe(t *testing.T) {
+	hostile := "ok\n\x1b[2Jevil \u202egnp.exe \u009b31m\n"
+	for _, format := range []string{"json", "yaml"} {
+		t.Run(format, func(t *testing.T) {
+			e := pendingSkill("evil", "sk1-new")
+			e.Status, e.ApprovedHash = "changed", "sk1-old"
+			e.ApprovedFiles = []contracts.SkillFileInfo{skillFile("a.md", 1, "sha256:old", true)}
+			e.Files = []contracts.SkillFileInfo{skillFile("a.md", 2, "sha256:new", true)}
+			rec := newRESTRecorder(t, map[string]cannedResponse{
+				"GET /api/v1/servers/alpha/skills": okResp(skillsApproveList(t, 1, e)),
+			})
+			rec.mu.Lock()
+			rec.sequences = map[string][]cannedResponse{
+				"GET /api/v1/servers/alpha/skills/content": {
+					okResp(mustJSON(t, map[string]any{"text": "ok\n", "offset": 0, "size": 3, "digest": "sha256:old"})),
+					okResp(mustJSON(t, map[string]any{"text": hostile, "offset": 0, "size": 20, "digest": "sha256:new"})),
+				},
+			}
+			rec.mu.Unlock()
+			out, _, err := runCLI(t, GetSkillsCommand, format, "show", "alpha:evil", "--diff")
+			require.NoError(t, err)
+			for _, c := range []string{"\x1b", "\u202e", "\u009b"} {
+				require.NotContains(t, out, c, "raw control character %q reached the terminal", c)
+			}
+			if format == "json" {
+				var doc struct {
+					Diffs map[string]string `json:"diffs"`
+				}
+				require.NoError(t, json.Unmarshal([]byte(out), &doc))
+				require.Contains(t, doc.Diffs["a.md"], "+\x1b[2Jevil \u202egnp.exe \u009b31m", "the JSON document decodes to the exact text")
+			} else {
+				require.Contains(t, out, `\u202egnp.exe`)
+			}
+		})
+	}
+}
+
+func TestJSONTermSafe(t *testing.T) {
+	raw, err := json.Marshal(map[string]string{"k\u202e": "a\u202eb\u0085c\x7fd\ufeffe é 日本"})
+	require.NoError(t, err)
+	safe := jsonTermSafe(raw)
+	for _, r := range string(safe) {
+		require.False(t, termUnsafe(r, true), "%U left in the output", r)
+	}
+	var back map[string]string
+	require.NoError(t, json.Unmarshal(safe, &back))
+	require.Equal(t, map[string]string{"k\u202e": "a\u202eb\u0085c\x7fd\ufeffe é 日本"}, back)
+	plain := []byte(`{"a":"b"}`)
+	require.Equal(t, plain, jsonTermSafe(plain))
+}
+
+// What is approved is what was shown: if the review cannot be written, no
+// approval is sent.
+func TestSkillsApprove_SendsNothingWhenTheReviewCannotBeWritten(t *testing.T) {
+	rec := newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/servers/alpha/skills":          okResp(skillsApproveList(t, 1, pendingSkill("hf-cli", "sk1-hf"))),
+		"POST /api/v1/servers/alpha/skills/approve": okResp(`{"approved":1}`),
+	})
+	t.Setenv("MCPPROXY_OUTPUT", "")
+	setOutputGlobals(t, "table", false)
+	closed, err := os.CreateTemp(t.TempDir(), "closed")
+	require.NoError(t, err)
+	require.NoError(t, closed.Close())
+	saved := os.Stdout
+	os.Stdout = closed
+	t.Cleanup(func() { os.Stdout = saved })
+
+	cmd := GetSkillsCommand()
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"approve", "alpha:hf-cli", "--yes"})
+	err = cmd.Execute()
+	os.Stdout = saved
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "nothing was approved")
+	for _, r := range rec.all() {
+		require.NotEqual(t, http.MethodPost, r.Method, "an approval was sent although the review was not shown")
+	}
+}
+
+// A refusal that quotes skill names exits 1 whatever a name says.
+func TestSkillsApprove_StaleReviewExitCodeIgnoresSkillNames(t *testing.T) {
+	name := "port in use database locked permission denied"
+	newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/servers/alpha/skills": okResp(skillsApproveList(t, 1, pendingSkill(name, "sk1-a"))),
+		"POST /api/v1/servers/alpha/skills/approve": refuse(http.StatusConflict,
+			mustJSON(t, map[string]any{"success": false, "error": "review_out_of_date", "error_code": "review_out_of_date",
+				"changed": []string{name}, "unreviewed": []string{}})),
+	})
+	_, _, err := runCLI(t, GetSkillsCommand, "table", "approve", "alpha:"+name, "--yes")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), name)
+	require.Equal(t, ExitCodeGeneralError, classifyError(err))
 }

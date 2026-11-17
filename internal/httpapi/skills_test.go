@@ -39,6 +39,8 @@ type skillsTestController struct {
 	blockFn   func(ctx context.Context, server string, skills []string, blocked bool, by string, inc int64) (int, error)
 	// incarnations answers ServerIncarnation (the optional reader capability).
 	incarnations map[string]int64
+	// onList runs on every read of the records.
+	onList func()
 }
 
 func (c *skillsTestController) ServerIncarnation(name string) (int64, bool) {
@@ -83,6 +85,9 @@ func (c *skillsTestController) SkillsStatus(server string) internalRuntime.Skill
 
 func (c *skillsTestController) ListSkillRecords(server string) ([]*storage.SkillApprovalRecord, error) {
 	c.record("ListSkillRecords")
+	if c.onList != nil {
+		c.onList()
+	}
 	return c.recs[server], nil
 }
 

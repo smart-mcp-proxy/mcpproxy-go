@@ -232,12 +232,16 @@ func scanStateOf(s *storage.SkillScan, currentHash string) skillScanState {
 // scanSkillOutcomes scans the usable skills of one refresh that have no scan
 // of their current content, reading each skill's text back from the store so
 // only one skill is in memory at a time. It stops starting new scans once the
-// refresh's scan time is spent (the first skill is always scanned) and
-// reports how many it scanned and how many it left for the next refresh.
-func (r *Runtime) scanSkillOutcomes(ctx context.Context, serverName string, outcomes []skillOutcome) (scanned, pending int) {
+// refresh's scan time is spent (the first skill is always scanned). settled
+// counts the scans that will not be repeated for the same content, pending
+// the skills left without a scan. A scan that has to be repeated (degraded
+// coverage) is recorded but is not progress: a follow-up refresh would only
+// scan the same skills again.
+func (r *Runtime) scanSkillOutcomes(ctx context.Context, serverName string, outcomes []skillOutcome) (settled, pending int) {
 	sm := r.storageManager
 	budget := r.skills.limits.scanRefresh()
 	start := time.Now()
+	scanned := 0
 	for i := range outcomes {
 		o := &outcomes[i]
 		if !o.usable || !o.needScan {
@@ -274,6 +278,9 @@ func (r *Runtime) scanSkillOutcomes(ctx context.Context, serverName string, outc
 		res.Hash = o.hash
 		o.scan = res
 		scanned++
+		if res.Incomplete != storage.SkillScanIncompleteCoverage {
+			settled++
+		}
 	}
-	return scanned, pending
+	return settled, pending
 }

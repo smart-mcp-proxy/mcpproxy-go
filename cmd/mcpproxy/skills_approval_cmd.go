@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -54,7 +55,12 @@ func parseSkillTargets(targets []string) (server string, skills []string, err er
 // name the same version of the file. maxBytes > 0 cuts the text at that many
 // bytes (on a line boundary when there is one) and reports truncated; 0 reads
 // to the end.
-func readSkillFile(ctx context.Context, client *cliclient.Client, server, skill, file string, approved bool, maxBytes int64) (text string, truncated bool, err error) {
+//
+// wantDigest binds the read to the listing the caller is showing: the text
+// printed under a listed content hash must be the text of that listing, not of
+// a refresh that ran between the listing and this read. Empty means the file
+// is not in the listing (the core answers 404 for it).
+func readSkillFile(ctx context.Context, client *cliclient.Client, server, skill, file string, approved bool, maxBytes int64, wantDigest string) (text string, truncated bool, err error) {
 	var b strings.Builder
 	offset := int64(0)
 	var digest string
@@ -68,6 +74,9 @@ func readSkillFile(ctx context.Context, client *cliclient.Client, server, skill,
 		// requests would otherwise be shown as text no version contains.
 		if first {
 			digest, size = chunk.Digest, chunk.Size
+			if wantDigest != "" && digest != wantDigest {
+				return "", false, cliRefusalError{fmt.Errorf("%s changed after the skill was listed; run the command again", file)}
+			}
 		} else if chunk.Digest != digest || chunk.Size != size {
 			return "", false, fmt.Errorf("%s changed while it was being read; run the command again", termSafe(file))
 		}
@@ -124,6 +133,16 @@ type skillDiffDoc struct {
 }
 
 // diffSkillFiles compares the approved and current file sets.
+// skillFileDigest returns the listed digest of one file, or "".
+func skillFileDigest(files []contracts.SkillFileInfo, path string) string {
+	for _, f := range files {
+		if f.Path == path {
+			return f.Digest
+		}
+	}
+	return ""
+}
+
 func diffSkillFiles(approved, current []contracts.SkillFileInfo) []skillFileChange {
 	byPath := map[string]contracts.SkillFileInfo{}
 	for _, f := range approved {
@@ -194,14 +213,14 @@ func runSkillsShowDiff(target string) error {
 		var oldText, newText string
 		cut := false
 		if f.Change != "added" {
-			t, c, rerr := readSkillFile(ctx, s.client, server, skill, f.Path, true, skillDiffFileCap)
+			t, c, rerr := readSkillFile(ctx, s.client, server, skill, f.Path, true, skillDiffFileCap, skillFileDigest(entry.ApprovedFiles, f.Path))
 			if rerr != nil {
 				return rerr
 			}
 			oldText, cut = t, cut || c
 		}
 		if f.Change != "removed" {
-			t, c, rerr := readSkillFile(ctx, s.client, server, skill, f.Path, false, skillDiffFileCap)
+			t, c, rerr := readSkillFile(ctx, s.client, server, skill, f.Path, false, skillDiffFileCap, skillFileDigest(entry.Files, f.Path))
 			if rerr != nil {
 				return rerr
 			}
@@ -371,8 +390,8 @@ func runSkillsApprove(args []string, serverFlag string, all bool, expectHash str
 		return nil
 	}
 	if expectHash != "" && entries[0].CurrentHash != expectHash {
-		return fmt.Errorf("%s has content hash %s, not the expected %s; it changed since you read it. Review it again with `mcpproxy skills show %s`; nothing was approved",
-			entries[0].ID, dash(entries[0].CurrentHash), expectHash, entries[0].ID)
+		return cliRefusalError{fmt.Errorf("%s has content hash %s, not the expected %s; it changed since you read it. Review it again with `mcpproxy skills show %s`; nothing was approved",
+			entries[0].ID, dash(entries[0].CurrentHash), expectHash, entries[0].ID)}
 	}
 
 	// What is about to be approved goes to stdout in table mode and to stderr
@@ -381,12 +400,18 @@ func runSkillsApprove(args []string, serverFlag string, all bool, expectHash str
 	if structuredOutput() {
 		review = os.Stderr
 	}
-	fmt.Fprintf(review, "About to approve %d skill(s) on %s (server incarnation %d):\n", len(entries), termSafe(server), list.Incarnation)
+	var shown strings.Builder
+	fmt.Fprintf(&shown, "About to approve %d skill(s) on %s (server incarnation %d):\n", len(entries), termSafe(server), list.Incarnation)
 	req := contracts.SkillsApproveRequest{ExpectedHashes: map[string]string{}, ExpectedIncarnation: list.Incarnation}
 	for _, e := range entries {
-		fmt.Fprintln(review, termSafe(skillReviewLine(*e)))
+		fmt.Fprintln(&shown, termSafe(skillReviewLine(*e)))
 		req.Skills = append(req.Skills, e.Path)
 		req.ExpectedHashes[e.Path] = e.CurrentHash
+	}
+	// What is approved is what was shown: if the review could not be written
+	// (a closed or full output), nothing is sent.
+	if _, werr := io.WriteString(review, shown.String()); werr != nil {
+		return cliRefusalError{fmt.Errorf("the review could not be written (%v); nothing was approved", werr)}
 	}
 
 	ok, err := confirmYes(fmt.Sprintf("Approve %d skill(s)?", len(entries)), yes)
@@ -402,8 +427,10 @@ func runSkillsApprove(args []string, serverFlag string, all bool, expectHash str
 	if err != nil {
 		var stale *cliclient.SkillsStaleReviewError
 		if errors.As(err, &stale) {
-			return fmt.Errorf("the skills changed after they were listed; nothing was approved. Changed: %s. Not reviewed: %s. Review them again and re-run the command",
-				joinOrDash(stale.Changed), joinOrDash(stale.Unreviewed))
+			// A refusal with skill names in it: the exit code must not depend
+			// on what a name happens to say.
+			return cliRefusalError{fmt.Errorf("the skills changed after they were listed; nothing was approved. Changed: %s. Not reviewed: %s. Review them again and re-run the command",
+				joinOrDash(stale.Changed), joinOrDash(stale.Unreviewed))}
 		}
 		return err
 	}

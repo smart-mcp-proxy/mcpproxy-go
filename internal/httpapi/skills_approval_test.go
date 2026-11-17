@@ -327,3 +327,35 @@ func TestSkillsApprove_BodyOverLimitDoesNotReachController(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.NotContains(t, ctrl.recorded(), "ApproveSkillsReviewedAt")
 }
+
+// The refresh answer carries records and an incarnation a decision can be
+// bound to. They are read as one answer: an identity that keeps moving while
+// the records are read is refused, never paired with them.
+func TestSkillsRefresh_IncarnationIsReadWithTheRecords(t *testing.T) {
+	moving := false
+	ctrl, srv, _ := skillsServer(t, true, func(c *skillsTestController) {
+		c.recs["alpha"] = []*storage.SkillApprovalRecord{skillRec("a", storage.SkillStatusPending, "sk1-a")}
+		c.status["alpha"] = internalRuntime.SkillsServerStatus{Supported: true}
+		c.incarnations = map[string]int64{"alpha": 5}
+	})
+	rec := skillsPost(t, srv, "/api/v1/servers/alpha/skills/refresh", scopeAdminAPIKey, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var ok struct {
+		Data struct {
+			Incarnation int64 `json:"incarnation"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ok))
+	require.EqualValues(t, 5, ok.Data.Incarnation)
+
+	// Every read of the records now moves the server's identity.
+	moving = true
+	ctrl.onList = func() {
+		if moving {
+			ctrl.incarnations["alpha"]++
+		}
+	}
+	rec = skillsPost(t, srv, "/api/v1/servers/alpha/skills/refresh", scopeAdminAPIKey, "")
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	require.Equal(t, "server_replaced", errBody(t, rec)["error_code"])
+}

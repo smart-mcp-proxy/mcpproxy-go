@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
@@ -249,8 +251,8 @@ func skillScanLabel(e contracts.SkillEntry) string {
 // carried out by the terminal: clear the screen, set the title, write the
 // clipboard, reverse the reading order. Control characters, the Unicode
 // direction and invisible-format characters, and bytes that are not UTF-8 are
-// shown as visible escapes instead. Structured output (-o json|yaml) does not
-// go through here: its encoder escapes on its own and stays exact.
+// shown as visible escapes instead. Structured output (-o json|yaml) goes
+// through printJSONValue, which keeps the same characters off the terminal.
 func termSafe(s string) string { return termEscape(s, false) }
 
 // escapedError is an error whose message is safe to print; the error it wraps
@@ -320,13 +322,80 @@ func termUnsafe(r rune, keepLayout bool) bool {
 	return false
 }
 
-// printJSONValue prints v through the -o json|yaml path.
+// printJSONValue prints v through the -o json|yaml path, and keeps what a
+// terminal would act on out of the output. Go's JSON encoder escapes the C0
+// controls but writes the direction overrides, the C1 controls and DEL as
+// they are, and the YAML encoder writes most of them too.
+//
+// JSON stays exact: each such character becomes its \uXXXX escape, which a
+// JSON parser decodes back. YAML has no escape that works in every scalar
+// style, so there the characters are shown as visible text (\u202e), as in
+// the table output; -o json is the format for the exact text.
 func printJSONValue(v any) error {
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	return printData(raw)
+	if ResolveOutputFormat() == "yaml" {
+		var decoded any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			return err
+		}
+		out, err := yaml.Marshal(termSafeValue(decoded))
+		if err != nil {
+			return err
+		}
+		fmt.Print(string(out))
+		return nil
+	}
+	return printData(jsonTermSafe(raw))
+}
+
+// jsonTermSafe replaces every character of an encoded JSON document that a
+// terminal would act on with its \uXXXX escape. Such a character can only sit
+// inside a string (the encoder writes nothing else outside ASCII), and all of
+// them are in the basic plane, so the document decodes to the same value.
+func jsonTermSafe(raw []byte) []byte {
+	clean := true
+	for _, r := range string(raw) {
+		if termUnsafe(r, true) {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return raw
+	}
+	var b bytes.Buffer
+	b.Grow(len(raw) + 32)
+	for _, r := range string(raw) {
+		if termUnsafe(r, true) {
+			fmt.Fprintf(&b, `\u%04x`, r)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.Bytes()
+}
+
+// termSafeValue escapes every string (keys included) of a decoded JSON value.
+func termSafeValue(v any) any {
+	switch t := v.(type) {
+	case string:
+		return termSafeText(t)
+	case []any:
+		for i := range t {
+			t[i] = termSafeValue(t[i])
+		}
+		return t
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			out[termSafe(k)] = termSafeValue(val)
+		}
+		return out
+	}
+	return v
 }
 
 // --- show ---
@@ -398,7 +467,11 @@ func runSkillsShow(target, file string, approved bool) error {
 		return fmt.Errorf("%w: %s", err, target)
 	}
 
-	body, _, err := readSkillFile(ctx, s.client, server, skill, file, approved, 0)
+	listed := entry.Files
+	if approved {
+		listed = entry.ApprovedFiles
+	}
+	body, _, err := readSkillFile(ctx, s.client, server, skill, file, approved, 0, skillFileDigest(listed, file))
 	if err != nil {
 		return err
 	}

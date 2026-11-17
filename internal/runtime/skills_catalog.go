@@ -137,6 +137,11 @@ type skillsCatalogState struct {
 	// followUp marks servers whose last refresh left skills unscanned; the
 	// flight starts one more refresh for them when it ends.
 	followUp map[string]bool
+	// rerun marks servers for which a background trigger arrived while a
+	// refresh was running. That refresh may already have applied its
+	// decisions (with the trust mode of before a configuration change, for
+	// one), so joining it would lose the trigger: one more refresh runs.
+	rerun map[string]bool
 
 	// Tests only: budgets, a seam after the listing returns, and a switch for
 	// the background triggers.
@@ -158,6 +163,7 @@ func (s *skillsCatalogState) init() {
 		s.applied = map[string]uint64{}
 		s.status = map[string]SkillsServerStatus{}
 		s.followUp = map[string]bool{}
+		s.rerun = map[string]bool{}
 	}
 }
 
@@ -295,11 +301,16 @@ func (r *Runtime) runSkillsFlight(serverName string, f *skillsFlight) {
 	defer func() {
 		st.mu.Lock()
 		delete(st.flights, serverName)
+		rerun := st.rerun[serverName] && !st.closed
 		again := st.followUp[serverName] && !st.closed
+		delete(st.rerun, serverName)
 		delete(st.followUp, serverName)
 		st.mu.Unlock()
 		close(f.done)
-		if again {
+		switch {
+		case rerun:
+			r.triggerSkillsRefresh(serverName)
+		case again:
 			// After a pause, so a server that keeps changing its skills cannot
 			// keep one core scanning without a break.
 			time.AfterFunc(st.limits.followUp(), func() { r.triggerSkillsRefresh(serverName) })
@@ -487,7 +498,7 @@ func (r *Runtime) runSkillsRefresh(ctx, scanCtx context.Context, serverName stri
 	}
 	// Every skill is read and its text is stored: scan what has no scan yet,
 	// outside any lock and outside the upstream timeout.
-	scanned, scansPending := r.scanSkillOutcomes(scanCtx, serverName, outcomes)
+	scansSettled, scansPending := r.scanSkillOutcomes(scanCtx, serverName, outcomes)
 
 	// A listing entry that did not decode but carried a URI is still a skill
 	// the person should see; without a URI there is nothing to key a record on.
@@ -605,8 +616,9 @@ func (r *Runtime) runSkillsRefresh(ctx, scanCtx context.Context, serverName stri
 	})
 	// Scan time ran out with skills left: the next refresh scans them (what
 	// was scanned now is on the records and is not scanned again). Only after
-	// progress, so a refresh that scanned nothing cannot loop.
-	if scansPending > 0 && scanned > 0 {
+	// progress, that is a scan that will not be repeated: a refresh that
+	// settled nothing would be followed by one doing the same work again.
+	if scansPending > 0 && scansSettled > 0 {
 		r.skills.mu.Lock()
 		r.skills.init()
 		r.skills.followUp[serverName] = true
@@ -1105,6 +1117,14 @@ func (r *Runtime) triggerSkillsRefresh(serverName string) {
 	}
 	r.skills.mu.Lock()
 	if r.skills.closed {
+		r.skills.mu.Unlock()
+		return
+	}
+	r.skills.init()
+	if r.skills.flights[serverName] != nil {
+		// A refresh is running and may be past the point where it reads the
+		// configuration and the listing: have it followed by one more.
+		r.skills.rerun[serverName] = true
 		r.skills.mu.Unlock()
 		return
 	}
