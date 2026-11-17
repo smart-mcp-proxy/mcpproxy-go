@@ -124,6 +124,11 @@ type MCPProxyServer struct {
 	// skillAccessEmit, when set, receives skill_access activity instead of the
 	// runtime (tests).
 	skillAccessEmit func(runtime.SkillAccessActivity)
+	// skillServedCache remembers skill files as the output sanitisation
+	// policy lets them out (mcp_skills_output.go).
+	skillServedMu    sync.Mutex
+	skillServedCache map[string]*skillServed
+	skillServedTick  uint64
 	// inventoryMu guards lastInventoryKey, the reachable-server set last
 	// announced via tools/list_changed (NotifyUpstreamInventoryChanged).
 	inventoryMu      sync.Mutex

@@ -15,6 +15,7 @@ const (
 	SkillAccessDamaged      = "damaged"
 	SkillAccessStaleVersion = "stale_version"
 	SkillAccessBlocked      = "blocked" // the output sanitisation policy withheld the text
+	SkillAccessInvalid      = "invalid" // the call's parameters were unusable; nothing was read
 )
 
 // Skill access actions.
