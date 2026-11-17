@@ -39,6 +39,14 @@ const (
 	// current_hash, reason, approved_by, actor_kind, actor_name, surface.
 	// Administrator-only: it names skills that may not be approved.
 	ActivityTypeSkillQuarantineChange ActivityType = "skill_quarantine_change"
+	// ActivityTypeSkillAccess represents one agent search, load or file read of
+	// a skill (Spec 125 FR-024). Metadata: action (search|load|read), tool,
+	// outcome (success|not_found|binary|damaged|stale_version), skill, skill_id,
+	// file, hash, offset, bytes, total_bytes, results, matches. The skill text is
+	// never stored. ServerName is the skill's origin server for load and read
+	// and empty for a search, so the ordinary server-reach filter of every
+	// activity read applies without a special case.
+	ActivityTypeSkillAccess ActivityType = "skill_access"
 	// ActivityTypeSecurityScan represents a security scan event (Spec 039)
 	ActivityTypeSecurityScan ActivityType = "security_scan"
 	// ActivityTypeCredentialBroker represents a per-user credential brokering
@@ -79,6 +87,7 @@ var ValidActivityTypes = []string{
 	string(ActivityTypeConfigChange),
 	string(ActivityTypeToolQuarantineChange),
 	string(ActivityTypeSkillQuarantineChange),
+	string(ActivityTypeSkillAccess),
 	string(ActivityTypeSecurityScan),
 	string(ActivityTypeCredentialBroker),
 	string(ActivityTypePreflight),

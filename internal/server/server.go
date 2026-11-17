@@ -949,6 +949,9 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 				// until a restart. Same shape as RefreshPrompts above: cheap,
 				// idempotent, static construction on this one listener goroutine.
 				s.mcpProxy.RefreshCodeExecutionAvailability()
+				// Spec 125 FR-026: enable_skills is hot-reloadable; the skill
+				// tools follow the live switch on every surface.
+				s.mcpProxy.RefreshSkillsAvailability()
 				// Spec 102 FR-014: direct_tool_response_mode is hot-reloadable,
 				// but unlike the settings above the direct listing is
 				// REGISTERED state — reading the live config on the next call

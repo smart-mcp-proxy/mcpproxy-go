@@ -1013,6 +1013,8 @@ export type ActivityType =
   | 'profile_change'
   /** Spec 125: a skill's approval state change (administrator-only). */
   | 'skill_quarantine_change'
+  /** Spec 125: an agent searched, loaded or read a skill (never carries the skill text). */
+  | 'skill_access'
 
 export type ActivitySource = 'mcp' | 'cli' | 'api'
 
