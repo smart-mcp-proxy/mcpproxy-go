@@ -87,15 +87,15 @@ description: "Task list for Skills over MCP (spec 125)"
 
 ## PR-3: Agent tools (US3, rest of US4)
 
-- [ ] T034 [P] [US3] Tests for the search index in `internal/skills/index/index_test.go`: ranking by name and description, rebuild, only available skills, 1,000 entries under 100 ms
-- [ ] T035 [US3] Implement `internal/skills/index` (memory-only Bleve)
-- [ ] T036 [P] [US3] Tool tests in `internal/server/mcp_skills_test.go`: search result shape and `total`, load with provenance header and manifest, offsets and `next_offset` over a multi-part file, file read, binary refused, path escape refused, and the single `skill not found` answer for pending, changed, blocked, unusable, not listed, excluded server, disabled server, quarantined server, out-of-scope server and unknown id (byte-identical answers)
-- [ ] T037 [US3] Implement `internal/server/mcp_skills.go`; content only from the approved copy, re-hashed before return; sanitisation and sensitive-data detection; activity type `skill_access`
-- [ ] T038 [US3] Scope tests with an agent token, a profile, a pinned profile and tool-deny rules (FR-023, FR-023a); upstream changed after approval → agent still gets the approved text (FR-008b)
-- [ ] T039 [US4] `RefreshSkillsAvailability`: per-surface tests (default registry, call-tool, code-execution, direct, single-server) for off → on → off; a built-in name can never resolve to an upstream tool; implement and call it from the reload listener (plan D5)
-- [ ] T040 [US3] Scoped REST answers (available skills only, approved copy only) replacing the PR-1 administrator-only gate on list and content
-- [ ] T041 [US3] E2E in `internal/server/e2e_test.go` style: real client session, search → load → read; `./scripts/test-api-e2e.sh`; token count of a 25-skill search answer under 2,000 (SC-003)
-- [ ] T042 [US3] Docs: agent usage, the three tools, profiles and tokens; `docs/features/agent-instructions.md` snippet
+- [x] T034 [P] [US3] Tests for the search index in `internal/skills/index/index_test.go`: ranking by name and description, rebuild, only available skills, 1,000 entries under 100 ms
+- [x] T035 [US3] Implement `internal/skills/index` (memory-only Bleve)
+- [x] T036 [P] [US3] Tool tests in `internal/server/mcp_skills_test.go`: search result shape and `total`, load with provenance header and manifest, offsets and `next_offset` over a multi-part file, file read, binary refused, path escape refused, and the single `skill not found` answer for pending, changed, blocked, unusable, not listed, excluded server, disabled server, quarantined server, out-of-scope server and unknown id (byte-identical answers)
+- [x] T037 [US3] Implement `internal/server/mcp_skills.go`; content only from the approved copy, re-hashed before return; sanitisation and sensitive-data detection; activity type `skill_access`
+- [x] T038 [US3] Scope tests with an agent token, a profile, a pinned profile and tool-deny rules (FR-023, FR-023a); upstream changed after approval → agent still gets the approved text (FR-008b)
+- [x] T039 [US4] `RefreshSkillsAvailability`: per-surface tests (default registry, call-tool, code-execution, direct, single-server) for off → on → off; a built-in name can never resolve to an upstream tool; implement and call it from the reload listener (plan D5)
+- [x] T040 [US3] Scoped REST answers (available skills only, approved copy only) replacing the PR-1 administrator-only gate on list and content
+- [x] T041 [US3] E2E in `internal/server/e2e_test.go` style: real client session, search → load → read; `./scripts/test-api-e2e.sh`; token count of a 25-skill search answer under 2,000 (SC-003)
+- [x] T042 [US3] Docs: agent usage, the three tools, profiles and tokens; `docs/features/agent-instructions.md` snippet
 
 **Checkpoint PR-3**: an agent in any client finds and loads approved skills.
 
