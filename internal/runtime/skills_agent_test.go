@@ -1,12 +1,17 @@
 package runtime
 
 import (
+	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/skills"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/skills/skillstest"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
@@ -294,6 +299,18 @@ func TestSearchAvailableSkills_FollowsBlockAndConfigWithoutAnIndexCall(t *testin
 	assert.Zero(t, total)
 }
 
+// builtOf is the generation the only cached index was built from.
+func (g *skillsRig) builtOf(t *testing.T) uint64 {
+	t.Helper()
+	g.rt.skills.idxMu.Lock()
+	defer g.rt.skills.idxMu.Unlock()
+	require.Len(t, g.rt.skills.idxCache, 1)
+	for _, e := range g.rt.skills.idxCache {
+		return e.built
+	}
+	return 0
+}
+
 func TestSearchAvailableSkills_RebuildsOnlyWhenTheGenerationMoved(t *testing.T) {
 	g := newSkillsRig(t, skillsRigOpts{enable: true})
 	g.fx.AddSkill(skillstest.Skill{Path: "pdf"})
@@ -301,14 +318,146 @@ func TestSearchAvailableSkills_RebuildsOnlyWhenTheGenerationMoved(t *testing.T) 
 	g.approve(t, "pdf")
 	_, _, err := g.rt.SearchAvailableSkills("pdf", 10, nil)
 	require.NoError(t, err)
-	built := g.rt.skills.idxBuilt
+	built := g.builtOf(t)
 	_, _, err = g.rt.SearchAvailableSkills("pdf", 10, nil)
 	require.NoError(t, err)
-	assert.Equal(t, built, g.rt.skills.idxBuilt)
+	assert.Equal(t, built, g.builtOf(t))
 	g.rt.skills.bumpIndexGeneration()
 	_, _, err = g.rt.SearchAvailableSkills("pdf", 10, nil)
 	require.NoError(t, err)
-	assert.Greater(t, g.rt.skills.idxBuilt, built)
+	assert.Greater(t, g.builtOf(t), built)
+}
+
+// addApprovedServer adds a second server to the configuration with n approved
+// skills written straight into the store (it is never connected).
+func (g *skillsRig) addApprovedServer(t *testing.T, name string, n int, desc string) {
+	t.Helper()
+	_, err := g.rt.Commit("test_add", func(tx *CommitTx) error {
+		return tx.CreateServer(&config.ServerConfig{Name: name, URL: "http://127.0.0.1:1/mcp", Protocol: "streamable-http", Enabled: true, TrustMode: "manual"})
+	})
+	require.NoError(t, err)
+	_, err = g.rt.Commit("test_trust", func(tx *CommitTx) error { return tx.SetQuarantined(name, false) })
+	require.NoError(t, err)
+	g.rt.skills.wait()
+	sc := skillsServerConfig(g.rt.Config(), name)
+	require.True(t, skillsServerExposed(g.rt.Config(), sc), "the fixture server must be one that may serve skills")
+	for i := 0; i < n; i++ {
+		p := fmt.Sprintf("other-%03d", i)
+		fm, merr := json.Marshal(map[string]string{"name": p, "description": desc})
+		require.NoError(t, merr)
+		content := storage.SkillContent{Frontmatter: fm, Files: []storage.SkillFile{{RelPath: "SKILL.md", URI: "skill://" + p + "/SKILL.md", Digest: "sha256:" + strings.Repeat("a", 64), Size: 1, Text: true, Stored: true}}}
+		require.NoError(t, g.rt.storageManager.SaveSkillApproval(&storage.SkillApprovalRecord{
+			ServerName: name, SkillURI: "skill://" + p + "/SKILL.md", SkillPath: p, Name: p, Description: desc,
+			Status: storage.SkillStatusApproved, Listed: true, Current: content, Approved: &content,
+			CurrentHash: "sk1-x", ApprovedHash: "sk1-x", FirstSeen: time.Now(), UpdatedAt: time.Now(),
+		}))
+	}
+	g.rt.skills.bumpIndexGeneration()
+}
+
+// A full-text score depends on how common a word is in the whole index. With
+// one index for everybody, skills a caller cannot reach would move the order
+// of the caller's own results: an answer that changes with skills that must
+// not exist for it. Each reach has its own index.
+func TestSearchAvailableSkills_SkillsOutsideReachDoNotMoveTheOrder(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	g.fx.AddSkill(skillstest.Skill{Path: "one", Files: map[string][]byte{"SKILL.md": skillMD("one", "alpha alpha gamma", "b")}})
+	g.fx.AddSkill(skillstest.Skill{Path: "two", Files: map[string][]byte{"SKILL.md": skillMD("two", "beta delta", "b")}})
+	g.fx.AddSkill(skillstest.Skill{Path: "three", Files: map[string][]byte{"SKILL.md": skillMD("three", "alpha beta", "b")}})
+	require.NoError(t, g.refresh(t))
+	g.approve(t, "one", "two", "three")
+	own := func(s string) bool { return s == skillsSrv }
+	ids := func() ([]string, int) {
+		hits, total, err := g.rt.SearchAvailableSkills("alpha beta", 10, own)
+		require.NoError(t, err)
+		var out []string
+		for _, h := range hits {
+			out = append(out, h.ID)
+		}
+		return out, total
+	}
+	before, totalBefore := ids()
+	require.Len(t, before, 3)
+
+	g.addApprovedServer(t, "other", 40, "alpha alpha alpha")
+	after, totalAfter := ids()
+	assert.Equal(t, before, after, "the order of a caller's results is the same with and without skills it cannot reach")
+	assert.Equal(t, totalBefore, totalAfter)
+
+	// The caller's index holds its own servers' skills and nothing else.
+	g.rt.skills.idxMu.Lock()
+	e := g.rt.skills.idxCache[skillsSrv]
+	g.rt.skills.idxMu.Unlock()
+	require.NotNil(t, e)
+	assert.Equal(t, 3, e.ix.Len())
+
+	all, total, err := g.rt.SearchAvailableSkills("alpha", 5, nil)
+	require.NoError(t, err)
+	assert.Len(t, all, 5)
+	assert.Equal(t, 42, total, "an unrestricted caller counts every server")
+}
+
+// A search reads one record per returned hit: a hit whose record is gone or
+// no longer available is dropped and not counted.
+func TestSearchAvailableSkills_AHitWithoutItsRecordIsDroppedAndNotCounted(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf"})
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf-two"})
+	require.NoError(t, g.refresh(t))
+	g.approve(t, "pdf", "pdf-two")
+	hits, total, err := g.rt.SearchAvailableSkills("pdf", 10, nil)
+	require.NoError(t, err)
+	require.Len(t, hits, 2)
+	require.Equal(t, 2, total)
+
+	// Removed behind the index's back (no generation bump).
+	require.NoError(t, g.rt.storageManager.DeleteSkillApproval(skillsSrv, g.records(t)["pdf-two"].SkillURI))
+	hits, total, err = g.rt.SearchAvailableSkills("pdf", 10, nil)
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	assert.Equal(t, skillsSrv+":pdf", hits[0].ID)
+	assert.Equal(t, 1, total)
+}
+
+func TestSearchAvailableSkills_AVeryLongQueryIsCut(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf"})
+	require.NoError(t, g.refresh(t))
+	g.approve(t, "pdf")
+	hits, _, err := g.rt.SearchAvailableSkills("pdf "+strings.Repeat("zzz ", 100000), 10, nil)
+	require.NoError(t, err)
+	assert.Len(t, hits, 1)
+}
+
+// A server that renames its skills on every listing leaves a record behind
+// each time. The oldest are dropped; a blocked one is kept.
+func TestSkillsRefresh_RecordsOfUnlistedSkillsAreBounded(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	old := time.Now().Add(-time.Hour)
+	for i := 0; i < skills.MaxUnlistedSkillsPerServer+5; i++ {
+		p := fmt.Sprintf("gone-%03d", i)
+		require.NoError(t, g.rt.storageManager.SaveSkillApproval(&storage.SkillApprovalRecord{
+			ServerName: skillsSrv, SkillURI: "skill://" + p + "/SKILL.md", SkillPath: p, Name: p,
+			Status: storage.SkillStatusPending, Listed: false, Blocked: i == 0,
+			FirstSeen: old, UpdatedAt: old.Add(time.Duration(i) * time.Second),
+		}))
+	}
+	g.fx.AddSkill(skillstest.Skill{Path: "pdf"})
+	require.NoError(t, g.refresh(t))
+
+	recs := g.records(t)
+	unlisted := 0
+	for _, r := range recs {
+		if !r.Listed && !r.Blocked {
+			unlisted++
+		}
+	}
+	assert.Equal(t, skills.MaxUnlistedSkillsPerServer, unlisted)
+	require.Contains(t, recs, "gone-000", "a blocked record is kept: the mark is a person's decision")
+	assert.True(t, recs["gone-000"].Blocked)
+	assert.NotContains(t, recs, "gone-001", "the oldest unlisted records go first")
+	assert.Contains(t, recs, fmt.Sprintf("gone-%03d", skills.MaxUnlistedSkillsPerServer+4))
+	assert.Contains(t, recs, "pdf")
 }
 
 func TestSearchAvailableSkills_AfterCloseIsEmpty(t *testing.T) {

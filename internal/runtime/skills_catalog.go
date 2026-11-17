@@ -17,7 +17,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/skills"
-	skillindex "github.com/smart-mcp-proxy/mcpproxy-go/internal/skills/index"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
@@ -171,8 +170,8 @@ type skillsCatalogState struct {
 	// indexGen moved past the generation it was built from.
 	indexGen atomic.Uint64
 	idxMu    sync.Mutex
-	idx      *skillindex.Index
-	idxBuilt uint64
+	idxCache map[string]*skillIndexEntry
+	idxTick  uint64
 	idxDone  bool
 }
 
@@ -617,6 +616,16 @@ func (r *Runtime) runSkillsRefresh(ctx, scanCtx context.Context, serverName stri
 		// collection removes what no record references any more.
 		if _, err := sm.ApplySkillRefresh(serverName, upserts, unlisted, nil); err != nil {
 			return err
+		}
+		// A server that renames its skills on every listing would otherwise
+		// leave a record behind each time. The blobs the deleted records
+		// referenced are collected by the next apply.
+		if n, err := sm.PruneUnlistedSkillApprovals(serverName, skills.MaxUnlistedSkillsPerServer); err != nil {
+			return err
+		} else if n > 0 {
+			changed = true
+			r.logger.Info("Dropped the oldest records of skills the server no longer lists",
+				zap.String("server", serverName), zap.Int("dropped", n))
 		}
 		recs, err := sm.ListSkillApprovals(serverName)
 		if err != nil {

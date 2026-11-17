@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -457,6 +458,44 @@ func (b *BoltDB) ApplySkillRefresh(serverName string, upserts []*SkillApprovalRe
 	return removed, err
 }
 
+// PruneUnlistedSkillApprovals deletes the server's oldest records of skills it
+// no longer lists, so that at most keep of them remain. A blocked record is
+// never deleted: the mark is a person's decision and must still be there when
+// the skill comes back. It returns how many records it deleted.
+func (b *BoltDB) PruneUnlistedSkillApprovals(serverName string, keep int) (int, error) {
+	var removed int
+	err := b.db.Update(func(tx *bbolt.Tx) error {
+		recs, err := listSkillApprovalsTx(tx, serverName)
+		if err != nil {
+			return err
+		}
+		var unlisted []*SkillApprovalRecord
+		for _, r := range recs {
+			if !r.Listed && !r.Blocked {
+				unlisted = append(unlisted, r)
+			}
+		}
+		if len(unlisted) <= keep {
+			return nil
+		}
+		sort.Slice(unlisted, func(i, j int) bool {
+			if !unlisted[i].UpdatedAt.Equal(unlisted[j].UpdatedAt) {
+				return unlisted[i].UpdatedAt.Before(unlisted[j].UpdatedAt)
+			}
+			return unlisted[i].SkillURI < unlisted[j].SkillURI
+		})
+		approvals := tx.Bucket([]byte(SkillApprovalBucket))
+		for _, r := range unlisted[:len(unlisted)-keep] {
+			if err := approvals.Delete([]byte(SkillApprovalKey(serverName, r.SkillURI))); err != nil {
+				return err
+			}
+			removed++
+		}
+		return nil
+	})
+	return removed, err
+}
+
 // --- Manager mirrors ---
 
 // SaveSkillApproval upserts a skill approval record.
@@ -535,4 +574,11 @@ func (m *Manager) ApplySkillRefresh(serverName string, upserts []*SkillApprovalR
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.db.ApplySkillRefresh(serverName, upserts, unlistedURIs, newFiles)
+}
+
+// PruneUnlistedSkillApprovals bounds the records of skills no longer listed.
+func (m *Manager) PruneUnlistedSkillApprovals(serverName string, keep int) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.db.PruneUnlistedSkillApprovals(serverName, keep)
 }

@@ -19,15 +19,16 @@ import (
 	bquery "github.com/blevesearch/bleve/v2/search/query"
 )
 
-// Doc is one skill to index. ID is "server:skill-path".
+// Doc is one skill to index. ID is "server:skill-path"; URI is the skill's
+// address on its server, which is the key of its record.
 type Doc struct {
-	ID, Server, Path, Name, Description string
+	ID, Server, Path, URI, Name, Description string
 }
 
 // Hit is one search result, best first.
 type Hit struct {
-	ID, Server, Path string
-	Score            float64
+	ID, Server, Path, URI string
+	Score                 float64
 }
 
 // ErrClosed is returned by a closed index.
@@ -36,6 +37,7 @@ var ErrClosed = errors.New("skills index is closed")
 type indexDoc struct {
 	Server         string `json:"server"`
 	Path           string `json:"path"`
+	URI            string `json:"uri"`
 	NameExact      string `json:"name_exact"`
 	Name           string `json:"name"`
 	Description    string `json:"description"`
@@ -63,6 +65,7 @@ func buildMapping() *mapping.IndexMappingImpl {
 	}
 	add("server", keyword.Name, true)
 	add("path", keyword.Name, true)
+	add("uri", keyword.Name, true)
 	add("name_exact", keyword.Name, false)
 	add("name", standard.Name, false)
 	add("description", standard.Name, false)
@@ -81,6 +84,7 @@ func newBleve(docs []Doc) (bleve.Index, error) {
 		if err := b.Index(d.ID, indexDoc{
 			Server:         d.Server,
 			Path:           d.Path,
+			URI:            d.URI,
 			NameExact:      strings.ToLower(d.Name),
 			Name:           splitUnderscores(d.Name),
 			Description:    splitUnderscores(d.Description),
@@ -183,37 +187,39 @@ func buildQuery(q string) bquery.Query {
 	return bq
 }
 
-// Search returns up to limit hits, best first, ties broken by id. An empty or
-// blank query returns nothing.
-func (ix *Index) Search(query string, limit int) ([]Hit, error) {
+// Search returns up to limit hits, best first, ties broken by id, and the
+// number of documents that match at all. An empty or blank query returns
+// nothing.
+func (ix *Index) Search(query string, limit int) (hits []Hit, total int, err error) {
 	query = strings.TrimSpace(query)
 	if query == "" || limit <= 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 	if ix.closed {
-		return nil, ErrClosed
+		return nil, 0, ErrClosed
 	}
 	if limit > ix.n {
 		limit = ix.n
 	}
 	if limit == 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
 	req := bleve.NewSearchRequestOptions(buildQuery(query), limit, 0, false)
-	req.Fields = []string{"server", "path"}
+	req.Fields = []string{"server", "path", "uri"}
 	req.SortBy([]string{"-_score", "_id"})
 	res, err := ix.cur.Search(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	out := make([]Hit, 0, len(res.Hits))
+	hits = make([]Hit, 0, len(res.Hits))
 	for _, h := range res.Hits {
 		hit := Hit{ID: h.ID, Score: h.Score}
 		hit.Server, _ = h.Fields["server"].(string)
 		hit.Path, _ = h.Fields["path"].(string)
-		out = append(out, hit)
+		hit.URI, _ = h.Fields["uri"].(string)
+		hits = append(hits, hit)
 	}
-	return out, nil
+	return hits, int(res.Total), nil //nolint:gosec // bounded by the number of indexed documents
 }

@@ -36,7 +36,7 @@ func TestSearchRanksNameOverDescription(t *testing.T) {
 		doc("a", "other", "other", "helps you with pdf files and many other things"),
 		doc("a", "pdf", "pdf", "reads documents"),
 	)
-	hits, err := ix.Search("pdf", 10)
+	hits, _, err := ix.Search("pdf", 10)
 	require.NoError(t, err)
 	require.Equal(t, []string{"a:pdf", "a:other"}, ids(hits))
 	require.Greater(t, hits[0].Score, hits[1].Score)
@@ -46,7 +46,7 @@ func TestSearchRanksNameOverDescription(t *testing.T) {
 
 func TestSearchDescriptionOnlyMatch(t *testing.T) {
 	ix := newIdx(t, doc("a", "x", "alpha", "converts spreadsheets into charts"))
-	hits, err := ix.Search("spreadsheets", 10)
+	hits, _, err := ix.Search("spreadsheets", 10)
 	require.NoError(t, err)
 	require.Equal(t, []string{"a:x"}, ids(hits))
 }
@@ -58,7 +58,7 @@ func TestSearchHyphenAndUnderscoreNames(t *testing.T) {
 		doc("a", "my_skill", "my_skill", ""),
 	)
 	for q, want := range map[string]string{"hf cli": "a:hf-cli", "pdf": "a:pdf-tools", "hf-cli": "a:hf-cli", "my skill": "a:my_skill", "my_skill": "a:my_skill", "HF-CLI": "a:hf-cli"} {
-		hits, err := ix.Search(q, 10)
+		hits, _, err := ix.Search(q, 10)
 		require.NoError(t, err, q)
 		require.NotEmpty(t, hits, q)
 		require.Equal(t, want, hits[0].ID, q)
@@ -68,11 +68,11 @@ func TestSearchHyphenAndUnderscoreNames(t *testing.T) {
 func TestSearchEmptyQuery(t *testing.T) {
 	ix := newIdx(t, doc("a", "x", "x", "y"))
 	for _, q := range []string{"", "   ", "\t\n"} {
-		hits, err := ix.Search(q, 10)
+		hits, _, err := ix.Search(q, 10)
 		require.NoError(t, err)
 		require.Empty(t, hits)
 	}
-	hits, err := ix.Search("x", 0)
+	hits, _, err := ix.Search("x", 0)
 	require.NoError(t, err)
 	require.Empty(t, hits)
 }
@@ -82,10 +82,10 @@ func TestReplaceDropsOldDocs(t *testing.T) {
 	require.Equal(t, 1, ix.Len())
 	require.NoError(t, ix.Replace([]Doc{doc("a", "new", "newskill", "fresh")}))
 	require.Equal(t, 1, ix.Len())
-	hits, err := ix.Search("oldskill", 10)
+	hits, _, err := ix.Search("oldskill", 10)
 	require.NoError(t, err)
 	require.Empty(t, hits)
-	hits, err = ix.Search("newskill", 10)
+	hits, _, err = ix.Search("newskill", 10)
 	require.NoError(t, err)
 	require.Equal(t, []string{"a:new"}, ids(hits))
 	require.NoError(t, ix.Replace(nil))
@@ -98,10 +98,10 @@ func TestSearchLimitUpToIndexSize(t *testing.T) {
 		docs = append(docs, doc("s", fmt.Sprintf("k%d", i), fmt.Sprintf("k%d", i), "common words"))
 	}
 	ix := newIdx(t, docs...)
-	hits, err := ix.Search("common", 10000)
+	hits, _, err := ix.Search("common", 10000)
 	require.NoError(t, err)
 	require.Len(t, hits, 250)
-	hits, err = ix.Search("common", 7)
+	hits, _, err = ix.Search("common", 7)
 	require.NoError(t, err)
 	require.Len(t, hits, 7)
 }
@@ -112,10 +112,10 @@ func TestSearchThousandDocsFast(t *testing.T) {
 		docs = append(docs, doc("s", fmt.Sprintf("skill-%d", i), fmt.Sprintf("skill-%d", i), fmt.Sprintf("does thing number %d with widgets", i)))
 	}
 	ix := newIdx(t, docs...)
-	_, err := ix.Search("widgets", 20) // warm
+	_, _, err := ix.Search("widgets", 20) // warm
 	require.NoError(t, err)
 	start := time.Now()
-	hits, err := ix.Search("skill 500", 20)
+	hits, _, err := ix.Search("skill 500", 20)
 	elapsed := time.Since(start)
 	require.NoError(t, err)
 	require.NotEmpty(t, hits)
@@ -135,7 +135,7 @@ func TestConcurrentSearchDuringReplace(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for !stop.Load() {
-				hits, err := ix.Search("alpha", 10)
+				hits, _, err := ix.Search("alpha", 10)
 				if err != nil {
 					t.Error(err)
 					return
@@ -163,7 +163,28 @@ func TestClosedIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, ix.Close())
 	require.NoError(t, ix.Close())
-	_, err = ix.Search("x", 1)
+	_, _, err = ix.Search("x", 1)
 	require.Error(t, err)
 	require.Error(t, ix.Replace(nil))
+}
+
+func TestSearch_ReportsTheRecordAddressAndTheNumberOfMatches(t *testing.T) {
+	ix, err := New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ix.Close() })
+	var docs []Doc
+	for i := 0; i < 30; i++ {
+		id := fmt.Sprintf("srv:common-%02d", i)
+		docs = append(docs, Doc{ID: id, Server: "srv", Path: id[4:], URI: "skill://" + id[4:] + "/SKILL.md", Name: id[4:], Description: "common words"})
+	}
+	docs = append(docs, Doc{ID: "srv:other", Server: "srv", Path: "other", URI: "skill://other/SKILL.md", Name: "other", Description: "nothing shared"})
+	require.NoError(t, ix.Replace(docs))
+
+	hits, total, err := ix.Search("common", 5)
+	require.NoError(t, err)
+	require.Len(t, hits, 5)
+	require.Equal(t, 30, total, "total counts every match, not only the returned ones")
+	for _, h := range hits {
+		require.Equal(t, "skill://"+h.Path+"/SKILL.md", h.URI)
+	}
 }
