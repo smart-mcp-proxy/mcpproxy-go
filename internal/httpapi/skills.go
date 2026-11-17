@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -133,10 +136,34 @@ func skillEntryFor(serverName string, rec *storage.SkillApprovalRecord, availabl
 	return e
 }
 
+// recordAgentSkillAccess writes the skill_access row of a scoped caller's REST
+// read (FR-024): an agent token that reads skill text over REST is recorded
+// like one that uses the agent tools. The row never holds the text.
+func (s *Server) recordAgentSkillAccess(r *http.Request, start time.Time, a internalRuntime.SkillAccessActivity) {
+	a.Source = string(storage.ActivitySourceAPI)
+	a.RequestID = reqcontext.GetRequestID(r.Context())
+	a.DurationMs = time.Since(start).Milliseconds()
+	if ac := auth.AuthContextFromContext(r.Context()); ac != nil {
+		a.Attribution.TokenName = ac.AgentName
+		a.Attribution.TokenPrefix = ac.TokenPrefix
+		if ac.IsClientCredential() {
+			a.Attribution.ClientID = ac.ClientID
+		}
+	}
+	s.controller.EmitActivitySkillAccess(a)
+}
+
 // writeAgentSkillsList answers a scoped caller: the approved copy of each
 // available skill, and nothing about any other skill.
 func (s *Server) writeAgentSkillsList(w http.ResponseWriter, r *http.Request, serverName string) {
+	start := time.Now()
 	avail, err := s.controller.ListAvailableSkills(serverName)
+	if err == nil {
+		s.recordAgentSkillAccess(r, start, internalRuntime.SkillAccessActivity{
+			Action: internalRuntime.SkillActionList, Outcome: internalRuntime.SkillAccessSuccess,
+			Server: serverName, Results: len(avail), Matches: len(avail),
+		})
+	}
 	if err != nil {
 		s.logger.Errorw("Failed to list skills", "server", serverName, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to list skills")
@@ -360,11 +387,28 @@ func (s *Server) handleGetServerSkillContent(w http.ResponseWriter, r *http.Requ
 		meta storage.SkillFile
 		err  error
 	)
+	// record writes the access row of a scoped read; an administrator's read
+	// of its own store is not an agent access.
+	record := func(string, int64, int64) {}
 	if scoped {
+		start := time.Now()
 		// copy is forced to approved, and only an available skill's approved
 		// files exist: every other case is the one not-found answer.
-		data, meta, _, err = s.controller.AvailableSkillFile(sc.Name, skillPath, file)
+		var sk *internalRuntime.AvailableSkill
+		data, meta, sk, err = s.controller.AvailableSkillFile(sc.Name, skillPath, file)
+		record = func(outcome string, from, n int64) {
+			a := internalRuntime.SkillAccessActivity{
+				Action: internalRuntime.SkillActionRead, Outcome: outcome, Server: sc.Name,
+				SkillID: cutSkillActivityText(sc.Name + ":" + skillPath), File: cutSkillActivityText(file),
+				Offset: from, Bytes: n, TotalSize: int64(len(data)),
+			}
+			if sk != nil {
+				a.Hash, a.SkillName = sk.ApprovedHash, cutSkillActivityText(sk.Name)
+			}
+			s.recordAgentSkillAccess(r, start, a)
+		}
 		if errors.Is(err, internalRuntime.ErrSkillNotFound) || errors.Is(err, internalRuntime.ErrSkillFileNotFound) {
+			record(internalRuntime.SkillAccessNotFound, offset, 0)
 			s.writeError(w, r, http.StatusNotFound, skillNotAvailableMessage)
 			return
 		}
@@ -376,9 +420,11 @@ func (s *Server) handleGetServerSkillContent(w http.ResponseWriter, r *http.Requ
 		s.writeError(w, r, http.StatusNotFound, err.Error())
 		return
 	case errors.Is(err, internalRuntime.ErrSkillFileBinary):
+		record(internalRuntime.SkillAccessBinary, offset, 0)
 		s.writeError(w, r, http.StatusUnsupportedMediaType, err.Error())
 		return
 	case errors.Is(err, internalRuntime.ErrSkillStoredCopyDamaged):
+		record(internalRuntime.SkillAccessDamaged, offset, 0)
 		s.writeSkillsError(w, r, http.StatusConflict, "stored_copy_damaged", err.Error())
 		return
 	case err != nil:
@@ -406,5 +452,26 @@ func (s *Server) handleGetServerSkillContent(w http.ResponseWriter, r *http.Requ
 	if more {
 		resp.NextOffset = &next
 	}
+	record(internalRuntime.SkillAccessSuccess, offset, int64(len(text)))
 	s.writeSuccess(w, resp)
+}
+
+// cutSkillActivityText bounds a caller-supplied value before it goes into an
+// activity row, and drops control characters.
+func cutSkillActivityText(v string) string {
+	v = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, strings.ToValidUTF8(v, ""))
+	const limit = 200
+	if len(v) > limit {
+		cut := limit
+		for cut > 0 && !utf8.RuneStart(v[cut]) {
+			cut--
+		}
+		v = v[:cut]
+	}
+	return v
 }

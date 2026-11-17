@@ -371,6 +371,7 @@ func (m *baseController) SkillFileText(_, _, _ string, _ bool) ([]byte, storage.
 func (m *baseController) ListAvailableSkills(_ string) ([]*runtime.AvailableSkill, error) {
 	return nil, nil
 }
+func (m *baseController) EmitActivitySkillAccess(runtime.SkillAccessActivity) {}
 func (m *baseController) AvailableSkillFile(_, _, _ string) ([]byte, storage.SkillFile, *runtime.AvailableSkill, error) {
 	return nil, storage.SkillFile{}, nil, runtime.ErrSkillNotFound
 }

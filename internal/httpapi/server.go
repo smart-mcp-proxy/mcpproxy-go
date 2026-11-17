@@ -298,6 +298,8 @@ type ServerController interface {
 	SkillAvailable(serverName string, rec *storage.SkillApprovalRecord) bool
 	// Scoped callers (PR-3): approved copies of available skills only.
 	ListAvailableSkills(serverName string) ([]*internalRuntime.AvailableSkill, error)
+	// EmitActivitySkillAccess records a scoped caller's read of skills (FR-024).
+	EmitActivitySkillAccess(a internalRuntime.SkillAccessActivity)
 	AvailableSkillFile(serverName, skillPath, relPath string) ([]byte, storage.SkillFile, *internalRuntime.AvailableSkill, error)
 	RefreshServerSkills(ctx context.Context, serverName string) error
 	// Spec 125 PR-2: the approval gate. Both are review- and

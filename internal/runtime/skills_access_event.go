@@ -22,6 +22,9 @@ const (
 	SkillActionSearch = "search"
 	SkillActionLoad   = "load"
 	SkillActionRead   = "read"
+	// SkillActionList is a scoped REST caller listing a server's available
+	// skills. The agent tools have no listing.
+	SkillActionList = "list"
 )
 
 // SkillAccessActivity describes one agent search, load or file read of a skill.
@@ -29,7 +32,10 @@ const (
 // one exception, it is scanned for sensitive data by the activity service and
 // dropped.
 type SkillAccessActivity struct {
-	Action  string // search | load | read
+	Action string // search | load | read | list
+	// Source is the door the access came through: empty or "mcp" for the agent
+	// tools, "api" for a scoped REST read.
+	Source  string
 	Tool    string // retrieve_skills | load_skill | read_skill_file
 	Outcome string // one of the SkillAccess* outcomes
 	// Server is the skill's origin server for a load or read the caller may
@@ -63,6 +69,7 @@ func (r *Runtime) EmitActivitySkillAccess(a SkillAccessActivity) {
 		// identity-bearing and drops an unnamed frame for a scoped subscriber.
 		"server_name": a.Server,
 		"action":      a.Action,
+		"source":      a.Source,
 		"tool":        a.Tool,
 		"outcome":     a.Outcome,
 		"session_id":  a.SessionID,
@@ -108,7 +115,7 @@ func (s *ActivityService) handleSkillAccess(evt Event) {
 			metadata[k] = v
 		}
 	}
-	if action == SkillActionSearch {
+	if action == SkillActionSearch || action == SkillActionList {
 		metadata["results"] = getInt64Payload(evt.Payload, "results")
 		metadata["matches"] = getInt64Payload(evt.Payload, "matches")
 	}
@@ -125,6 +132,10 @@ func (s *ActivityService) handleSkillAccess(evt Event) {
 		arguments["path"] = f
 	}
 
+	source := storage.ActivitySourceMCP
+	if getStringPayload(evt.Payload, "source") == string(storage.ActivitySourceAPI) {
+		source = storage.ActivitySourceAPI
+	}
 	status := storage.ActivityStatusSuccess
 	errMsg := ""
 	if outcome != SkillAccessSuccess {
@@ -134,7 +145,7 @@ func (s *ActivityService) handleSkillAccess(evt Event) {
 
 	record := &storage.ActivityRecord{
 		Type:          storage.ActivityTypeSkillAccess,
-		Source:        storage.ActivitySourceMCP,
+		Source:        source,
 		ToolName:      getStringPayload(evt.Payload, "tool"),
 		ServerName:    serverName,
 		Arguments:     arguments,

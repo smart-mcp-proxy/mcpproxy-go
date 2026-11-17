@@ -192,3 +192,41 @@ func TestSkills_PinnedTokenOutsideThePinGets404(t *testing.T) {
 		require.Equal(t, http.StatusNotFound, f.get(t, "/api/v1/servers/github"+path, f.deleted).Code)
 	}
 }
+
+// FR-024: an agent token that reads skills over REST is recorded like one that
+// uses the agent tools. An administrator reading its own store is not.
+func TestSkills_ScopedRESTReadsAreRecordedAsSkillAccess(t *testing.T) {
+	ctrl, srv, token := scopedSkillsServer(t)
+
+	require.Equal(t, http.StatusOK, skillsDo(t, srv, http.MethodGet, "/api/v1/servers/alpha/skills", token).Code)
+	require.Equal(t, http.StatusOK, skillsDo(t, srv, http.MethodGet, contentURL(url.Values{"skill": {"ok"}}), token).Code)
+	require.Equal(t, http.StatusNotFound, skillsDo(t, srv, http.MethodGet, contentURL(url.Values{"skill": {heldMarker + "-pending"}}), token).Code)
+	require.Equal(t, http.StatusUnsupportedMediaType, skillsDo(t, srv, http.MethodGet, contentURL(url.Values{"skill": {"ok"}, "file": {"img.png"}}), token).Code)
+
+	rows := ctrl.accessRows()
+	require.Len(t, rows, 4)
+	for _, a := range rows {
+		require.Equal(t, "api", a.Source)
+		require.Equal(t, "alpha", a.Server)
+		require.NotEmpty(t, a.Attribution.TokenName, "the row names the token that read")
+		require.Empty(t, a.DetectionText)
+	}
+	require.Equal(t, internalRuntime.SkillActionList, rows[0].Action)
+	require.Equal(t, 1, rows[0].Results, "only the available skill is counted")
+
+	require.Equal(t, internalRuntime.SkillActionRead, rows[1].Action)
+	require.Equal(t, internalRuntime.SkillAccessSuccess, rows[1].Outcome)
+	require.Equal(t, "alpha:ok", rows[1].SkillID)
+	require.Equal(t, "SKILL.md", rows[1].File)
+	require.Equal(t, "sk1-approved-ok", rows[1].Hash)
+	require.Equal(t, int64(len("approved text")), rows[1].Bytes)
+
+	require.Equal(t, internalRuntime.SkillAccessNotFound, rows[2].Outcome)
+	require.Empty(t, rows[2].Hash)
+	require.Equal(t, internalRuntime.SkillAccessBinary, rows[3].Outcome)
+
+	// An administrator's reads write no access row.
+	require.Equal(t, http.StatusOK, skillsDo(t, srv, http.MethodGet, "/api/v1/servers/alpha/skills", scopeAdminAPIKey).Code)
+	require.Equal(t, http.StatusOK, skillsDo(t, srv, http.MethodGet, contentURL(url.Values{"skill": {"ok"}}), scopeAdminAPIKey).Code)
+	require.Len(t, ctrl.accessRows(), 4)
+}

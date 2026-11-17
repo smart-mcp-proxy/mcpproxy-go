@@ -4886,6 +4886,11 @@ func (s *Server) ListAvailableSkills(serverName string) ([]*runtime.AvailableSki
 	return s.runtime.ListAvailableSkills(serverName)
 }
 
+// EmitActivitySkillAccess records one skill access in the activity log.
+func (s *Server) EmitActivitySkillAccess(a runtime.SkillAccessActivity) {
+	s.runtime.EmitActivitySkillAccess(a)
+}
+
 // AvailableSkillFile returns one text file of the approved copy of an
 // available skill.
 func (s *Server) AvailableSkillFile(serverName, skillPath, relPath string) ([]byte, storage.SkillFile, *runtime.AvailableSkill, error) {

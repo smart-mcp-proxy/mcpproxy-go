@@ -32,6 +32,7 @@ type skillsTestController struct {
 	afterRefresh *internalRuntime.SkillsServerStatus
 	refreshErr   error
 	files        map[string][]byte // "<skill>|<rel>|<current|approved>"
+	accesses     []internalRuntime.SkillAccessActivity
 	fileErr      error
 
 	// approveFn / blockFn stand in for the runtime approval writers (PR-2).
@@ -68,6 +69,18 @@ func (c *skillsTestController) record(call string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls = append(c.calls, call)
+}
+
+func (c *skillsTestController) EmitActivitySkillAccess(a internalRuntime.SkillAccessActivity) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.accesses = append(c.accesses, a)
+}
+
+func (c *skillsTestController) accessRows() []internalRuntime.SkillAccessActivity {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]internalRuntime.SkillAccessActivity(nil), c.accesses...)
 }
 
 func (c *skillsTestController) recorded() []string {
