@@ -500,7 +500,7 @@ func (r *Runtime) runSkillsRefresh(ctx, scanCtx context.Context, serverName stri
 	}
 	// Every skill is read and its text is stored: scan what has no scan yet,
 	// outside any lock and outside the upstream timeout.
-	scansSettled, scansPending := r.scanSkillOutcomes(scanCtx, serverName, outcomes)
+	firstScans, unscanned, scansPending := r.scanSkillOutcomes(scanCtx, serverName, outcomes)
 
 	// A listing entry that did not decode but carried a URI is still a skill
 	// the person should see; without a URI there is nothing to key a record on.
@@ -616,11 +616,12 @@ func (r *Runtime) runSkillsRefresh(ctx, scanCtx context.Context, serverName stri
 		s.EntryErrors = len(entryErrs) + skipped
 		s.ScansPending = scansPending
 	})
-	// Scan time ran out with skills left: the next refresh scans them (what
-	// was scanned now is on the records and is not scanned again). Only after
-	// progress, that is a scan that will not be repeated: a refresh that
-	// settled nothing would be followed by one doing the same work again.
-	if scansPending > 0 && scansSettled > 0 {
+	// Scan time ran out with never-scanned skills left: the next refresh
+	// scans them (what was scanned now is on the records and comes after
+	// them). Only while this refresh gave at least one skill its first scan,
+	// so every follow-up shrinks the never-scanned set and the chain ends;
+	// skills that only wait for a retry of a degraded scan start none.
+	if unscanned > 0 && firstScans > 0 {
 		r.skills.mu.Lock()
 		r.skills.init()
 		r.skills.followUp[serverName] = true

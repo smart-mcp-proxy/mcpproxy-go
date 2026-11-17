@@ -240,11 +240,14 @@ func scanStateOf(s *storage.SkillScan, currentHash string) skillScanState {
 // and takes the whole budget would be retried first on every refresh, and the
 // skills listed after it would never be scanned.
 //
-// settled counts the scans that will not be repeated for the same content,
-// pending the skills left without such a scan. A scan that has to be repeated
-// is recorded but is not progress: a follow-up refresh would only scan the
-// same skills again.
-func (r *Runtime) scanSkillOutcomes(ctx context.Context, serverName string, outcomes []skillOutcome) (settled, pending int) {
+// firstScans counts the skills that got their first scan of this content
+// (whatever its result), unscanned the never-scanned skills it did not get
+// to, and pending every skill left without a scan that stands (unscanned, a
+// degraded result, a retry not reached). A follow-up refresh is worth it only
+// while both firstScans and unscanned are above zero: each one then moves at
+// least one skill out of the never-scanned set, so the chain ends, and
+// retries alone never start one.
+func (r *Runtime) scanSkillOutcomes(ctx context.Context, serverName string, outcomes []skillOutcome) (firstScans, unscanned, pending int) {
 	sm := r.storageManager
 	budget := r.skills.limits.scanRefresh()
 	start := time.Now()
@@ -255,9 +258,15 @@ func (r *Runtime) scanSkillOutcomes(ctx context.Context, serverName string, outc
 			if !o.usable || !o.needScan || o.scanRetry != retries {
 				continue
 			}
+			skip := func() {
+				pending++
+				if !retries {
+					unscanned++
+				}
+			}
 			if sm == nil || ctx.Err() != nil || !r.skillsEligible(serverName) ||
 				(scanned > 0 && time.Since(start) >= budget) {
-				pending++
+				skip()
 				continue
 			}
 			texts := make([]skillTextFile, 0, len(o.files))
@@ -274,24 +283,25 @@ func (r *Runtime) scanSkillOutcomes(ctx context.Context, serverName string, outc
 				texts = append(texts, skillTextFile{relPath: f.RelPath, data: data})
 			}
 			if !readable {
-				pending++
+				skip()
 				continue
 			}
 			res := r.scanSkillText(ctx, serverName, o.path, texts)
 			if res.Incomplete == storage.SkillScanIncompleteInterrupted {
 				// Stopped from outside (shutdown): nothing worth recording.
-				pending++
+				skip()
 				continue
 			}
 			res.Hash = o.hash
 			o.scan = res
 			scanned++
+			if !retries {
+				firstScans++
+			}
 			if res.Incomplete == storage.SkillScanIncompleteCoverage {
 				pending++
-			} else {
-				settled++
 			}
 		}
 	}
-	return settled, pending
+	return firstScans, unscanned, pending
 }

@@ -120,9 +120,10 @@ func TestApproveSkills_KeepsBlobsARunningRefreshStaged(t *testing.T) {
 	assert.True(t, ok)
 }
 
-// A scan with degraded coverage has to be repeated, so it is not progress: a
-// follow-up refresh would scan the same skills again and never get further.
-func TestSkillsRefresh_DegradedScansDoNotScheduleAFollowUp(t *testing.T) {
+// Follow-ups run while skills that were never scanned remain, also when the
+// scans come back degraded, and stop once every skill has had its first scan:
+// retries of degraded scans alone never start a follow-up, so nothing loops.
+func TestSkillsRefresh_FollowUpsEndWhenOnlyDegradedRetriesRemain(t *testing.T) {
 	g := newSkillsRig(t, skillsRigOpts{enable: true, trust: "scan", autoTrig: true})
 	var n atomic.Int32
 	g.rt.skills.scanFunc = countingScan(&n, "clean", false)
@@ -131,15 +132,25 @@ func TestSkillsRefresh_DegradedScansDoNotScheduleAFollowUp(t *testing.T) {
 	for _, p := range []string{"a", "b", "c"} {
 		g.fx.AddSkill(skillstest.Skill{Path: p})
 	}
-	// The connect may have started a refresh of its own; let it finish.
 	require.NoError(t, g.refresh(t))
+	require.Eventually(t, func() bool {
+		recs := g.records(t)
+		return len(recs) == 3 && recs["a"].Scan != nil && recs["b"].Scan != nil && recs["c"].Scan != nil
+	}, 20*time.Second, 20*time.Millisecond, "b and c get their first scan without anyone asking, although a's scan was degraded")
+
+	// Every skill has a (degraded) scan now. Nothing follows any more.
 	g.rt.skills.wait()
-	lists := g.fx.Count("skills/list")
-	require.NoError(t, g.refresh(t))
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	g.rt.skills.wait()
-	assert.Equal(t, lists+1, g.fx.Count("skills/list"), "no refresh follows one that settled nothing")
-	assert.Equal(t, 3, g.rt.SkillsStatus(skillsSrv).ScansPending, "one degraded, two not reached")
+	lists, scans := g.fx.Count("skills/list"), n.Load()
+	time.Sleep(500 * time.Millisecond)
+	g.rt.skills.wait()
+	assert.Equal(t, lists, g.fx.Count("skills/list"), "no refresh follows when only retries are left")
+	assert.Equal(t, scans, n.Load())
+	assert.Equal(t, 3, g.rt.SkillsStatus(skillsSrv).ScansPending)
+	for p, rec := range g.records(t) {
+		assert.Equal(t, storage.SkillStatusPending, rec.Status, "%s: a degraded scan approves nothing", p)
+	}
 }
 
 // A background trigger that arrives while a refresh runs is not lost by
