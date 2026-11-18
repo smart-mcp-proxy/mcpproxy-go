@@ -11,6 +11,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
@@ -120,7 +121,7 @@ func transitionEvent(server, transport string, t types.Transition) (UpstreamEven
 		ev.Kind = UpstreamConnectionRestored
 		return ev, true
 
-	case t.To == types.StatePendingAuth && t.From != types.StatePendingAuth, loginCode && t.To == types.StateError:
+	case t.To == types.StatePendingAuth && t.From != types.StatePendingAuth, (loginCode || t.Login) && t.To != types.StateReady:
 		ev.Kind = UpstreamLoginRequired
 		if loginCode {
 			ev.Code = code
@@ -246,11 +247,17 @@ func transitionCode(server, transport string, t types.Transition) (code string, 
 // transitionIsLoginError says whether a change into the error state is a login
 // requirement. The state managers ask it at capture, under their lock.
 func transitionIsLoginError(server, transport string, t types.Transition) bool {
-	if t.To != types.StateError {
+	logoutDisconnect := t.To == types.StateDisconnected && t.LoggedOut
+	if t.To != types.StateError && !logoutDisconnect {
 		return false
 	}
-	_, login := transitionCode(server, transport, t)
-	return login
+	if _, login := transitionCode(server, transport, t); login {
+		return true
+	}
+	// Release QA F1: the rule the call path uses for the error class, so a
+	// logout and a restart into "authorization required" are recorded as
+	// the login requirement the failed calls report.
+	return managed.SignInRequired(t.To, t.LoggedOut, t.OAuthError, t.Err, t.TerminalCode)
 }
 
 type upstreamRowKey struct {

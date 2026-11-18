@@ -4872,6 +4872,12 @@ func (s *Server) WalkWorkSessionTimeline(id string, servers []string, from, to t
 	return s.runtime.WalkWorkSessionTimeline(id, servers, from, to, fn)
 }
 
+// OpenUpstreamEventsBefore returns the latest unresolved upstream event of
+// each server before a time (release QA F2).
+func (s *Server) OpenUpstreamEventsBefore(servers []string, before time.Time, visible func(owner string) bool) ([]storage.WorkSessionRowRef, error) {
+	return s.runtime.OpenUpstreamEventsBefore(servers, before, visible)
+}
+
 // GetActivitiesByKeys loads activity rows by key.
 func (s *Server) GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error) {
 	return s.runtime.GetActivitiesByKeys(keys)

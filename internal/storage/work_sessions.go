@@ -390,6 +390,16 @@ func failureReason(r *ActivityRecord, role AttemptRole) string {
 	if class == "http" && r.UpstreamHTTPStatus > 0 {
 		reason = fmt.Sprintf("The upstream server answered with HTTP %d.", r.UpstreamHTTPStatus)
 	}
+	// An auth failure with an upstream status is credentials the server
+	// refused; without one the call was never sent, because the server waits
+	// for a login (logged out, parked for sign-in; release QA F1).
+	if class == "auth" {
+		if r.UpstreamHTTPStatus > 0 {
+			reason = fmt.Sprintf("The upstream server refused the credentials (HTTP %d).", r.UpstreamHTTPStatus)
+		} else {
+			reason = "The upstream server needs a login."
+		}
+	}
 	return truncateRunes(reason, MaxWorkSessionReasonLen)
 }
 
@@ -885,6 +895,70 @@ func (m *Manager) WalkWorkSessionTimeline(workSessionID string, servers []string
 		emitEvents(time.Time{})
 		return nil
 	})
+}
+
+// maxOpenEventLookback bounds how many events of one server
+// OpenUpstreamEventsBefore steps back over that the caller may not read.
+const maxOpenEventLookback = 256
+
+// OpenUpstreamEventsBefore returns, for each of the servers, the latest
+// upstream event before the given time that the caller may read (visible is
+// asked with the event's owner, "" for a shared event), unless that event is
+// a recovery: then nothing about the server is still open (release QA F2,
+// SC-005). A session that starts while a server is already down has its
+// cause here rather than inside its span. Only the index and one row per
+// server are read.
+func (m *Manager) OpenUpstreamEventsBefore(servers []string, before time.Time, visible func(owner string) bool) ([]WorkSessionRowRef, error) {
+	var out []WorkSessionRowRef
+	err := m.db.db.View(func(tx *bbolt.Tx) error {
+		eb := tx.Bucket([]byte(UpstreamEventsByServerBucket))
+		acts := tx.Bucket([]byte(ActivityRecordsBucket))
+		if eb == nil || acts == nil {
+			return nil
+		}
+		for _, server := range servers {
+			if !indexableServerName(server) {
+				continue
+			}
+			prefix := workSessionRowPrefix(server)
+			c := eb.Cursor()
+			k, _ := c.Seek(workSessionRowKey(server, activityKey(before, "")))
+			var v []byte
+			if k == nil {
+				k, v = c.Last()
+			} else {
+				k, v = c.Prev()
+			}
+			for steps := 0; k != nil && bytes.HasPrefix(k, prefix) && steps < maxOpenEventLookback; k, v = c.Prev() {
+				steps++
+				ak := k[len(prefix):]
+				ts := activityKeyTime(ak)
+				if len(ak) < 22 || ts.IsZero() || !ts.Before(before) {
+					continue
+				}
+				owner := string(v)
+				if visible != nil && !visible(owner) {
+					continue
+				}
+				data := acts.Get(ak)
+				if data == nil {
+					break // removed by retention: nothing older is evidence either
+				}
+				rec := &ActivityRecord{}
+				if err := rec.UnmarshalBinary(data); err != nil {
+					break
+				}
+				if kind, _ := rec.Metadata["kind"].(string); kind != "connection_restored" {
+					out = append(out, WorkSessionRowRef{
+						ActivityKey: append([]byte(nil), ak...), Timestamp: ts, Server: server, Event: true, Owner: owner,
+					})
+				}
+				break
+			}
+		}
+		return nil
+	})
+	return out, err
 }
 
 // UpstreamEventRefs returns the upstream event rows of one server whose time

@@ -1071,6 +1071,15 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	}
 	u.proxy.noteUpstreamDispatched(dispatchCtx) // each JS sub-call counts its own requests; nil-safe
 	callerr.Observe(ctx, result, err)
+	// Release QA F1: this path has no not-connected check before the call,
+	// and the managed client's "client not connected" error classifies as a
+	// proxy failure. A server that is not connected failed for its own
+	// reason: it needs a login or it is unreachable, as on the direct path.
+	if err != nil && !client.IsConnected() {
+		if o, ok := callerr.OutcomeFrom(ctx); ok && o.Class == callerr.ClassProxyInternal {
+			callerr.NoteOutcome(ctx, callerr.NotConnectedOutcome(client.NeedsSignIn()))
+		}
+	}
 	fwdOut := fwdSink.Outbound()
 	parentFwdSink.Merge(fwdOut)
 	// Spec 113-d FR-062: this path calls the managed client directly, bypassing

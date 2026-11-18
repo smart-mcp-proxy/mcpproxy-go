@@ -50,6 +50,12 @@ type Transition struct {
 	// is a login requirement exactly like a change into PendingAuth, and
 	// folding must not hide it uncounted.
 	Login bool
+	// LoggedOut and OAuthError are the operator's logged-out flag and the
+	// OAuth-error flag at that moment. A logout's disconnect is a login
+	// requirement (release QA F1); an OAuth error flag alone is not, if the
+	// error itself is a network failure.
+	LoggedOut  bool
+	OAuthError bool
 }
 
 // lastLoginOrRecovery reports which came last among the record's hidden
@@ -91,7 +97,8 @@ func foldPair(a, b Transition) (Transition, bool) {
 		Folded: a.Folded + b.Folded + 1,
 		// The folded record ends where b ends, with b's error: it shows a
 		// login requirement itself exactly when b does.
-		Login: b.Login,
+		Login:     b.Login,
+		LoggedOut: b.LoggedOut, OAuthError: b.OAuthError,
 	}
 	al, ar, ag := a.edges()
 	bl, br, bg := b.edges()
@@ -152,8 +159,12 @@ func (sm *StateManager) captureLocked(oldState ConnectionState) {
 		At:           time.Now(),
 		Err:          sm.lastError,
 		TerminalCode: sm.terminalCode,
+		LoggedOut:    sm.userLoggedOut,
+		OAuthError:   sm.isOAuthError,
 	}
-	if sm.loginClassifier != nil && tr.To == StateError {
+	// A change into the error state may be a login requirement, and so is a
+	// logout's disconnect (release QA F1); the classifier decides.
+	if sm.loginClassifier != nil && (tr.To == StateError || (tr.To == StateDisconnected && tr.LoggedOut)) {
 		tr.Login = sm.loginClassifier(tr)
 	}
 	sm.transitions = append(sm.transitions, tr)

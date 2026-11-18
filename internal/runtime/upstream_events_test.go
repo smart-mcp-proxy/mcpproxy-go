@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"syscall"
 	"testing"
 	"time"
 
@@ -764,4 +766,35 @@ func TestUpstreamEvent_LateSaveEndsARequirementThatBeganBeforeIt(t *testing.T) {
 	fresh, isNew := c.place(UpstreamEvent{Server: "srv", Kind: UpstreamLoginRequired, At: evBase.Add(20 * time.Second), Seq: 3, PrevSeq: 2, PrevAt: evBase.Add(10 * time.Second)})
 	require.True(t, isNew)
 	assert.NotEqual(t, old.id, fresh.id)
+}
+
+// Release QA F1: a logout and a restart that lands in "OAuth authorization
+// required" are login requirements; an offline server is still a lost
+// connection, whatever OAuth flag an earlier failure left behind.
+func TestUpstreamEvent_SignInTransitions(t *testing.T) {
+	authInit := errors.New("OAuth authorization during MCP init failed: OAuth authorization required - deferred for background processing")
+	refused := fmt.Errorf("transport error: %w", &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED})
+
+	logout := types.Transition{From: types.StateReady, To: types.StateDisconnected, At: evBase, LoggedOut: true}
+	logout.Login = transitionIsLoginError("srv", "http", logout)
+	assert.True(t, logout.Login)
+	ev, ok := transitionEvent("srv", "http", logout)
+	require.True(t, ok)
+	assert.Equal(t, UpstreamLoginRequired, ev.Kind, "a logout is not a lost connection")
+	assert.Equal(t, string(diagnostics.OAuthLoginRequired), ev.Code)
+
+	restart := types.Transition{From: types.StateConnecting, To: types.StateError, At: evBase, Err: authInit}
+	restart.Login = transitionIsLoginError("srv", "http", restart)
+	assert.True(t, restart.Login)
+	ev, ok = transitionEvent("srv", "http", restart)
+	require.True(t, ok)
+	assert.Equal(t, UpstreamLoginRequired, ev.Kind)
+
+	offline := types.Transition{From: types.StateReady, To: types.StateError, At: evBase, Err: refused, OAuthError: true}
+	offline.Login = transitionIsLoginError("srv", "http", offline)
+	assert.False(t, offline.Login)
+	ev, ok = transitionEvent("srv", "http", offline)
+	require.True(t, ok)
+	assert.Equal(t, UpstreamConnectionLost, ev.Kind)
+	assert.Equal(t, string(diagnostics.HTTPConnRefuse), ev.Code)
 }

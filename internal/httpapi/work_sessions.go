@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"sort"
@@ -48,6 +49,7 @@ type workSessionController interface {
 	GetWorkSessionSummary(id string) (*storage.WorkSessionSummary, error)
 	WalkWorkSessionTimeline(id string, servers []string, from, to time.Time, fn func(storage.WorkSessionRowRef) bool) error
 	GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error)
+	OpenUpstreamEventsBefore(servers []string, before time.Time, visible func(owner string) bool) ([]storage.WorkSessionRowRef, error)
 }
 
 // workSessions returns the controller's work-session storage. A controller
@@ -73,6 +75,9 @@ func (noWorkSessions) WalkWorkSessionTimeline(string, []string, time.Time, time.
 }
 func (noWorkSessions) GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error) {
 	return make([]*storage.ActivityRecord, len(keys)), nil
+}
+func (noWorkSessions) OpenUpstreamEventsBefore([]string, time.Time, func(string) bool) ([]storage.WorkSessionRowRef, error) {
+	return nil, nil
 }
 
 // workSessionReach is the caller's view of work sessions.
@@ -511,6 +516,34 @@ func (s *Server) handleWorkSessionTimeline(w http.ResponseWriter, r *http.Reques
 	// in. Nothing but the page is kept: the pass counts rows and failures and
 	// finds the position, so a page of one row of a very long session costs
 	// index keys, not memory.
+	// Release QA F2 (SC-005): a server the session failed on that was already
+	// down when the session started has its cause before the span. The latest
+	// event of each such server before the start is placed ahead of the start
+	// row while no recovery followed it, under the same FR-025 rule.
+	var failedServers []string
+	for _, server := range eventServers {
+		if p := sum.Servers[server]; p != nil && p.Failures > 0 {
+			failedServers = append(failedServers, server)
+		}
+	}
+	if len(failedServers) > 0 {
+		open, err := c.OpenUpstreamEventsBefore(failedServers, session.StartedAt, func(owner string) bool {
+			return owner == "" || viewer == nil || viewer.UserID == owner
+		})
+		if err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, "Failed to read work session")
+			return
+		}
+		sort.Slice(open, func(i, j int) bool {
+			if !open[i].Timestamp.Equal(open[j].Timestamp) {
+				return open[i].Timestamp.Before(open[j].Timestamp)
+			}
+			return bytes.Compare(open[i].ActivityKey, open[j].ActivityKey) < 0
+		})
+		for _, ref := range open {
+			col.add(timelineEntry{ref: ref, precedes: true})
+		}
+	}
 	col.add(timelineEntry{kind: contracts.TimelineKindSessionStart, at: session.StartedAt})
 	scanned := 0
 	walkErr := c.WalkWorkSessionTimeline(id, eventServers, session.StartedAt, spanEnd, func(ref storage.WorkSessionRowRef) bool {
@@ -583,13 +616,14 @@ func (s *Server) handleWorkSessionTimeline(w http.ResponseWriter, r *http.Reques
 			record.Arguments, record.Response = nil, ""
 		}
 		rows = append(rows, contracts.WorkSessionTimelineRow{
-			Index:         from + i,
-			Kind:          timelineKind(rec.Type),
-			At:            rec.Timestamp,
-			Failed:        e.ref.Counted && e.ref.Failed,
-			PolicyBlock:   e.ref.Block,
-			BodiesRemoved: rec.BodiesRemoved,
-			Activity:      &record,
+			Index:           from + i,
+			Kind:            timelineKind(rec.Type),
+			At:              rec.Timestamp,
+			Failed:          e.ref.Counted && e.ref.Failed,
+			PolicyBlock:     e.ref.Block,
+			BodiesRemoved:   rec.BodiesRemoved,
+			PrecedesSession: e.precedes,
+			Activity:        &record,
 		})
 	}
 
@@ -613,6 +647,8 @@ type timelineEntry struct {
 	ref  storage.WorkSessionRowRef
 	kind string
 	at   time.Time
+	// precedes marks an open event from before the session (release QA F2).
+	precedes bool
 }
 
 func (e timelineEntry) failed() bool { return e.kind == "" && e.ref.Counted && e.ref.Failed }

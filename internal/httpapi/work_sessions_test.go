@@ -41,6 +41,9 @@ func (c *wsController) WalkWorkSessionTimeline(id string, servers []string, from
 func (c *wsController) GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error) {
 	return c.store.GetActivitiesByKeys(keys)
 }
+func (c *wsController) OpenUpstreamEventsBefore(servers []string, before time.Time, visible func(string) bool) ([]storage.WorkSessionRowRef, error) {
+	return c.store.OpenUpstreamEventsBefore(servers, before, visible)
+}
 
 const (
 	wsAlphaSecretArg  = "ALPHA_ARG_BODY"
@@ -103,7 +106,18 @@ func newWSFixture(t *testing.T) *wsFixture {
 	f.event("alpha", 40*time.Second, wsOwnedEventOwner)
 	f.event("beta", 90*time.Second, "")
 	f.event("alpha", -time.Hour, "") // before the session: outside its span
+	// ...and resolved before it started, so no earlier event is still open
+	// (release QA F2 adds the open one; see work_sessions_open_event_test.go).
+	f.restored("alpha", -50*time.Minute)
 	return f
+}
+
+func (f *wsFixture) restored(server string, offset time.Duration) {
+	f.t.Helper()
+	require.NoError(f.t, f.store.SaveActivity(&storage.ActivityRecord{
+		Type: storage.ActivityTypeUpstreamEvent, Status: storage.ActivityStatusSuccess, ServerName: server,
+		Timestamp: f.base.Add(offset), Source: storage.ActivitySourceInternal, Metadata: map[string]interface{}{"kind": "connection_restored"},
+	}))
 }
 
 func (f *wsFixture) row(ws, tokenName, prefix string, offset time.Duration, mutate func(*storage.ActivityRecord)) {

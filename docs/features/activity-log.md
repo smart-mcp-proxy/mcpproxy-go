@@ -593,10 +593,12 @@ curl -X POST -H "X-API-Key: $TOKEN" -H "X-MCPProxy-Run: nightly-2026-11-15" \
 | `connection_lost` | The server's connection was lost or closed |
 | `process_exited` | A stdio server's process exited |
 | `oauth_refresh_failed` | A token refresh was sent and failed |
-| `login_required` | The server needs a new login |
+| `login_required` | The server needs a new login, including after `mcpproxy auth logout` and after a restart that finds no usable token |
 | `connection_restored` | The connection came back after a recorded loss |
 
-A row carries the server, the kind, the diagnostic code (`MCPX_*`) and its fixed message, never the raw error text. Repeats within a minute are one row with `metadata.count`, `first_at` and `last_at`; one server adds at most 120 rows an hour. The rows appear in the System view (`--type upstream_event`) and in the timeline of every session that called the server while the event happened.
+A row carries the server, the kind, the diagnostic code (`MCPX_*`) and its fixed message, never the raw error text. Repeats within a minute are one row with `metadata.count`, `first_at` and `last_at`; one server adds at most 120 rows an hour. The rows appear in the System view (`--type upstream_event`) and in the timeline of every session that called the server while the event happened. A session that failed on a server which was already down when the session started also shows that server's latest event from before the start, marked `precedes_session`, as long as no `connection_restored` followed it.
+
+**Why a call to a server that is not connected failed.** Such a call is never sent. When the server waits for a login (logged out, parked for sign-in, or its last connect failed on OAuth) the call is recorded with error class `auth` and the reason "The upstream server needs a login."; otherwise it is `network`, "The upstream server could not be reached." A network failure is never read as a login requirement.
 
 **Reading a session.** `GET /api/v1/work-sessions` lists sessions (`?failed=true` for the ones that failed), and `GET /api/v1/work-sessions/{id}/timeline` returns one session's rows and upstream events in time order, positioned at its first failure with the 20 rows before it. See the [REST API reference](../api/rest-api.md#work-sessions).
 

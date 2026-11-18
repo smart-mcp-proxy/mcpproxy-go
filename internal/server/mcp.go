@@ -3644,7 +3644,8 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 				intentMap = intent.ToMap()
 			}
 			auditNoteErrorClass(ctx, audit.ErrorClassUpstreamUnavailable)
-			callerr.NoteOutcome(ctx, callerr.UnavailableOutcome())
+			// Release QA F1: a server that waits for a login is not unreachable.
+			callerr.NoteOutcome(ctx, callerr.NotConnectedOutcome(client.NeedsSignIn()))
 			p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
 			p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
 			return mcp.NewToolResultError(errMsg), nil
@@ -4262,8 +4263,9 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			} else {
 				errMsg = fmt.Sprintf("Server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())
 			}
-			// Log the early failure to activity (Spec 024)
-			callerr.NoteOutcome(ctx, callerr.UnavailableOutcome())
+			// Log the early failure to activity (Spec 024). Release QA F1: a
+			// server that waits for a login is not unreachable.
+			callerr.NoteOutcome(ctx, callerr.NotConnectedOutcome(client.NeedsSignIn()))
 			p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
 			p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", "", 0, 0, "", nil, "")
 			return mcp.NewToolResultError(errMsg), nil

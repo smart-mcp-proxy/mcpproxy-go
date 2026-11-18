@@ -4339,6 +4339,12 @@ components:
           type: string
         policy_block:
           type: boolean
+        precedes_session:
+          description: |-
+            PrecedesSession marks an upstream event from before the session
+            started: the latest event of a server the session then failed on,
+            still unresolved when the session began (release QA F2, SC-005).
+          type: boolean
       type: object
     data:
       properties:

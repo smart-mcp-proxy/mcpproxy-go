@@ -310,3 +310,35 @@ func TestTransitionCapture_FoldingCountsALoginRequirementInTheErrorState(t *test
 	_, hides = foldPair(Transition{From: StateConnecting, To: StateError, Err: errors.New("other")}, Transition{From: StateError, To: StateConnecting})
 	assert.False(t, hides)
 }
+
+// Release QA F1: the logged-out flag and the OAuth error flag ride on the
+// captured transition, and a logout's disconnect is offered to the login
+// classifier like a change into the error state.
+func TestTransitionCapture_LogoutIsOfferedToTheLoginClassifier(t *testing.T) {
+	sm := NewStateManager()
+	var asked []Transition
+	sm.SetTransitionLoginClassifier(func(tr Transition) bool { asked = append(asked, tr); return tr.LoggedOut })
+	sm.SetTransitionObserver(func(Transition) {})
+	sm.mu.Lock()
+	sm.transitions = nil
+	sm.draining = true
+	sm.currentState, sm.userLoggedOut, sm.isOAuthError = StateDisconnected, true, true
+	sm.captureLocked(StateReady)
+	captured := sm.transitions[0]
+	sm.mu.Unlock()
+
+	require.Len(t, asked, 1, "the classifier is asked about the logout")
+	assert.True(t, captured.LoggedOut)
+	assert.True(t, captured.OAuthError)
+	assert.True(t, captured.Login, "a logout is a login requirement")
+
+	// A plain disconnect is not offered.
+	sm.mu.Lock()
+	sm.transitions = nil
+	sm.userLoggedOut = false
+	sm.captureLocked(StateReady)
+	plain := sm.transitions[0]
+	sm.mu.Unlock()
+	assert.Len(t, asked, 1)
+	assert.False(t, plain.Login)
+}

@@ -313,6 +313,10 @@ func TestWorkSessionSummary_ReasonNeverCopiesFreeText(t *testing.T) {
 		{ActivityRecord{Type: ActivityTypeToolCall, Status: ActivityStatusError, ErrorMessage: secret}, "The call failed."},
 		{ActivityRecord{Type: ActivityTypePolicyDecision, Status: "blocked", BlockReason: "profile_scope", Metadata: map[string]interface{}{"reason": "blocked " + secret}}, "MCPProxy refused the call (profile_scope)."},
 		{ActivityRecord{Type: ActivityTypeToolCall, Status: ActivityStatusRejected, ErrorClass: ErrorClassProxyPolicy, ErrorMessage: secret}, "MCPProxy refused the call (limit reached)."},
+		// Release QA F1: a call that was not made because the server waits
+		// for a login, and one whose credentials the upstream refused.
+		{ActivityRecord{Type: ActivityTypeToolCall, Status: ActivityStatusError, ErrorClass: "auth", ErrorMessage: secret}, "The upstream server needs a login."},
+		{ActivityRecord{Type: ActivityTypeToolCall, Status: ActivityStatusError, ErrorClass: "auth", UpstreamHTTPStatus: 401, ErrorMessage: secret}, "The upstream server refused the credentials (HTTP 401)."},
 	}
 	for _, tc := range cases {
 		rec := tc.rec

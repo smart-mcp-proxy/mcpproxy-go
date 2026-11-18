@@ -98,6 +98,10 @@ type WorkSessionTimelineRow struct {
 	// BodiesRemoved is true when retention removed the row's argument and
 	// response bodies to keep the row.
 	BodiesRemoved bool `json:"bodies_removed,omitempty"`
+	// PrecedesSession marks an upstream event from before the session
+	// started: the latest event of a server the session then failed on,
+	// still unresolved when the session began (release QA F2, SC-005).
+	PrecedesSession bool `json:"precedes_session,omitempty"`
 	// Activity is the stored row; absent on a session_start or session_end
 	// row.
 	Activity *ActivityRecord `json:"activity,omitempty"`
