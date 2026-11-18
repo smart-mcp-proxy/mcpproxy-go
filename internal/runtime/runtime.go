@@ -1494,25 +1494,21 @@ func (r *Runtime) NotifySecretsChanged(ctx context.Context, operation, secretNam
 		return fmt.Errorf("config not available")
 	}
 
-	// Find all servers that reference this secret in their env vars or args
+	// Find all servers that reference this secret, in any field that is
+	// resolved when the connection is created: env, args, working dir, and
+	// for remote servers the URL, headers and OAuth settings (release QA F9:
+	// a header reference was never restarted).
 	secretRef := fmt.Sprintf("${keyring:%s}", secretName)
 	var affectedServers []string
 
 	for _, server := range cfg.Servers {
-		// Check environment variables
-		for _, value := range server.Env {
-			if strings.Contains(value, secretRef) {
-				affectedServers = append(affectedServers, server.Name)
-				break
-			}
+		// A restart enables a disabled server (RestartServerCtx), and a
+		// secret change is no reason to undo the operator's disable.
+		if !server.Enabled {
+			continue
 		}
-
-		// Check arguments
-		for _, arg := range server.Args {
-			if strings.Contains(arg, secretRef) {
-				affectedServers = append(affectedServers, server.Name)
-				break
-			}
+		if serverReferencesSecret(server, secretRef) {
+			affectedServers = append(affectedServers, server.Name)
 		}
 	}
 
@@ -4946,4 +4942,41 @@ func (r *Runtime) callTimeOAuthRequired(name string) bool {
 // FR-031), so the row is probed (for that outcome only).
 func shouldProbeStoredOAuthRow(url string, haveStorage, tokenInPlay, callTimeOAuthRequired bool) bool {
 	return url != "" && haveStorage && (tokenInPlay || callTimeOAuthRequired)
+}
+
+// serverReferencesSecret reports whether any field of server that is expanded
+// when its connection is created contains ref (e.g. "${keyring:name}").
+func serverReferencesSecret(server *config.ServerConfig, ref string) bool {
+	if server == nil {
+		return false
+	}
+	has := func(v string) bool { return strings.Contains(v, ref) }
+	anyOf := func(vs []string) bool {
+		for _, v := range vs {
+			if has(v) {
+				return true
+			}
+		}
+		return false
+	}
+	values := func(m map[string]string) bool {
+		for _, v := range m {
+			if has(v) {
+				return true
+			}
+		}
+		return false
+	}
+	if has(server.URL) || has(server.Command) || has(server.WorkingDir) ||
+		anyOf(server.Args) || values(server.Env) || values(server.Headers) {
+		return true
+	}
+	if o := server.OAuth; o != nil {
+		if has(o.ClientID) || has(o.ClientSecret) || has(o.RedirectURI) || has(o.CallbackBaseURL) ||
+			has(o.AuthorizationEndpoint) || has(o.TokenEndpoint) || has(o.RegistrationEndpoint) ||
+			has(o.AuthServerMetadataURL) || anyOf(o.Scopes) || values(o.ExtraParams) {
+			return true
+		}
+	}
+	return false
 }
