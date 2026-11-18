@@ -293,15 +293,23 @@ type MCPProxyServer struct {
 	// without that server's tools, and the server can recover on the same
 	// connection without any servers.changed event — leaving /mcp/s/<server>
 	// and the direct surface stale. While a rebuild sees such a server, it is
-	// retried: base delay, doubling, capped. All four fields are guarded by
-	// directRefreshMu. directDiscovery replaces the upstream manager's
-	// discovery in tests; nil uses DiscoverToolsWithFailures.
-	directDiscovery  func(ctx context.Context) ([]*config.ToolMetadata, []string, error)
-	directRetryTimer *time.Timer
-	directRetryDelay time.Duration
-	directRetryBase  time.Duration
-	directRetryMax   time.Duration
-	directClosed     bool
+	// retried: base delay, doubling, capped, at most directRetryLimit times
+	// (each retry lists every connected server, so a server whose listing
+	// fails for good must not keep the fleet polled). After the last retry
+	// directUnlisted stays set, so an OAuth token refresh — the usual moment
+	// such a server lists again — still rebuilds; otherwise the next
+	// servers.changed does. All fields are guarded by directRefreshMu.
+	// directDiscovery replaces the upstream manager's discovery in tests;
+	// nil uses DiscoverToolsWithFailures.
+	directDiscovery     func(ctx context.Context) ([]*config.ToolMetadata, []string, error)
+	directRetryTimer    *time.Timer
+	directRetryDelay    time.Duration
+	directRetryBase     time.Duration
+	directRetryMax      time.Duration
+	directRetryLimit    int
+	directRetryAttempts int
+	directUnlisted      bool
+	directClosed        bool
 
 	// directRebuildPause, when non-nil, is invoked BETWEEN SetTools and the
 	// catalog publish. Nil in production; the only writer is a test.

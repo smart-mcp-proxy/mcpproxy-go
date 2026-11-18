@@ -2454,8 +2454,7 @@ func isTransientHealthCheckError(err error) bool {
 	// A typed socket error decides by type (review r6 on GH #1929): a timeout
 	// is a soft miss, anything else (refused, reset, unreachable network or
 	// host, in any OS's words) is hard.
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
+	if opErr, ok := socketOpError(err); ok {
 		return opErr.Timeout()
 	}
 	msg := strings.ToLower(err.Error())
@@ -2884,8 +2883,7 @@ func (mc *Client) isConnectionError(err error) bool {
 	// A socket-level failure is a connection error whatever the OS calls it
 	// (review r6 on GH #1929: Windows words unreachable networks and timeouts
 	// in ways no phrase list keeps up with).
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
+	if _, ok := socketOpError(err); ok {
 		return true
 	}
 
@@ -3246,3 +3244,16 @@ var connectionEpochCounter atomic.Int64
 
 // nextConnectionEpoch returns a fresh, strictly increasing epoch.
 func nextConnectionEpoch() int64 { return connectionEpochCounter.Add(1) }
+
+// socketOpError returns the socket-level *net.OpError in err's chain. A TLS
+// alert the peer sent ("remote error: tls: certificate required", "bad
+// certificate") is also reported as an OpError, but it is the server rejecting
+// our credentials, not a network failure (review r7 on GH #1929), so it is not
+// returned and the caller falls back to its text rules.
+func socketOpError(err error) (*net.OpError, bool) {
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) || opErr.Op == "remote error" {
+		return nil, false
+	}
+	return opErr, true
+}

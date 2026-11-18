@@ -108,3 +108,31 @@ func TestDirectRebuildRetry_BacksOffAndStopsOnClose(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	assert.Equal(t, after, fake.callCount(), "no retry after Close")
 }
+
+// Review r7 on GH #1929: each retry lists every connected server, so a server
+// whose listing fails for good must not keep the fleet polled. The retries stop
+// after the limit; an OAuth token refresh still rebuilds afterwards (the usual
+// moment such a server lists again), and recovery then clears the state.
+func TestDirectRebuildRetry_GivesUpThenRebuildsOnTokenRefresh(t *testing.T) {
+	p := newDirectDescribeProxy(t)
+	fake := &fakeDirectDiscovery{tools: describeDirectFixture(), failing: "github"}
+	p.directDiscovery = fake.discover
+	p.directRetryBase, p.directRetryMax, p.directRetryLimit = 10*time.Millisecond, 20*time.Millisecond, 3
+
+	p.RefreshDirectModeTools()
+	require.Eventually(t, func() bool { return fake.callCount() == 4 }, 2*time.Second, 5*time.Millisecond,
+		"the first rebuild plus three retries")
+	time.Sleep(200 * time.Millisecond)
+	assert.Equal(t, 4, fake.callCount(), "no retry after the limit")
+
+	s := newSingleServerSurfaceForTest(t, p, "github")
+	require.NotContains(t, listSingleServerTools(t, s, singleServerAdminCtx()), "read_file")
+
+	fake.setFailing("")
+	p.RetryPendingDirectRebuild() // oauth.token_refreshed
+	assert.Equal(t, 5, fake.callCount(), "a token refresh rebuilds after the retries gave up")
+	require.Contains(t, listSingleServerTools(t, s, singleServerAdminCtx()), "read_file")
+
+	p.RetryPendingDirectRebuild()
+	assert.Equal(t, 5, fake.callCount(), "nothing is pending once every server listed")
+}

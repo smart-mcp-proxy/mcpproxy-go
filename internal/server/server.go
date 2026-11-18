@@ -435,6 +435,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// start below, so no removal can commit without forgetting its scan state.
 	server.forgetInformationalScansOnPurge()
 	server.registerToolChangeRescan()
+	server.registerTokenSavedDirectRebuild()
 	// Spec 101 US3 (B17, B19, B21): the refresher nudge, the refresh-cycle
 	// telemetry and the post-activation re-protection sweep. Registered here,
 	// at construction, so no activation can slip in before the observer; the

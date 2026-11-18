@@ -6,6 +6,12 @@ import "sync"
 type toolDefinitionsObserverState struct {
 	toolDefsObserversMu sync.RWMutex
 	toolDefsObservers   []func(serverName string)
+
+	// tokenSavedObservers run (each on its own goroutine) after an upstream
+	// OAuth token is saved, whichever path refreshed it (GH #1929 release QA:
+	// the network watcher's direct refresh emits no oauth.token_refreshed).
+	tokenSavedObserversMu sync.RWMutex
+	tokenSavedObservers   []func(serverName string)
 }
 
 // AddToolDefinitionsChangedObserver registers fn to run after a discovery pass
@@ -42,4 +48,27 @@ func (r *Runtime) ToolDefinitionsObserverCount() int {
 	r.toolDefsObserversMu.RLock()
 	defer r.toolDefsObserversMu.RUnlock()
 	return len(r.toolDefsObservers)
+}
+
+// AddTokenSavedObserver registers fn to run after an upstream OAuth token is
+// saved: a sign-in, a proactive or reactive refresh, or the network watcher's
+// direct refresh. GH #1929 release QA: the direct surface republishes a server
+// that could not list its tools while its refresh was failing. fn runs on its
+// own goroutine, because the save path may hold the client's locks.
+func (r *Runtime) AddTokenSavedObserver(fn func(serverName string)) {
+	if fn == nil {
+		return
+	}
+	r.tokenSavedObserversMu.Lock()
+	r.tokenSavedObservers = append(r.tokenSavedObservers, fn)
+	r.tokenSavedObserversMu.Unlock()
+}
+
+func (r *Runtime) notifyTokenSaved(serverName string) {
+	r.tokenSavedObserversMu.RLock()
+	observers := append([]func(string){}, r.tokenSavedObservers...)
+	r.tokenSavedObserversMu.RUnlock()
+	for _, fn := range observers {
+		go fn(serverName)
+	}
 }

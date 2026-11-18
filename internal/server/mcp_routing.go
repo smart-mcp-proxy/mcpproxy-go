@@ -144,8 +144,9 @@ func (p *MCPProxyServer) discoverDirectTools(ctx context.Context) ([]*config.Too
 }
 
 const (
-	defaultDirectRetryBase = 5 * time.Second
-	defaultDirectRetryMax  = 30 * time.Second
+	defaultDirectRetryBase  = 5 * time.Second
+	defaultDirectRetryMax   = 30 * time.Second
+	defaultDirectRetryLimit = 6 // 5+10+20+30+30+30 s: about two minutes
 )
 
 // scheduleDirectRebuildRetryLocked arms (or clears) the retry of the direct
@@ -158,18 +159,31 @@ func (p *MCPProxyServer) scheduleDirectRebuildRetryLocked(unlisted []string) {
 			p.directRetryTimer = nil
 		}
 		p.directRetryDelay = 0
+		p.directRetryAttempts = 0
+		p.directUnlisted = false
 		return
 	}
+	p.directUnlisted = true
 	if p.directRetryTimer != nil {
 		return // one retry pending is enough; it rebuilds the whole catalog
 	}
-	base, maxDelay := p.directRetryBase, p.directRetryMax
+	base, maxDelay, limit := p.directRetryBase, p.directRetryMax, p.directRetryLimit
 	if base <= 0 {
 		base = defaultDirectRetryBase
 	}
 	if maxDelay <= 0 {
 		maxDelay = defaultDirectRetryMax
 	}
+	if limit <= 0 {
+		limit = defaultDirectRetryLimit
+	}
+	if p.directRetryAttempts >= limit {
+		p.logger.Warn("connected servers still cannot list their tools; no further direct rebuild retries until a token refresh or server change",
+			zap.Strings("servers", unlisted),
+			zap.Int("attempts", p.directRetryAttempts))
+		return
+	}
+	p.directRetryAttempts++
 	if p.directRetryDelay == 0 {
 		p.directRetryDelay = base
 	} else if p.directRetryDelay *= 2; p.directRetryDelay > maxDelay {
@@ -178,25 +192,33 @@ func (p *MCPProxyServer) scheduleDirectRebuildRetryLocked(unlisted []string) {
 	delay := p.directRetryDelay
 	p.logger.Info("some connected servers could not list their tools; retrying the direct tool rebuild",
 		zap.Strings("servers", unlisted),
-		zap.Duration("retry_in", delay))
-	p.directRetryTimer = time.AfterFunc(delay, func() {
+		zap.Duration("retry_in", delay),
+		zap.Int("attempt", p.directRetryAttempts),
+		zap.Int("limit", limit))
+	var timer *time.Timer
+	timer = time.AfterFunc(delay, func() {
 		p.directRefreshMu.Lock()
-		p.directRetryTimer = nil
+		// Clear the field only if it is still this timer: a rebuild may have
+		// stopped it (too late) and armed a newer one meanwhile.
+		if p.directRetryTimer == timer {
+			p.directRetryTimer = nil
+		}
 		closed := p.directClosed
 		p.directRefreshMu.Unlock()
 		if !closed {
 			p.RefreshDirectModeTools()
 		}
 	})
+	p.directRetryTimer = timer
 }
 
-// RetryPendingDirectRebuild rebuilds the direct surface now if a retry is
-// pending — i.e. a connected server failed to list its tools in the last
-// rebuild. Called when a server's OAuth token is refreshed, the usual moment
-// such a server becomes able to list again.
+// RetryPendingDirectRebuild rebuilds the direct surface now if the last
+// rebuild saw a connected server fail to list its tools (whether or not a
+// timed retry is still pending). Called when a server's OAuth token is
+// refreshed, the usual moment such a server becomes able to list again.
 func (p *MCPProxyServer) RetryPendingDirectRebuild() {
 	p.directRefreshMu.Lock()
-	pending := p.directRetryTimer != nil && !p.directClosed
+	pending := p.directUnlisted && !p.directClosed
 	p.directRefreshMu.Unlock()
 	if pending {
 		p.RefreshDirectModeTools()
