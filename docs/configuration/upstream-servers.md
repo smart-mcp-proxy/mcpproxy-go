@@ -383,6 +383,19 @@ When MCPProxy starts, it:
 3. Connects to servers in the background (async)
 4. Indexes tools once connections are established
 
+### Reconnecting after a failure
+
+A server that fails to connect is retried with exponential backoff: 1s, 2s, 4s and so on, up to 5 minutes between attempts. After 20 failures in a row MCPProxy stops the regular retries and probes the server every 30 minutes instead, so a remote that is really gone is not called over and over. **Restart** in the tray or Web UI, or `mcpproxy upstream restart <name>`, retries at once.
+
+**After a network outage or sleep.** A remote (HTTP/SSE) server whose last failure was a network failure (DNS lookup, connection refused, a timeout before the upstream answered) is also watched for the network coming back. A laptop that sleeps overnight gives up on its remote servers this way, and used to leave them in **Error** for up to 30 minutes after waking. While such a server is down, MCPProxy opens a plain TCP connection to its host every 10 seconds, or to the HTTP proxy it goes through. After 5 minutes of failed probes it slows to every 30 seconds. It sends no request and no credentials.
+
+- **The network comes back.** When probes that were failing start to succeed, MCPProxy clears the server's backoff and reconnects it. The server is back within one probe interval, usually a few seconds.
+- **The computer wakes, or its network changes.** After a wake or a change of network addresses, a server waiting on the network gets one reconnect attempt as soon as its host answers. If that attempt fails, the normal backoff continues.
+
+The watcher reconnects a server at most once every 30 seconds. It leaves alone a server that is awaiting sign-in, failed on credentials (for example a rejected token, HTTP 401), was stopped as permanently broken, or was told by the upstream to wait (`Retry-After`). A server whose host stays reachable while the server itself keeps failing is left to the normal backoff. Local (stdio) servers are not watched.
+
+To turn the watcher off, set `MCPPROXY_NETWORK_RECOVERY=off` in the environment of `mcpproxy serve`.
+
 ### Shutdown
 
 When MCPProxy stops, it performs graceful shutdown of all subprocesses:

@@ -734,6 +734,11 @@ func (mc *Client) connectUnlessStopped(ctx context.Context, stop <-chan struct{}
 				zap.String("code", string(code)),
 				zap.Error(connectErr))
 			mc.StateManager.SetTerminalError(connectErr, string(code))
+		} else if isNetworkErr {
+			// No upstream answered (GH #1929): same backoff, but marked so the
+			// connectivity watcher reconnects it as soon as the network is back
+			// instead of leaving it on a ladder built while the network was gone.
+			mc.StateManager.SetNetworkError(connectErr)
 		} else {
 			mc.StateManager.SetError(connectErr)
 		}

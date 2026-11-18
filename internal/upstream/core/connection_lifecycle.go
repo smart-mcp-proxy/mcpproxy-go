@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -67,6 +68,15 @@ func (c *Client) initialize(ctx context.Context) error {
 		// to stderr before dying. Non-timeout errors pass through unchanged.
 		if errors.Is(err, context.DeadlineExceeded) {
 			waited := time.Since(initStart).Round(100 * time.Millisecond)
+			// GH #1929: a remote upstream has no subprocess and no stderr, and
+			// the stdio hint below sent users after a "help banner" when their
+			// laptop had simply woken without a network. Name the host and
+			// keep the typed deadline in the chain, so the failure stays a
+			// network failure (IsNetworkError) for the retry policy.
+			if c.transportType != transportStdio {
+				return fmt.Errorf("%s did not respond to MCP initialize within %s (network unreachable or upstream not answering); will retry: %w",
+					c.initializeTimeoutTarget(), waited, err)
+			}
 			stderrBlock := c.formatRecentStderr()
 			if stderrBlock != "" {
 				return &childOutputError{msg: fmt.Sprintf("server did not respond to MCP initialize within %s (subprocess may have crashed or printed to stderr instead of stdout); recent stderr:\n%s", waited, stderrBlock)}
@@ -147,6 +157,18 @@ func (c *Client) initialize(ctx context.Context) error {
 // specific (it describes a local "server process" and its stderr); HTTP/SSE
 // transports share initialize() but have no subprocess, so a closed-transport
 // error there must keep its generic diagnostics. (Codex review on PR #606)
+// initializeTimeoutTarget names a remote upstream in an initialize-timeout
+// error: its host[:port] only, never the path, query or userinfo, which can
+// carry a credential (#1148).
+func (c *Client) initializeTimeoutTarget() string {
+	if c.config != nil {
+		if u, err := url.Parse(c.config.URL); err == nil && u.Host != "" {
+			return u.Host
+		}
+	}
+	return "upstream"
+}
+
 func shouldEnrichStdioPrematureExit(transportType string, err error) bool {
 	return transportType == transportStdio && isTransportClosedErr(err)
 }

@@ -167,8 +167,12 @@ type Manager struct {
 	// Context for shutdown coordination
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
-	shuttingDown   bool           // Flag to prevent reconnections during shutdown
-	shutdownWg     sync.WaitGroup // Tracks all background goroutines for clean shutdown
+
+	// networkRecovery reconnects servers that failed on the network once it
+	// is back (GH #1929); nil when disabled by MCPPROXY_NETWORK_RECOVERY.
+	networkRecovery *networkRecovery
+	shuttingDown    bool           // Flag to prevent reconnections during shutdown
+	shutdownWg      sync.WaitGroup // Tracks all background goroutines for clean shutdown
 
 	// Docker recovery state
 	dockerRecoveryMu     sync.RWMutex
@@ -313,7 +317,37 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *st
 		manager.logger.Info("Docker recovery monitor disabled (docker isolation off or recovery disabled in config)")
 	}
 
+	// Reconnect servers that failed on the network as soon as it is back,
+	// instead of on a backoff built while it was gone (GH #1929).
+	if networkRecoveryEnabled() {
+		manager.networkRecovery = newNetworkRecovery(defaultNetworkRecoveryConfig(), logger.Named("network_recovery"), dialProbe, networkFingerprint)
+		manager.shutdownWg.Add(1)
+		go func() {
+			defer manager.shutdownWg.Done()
+			manager.networkRecovery.run(shutdownCtx, manager.networkRecoveryTargets)
+		}()
+	} else {
+		manager.logger.Info("Network recovery watcher disabled", zap.String("env", networkRecoveryEnv))
+	}
+
 	return manager
+}
+
+// networkRecoveryTargets lists the registered clients for the connectivity
+// watcher; it decides itself which of them are waiting on the network.
+func (m *Manager) networkRecoveryTargets() []recoveryTarget {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.shuttingDown {
+		return nil
+	}
+	targets := make([]recoveryTarget, 0, len(m.clients))
+	for _, c := range m.clients {
+		if c != nil {
+			targets = append(targets, c)
+		}
+	}
+	return targets
 }
 
 // shouldEnableDockerRecovery returns true when Docker recovery should run based
