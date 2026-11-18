@@ -376,7 +376,7 @@ func TestDescribeTool_RegisteredInRetrieveToolsModeOnly(t *testing.T) {
 		// asserted here before: deferral without a schema-recovery stage on the
 		// same surface trades tokens for failed calls, so the Inspect step has to
 		// live where the Catalog is.
-		directTools, _ := proxy.buildDirectModeTools()
+		directTools, _, _ := proxy.buildDirectModeTools()
 		found := false
 		for _, st := range directTools {
 			if st.Tool.Name == "describe_tool" {

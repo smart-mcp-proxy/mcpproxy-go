@@ -89,7 +89,7 @@ func FormatDirectPromptName(serverName, promptName string) string {
 // buildDirectModeTools builds MCP tool definitions for direct mode.
 // Each upstream tool is exposed directly with serverName__toolName naming.
 // Only tools from connected, enabled, non-quarantined servers are included.
-func (p *MCPProxyServer) buildDirectModeTools() ([]mcpserver.ServerTool, *directCatalog) {
+func (p *MCPProxyServer) buildDirectModeTools() ([]mcpserver.ServerTool, *directCatalog, []string) {
 	ctx := context.Background()
 
 	// Resolved ONCE for this rebuild and stamped on whichever catalog we end up
@@ -114,11 +114,11 @@ func (p *MCPProxyServer) buildDirectModeTools() ([]mcpserver.ServerTool, *direct
 	// before the upstream manager is wired. Treat it exactly like a discovery
 	// failure rather than panicking: built-ins still register, the catalog is
 	// still published, and the next servers.changed fills in the upstreams.
-	if p.upstreamManager == nil {
-		return p.withDirectBuiltins(nil), emptyDirectCatalog(mode, p.logger)
+	if p.upstreamManager == nil && p.directDiscovery == nil {
+		return p.withDirectBuiltins(nil), emptyDirectCatalog(mode, p.logger), nil
 	}
 
-	tools, err := p.upstreamManager.DiscoverTools(ctx)
+	tools, unlisted, err := p.discoverDirectTools(ctx)
 	if err != nil {
 		p.logger.Error("failed to discover tools for direct mode", zap.Error(err))
 		// A NON-NIL empty catalog, not nil (D13 rule 2). Returning nil here — as
@@ -126,12 +126,92 @@ func (p *MCPProxyServer) buildDirectModeTools() ([]mcpserver.ServerTool, *direct
 		// discovery filters "no catalog yet, do not deny" at exactly the moment
 		// upstream discovery is failing, flipping them from deny-on-miss to
 		// allow-everything.
-		return p.withDirectBuiltins(nil), emptyDirectCatalog(mode, p.logger)
+		return p.withDirectBuiltins(nil), emptyDirectCatalog(mode, p.logger), nil
 	}
 
 	cat := buildDirectCatalog(tools, p.logger)
 	cat.mode = mode
-	return p.withDirectBuiltins(p.renderDirectTools(cat)), cat
+	return p.withDirectBuiltins(p.renderDirectTools(cat)), cat, unlisted
+}
+
+// discoverDirectTools lists the upstream tools for a direct rebuild and names
+// the connected servers whose listing failed (see directDiscovery).
+func (p *MCPProxyServer) discoverDirectTools(ctx context.Context) ([]*config.ToolMetadata, []string, error) {
+	if p.directDiscovery != nil {
+		return p.directDiscovery(ctx)
+	}
+	return p.upstreamManager.DiscoverToolsWithFailures(ctx)
+}
+
+const (
+	defaultDirectRetryBase = 5 * time.Second
+	defaultDirectRetryMax  = 30 * time.Second
+)
+
+// scheduleDirectRebuildRetryLocked arms (or clears) the retry of the direct
+// rebuild. unlisted are the connected servers whose tools/list failed in the
+// rebuild that just ran. The caller holds directRefreshMu.
+func (p *MCPProxyServer) scheduleDirectRebuildRetryLocked(unlisted []string) {
+	if len(unlisted) == 0 || p.directClosed {
+		if p.directRetryTimer != nil {
+			p.directRetryTimer.Stop()
+			p.directRetryTimer = nil
+		}
+		p.directRetryDelay = 0
+		return
+	}
+	if p.directRetryTimer != nil {
+		return // one retry pending is enough; it rebuilds the whole catalog
+	}
+	base, maxDelay := p.directRetryBase, p.directRetryMax
+	if base <= 0 {
+		base = defaultDirectRetryBase
+	}
+	if maxDelay <= 0 {
+		maxDelay = defaultDirectRetryMax
+	}
+	if p.directRetryDelay == 0 {
+		p.directRetryDelay = base
+	} else if p.directRetryDelay *= 2; p.directRetryDelay > maxDelay {
+		p.directRetryDelay = maxDelay
+	}
+	delay := p.directRetryDelay
+	p.logger.Info("some connected servers could not list their tools; retrying the direct tool rebuild",
+		zap.Strings("servers", unlisted),
+		zap.Duration("retry_in", delay))
+	p.directRetryTimer = time.AfterFunc(delay, func() {
+		p.directRefreshMu.Lock()
+		p.directRetryTimer = nil
+		closed := p.directClosed
+		p.directRefreshMu.Unlock()
+		if !closed {
+			p.RefreshDirectModeTools()
+		}
+	})
+}
+
+// RetryPendingDirectRebuild rebuilds the direct surface now if a retry is
+// pending — i.e. a connected server failed to list its tools in the last
+// rebuild. Called when a server's OAuth token is refreshed, the usual moment
+// such a server becomes able to list again.
+func (p *MCPProxyServer) RetryPendingDirectRebuild() {
+	p.directRefreshMu.Lock()
+	pending := p.directRetryTimer != nil && !p.directClosed
+	p.directRefreshMu.Unlock()
+	if pending {
+		p.RefreshDirectModeTools()
+	}
+}
+
+// stopDirectRebuildRetry cancels a pending retry and prevents new ones.
+func (p *MCPProxyServer) stopDirectRebuildRetry() {
+	p.directRefreshMu.Lock()
+	defer p.directRefreshMu.Unlock()
+	p.directClosed = true
+	if p.directRetryTimer != nil {
+		p.directRetryTimer.Stop()
+		p.directRetryTimer = nil
+	}
 }
 
 // builtinDirectToolNames is the explicit, POSITIVE set of tool names this
@@ -1499,7 +1579,10 @@ func (p *MCPProxyServer) RefreshDirectModeTools() {
 // directRefreshMu — split out so the reload guard can hold the lock across its
 // drift check and the rebuild that check authorizes.
 func (p *MCPProxyServer) refreshDirectModeToolsLocked() {
-	directTools, cat := p.buildDirectModeTools()
+	directTools, cat, unlisted := p.buildDirectModeTools()
+	// Arm or clear the retry before the unchanged short-circuit below: a
+	// rebuild that changed nothing can still have a server that failed to list.
+	p.scheduleDirectRebuildRetryLocked(unlisted)
 
 	serverTools := make([]mcpserver.ServerTool, len(directTools))
 	copy(serverTools, directTools)

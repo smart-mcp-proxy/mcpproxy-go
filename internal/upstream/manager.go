@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os/exec"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1242,6 +1243,42 @@ func (m *Manager) DiscoverToolsReport(ctx context.Context, dueOnly bool) ([]*con
 // under one ticket for the whole sweep.
 func (m *Manager) DiscoverToolsReportCaptured(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, map[string]managed.InventoryCapture, error) {
 	return m.discoverTools(ctx, dueOnly)
+}
+
+// DiscoverToolsWithFailures is DiscoverTools plus the names of the servers
+// that are connected, enabled and not quarantined but whose tools/list did not
+// succeed in this sweep (a transient failure — e.g. its OAuth token refresh is
+// failing while the connection stays up). Their tools are missing from the
+// result. The direct-mode rebuild uses it to retry until they list again,
+// since such a server can recover without any servers.changed event (GH #1929
+// release QA). A server that connected after the sweep started can appear
+// here too; that only costs one extra retry.
+func (m *Manager) DiscoverToolsWithFailures(ctx context.Context) ([]*config.ToolMetadata, []string, error) {
+	tools, listed, _, err := m.discoverTools(ctx, false)
+	if err != nil {
+		return tools, nil, err
+	}
+	ok := make(map[string]struct{}, len(listed))
+	for _, name := range listed {
+		ok[name] = struct{}{}
+	}
+	var failed []string
+	m.mu.RLock()
+	for _, client := range m.clients {
+		if client == nil || !client.IsConnected() {
+			continue
+		}
+		cfg := client.GetConfig()
+		if cfg == nil || cfg.Name == "" || !cfg.Enabled || cfg.Quarantined {
+			continue
+		}
+		if _, listedOK := ok[cfg.Name]; !listedOK {
+			failed = append(failed, cfg.Name)
+		}
+	}
+	m.mu.RUnlock()
+	sort.Strings(failed)
+	return tools, failed, nil
 }
 
 // DiscoverToolsDue is the periodic-sweep variant of DiscoverTools: it lists only

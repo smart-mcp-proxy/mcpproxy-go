@@ -288,6 +288,21 @@ type MCPProxyServer struct {
 	// publishDirectCatalog cannot interleave with another rebuild's pair.
 	directRefreshMu sync.Mutex
 
+	// Direct rebuild retry (GH #1929 release QA). A rebuild that ran while a
+	// connected server's tools/list failed transiently published the catalog
+	// without that server's tools, and the server can recover on the same
+	// connection without any servers.changed event — leaving /mcp/s/<server>
+	// and the direct surface stale. While a rebuild sees such a server, it is
+	// retried: base delay, doubling, capped. All four fields are guarded by
+	// directRefreshMu. directDiscovery replaces the upstream manager's
+	// discovery in tests; nil uses DiscoverToolsWithFailures.
+	directDiscovery  func(ctx context.Context) ([]*config.ToolMetadata, []string, error)
+	directRetryTimer *time.Timer
+	directRetryDelay time.Duration
+	directRetryBase  time.Duration
+	directRetryMax   time.Duration
+	directClosed     bool
+
 	// directRebuildPause, when non-nil, is invoked BETWEEN SetTools and the
 	// catalog publish. Nil in production; the only writer is a test.
 	//
@@ -962,6 +977,7 @@ func NewMCPProxyServer(
 
 // Close gracefully shuts down the MCP proxy server and releases resources
 func (p *MCPProxyServer) Close() error {
+	p.stopDirectRebuildRetry()
 	if p.profileNotifier != nil {
 		p.profileNotifier.close()
 	}
