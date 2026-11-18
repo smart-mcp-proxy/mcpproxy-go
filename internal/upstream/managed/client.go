@@ -3035,34 +3035,9 @@ func (mc *Client) isNormalReconnectionError(err error) bool {
 // isDeprecatedEndpointError checks if error indicates a deprecated/removed endpoint (HTTP 410 Gone)
 // This helps detect when an MCP server has migrated to a new endpoint URL
 func (mc *Client) isDeprecatedEndpointError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	// Check for transport.ErrEndpointDeprecated type first
-	if transport.IsEndpointDeprecatedError(err) {
-		return true
-	}
-
-	errStr := strings.ToLower(err.Error())
-	deprecationIndicators := []string{
-		"410",                            // HTTP 410 Gone
-		"gone",                           // Status text
-		"deprecated",                     // Common migration message
-		"removed",                        // Endpoint removed
-		"no longer supported",            // Common deprecation message
-		"use the http transport",         // Sentry-specific migration hint
-		"sse transport has been removed", // Sentry-specific error
-		"endpoint deprecated",            // Our custom error message
-	}
-
-	for _, indicator := range deprecationIndicators {
-		if strings.Contains(errStr, indicator) {
-			return true
-		}
-	}
-
-	return false
+	// GH #1929: one classifier for both layers; a socket failure naming an
+	// address that contains "410" is not a 410 Gone.
+	return transport.LooksLikeDeprecatedEndpoint(err)
 }
 
 // GetCachedToolCount returns the cached tool count or fetches fresh count if cache is expired
