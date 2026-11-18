@@ -122,6 +122,13 @@ type refreshKeyState struct {
 	// so the connectivity watcher still knows the credential needs a refresh.
 	transientPending  bool
 	transientFailures int
+	// savesInProgress counts token responses being written for this key
+	// (BeginTokenSaveFor). A successful token response settles the
+	// transient state, but the write commits before NoteTokenSavedFor runs
+	// and other goroutines can already use the new token; while a save is
+	// in progress the credential is not reported as transiently failing
+	// (GH #1929 Windows CI: a slow bbolt fsync held that window open).
+	savesInProgress int
 
 	// dcrCleared is set when the DCR registration was cleared after
 	// invalid_client and no successful token response has been seen since
@@ -279,7 +286,29 @@ func (c *RefreshCoordinator) TransientlyFailing(serverKey string, b commitview.C
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	st := c.keys[flightKey{serverKey, b}]
-	return st != nil && st.transientPending && st.latchErr == nil
+	return st != nil && st.transientPending && st.savesInProgress == 0 && st.latchErr == nil
+}
+
+// BeginTokenSaveFor marks that a successful token response for one credential
+// binding of key is being persisted; the returned function ends it and must be
+// called once the save finished (after NoteTokenSavedFor on success). Until
+// then TransientlyFailing and TransientRefreshStatus report no transient
+// failure, so no reader that already sees the new token is told the refresh
+// is still failing. A save that fails or is discarded leaves the earlier
+// transient state in place once it ends.
+func (c *RefreshCoordinator) BeginTokenSaveFor(key string, b commitview.CredentialBinding) (end func()) {
+	c.mu.Lock()
+	st := c.stateLocked(flightKey{key, b})
+	st.savesInProgress++
+	c.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.mu.Lock()
+			st.savesInProgress--
+			c.mu.Unlock()
+		})
+	}
 }
 
 // TransientRefreshInfo describes a refresh that is failing transiently.
@@ -296,7 +325,7 @@ func (c *RefreshCoordinator) TransientRefreshStatus(serverKey string, b commitvi
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	st := c.keys[flightKey{serverKey, b}]
-	if st == nil || !st.transientPending || st.latchErr != nil {
+	if st == nil || !st.transientPending || st.savesInProgress > 0 || st.latchErr != nil {
 		return TransientRefreshInfo{}, false
 	}
 	info := TransientRefreshInfo{Failures: st.transientFailures, RetryAt: st.cooldownUntil}

@@ -334,6 +334,10 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 	flightGen, inFlight := FlightGeneration(ctx)
 	login, isLogin := loginClientFrom(ctx)
 	discarded := false
+	// A successful token response is being stored: from here until the
+	// coordinator has been told (NoteTokenSavedFor below), it must not report
+	// the credential as transiently failing (GH #1929).
+	defer DefaultRefreshCoordinator().BeginTokenSaveFor(p.serverKey, p.cb)()
 	if hook := oauthBeforePersistHook; hook != nil {
 		hook(p.serverName, p.cb)
 	}
@@ -655,6 +659,7 @@ func (m *coordinatedMemoryTokenStore) SaveToken(ctx context.Context, token *clie
 			return nil // superseded by a newer grant (FR-006a)
 		}
 	}
+	defer DefaultRefreshCoordinator().BeginTokenSaveFor(m.key(), commitview.CredentialBinding{})()
 	err := m.inner.SaveToken(ctx, token)
 	if err == nil {
 		m.savedAt.Store(time.Now().UnixNano())
