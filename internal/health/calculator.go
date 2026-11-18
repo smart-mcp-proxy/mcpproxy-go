@@ -1069,6 +1069,20 @@ func ExtractMissingSecret(lastError string) string {
 		return ""
 	}
 
+	// Pattern: "unresolved secret reference ${keyring:NAME} in Headers[...]"
+	// (core.UnresolvedSecretError, release QA F9): the connection was refused
+	// before any request, for any secret type.
+	const unresolvedPrefix = "unresolved secret reference ${"
+	if idx := findSubstring(lastError, unresolvedPrefix); idx >= 0 {
+		start := idx + len(unresolvedPrefix)
+		if end := findChar(lastError[start:], '}'); end > 0 {
+			ref := lastError[start : start+end]
+			if colon := findChar(ref, ':'); colon >= 0 && colon+1 < len(ref) {
+				return ref[colon+1:]
+			}
+		}
+	}
+
 	// Pattern: "environment variable VARNAME not found or empty"
 	const prefix = "environment variable "
 	const suffix = " not found or empty"

@@ -1904,6 +1904,11 @@ func (c *Client) storedOAuthTokenUndecryptable() error {
 // manual-login entry point (quick and forced HTTP/SSE). It is
 // storedOAuthTokenUndecryptable plus the warning the automatic strategies log.
 func (c *Client) rejectManualLoginOnUndecryptableToken() error {
+	// Release QA F9: a sign-in would send the unresolved OAuth settings (or
+	// headers) to the authorization server.
+	if err := c.UnresolvedSecrets(); err != nil {
+		return err
+	}
 	err := c.storedOAuthTokenUndecryptable()
 	if err != nil {
 		c.logger.Warn("Stored OAuth token cannot be decrypted; not starting a manual OAuth login",
