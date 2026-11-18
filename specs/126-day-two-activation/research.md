@@ -110,7 +110,7 @@ A starter that never completed a capture keeps its `connect_failed` / `capture_t
 - ~~A record exists without the field: the install is an upgrade, and the anchor stays zero forever.~~ Superseded by the revision below.
 
 **Revised 2026-11-18 (spec review r1 #1, #12, #13)**: there is no safeguard writer. The "missing record" branch of `UpdateOnboardingState` runs on every MCP initialize (`RecordClientSeen`), connect and mark, so a safeguard there would anchor upgraded installs. Only `EnsureInstallAnchor` writes the anchor.
-- It writes only when `config.db` was empty at open: the file was absent, the file was 0 bytes, or it held no records other than `meta/schema_version`. This is decided before `initBuckets` runs (spec review r2 #5).
+- It writes only when `config.db` was empty at open: the file was absent, the file was 0 bytes, or it held no records other than the schema-version record (`meta` bucket, key `SchemaVersionKey` = `"schema"`). This is decided before `initBuckets` runs (spec review r2 #5).
 - It stores the anchor under its own key in its own bucket, because older binaries round-trip `OnboardingState` and would erase it on a downgrade.
 
 The anchor is never back-filled. Tests cover: an upgrade followed by an MCP initialize and a connect (no anchor), an empty-buckets store (fresh), concurrent first writers, and a downgrade round-trip.
@@ -289,3 +289,5 @@ The facts loop, `first_tool_indexed_ever`, `clients_day0` and the starter, secon
 - If a process is killed with undelivered counts, those counts are lost. The persisted undelivered-window marker makes the next process's first window `partial`. A plain restart after a delivered window is not marked.
 - A counter window is attributed to its `window_age`, the age when it opened. A window that straddles day 7 therefore counts in `d0_6`.
 - The receiver change (spec FR-039) must be live before the first schema-17 release. Until then, only the last window of each day survives.
+- Windows received after D0+20 are not fetched and not counted. A unit is judged at D0+21, so this loses only windows delayed by more than a week.
+- `schema17` mode runs per install only. Rolling it up to machine or IP units would mix installs that are judged on different calendars.

@@ -84,8 +84,8 @@ The maintainer's release handoff renumbered this spec to 126 (Spec 124 is `124-s
 
 ## Definitions
 
-- **Fresh install**: the persisted onboarding state was never engaged (`OnboardingState.engaged == false`). This covers new installs and upgraded installs that never dismissed the wizard.
-- **Install anchor**: a persisted UTC timestamp, written once by `EnsureInstallAnchor`, only when `config.db` held no records in any bucket when the core opened it (FR-033).
+- **Fresh install** (onboarding sense, used by the starter and wizard requirements): the persisted onboarding state was never engaged (`OnboardingState.engaged == false`). This covers new installs and upgraded installs that never dismissed the wizard. It is **not** the telemetry `install_origin = fresh` of FR-034, which means an install anchor exists. Every PR-A requirement (FR-033 to FR-040) that says "fresh" means `install_origin = fresh`.
+- **Install anchor**: a persisted UTC timestamp, written once by `EnsureInstallAnchor`, only when `config.db` was empty when the core opened it, in the FR-033 sense.
   - It has its own key in its own bucket. It is not part of `OnboardingState`, which older binaries rewrite.
   - No other writer sets it, including the missing-record branch of `UpdateOnboardingState`. That branch runs on every MCP initialize, so it would turn an upgrade into a fresh install.
   - It never rotates. The telemetry `anonymous_id` rotates yearly.
@@ -324,7 +324,7 @@ The maintainer queries the telemetry store for post-release cohorts. Without any
 These requirements are the whole of PR-A. PR-A changes no onboarding behaviour and no UI.
 
 - **FR-033 (install anchor)**: At startup, before the HTTP server starts, the core MUST record an install anchor (the UTC first-run time).
-  - It does so only when `config.db` was empty when this process opened it. Empty means the file was absent, the file was 0 bytes, or it held no records other than `meta/schema_version`, which `initBuckets` writes on every first open. This is decided before `initBuckets` runs. A store in which a standalone CLI command wrote real records before the first `serve` counts as `existing`; that is an accepted limit.
+  - It does so only when `config.db` was empty when this process opened it. Empty means the file was absent, the file was 0 bytes, or it held no records other than the schema-version record (`meta` bucket, key `SchemaVersionKey` = `"schema"`), which `initBuckets` writes on every first open. This is decided before `initBuckets` runs. A store in which a standalone CLI command wrote real records before the first `serve` counts as `existing`; that is an accepted limit.
   - Only `EnsureInstallAnchor` writes the anchor. It has its own key in its own bucket (not `OnboardingState`), so an older binary that rewrites onboarding state cannot erase it.
   - An existing store without an anchor MUST stay without one.
   - Later starts and later writes MUST never change an anchor.
@@ -339,20 +339,21 @@ These requirements are the whole of PR-A. PR-A changes no onboarding behaviour a
   - `unusable`: logical calls that dispatched at least one request but ended without a usable result. That covers a transport or upstream error, `isError:true`, and a result withheld by an output policy;
   - `succeeded_non_starter`: the subset of `succeeded` that is not on the starter server (FR-037).
 
-  Each count is bucketed like `upstream_tool_call_count_bucket` (`0 | 1-10 | 11-100 | 101-1000 | 1000+`). The object also carries `window_age` (`d0_6 | d7_13 | d14_plus`), only when the install is fresh:
+  Each count is bucketed like `upstream_tool_call_count_bucket` (`0 | 1-10 | 11-100 | 101-1000 | 1000+`). The object also carries `window_age` (`d0_6 | d7_13 | d14_plus`), only when `install_origin = fresh` (an anchor exists). The core reads the anchor once per process and uses that one value for both `day_two` and `window_age`, so the two can never disagree; a disagreement would be a 400 that the client retries forever:
   - it is the install age, in the FR-034 calendar-date sense, at the moment the window opened. A window opens at process start or at the last `CounterRegistry.Drain`, which happens at the start of each send. The open time is stamped inside `Drain`;
   - it is frozen into the drained snapshot with the counts;
   - it attributes the window to days 0–6 or days 7–13 without a join, and without the one-day lag that labelling at send time would add.
 
-  Exactly three paths MUST feed exactly one outcome per logical call: the `call_tool_*` wrapper, direct routing, and each `code_execution` sub-call. These are the same paths that feed the dispatch count. Every exit after a dispatch counts, including errors, `isError`, and the sanitisation and output-validation blocks. `Runtime.ReplayToolCallWithOptions` is excluded from both counts, as it is from the dispatch count today. A call refused before dispatch feeds none of them. Dispatch counts requests, so a session-recovery repeat counts twice. Outcomes count logical calls. The window is the existing delta-counter window, keyed by `heartbeat_id` and drained only on an accepted send.
-- **FR-036 (window coverage)**: `upstream_outcomes.coverage` MUST be `partial` only when counts were actually lost, and `full` otherwise.
+  Exactly three paths MUST feed exactly one outcome per logical call: the `call_tool_*` wrapper, direct routing, and each `code_execution` sub-call. These are the same paths that feed the dispatch count. Every exit after a dispatch counts, including errors, `isError`, and the sanitisation and output-validation blocks. `Runtime.ReplayToolCallWithOptions` is excluded from both counts, as it is from the dispatch count today. A call refused before dispatch feeds none of them. Dispatch counts requests, so a session-recovery repeat counts twice. Outcomes count logical calls. The window is the existing delta-counter window, keyed by `heartbeat_id`. `Drain` runs at the start of a send when no snapshot is pending. A failed send keeps the pending snapshot and does not drain again. An accepted send discards it.
+- **FR-036 (window coverage)**: `upstream_outcomes.coverage` MUST be `partial` when counts may have been lost, and `full` otherwise. The one conservative exception is below: an absent marker on an `install_origin = existing` store.
   - The core persists an *undelivered window* marker, stored as `true`, `false` or absent.
-    - It is set to `true` when the first outcome is recorded after each `Drain`. A send drains at its start, so outcomes recorded after that drain are still undelivered when the send is accepted.
+    - It is set to `true` on the first outcome recorded after process start or after each `Drain`. A send drains at its start, so outcomes recorded after that drain are still undelivered when the send is accepted.
     - On an accepted send (including the graceful-shutdown flush), it is set to `false` only if no outcome was recorded after the drain whose snapshot was accepted. Otherwise it stays `true`.
     - At every start, once the first window's coverage is decided, the core writes the marker as `false` if it is absent.
   - The first window of a process is `partial` only when the marker was `true` at open, meaning the previous process ended with counts it never delivered.
-  - An *absent* marker at open means that no build at schema 17 or later has run on this store yet. On an existing store this counts as `partial` once. A fresh install that restarts before any call has the marker `false`, so it stays `full`.
-  - A fresh install's first window is `full`.
+  - An *absent* marker at open means that no build at schema 17 or later has run on this store yet. When `install_origin = existing`, this counts as `partial` once. When `install_origin = fresh`, an absent marker (a crash before the start-time write) gives `full`. A fresh install that restarts before any call has the marker `false`, so it stays `full`.
+  - The marker's `true` write on an outcome and the accept path's `false` write run under one lock, shared with the accept decision, so a stale `false` can never overwrite a newer `true`.
+  - An `install_origin = fresh` install's first window is `full`.
   - A plain restart after a delivered window stays `full`.
   - The flag is frozen into the drained snapshot, so retries are byte-identical.
 - **FR-037 (starter classification)**: One local classifier MUST decide starter-ness for a `(server name, incarnation)` pair.
@@ -375,9 +376,12 @@ These requirements are the whole of PR-A. PR-A changes no onboarding behaviour a
   - day 0–6 activity;
   - day 7–13 return, meaning any heartbeat;
   - day 7–13 active return, meaning a non-starter completion;
-  - starter-only installs.
+  - starter-only installs;
+  - SC-001: `tool_count > 0` on a day 0–13 row at schema 11 or later, the dashboard's `MIN_TRUSTED_INSTRUMENT_SCHEMA`;
+  - SC-004: distinct `connected_client_ids` over the D0 and D0+1 daily rows (one or more, and two or more);
+  - counter-window totals for SC-008.
 
-  Every figure carries its coverage. The query has two modes, a pre-17 baseline and schema 17, defined in research R13.
+  Every figure carries its coverage. `schema17` mode runs on the install unit only. The query has two modes, a pre-17 baseline and schema 17, defined in research R13.
 
 ### Functional Requirements: telemetry for the onboarding changes (US5, PR-B to PR-D)
 
@@ -441,7 +445,7 @@ Cohort definition for SC-001 to SC-004 (implemented once, by the FR-040 query in
     An eligible install whose `anonymous_id_created_at` is more than 6 days before its first heartbeat is reported in the coverage row `identity_predates_anchor`;
   - the pre-17 baseline matches by calendar offset from the identity's first heartbeat date (D0): days D0 to D0+6, and days D0+7 to D0+13;
   - machines are counted on the canonical identity key, with the IP key reported alongside, held constant over any trend;
-- matured: the first heartbeat is at least 14 days before the query date.
+- matured: the first heartbeat is at least 21 days before the query date. Windows are fetched up to D0+20, so a days 7–13 window that is delivered late (the 24 h cadence, or a retry) is in before the cohort is judged. A weekly cohort is `complete` once its Sunday is 21 days old.
 
 The release-to-release comparison is pre/post. It is associative, not causal: release composition, autostart behaviour and heartbeat availability are confounds and are reported with the result.
 
@@ -453,16 +457,23 @@ The release-to-release comparison is pre/post. It is associative, not causal: re
   - **Reference.** The 14.9% Jun–Sep figure came from an older script with a different day-7 definition, so it is not the comparison point. The FR-040 query recomputes the baseline before the starter release, and that value becomes the reference.
   - **Keys.** The IP key is primary for SC-002, because it can be held constant over the trend. The canonical machine key is reported alongside for levels, with the same noise rule as SC-001.
   - Three companions are reported and never substituted:
-  - **schema-17 return**: the anchor-based, fresh-only `schema17` figure. Its reference is the PR-A release cohort, and its noise rule starts once four monthly cohorts of it exist;
-  - **active return**: a non-starter completion (`upstream_outcomes.succeeded_non_starter != '0'`) in days 7–13. This is measurable on schema 17 only. The pre-17 baseline can only show dispatch-based activity (`upstream_tool_call_count_bucket != '0'` in `heartbeat_events`, schema 14 and later), and is labelled that way;
-  - **starter-only**: the share of eligible installs whose `success_scope_ever` is `starter_only` at the end of day 13. These installs never count as active.
+  - **schema-17 return** (install unit): the anchor-based, fresh-only `schema17` figure. Its reference is the PR-A release cohort, and its noise rule starts once four monthly cohorts of it exist;
+  - **active return** (install unit on schema 17; IP and machine units in the dispatch-based baseline): a non-starter completion (`upstream_outcomes.succeeded_non_starter != '0'`) in days 7–13. This is measurable on schema 17 only. The pre-17 baseline can only show dispatch-based activity (`upstream_tool_call_count_bucket != '0'` in `heartbeat_events`, schema 14 and later), and is labelled that way;
+  - **starter-only** (install unit): the share of eligible installs whose `success_scope_ever` is `starter_only` at the end of day 13. These installs never count as active.
 - **SC-003 (diagnostic)**:
   - Launcher availability: `starter_launcher = none` is below 15% of installs with a non-empty `starter_launcher`. That field is evaluated independently of every other eligibility outcome, so `tools_present` or `name_taken` installs never dilute it. Above 15%, follow-up O1 (an embedded starter) is triggered.
   - Conversion: at least 60% of installs with `starter_offered` reach `starter_live`.
 - **SC-004 (diagnostic)**: the share of cohort installs with at least one connected client whose day-0 heartbeats show at least two distinct ids rises by at least 8 points over the pre-release baseline. Both sides use the same instrument: the union of `connected_client_ids` over heartbeats received within 26 h of the identity's first heartbeat. Today that is the startup heartbeat at about 5 minutes and the first daily one. The baseline uses pre-release cohorts (schema 16 or older), plus the PR-A release cohort for the same-instrument fields. The comparison uses cohorts first seen on a build that contains PR-C, because the second-client step ships there. The richer `clients_day0` / `clients_day0_final` fields are a separate diagnostic with no pre-release baseline. Their first release cohort becomes the baseline for later releases.
 - **SC-005 (safety)**: no code path makes a starter tool callable without an explicit user approval when a normal catalog add of the same server would be quarantined. A test asserts this for the wizard, Web Home and native doors. No starter code runs before the user clicks "Add and inspect".
 - **SC-006 (performance)**: the 7-day summary with digest returns in under 1.5 s on a 100k-record activity log, measured with a new benchmark next to the summary handler tests. The Home card renders its figures within 2 s of Home load.
-- **SC-008 (coverage)**: every figure states its coverage: the share of eligible installs whose heartbeats carry the fields the figure needs, and the share of counter windows with `coverage = full`. A weekly cohort below 80% coverage for a figure is reported but not judged against SC-001 or SC-002. Coverage gaps are reported as their own rows, and no query treats a missing field as `false` or `0`.
+- **SC-008 (coverage)**: every figure states its coverage, and the denominator is defined per figure:
+  - **return (SC-002)**: eligible ÷ (eligible + `age_unverified`).
+  - **dispatch-based activity (baseline)**: eligible minus `dispatch_semantics_old` and `no_events`, over eligible.
+  - **completion-based activity (schema17)**: `windows.with_outcomes ÷ windows.total` and `windows.full ÷ windows.total`. The `coverage = full` share applies to schema-17 completion figures only, because pre-17 windows have no `coverage` field.
+  - **SC-001**: eligible minus `tool_count_semantics_old`, over eligible.
+  - **SC-004**: units with at least one client id, over eligible.
+
+  A weekly cohort whose coverage is below 80% for a figure is reported but not judged against SC-001 or SC-002. Coverage gaps are reported as their own rows, and no query treats a missing field as `false` or `0`.
 - **SC-007 (privacy)**: the schema-17 privacy tests pass. There are no new identifier fields. Every new field is enum-closed, and unknown keys are rejected.
 - **Kill rule**: if SC-001 and SC-002 show no movement beyond the noise rule after two releases and four weeks of cohort data, the starter pre-selection and the summary card revert to opt-in. The telemetry stays.
 
@@ -489,7 +500,7 @@ The release-to-release comparison is pre/post. It is associative, not causal: re
 ## Out of Scope
 
 - Any change to quarantine, trust modes, scan policy or approval semantics.
-- Telemetry receiver and dashboard changes. quickstart.md gives the queries only.
+- Dashboard pages or panels for E3. The receiver change (FR-039) and the cohort query (FR-040) ship as companion PRs in their own repositories.
 - A CLI starter flow.
 - Server edition onboarding.
 - Notifications and e-mail digests.

@@ -32,8 +32,8 @@ Base struct: `internal/storage/models.go:102`.
 
 | Value | Derivation |
 |---|---|
-| `clients_day0` | Count of `ClientFirstObservedAt` entries whose time is in `[InstallFirstRunAt, +24h)`, bucketed `0 / 1 / 2 / 3_plus`. `""` when `InstallFirstRunAt` is zero. |
-| `clients_day0_final` | `now >= InstallFirstRunAt + 24h`, when there is an anchor. |
+| `clients_day0` | Count of `ClientFirstObservedAt` entries whose time is in `[anchor, +24h)`, bucketed `0 / 1 / 2 / 3_plus`. `""` when there is no install anchor. The anchor is read through `InstallAnchor()`. |
+| `clients_day0_final` | `now >= anchor + 24h`, when there is an anchor. |
 | `approval_abandoned` | Checked on the telemetry-independent facts tick (R5a): `StarterCapturedAt` set (successful capture), `now - StarterCapturedAt >= 24h`, `!StarterLive`, and the starter (same incarnation) is still quarantined. Then `StarterLastFailure = approval_abandoned`. A starter that never captured keeps its capture or connect failure. |
 
 ## 2. `telemetry.ActivationState` additions (bbolt bucket `activation`)
@@ -44,7 +44,7 @@ Base: `internal/telemetry/activation.go:17-50`.
 |---|---|---|
 | `first_tool_indexed_ever` | bool | Sticky. Written by `MarkFirstToolIndexed`. |
 | `first_tool_indexed_at` | time, stored locally | Written once with the flag. **Never** on the wire. |
-| `FirstToolIndexedAfter` (wire `first_tool_indexed_after`) | enum | Derived at payload build from `first_tool_indexed_at - InstallFirstRunAt`: `lt_10m`, `10m_1h`, `1h_24h`, `1d_7d`, `gt_7d`. `""` without an anchor or before the flag. |
+| `FirstToolIndexedAfter` (wire `first_tool_indexed_after`) | enum | Derived at payload build from `first_tool_indexed_at - anchor`, with the anchor read through `InstallAnchor()`: `lt_10m`, `10m_1h`, `1h_24h`, `1d_7d`, `gt_7d`. `""` without an anchor or before the flag. |
 
 ## 2a. In-memory evidence (not persisted)
 
@@ -138,10 +138,10 @@ What each part is:
 - `day_two` is personal edition only. Its `install_age` is present only when `install_origin` is `fresh`.
 
 Where the values come from:
-- **Install anchor** (FR-033): one UTC time in its own bucket and key in `config.db`. It is written once, when the store had no records in any bucket at open, and never rewritten.
+- **Install anchor** (FR-033): one UTC time in its own bucket and key in `config.db`. It is written once, when the store was empty at open in the FR-033 sense, and never rewritten.
 - **`upstream_outcomes.window_age`** (FR-035): the install age when the window opened, frozen with the counts. Present only for a fresh install.
 - **Undelivered-window marker** (FR-036): persisted as `true`, `false` or absent.
-  - It is set `true` on the first outcome after each `Drain`.
+  - It is set `true` on the first outcome after process start or after each `Drain`, under the same lock as the accept path's `false` write.
   - It is set `false` on an accepted send only when no outcome followed the accepted snapshot's drain.
   - It is written `false` at every start if absent.
   - Absent at open means no schema-17+ build has run on this store yet.

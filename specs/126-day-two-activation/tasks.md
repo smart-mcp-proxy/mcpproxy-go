@@ -34,16 +34,16 @@
 ### Install anchor (FR-033)
 
 - [ ] T003 [P] [US5] test: `internal/storage/install_anchor_test.go`.
-  - (a) A store opened on a new file records `InstallFirstRunAt` once `EnsureInstallAnchor` runs.
+  - (a) A store opened on a new file has an anchor, read through `InstallAnchor()`, once `EnsureInstallAnchor` runs.
   - (b) A store opened on an existing file with data and no anchor stays without one (upgrade).
-  - (c) An existing empty file counts as new. That covers a 0-byte file, and a file that a real `NewBoltDB` open and close left with only `meta/schema_version`. A file in which a command wrote real records counts as `existing`.
+  - (c) An existing empty file counts as new. That covers a 0-byte file, and a file that a real `NewBoltDB` open and close left with only the schema-version record (`meta`/`SchemaVersionKey`). A file in which a command wrote real records counts as `existing`.
   - (c2) An upgraded store with no onboarding record still has no anchor after an MCP initialize and a connect. No safeguard writer exists.
   - (c3) The anchor survives a write of `OnboardingState` by code that does not know the anchor field. That is the downgrade case: the anchor lives in its own bucket.
   - (d) A second start never changes the anchor.
   - (e) Concurrent callers produce one anchor; run under `-race`.
   - (f) The anchor is recorded with telemetry disabled.
 - [ ] T004 [US5] impl:
-  - `wasEmptyAtOpen` is decided in `internal/storage` at open, before `initBuckets`. Empty means absent, 0 bytes, or no records other than `meta/schema_version`.
+  - `wasEmptyAtOpen` is decided in `internal/storage` at open, before `initBuckets`. Empty means absent, 0 bytes, or no records other than `meta`/`SchemaVersionKey`.
   - `EnsureInstallAnchor` and `InstallAnchor()` go in `internal/storage/bbolt.go`, with a `manager.go` wrapper. The anchor goes under one dedicated key in one dedicated bucket (for example bucket `install_anchor`, key `first_run_at`), never in `OnboardingState`.
   - Call `EnsureInstallAnchor` in `internal/server/server.go` startup **before** the HTTP server and MCP initialisation start.
 
@@ -52,9 +52,11 @@
 - [ ] T079 [P] [US5] test: `internal/telemetry/upstream_outcomes_test.go`.
   - `RecordUpstreamOutcome(succeeded, starter bool)` buckets match `bucketUpstream`.
   - `succeeded_non_starter` excludes starter successes.
-  - The counts drain only on an accepted send, and a rejected send keeps them.
+  - `Drain` runs at the start of a send when no snapshot is pending. A rejected send keeps the pending snapshot and does not drain again. An accepted send discards it.
   - `coverage`:
-    - `full` on a fresh install's first window;
+    - `full` on the first window of an `install_origin = fresh` install, and `full` for such an install whose marker is absent;
+    - `partial` after this sequence: the marker is written `false` at start, outcomes are recorded before the first send, and the process is killed;
+    - under `-race`, concurrent outcome and accept paths never leave the marker `false` while undelivered outcomes exist;
     - `full` after a restart whose previous window was delivered (marker clear);
     - `partial` after a restart with the undelivered-window marker set;
     - `partial` once on the first start of this build over an existing store (marker absent);
@@ -79,7 +81,8 @@
   - `internal/telemetry/upstream_outcomes.go`: counters on `CounterRegistry`, in the same reset-on-accept window as `upstream_tool_call_count_bucket`. Also:
     - the window open time, stamped in `Drain`, which gives `window_age`;
     - the coverage flag, frozen into the snapshot;
-    - the undelivered-window marker in the activation bucket, set `true` on the first outcome after each `Drain` and written `false` at start if absent;
+    - the undelivered-window marker in the activation bucket, set `true` on the first outcome after process start or after each `Drain`, and written `false` at start if absent. Its writes run under the same lock as the accept decision;
+    - one anchor read per process, used for both `day_two` and `window_age`;
     - on an accepted send, the marker is set `false` only if no outcome followed the accepted snapshot's drain.
   - `internal/telemetry/success_scope.go`: the sticky scope in the activation store.
   - `internal/server/mcp_upstream_telemetry.go`: `noteUpstreamOutcome` beside `noteUpstreamDispatched`, recorded exactly once per logical call by a deferred classifier set up right after `noteUpstreamDispatched`. It is guarded on dispatches > 0, and runs on every exit, including the early error and block returns. A logical call with zero dispatches records nothing.
@@ -147,6 +150,9 @@
     - an `identity_predates_anchor` row;
     - a window attributed by its `window_age`, and one attributed by the nearest-row fallback;
     - a schema-17 window stored without `upstream_outcomes` (`no_completion_counts`, by presence).
+    - a window received between D0+14 and D0+20 and attributed by its `window_age`, and baseline ignoring windows received after D0+13;
+    - SC-001 (`tool_count`, with the `tool_count_semantics_old` row) and SC-004 (distinct client ids on D0/D0+1);
+    - `schema17` refusing machine and IP units.
     - a CI id excluded.
   - Add a script or runbook entry that runs the baseline against D1 read-only (`--command`, never `--file`), and record the first baseline in the PR.
 

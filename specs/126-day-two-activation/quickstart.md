@@ -109,28 +109,19 @@ Use the tray dev-swap recipe (`docs/development/macos-tray.md`, `mcpproxy-ui-tes
 
 They use the canonical CI filter and identity keys from the 2026-10-20 telemetry note. `release_v` is the first build carrying PR-B, the starter UI.
 
-**SC-001: tools indexed, heartbeat-sampled, comparable with the 71.5% baseline.**
+**SC-001 and SC-004** come from the same FR-040 query (`day-two-cohort.ts`), in its `tools_indexed_d0_13` and `clients_1plus_day0` / `clients_2plus_day0` figures, on the same eligible cohort. The query never takes them from a separate cohort definition.
+- SC-001's 71.5% figure came from an earlier instrument (any heartbeat, no new-install test), so it is not the comparison point. The PR-A baseline run becomes the reference.
+- The SC-001 companion, the sticky `first_tool_indexed_ever`, ships with PR-B. It is read on rows at PR-B's schema version or later where the field is present.
+
+**SC-003: launcher availability and starter conversion.** These fields ship with PR-B at its schema version, written `:pr_b_schema` below. Read them only where the field is present:
 
 ```sql
-WITH c AS (SELECT cont_id, MIN(created_at) first_seen FROM hb_noci
-           WHERE edition='personal' GROUP BY cont_id
-           HAVING MIN(version_semver) >= :release_v AND MIN(created_at) <= date('now','-14 day'))
-SELECT AVG(ever_tools) FROM (
-  SELECT c.cont_id, MAX(json_extract(payload,'$.tool_count') > 0) ever_tools
-  FROM c JOIN hb_noci h USING (cont_id) GROUP BY c.cont_id);
+SELECT json_extract(payload_json,'$.day_two.starter_launcher') AS l, COUNT(DISTINCT anonymous_id)
+FROM heartbeats
+WHERE schema_version >= :pr_b_schema AND json_type(payload_json,'$.day_two.starter_launcher') IS NOT NULL AND l != ''
+GROUP BY l;
+-- conversion: share of anonymous ids with any starter_offered = 1 that ever have starter_live = 1
 ```
-
-**SC-001 companion: sticky flag, reported separately.** Use the same query with `MAX(json_extract(payload,'$.activation.first_tool_indexed_ever'))`.
-
-**SC-003: launcher availability and starter conversion.**
-
-```sql
-SELECT json_extract(payload,'$.day_two.starter_launcher') l, COUNT(DISTINCT cont_id)
-FROM hb_noci WHERE schema_version >= 17 AND l != '' GROUP BY l;
--- conversion: share of cont_ids with any starter_offered=1 that ever have starter_live=1
-```
-
-**SC-004: day-0 clients, same instrument on both sides.** Take the union of `connected_client_ids` over heartbeats with `created_at <= first_seen + 26h`, and compute the share with at least 2 distinct IDs among those with at least 1. Run it for pre-release cohorts (schema 16 or older) (baseline) and for schema-17 cohorts.
 
 **SC-002 and SC-008: return in days 7–13, active return, starter-only, coverage.** These come from the FR-040 query in `mcpproxy-dash` (`src/lib/server/queries/day-two-cohort.ts`, tasks T085), never from a one-off script.
 - Run it in `baseline` mode before the starter release, and record the result as the SC-002 reference.

@@ -32,7 +32,7 @@
           ]
         },
         "window_age": {
-          "description": "Install age (UTC calendar dates from the anchor) when the window opened; present only when the install is fresh.",
+          "description": "Install age (UTC calendar dates from the anchor) when the window opened; present only when day_two.install_origin = fresh (an anchor exists).",
           "enum": [
             "d0_6",
             "d7_13",
