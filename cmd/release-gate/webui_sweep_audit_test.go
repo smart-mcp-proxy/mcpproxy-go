@@ -82,6 +82,20 @@ func TestWebUISweepJobReportsAndUploads(t *testing.T) {
 	if !strings.Contains(uploads, "playwright-report") {
 		t.Errorf("the sweep job must upload the Playwright HTML report artifact; upload steps: %s", uploads)
 	}
+	// Spec 125: the Skills tab sweep runs in the same advisory job, and its
+	// results file lands inside the uploaded artifact directory.
+	var skillsStep *step
+	for i := range sweep.Steps {
+		if strings.Contains(sweep.Steps[i].Run, "scripts/run-skills-tab-sweep.sh") {
+			skillsStep = &sweep.Steps[i]
+		}
+	}
+	if skillsStep == nil {
+		t.Fatalf("the sweep job must run scripts/run-skills-tab-sweep.sh; run steps: %s", runs)
+	}
+	if !strings.Contains(skillsStep.Run, "tmp/web-smoke-artifacts/") {
+		t.Errorf("run-skills-tab-sweep.sh must write into tmp/web-smoke-artifacts/ so its results file is uploaded with the job's artifacts: %s", skillsStep.Run)
+	}
 }
 
 // yamlFlatten renders a `with:` mapping node as a flat string for substring

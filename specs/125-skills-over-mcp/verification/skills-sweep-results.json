@@ -1,0 +1,173 @@
+{
+  "checked_commit": "6370f1f45e05cec3b095da62bddcd6a0d4bfb025",
+  "working_tree_dirty": true,
+  "checked": "working tree on top of 6370f1f45e05cec3b095da62bddcd6a0d4bfb025",
+  "generated_at": "2026-11-18T12:54:51.927Z",
+  "fixture": {
+    "command": [
+      "/var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T//skills-sweep.K6rjBB/bin/skillsfixture",
+      "-addr",
+      "127.0.0.1:64492"
+    ],
+    "port": 64492
+  },
+  "core": {
+    "listen": "127.0.0.1:64512",
+    "server": "skillsfx",
+    "enable_skills": true,
+    "trust_mode": "manual"
+  },
+  "playwright_exit_code": 0,
+  "scenarios": [
+    {
+      "title": "the Skills tab lists the fixture skills as awaiting review",
+      "passed": true,
+      "status": "passed"
+    },
+    {
+      "title": "views SKILL.md, pages a large file, and does not offer a binary file",
+      "passed": true,
+      "status": "passed"
+    },
+    {
+      "title": "approve turns the chip to Approved",
+      "passed": true,
+      "status": "passed"
+    },
+    {
+      "title": "an upstream change plus Refresh shows Changed with a file diff and a line diff",
+      "passed": true,
+      "status": "passed"
+    },
+    {
+      "title": "block and unblock",
+      "passed": true,
+      "status": "passed"
+    },
+    {
+      "title": "the tab survives a reload through ?tab=skills and no page error was thrown",
+      "passed": true,
+      "status": "passed"
+    }
+  ],
+  "states": {
+    "approve": {
+      "incarnation": 1,
+      "skills": [
+        {
+          "path": "big",
+          "status": "pending",
+          "blocked": false,
+          "available": false,
+          "current_hash": "sk1-e546542d22642918aeab759cd6ebd414e007f0e78e7597a568a737ec3ebda041",
+          "approved_hash": ""
+        },
+        {
+          "path": "plain",
+          "status": "approved",
+          "blocked": false,
+          "available": true,
+          "current_hash": "sk1-b23404c9e4197b2f0f05125a948ce5f69b6b011ed9a8abcf1b9f8a63f04eaff7",
+          "approved_hash": "sk1-b23404c9e4197b2f0f05125a948ce5f69b6b011ed9a8abcf1b9f8a63f04eaff7"
+        },
+        {
+          "path": "with-files",
+          "status": "pending",
+          "blocked": false,
+          "available": false,
+          "current_hash": "sk1-11bf1bd99f40de60b2ebb00ea7d54be85ce487d61abcea4e7c14f725168097e3",
+          "approved_hash": ""
+        }
+      ]
+    },
+    "approve-changed": {
+      "incarnation": 1,
+      "skills": [
+        {
+          "path": "big",
+          "status": "pending",
+          "blocked": false,
+          "available": false,
+          "current_hash": "sk1-e546542d22642918aeab759cd6ebd414e007f0e78e7597a568a737ec3ebda041",
+          "approved_hash": ""
+        },
+        {
+          "path": "plain",
+          "status": "approved",
+          "blocked": false,
+          "available": true,
+          "current_hash": "sk1-03097acd9229c426c9b900e1e7a08d63d52b89d512708a8ed3235a80c79ff8b5",
+          "approved_hash": "sk1-03097acd9229c426c9b900e1e7a08d63d52b89d512708a8ed3235a80c79ff8b5"
+        },
+        {
+          "path": "with-files",
+          "status": "pending",
+          "blocked": false,
+          "available": false,
+          "current_hash": "sk1-11bf1bd99f40de60b2ebb00ea7d54be85ce487d61abcea4e7c14f725168097e3",
+          "approved_hash": ""
+        }
+      ]
+    },
+    "block": {
+      "incarnation": 1,
+      "skills": [
+        {
+          "path": "big",
+          "status": "pending",
+          "blocked": false,
+          "available": false,
+          "current_hash": "sk1-e546542d22642918aeab759cd6ebd414e007f0e78e7597a568a737ec3ebda041",
+          "approved_hash": ""
+        },
+        {
+          "path": "plain",
+          "status": "approved",
+          "blocked": false,
+          "available": true,
+          "current_hash": "sk1-03097acd9229c426c9b900e1e7a08d63d52b89d512708a8ed3235a80c79ff8b5",
+          "approved_hash": "sk1-03097acd9229c426c9b900e1e7a08d63d52b89d512708a8ed3235a80c79ff8b5"
+        },
+        {
+          "path": "with-files",
+          "status": "pending",
+          "blocked": true,
+          "available": false,
+          "current_hash": "sk1-11bf1bd99f40de60b2ebb00ea7d54be85ce487d61abcea4e7c14f725168097e3",
+          "approved_hash": ""
+        }
+      ]
+    },
+    "unblock": {
+      "incarnation": 1,
+      "skills": [
+        {
+          "path": "big",
+          "status": "pending",
+          "blocked": false,
+          "available": false,
+          "current_hash": "sk1-e546542d22642918aeab759cd6ebd414e007f0e78e7597a568a737ec3ebda041",
+          "approved_hash": ""
+        },
+        {
+          "path": "plain",
+          "status": "approved",
+          "blocked": false,
+          "available": true,
+          "current_hash": "sk1-03097acd9229c426c9b900e1e7a08d63d52b89d512708a8ed3235a80c79ff8b5",
+          "approved_hash": "sk1-03097acd9229c426c9b900e1e7a08d63d52b89d512708a8ed3235a80c79ff8b5"
+        },
+        {
+          "path": "with-files",
+          "status": "pending",
+          "blocked": false,
+          "available": false,
+          "current_hash": "sk1-11bf1bd99f40de60b2ebb00ea7d54be85ce487d61abcea4e7c14f725168097e3",
+          "approved_hash": ""
+        }
+      ]
+    }
+  },
+  "passed": true,
+  "problems": []
+}

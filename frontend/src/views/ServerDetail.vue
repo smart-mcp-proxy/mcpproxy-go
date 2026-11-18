@@ -317,6 +317,8 @@
           Tools ({{ serverTools.length }})
         </button>
         <button data-test="review-tab" :class="['tab tab-lg', activeTab === 'review' ? 'tab-active' : '']" @click="activeTab = 'review'">Review</button>
+        <!-- Spec 125: shown when skills are on and the server supports them (or has records); never for a tenant. -->
+        <button v-if="skillsTabVisible" data-test="skills-tab" :class="['tab tab-lg', activeTab === 'skills' ? 'tab-active' : '']" @click="activeTab = 'skills'">Skills</button>
         <button
           :class="['tab tab-lg', activeTab === 'logs' ? 'tab-active' : '']"
           @click="activeTab = 'logs'"
@@ -743,6 +745,14 @@
               </div>
             </div>
           </div>
+        </div>
+        <!-- Rendered only once the check says the tab is offered: until then a
+             ?tab=skills link waits, and a tab that is not offered falls back to Tools. -->
+        <div v-if="activeTab === 'skills' && !isTenant && skillsTabVisible">
+          <SkillsPanel :server-name="server.name" />
+        </div>
+        <div v-else-if="activeTab === 'skills' && !skillsTabChecked" class="text-center py-8" data-test="skills-tab-checking">
+          <span class="loading loading-spinner"></span>
         </div>
         <div v-if="activeTab === 'review'">
           <ReviewScreen :server-name="server.name" @approved="refreshData" />
@@ -1597,6 +1607,9 @@ import ToolDescription from '@/components/ToolDescription.vue'
 import FindingChip from '@/components/FindingChip.vue'
 import FlaggedToolsPanel from '@/components/FlaggedToolsPanel.vue'
 import ReviewScreen from '@/components/ReviewScreen.vue'
+import SkillsPanel from '@/components/skills/SkillsPanel.vue'
+import { useAuthStore } from '@/stores/auth'
+import { skillsTabVisible as listingOffersSkills } from '@/utils/skills'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Server, Tool, ToolApproval, SecurityScanReport, HealthStatus } from '@/types'
 import api from '@/services/api'
@@ -1677,7 +1690,55 @@ function mutateStoreServer(fn: (s: Server) => void) {
   const s = serversStore.servers.find(srv => srv.name === props.serverName)
   if (s) fn(s)
 }
-const activeTab = ref<'tools' | 'logs' | 'config' | 'security' | 'review'>('tools')
+const activeTab = ref<'tools' | 'logs' | 'config' | 'security' | 'review' | 'skills'>('tools')
+
+// Spec 125: the Skills tab. The skills routes are administrator-only, so a
+// tenant principal never sees the tab and never triggers the request (a 403
+// would be reported as an auth error). The check is repeated for every server
+// and a late answer for the previous one is dropped.
+const isTenant = computed(() => useAuthStore().principalKind === 'tenant')
+const skillsTabVisible = ref(false)
+// False while the check for the server on screen is in flight.
+const skillsTabChecked = ref(false)
+let skillsCheckGeneration = 0
+// A Skills tab that is not offered (feature off, server without skills, a
+// failed check, a tenant) is never left open: it falls back to Tools, and the
+// activeTab watch below writes ?tab=tools like any other tab change.
+function skillsTabRefused() {
+  return isTenant.value || (skillsTabChecked.value && !skillsTabVisible.value)
+}
+function leaveSkillsTabIfNotOffered() {
+  if (!skillsTabRefused()) return
+  if (activeTab.value === 'skills') activeTab.value = 'tools'
+  // activeTab may already read 'tools' (readTabFromQuery set it in the same
+  // tick), in which case the watch does not fire: write the URL here.
+  else if (route.query.tab === 'skills') void router.replace({ query: { ...route.query, tab: 'tools' } })
+}
+async function checkSkillsTab(reset = true) {
+  const gen = ++skillsCheckGeneration
+  const name = props.serverName
+  if (reset) {
+    skillsTabVisible.value = false
+    skillsTabChecked.value = false
+  }
+  if (isTenant.value) {
+    skillsTabVisible.value = false
+    skillsTabChecked.value = true
+    leaveSkillsTabIfNotOffered()
+    return
+  }
+  let visible = false
+  try {
+    const res = await api.getServerSkills(name)
+    visible = !!res.success && listingOffersSkills(res.data)
+  } catch {
+    // The tab is optional; no answer means no tab.
+  }
+  if (gen !== skillsCheckGeneration) return
+  skillsTabVisible.value = visible
+  skillsTabChecked.value = true
+  leaveSkillsTabIfNotOffered()
+}
 // Spec 109 FR-016: every tab change (click, or a programmatic jump such as
 // the auto-approve flow landing on Security) is reflected in `?tab=`, keeping
 // every other query param, so the active tab survives a reload or a shared
@@ -1698,9 +1759,12 @@ watch(activeTab, (tab) => {
 function readTabFromQuery() {
   const tabParam = route.query.tab as string
   activeTab.value =
-    tabParam && ['tools', 'logs', 'config', 'security', 'review'].includes(tabParam)
+    tabParam && ['tools', 'logs', 'config', 'security', 'review', 'skills'].includes(tabParam)
       ? (tabParam as typeof activeTab.value)
       : 'tools'
+  // A tenant never has the Skills tab; for everyone else the check decides.
+  if (activeTab.value === 'skills' && skillsTabRefused()) activeTab.value = 'tools'
+  leaveSkillsTabIfNotOffered()
 }
 const actionLoading = ref(false)
 
@@ -2336,6 +2400,9 @@ watch(
     trustModeRestartRequired.value = false
     // Re-read (or reset) the tab for the new server's URL — see
     // readTabFromQuery's own comment for why onMounted alone is not enough.
+    // The skills check first: it resets the previous server's answer
+    // synchronously, so readTabFromQuery never judges ?tab=skills by it.
+    void checkSkillsTab()
     readTabFromQuery()
     if (activeTab.value === 'security') {
       loadScannerNames()
@@ -4099,9 +4166,16 @@ watch(logTail, () => {
   loadLogs()
 })
 
+// Spec 125: a skills change on this server can turn the tab on or off.
+function handleSkillsChangedEvent(e: Event) {
+  const detail = (e as CustomEvent).detail as { server?: string } | null
+  if (detail?.server === props.serverName) void checkSkillsTab(false)
+}
+
 // Load data on mount
 onMounted(() => {
   // Read tab from query parameter (e.g., ?tab=security)
+  void checkSkillsTab()
   readTabFromQuery()
   loadServerDetails().then(() => {
     // Audit F11: honor ?focus=endpoint once the server payload is in, so the
@@ -4124,6 +4198,7 @@ onMounted(() => {
   // Spec 088 US5: live refresh listeners, scoped to this mounted view.
   window.addEventListener('mcpproxy:scan-settled', handleScanSettledEvent)
   window.addEventListener('mcpproxy:servers-changed', handleServersChangedEvent)
+  window.addEventListener('mcpproxy:skills-changed', handleSkillsChangedEvent)
 })
 
 // Cleanup polling on unmount
@@ -4131,5 +4206,6 @@ onUnmounted(() => {
   stopScanPolling()
   window.removeEventListener('mcpproxy:scan-settled', handleScanSettledEvent)
   window.removeEventListener('mcpproxy:servers-changed', handleServersChangedEvent)
+  window.removeEventListener('mcpproxy:skills-changed', handleSkillsChangedEvent)
 })
 </script>

@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -90,17 +91,47 @@ type Fixture struct {
 // New starts the fixture and registers its shutdown with t.
 func New(t testing.TB, opts ...Option) *Fixture {
 	t.Helper()
+	f := Start(opts...)
+	t.Cleanup(f.Close)
+	return f
+}
+
+// Start starts the fixture on an ephemeral port for use outside go test (the
+// cmd/skillsfixture command). The caller owns Close.
+func Start(opts ...Option) *Fixture {
+	f := NewDetached(opts...)
+	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
+	return f
+}
+
+// NewDetached builds a fixture without starting a server. Serve it with Handler.
+func NewDetached(opts ...Option) *Fixture {
 	f := &Fixture{extension: true, resources: true}
 	for _, o := range opts {
 		o(f)
 	}
-	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
-	t.Cleanup(f.srv.Close)
 	return f
 }
 
+// Handler is the JSON-RPC endpoint, for serving the fixture on a listener the
+// caller owns. It answers every path.
+func (f *Fixture) Handler() http.Handler { return http.HandlerFunc(f.handle) }
+
+// Close stops the server started by New or Start; it is a no-op for a fixture
+// built with NewDetached.
+func (f *Fixture) Close() {
+	if f.srv != nil {
+		f.srv.Close()
+	}
+}
+
 // URL is the endpoint to point a streamable-HTTP upstream at.
-func (f *Fixture) URL() string { return f.srv.URL }
+func (f *Fixture) URL() string {
+	if f.srv == nil {
+		return ""
+	}
+	return f.srv.URL
+}
 
 // AddSkill registers a skill. Digests and sizes in the listing are computed
 // from the current bytes each time, so they are correct unless a knob says
@@ -142,6 +173,20 @@ func (f *Fixture) Mutate(path, file string, content []byte) {
 		}
 	}
 	panic("skillstest: Mutate: no skill " + path)
+}
+
+// TryMutate is Mutate for callers that cannot panic: it reports an unknown
+// skill as an error instead.
+func (f *Fixture) TryMutate(path, file string, content []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, s := range f.skills {
+		if s.Path == path {
+			s.Files[file] = append([]byte(nil), content...)
+			return nil
+		}
+	}
+	return fmt.Errorf("skillstest: no skill %q", path)
 }
 
 // SetListFailure makes skills/list answer with a JSON-RPC error.

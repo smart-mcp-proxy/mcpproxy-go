@@ -110,8 +110,8 @@ The `web-ui-sweep` job runs the Playwright sweep
 see [Web UI verification](web-ui-verification.md)) against the Web UI **served by
 the candidate binary** — embedded frontend, never a dev server — with a live
 `mcpfixture` stdio upstream so the servers/tools screens have real data. It
-runs six spec files (the launcher's `playwright test` line is the list, and
-`TestWebUISweepSpecListIsComplete` fails when it, `e2e/web-ui-sweep` and this
+runs the spec files below (the launchers' `playwright test` lines are the list, and
+`TestWebUISweepSpecListIsComplete` fails when they, `e2e/web-ui-sweep` and this
 page disagree):
 
 - `web-ui-sweep.spec.ts`: servers list, server detail (+ security tab), tools
@@ -138,6 +138,20 @@ page disagree):
   900 px: the header status pill names servers awaiting review, a secret-like
   Manual-add value is masked with a Show toggle, and profile Try it is readable
   and labels unsaved edits.
+- `skills-tab.spec.ts` (spec 125): the Skills tab of Server Detail, run by its
+  own launcher [`scripts/run-skills-tab-sweep.sh`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/scripts/run-skills-tab-sweep.sh)
+  as a second step of the same job (it needs `enable_skills` and a
+  skills-capable upstream, `cmd/skillsfixture`, which `build-candidate` builds
+  into `gate-candidate`). It lists, views and pages skills, approves one, shows
+  a change made while the skill is open as a stale review, then the diff, and
+  blocks and unblocks. It writes `skills-sweep-results.json` (checked commit,
+  fixture command line and port, each scenario's pass/fail, and the skill
+  records read back after the approve, block and unblock steps) under
+  `tmp/web-smoke-artifacts/skills-sweep/`, so it is uploaded with the
+  `web-ui-sweep-playwright-report` artifact. The step runs even when the
+  standing sweep failed; a red step marks the job failed, which
+  `continue-on-error` keeps advisory. Its outcome is not a separate manifest
+  entry: read the results file.
 
 Setup is not duplicated in YAML: the job calls
 [`scripts/run-web-smoke.sh`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/scripts/run-web-smoke.sh),

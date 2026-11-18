@@ -1,5 +1,5 @@
 import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, StatusResponse, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, CatalogSearchResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivityRecord, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, AttentionResponse, ReviewQueueResponse, ServerReviewResponse } from '@/types'
-import type { ProfileConfig, ProfileList, ProfileView, ProfileWriteResult, ProfileRenameResult, ProfileDeleteResult, EffectiveToolsResult, TryProfileResponse, AccessExplanation, ExplainSubjectQuery, ClientView, ClientsResponse, BulkAssignResponse, CustomClientResponse, RotateResponse, UpgradePreview, UpgradeApplyResult, ForgetClientResponse, ConnectOptions } from '@/types/api'
+import type { ProfileConfig, ProfileList, ProfileView, ProfileWriteResult, ProfileRenameResult, ProfileDeleteResult, EffectiveToolsResult, TryProfileResponse, AccessExplanation, ExplainSubjectQuery, ClientView, ClientsResponse, BulkAssignResponse, CustomClientResponse, RotateResponse, UpgradePreview, UpgradeApplyResult, ForgetClientResponse, ConnectOptions, SkillsListResponse, SkillContentResponse, SkillCopy, SkillsResponse } from '@/types/api'
 
 import { joinHoldEvidence, type HoldEvidenceSource } from '@/utils/holdEvidence'
 
@@ -221,13 +221,14 @@ class APIService {
     }
   }
 
-  private async request<T>(endpoint: string, options: RequestInit = {}): Promise<APIResponse<T>> {
+  private async request<T>(endpoint: string, options: RequestInit = {}): Promise<APIResponse<T> & { errorCode?: string }> {
     // Ensure API key initialization is complete
     if (!this.initialized) {
       console.log('API service not initialized, initializing now...')
       this.initializeAPIKey()
     }
 
+    let errorCode: string | undefined
     try {
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
@@ -273,6 +274,7 @@ class APIService {
         // Try to extract error message from response body
         const errorData = await response.json().catch(() => ({}))
         const errorMsg = errorData.error || `HTTP ${response.status}: ${response.statusText}`
+        errorCode = typeof errorData.error_code === 'string' ? errorData.error_code : undefined
         console.error(`API request failed: ${errorMsg}`)
 
         // Special handling for authentication errors
@@ -298,6 +300,8 @@ class APIService {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
+        // Spec 125: the stable error_code of the body, when it had one.
+        ...(errorCode ? { errorCode } : {}),
       }
     }
   }
@@ -607,6 +611,52 @@ class APIService {
     return this.request<{ blocked: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/block`, {
       method: 'POST',
       body: JSON.stringify(withExpectedIncarnation(body, expectedIncarnation)),
+    })
+  }
+
+  // Spec 125 (skills over MCP, PR-4a): administrator-only skills routes. Failures
+  // carry `errorCode` (review_out_of_date, server_replaced, refresh_in_progress,
+  // skill_unusable, ...). approve is bound to the reviewed hashes (expectedHashes:
+  // skill path -> current_hash) and to the server incarnation; the core answers
+  // 409 and writes nothing when either moved.
+  async getServerSkills(serverName: string): Promise<SkillsResponse<SkillsListResponse>> {
+    return this.request<SkillsListResponse>(`/api/v1/servers/${encodeURIComponent(serverName)}/skills`)
+  }
+
+  async refreshServerSkills(serverName: string): Promise<SkillsResponse<SkillsListResponse>> {
+    return this.request<SkillsListResponse>(`/api/v1/servers/${encodeURIComponent(serverName)}/skills/refresh`, { method: 'POST' })
+  }
+
+  async getSkillContent(
+    serverName: string,
+    q: { skill: string; file?: string; copy?: SkillCopy; offset?: number; limit?: number },
+  ): Promise<SkillsResponse<SkillContentResponse>> {
+    const params = new URLSearchParams({ skill: q.skill })
+    if (q.file) params.set('file', q.file)
+    if (q.copy) params.set('copy', q.copy)
+    if (q.offset) params.set('offset', String(q.offset))
+    if (q.limit) params.set('limit', String(q.limit))
+    return this.request<SkillContentResponse>(`/api/v1/servers/${encodeURIComponent(serverName)}/skills/content?${params.toString()}`)
+  }
+
+  async approveSkills(serverName: string, skills: string[], expectedHashes: Record<string, string>, expectedIncarnation?: number): Promise<SkillsResponse<{ approved: number }>> {
+    return this.request<{ approved: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/skills/approve`, {
+      method: 'POST',
+      body: JSON.stringify(withExpectedIncarnation({ skills, expected_hashes: expectedHashes }, expectedIncarnation)),
+    })
+  }
+
+  async blockSkills(serverName: string, skills: string[], expectedIncarnation?: number): Promise<SkillsResponse<{ changed: number }>> {
+    return this.request<{ changed: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/skills/block`, {
+      method: 'POST',
+      body: JSON.stringify(withExpectedIncarnation({ skills }, expectedIncarnation)),
+    })
+  }
+
+  async unblockSkills(serverName: string, skills: string[], expectedIncarnation?: number): Promise<SkillsResponse<{ changed: number }>> {
+    return this.request<{ changed: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/skills/unblock`, {
+      method: 'POST',
+      body: JSON.stringify(withExpectedIncarnation({ skills }, expectedIncarnation)),
     })
   }
 

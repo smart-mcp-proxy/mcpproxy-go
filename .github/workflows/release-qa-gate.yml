@@ -128,6 +128,8 @@ jobs:
           # failed that test.
           go build -tags server,nogui -ldflags "${LDFLAGS}" -o dist-bin/mcpproxy-server ./cmd/mcpproxy
           go build                                    -o dist-bin/mcpfixture    ./cmd/mcpfixture
+          # Spec 125: the skills-capable upstream of the Skills tab sweep.
+          go build                                    -o dist-bin/skillsfixture ./cmd/skillsfixture
           go build                                    -o dist-bin/oauthserver   ./tests/oauthserver/cmd/server
           go build                                    -o dist-bin/release-gate  ./cmd/release-gate
           ./dist-bin/mcpproxy --version || true
@@ -561,6 +563,20 @@ jobs:
           ./dist-bin/release-gate run-suite \
             --name advisory/web-ui-sweep --advisory --report-dir "${GATE_REPORT_DIR}" \
             -- bash scripts/run-web-smoke.sh
+
+      # Spec 125: the Skills tab sweep needs enable_skills and a skills-capable
+      # upstream, so it has its own launcher (throwaway core + cmd/skillsfixture
+      # on free loopback ports). It runs even when the sweep above failed, inside
+      # this advisory job; its results file (skills-sweep-results.json) and
+      # screenshots land under tmp/web-smoke-artifacts/, which the Playwright
+      # report upload below already carries.
+      - name: Run Skills tab sweep (spec 125)
+        if: ${{ !cancelled() }}
+        env:
+          MCPPROXY_BINARY_PATH: ${{ github.workspace }}/dist-bin/mcpproxy
+          SKILLS_FIXTURE_BINARY: ${{ github.workspace }}/dist-bin/skillsfixture
+        run: |
+          bash scripts/run-skills-tab-sweep.sh --out "${GITHUB_WORKSPACE}/tmp/web-smoke-artifacts/skills-sweep"
 
       - name: Upload Playwright report
         if: always()
