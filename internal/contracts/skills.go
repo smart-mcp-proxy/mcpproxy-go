@@ -79,6 +79,32 @@ type SkillsListResponse struct {
 	Skills       []SkillEntry `json:"skills"`
 }
 
+// SkillAgentEntry is one available skill as a scoped caller (an agent token)
+// sees it: the approved copy and nothing else. There is no current hash, scan
+// result, blocked or unusable state, because a scoped caller must learn nothing
+// about skills that are not available (spec 125 FR-019a).
+type SkillAgentEntry struct {
+	ID           string          `json:"id"`
+	URI          string          `json:"uri"`
+	Path         string          `json:"path"`
+	Name         string          `json:"name"`
+	Description  string          `json:"description"`
+	Status       string          `json:"status"` // always "approved"
+	Available    bool            `json:"available"`
+	ApprovedHash string          `json:"approved_hash"`
+	Files        []SkillFileInfo `json:"files"`
+	TotalSize    int64           `json:"total_size"`
+}
+
+// SkillsAgentListResponse is the response of GET /api/v1/servers/{id}/skills
+// for a scoped caller. It carries no counts and no refresh, support or error
+// detail, since any of them could reveal skills that are held.
+type SkillsAgentListResponse struct {
+	Enabled bool              `json:"enabled"`
+	Server  string            `json:"server,omitempty"`
+	Skills  []SkillAgentEntry `json:"skills"`
+}
+
 // SkillContentResponse is the response of GET /api/v1/servers/{id}/skills/content.
 type SkillContentResponse struct {
 	Text   string `json:"text"`

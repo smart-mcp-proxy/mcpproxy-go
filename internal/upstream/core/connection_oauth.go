@@ -1962,7 +1962,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 		zap.String("correlation_id", result.CorrelationID))
 
 	// Fast-fail if OAuth is clearly not applicable for this server
-	if !oauth.ShouldUseOAuth(c.config) {
+	if !oauth.ManualLoginApplicable(c.config) {
 		c.logger.Warn("⚠️ OAuth not applicable for server",
 			zap.String("server", c.config.Name),
 			zap.String("correlation_id", result.CorrelationID))
@@ -2337,9 +2337,27 @@ func (c *Client) emptyClientIDFlowError(authURL, correlationID string, dcrErr er
 		CorrelationID: correlationID,
 		Message:       fmt.Sprintf("Server '%s' requires a client_id: the OAuth provider does not support Dynamic Client Registration (or registration failed) and no oauth.client_id is configured", c.config.Name),
 		Details:       details,
-		Suggestion:    "Register an OAuth app with the provider and set oauth.client_id in the server config.",
+		Suggestion:    c.clientIDRequiredSuggestion(),
 		DebugHint:     fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
 	})
+}
+
+// clientIDRequiredSuggestion is the remediation for a sign-in that cannot
+// proceed without a registered OAuth client.
+//
+// GH #1922: a server that authenticates with static headers and declares no
+// oauth block only reached this sign-in because the upstream rejected those
+// headers. Registering an OAuth app is rarely what its operator wants; the
+// expired or revoked credential in the headers is the likelier fix, so it is
+// named first.
+func (c *Client) clientIDRequiredSuggestion() string {
+	const registerApp = "Register an OAuth app with the provider and set oauth.client_id in the server config."
+	if c.config.OAuth == nil && len(c.config.Headers) > 0 {
+		return "The upstream rejected this server's configured headers. If it authenticates with a static token, " +
+			"replace that credential (update the secret the headers reference, or edit the headers). " +
+			"To sign in with OAuth instead: " + strings.ToLower(registerApp[:1]) + registerApp[1:]
+	}
+	return registerApp
 }
 
 // waitForOAuthCallbackAsync waits for OAuth callback and handles token exchange in background.
@@ -2498,7 +2516,7 @@ func (c *Client) ForceOAuthFlowWithResult(ctx context.Context) (*OAuthStartResul
 		zap.String("server", c.config.Name))
 
 	// Fast‑fail if OAuth is clearly not applicable for this server
-	if !oauth.ShouldUseOAuth(c.config) {
+	if !oauth.ManualLoginApplicable(c.config) {
 		return nil, fmt.Errorf("OAuth is not supported or not applicable for server '%s'", c.config.Name)
 	}
 

@@ -108,6 +108,12 @@ const (
 	// is administrator-only (FR-019a).
 	EventTypeActivitySkillQuarantineChange EventType = "activity.skill_quarantine_change"
 
+	// EventTypeActivitySkillAccess is emitted for every agent search, load or
+	// file read of a skill (Spec 125 FR-024). server_name is the skill's origin
+	// server (empty for a search), so the identity-bearing scoping rule of the
+	// SSE door applies: a scoped subscriber sees only rows of servers it reaches.
+	EventTypeActivitySkillAccess EventType = "activity.skill_access"
+
 	// Spec 039: Security scanner events
 	// EventTypeSecurityScanStarted is emitted when a security scan begins.
 	EventTypeSecurityScanStarted EventType = "security.scan_started"

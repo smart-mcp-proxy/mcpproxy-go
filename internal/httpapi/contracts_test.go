@@ -408,6 +408,13 @@ func (m *MockServerController) ListSkillRecords(_ string) ([]*storage.SkillAppro
 func (m *MockServerController) SkillFileText(_, _, _ string, _ bool) ([]byte, storage.SkillFile, error) {
 	return nil, storage.SkillFile{}, internalRuntime.ErrSkillNotFound
 }
+func (m *MockServerController) ListAvailableSkills(_ string) ([]*internalRuntime.AvailableSkill, error) {
+	return nil, nil
+}
+func (m *MockServerController) EmitActivitySkillAccess(internalRuntime.SkillAccessActivity) {}
+func (m *MockServerController) AvailableSkillFile(_, _, _ string) ([]byte, storage.SkillFile, *internalRuntime.AvailableSkill, error) {
+	return nil, storage.SkillFile{}, nil, internalRuntime.ErrSkillNotFound
+}
 func (m *MockServerController) SkillAvailable(_ string, _ *storage.SkillApprovalRecord) bool {
 	return false
 }

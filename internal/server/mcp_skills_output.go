@@ -1,0 +1,366 @@
+package server
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+)
+
+// Output sanitisation for skill text (FR-024).
+//
+// The policy that blocks, redacts or strips upstream tool output applies to
+// skill text too, and it is applied to the WHOLE file before the file is cut
+// into parts. Applied to each part on its own, a secret that straddles two
+// parts would pass in two harmless halves. Offsets and sizes in an answer are
+// therefore positions in the text as it is served: equal to the approved copy
+// unless the policy changed it.
+
+const (
+	// A served text is kept so that the parts of one long read do not each
+	// pay for sanitising the whole file again.
+	skillServedCacheEntries = 8
+	skillServedCacheBytes   = 32 << 20
+)
+
+// skillServed is one file as the policy lets it out.
+type skillServed struct {
+	text    []byte // nil: the approved bytes, unchanged
+	blocked bool
+	reason  string // why it is blocked
+	action  string // "redact" or "strip" when the policy changed the text
+	summary string
+	used    uint64
+}
+
+// skillOutputPolicy is the live output sanitisation policy, as skills use it.
+type skillOutputPolicy struct {
+	cfg *config.OutputSanitisationConfig
+	// detector finds secrets for a policy that blocks or redacts; it is never
+	// nil under such a policy.
+	detector  *security.Detector
+	mutates   bool // block, redact or strip is on
+	spotlight bool
+	key       string // identifies the mutating part of the policy
+}
+
+func (p *MCPProxyServer) skillPolicy() skillOutputPolicy {
+	var cfg *config.OutputSanitisationConfig
+	if live := p.currentConfig(); live != nil {
+		cfg = live.OutputSanitisation
+	}
+	if cfg == nil {
+		cfg = config.DefaultOutputSanitisationConfig()
+	}
+	pol := skillOutputPolicy{
+		cfg:       cfg,
+		mutates:   cfg.IsBlock() || cfg.IsRedact() || cfg.IsStripEnabled(),
+		spotlight: cfg.IsSpotlightEnabled(),
+	}
+	if cfg.IsBlock() || cfg.IsRedact() {
+		pol.detector = p.skillSecretDetector()
+	}
+	if pol.mutates {
+		var classes []string
+		for c, on := range cfg.EnabledStripClasses() {
+			if on {
+				classes = append(classes, c)
+			}
+		}
+		sort.Strings(classes)
+		pol.key = fmt.Sprintf("b%t r%t s%t %s m%d d%p", cfg.IsBlock(), cfg.IsRedact(), cfg.IsStripEnabled(),
+			strings.Join(classes, ","), cfg.MaxRedactions, pol.detector)
+	}
+	return pol
+}
+
+// skillSecretDetector returns the detector a blocking or redacting policy
+// needs. Skills read the LIVE policy and the LIVE detection settings, so they
+// keep a detector of their own, built on first need and built again after
+// every configuration reload (resetSkillOutputState). The detector the proxy
+// builds at start for tool results is not used: it exists only when such a
+// policy was configured then, and it keeps the patterns and limits of that
+// moment.
+func (p *MCPProxyServer) skillSecretDetector() *security.Detector {
+	p.skillServedMu.Lock()
+	defer p.skillServedMu.Unlock()
+	if p.skillDetector == nil {
+		var detection *config.SensitiveDataDetectionConfig
+		if live := p.currentConfig(); live != nil {
+			detection = live.SensitiveDataDetection
+		}
+		p.skillDetector = security.NewDetector(detection)
+	}
+	return p.skillDetector
+}
+
+// resetSkillOutputState forgets what was computed under the configuration that
+// was live until now: the served texts, and the detector skills built for
+// themselves (its patterns and limits come from the detection settings). It
+// runs on every configuration reload.
+func (p *MCPProxyServer) resetSkillOutputState() {
+	p.skillServedMu.Lock()
+	defer p.skillServedMu.Unlock()
+	p.skillServedCache = nil
+	p.skillDetector = nil
+}
+
+// sanitise redacts and strips txt as d says, with the policy's own detector.
+func (pol skillOutputPolicy) sanitise(txt string, d osDecision, cats, classes map[string]struct{}) (string, int) {
+	n := 0
+	if d.redact && pol.detector != nil {
+		redacted, dets := pol.detector.Redact(txt)
+		if len(dets) > 0 {
+			txt = redacted
+			n += len(dets)
+			for _, det := range dets {
+				cats[det.Category] = struct{}{}
+			}
+		}
+	}
+	if d.strip {
+		stripped, found := security.StripControlSequences(txt, pol.cfg.EnabledStripClasses())
+		txt = stripped
+		for _, cl := range found {
+			classes[cl] = struct{}{}
+		}
+	}
+	return txt, n
+}
+
+// decide is the policy's decision for untrusted text.
+func (pol skillOutputPolicy) decide(critical bool) osDecision {
+	return evaluateOutputSanitisation(pol.cfg, contracts.ContentTrustUntrusted, critical)
+}
+
+// servedSkillText returns the file as the policy lets it out, computed on the
+// whole file and remembered per (server, digest, policy).
+func (p *MCPProxyServer) servedSkillText(pol skillOutputPolicy, serverName, digest string, data []byte) skillServed {
+	if !pol.mutates {
+		return skillServed{}
+	}
+	if digest == "" { // nothing to remember it under
+		return p.sanitiseWholeSkillText(pol, string(data))
+	}
+	key := serverName + "\x00" + digest + "\x00" + pol.key
+	p.skillServedMu.Lock()
+	p.skillServedTick++
+	if e, ok := p.skillServedCache[key]; ok {
+		e.used = p.skillServedTick
+		out := *e
+		p.skillServedMu.Unlock()
+		return out
+	}
+	p.skillServedMu.Unlock()
+
+	e := p.sanitiseWholeSkillText(pol, string(data))
+
+	if len(e.text) <= skillServedCacheBytes {
+		p.skillServedMu.Lock()
+		if p.skillServedCache == nil {
+			p.skillServedCache = map[string]*skillServed{}
+		}
+		stored := e
+		stored.used = p.skillServedTick
+		p.skillServedCache[key] = &stored
+		for {
+			total, oldest := 0, ""
+			for k, c := range p.skillServedCache {
+				total += len(c.text)
+				if k != key && (oldest == "" || c.used < p.skillServedCache[oldest].used) {
+					oldest = k
+				}
+			}
+			if oldest == "" || (len(p.skillServedCache) <= skillServedCacheEntries && total <= skillServedCacheBytes) {
+				break
+			}
+			delete(p.skillServedCache, oldest)
+		}
+		p.skillServedMu.Unlock()
+	}
+	return e
+}
+
+const (
+	// skillScanWindow is the largest piece of text given to the detector at
+	// once.
+	skillScanWindow = 256 << 10
+	// skillScanOverlap is how far two neighbouring scan windows overlap, so
+	// that a secret lying across a window boundary is whole in one of them.
+	skillScanOverlap = 8 << 10
+	// skillScanMinWindow is the smallest window tried before a text counts as
+	// one that cannot be checked.
+	skillScanMinWindow = 512
+)
+
+// criticalAnywhere reports a critical secret anywhere in text. The detector
+// reads at most its payload limit of one input and says so when it read less
+// than it was given, while a skill file may be many times larger: the text is
+// scanned in overlapping windows, and a window the detector did not read
+// whole is halved and scanned again. The limit that counts is the one the
+// detector itself applies, whatever the configuration says now. A text that
+// cannot be read whole even in the smallest window counts as critical: what
+// cannot be checked is not let out.
+func criticalAnywhere(det *security.Detector, text string) bool {
+	window := skillScanWindow
+	for start := 0; ; {
+		end := start + window
+		if end > len(text) {
+			end = len(text)
+		}
+		res := det.Scan("", text[start:end])
+		if res != nil && res.Truncated {
+			if window <= skillScanMinWindow {
+				return true
+			}
+			window /= 2
+			continue
+		}
+		if res != nil && res.Detected {
+			for _, d := range res.Detections {
+				if d.Severity == string(security.SeverityCritical) {
+					return true
+				}
+			}
+		}
+		if end == len(text) {
+			return false
+		}
+		overlap := skillScanOverlap
+		if overlap > window/2 {
+			overlap = window / 2
+		}
+		start = end - overlap
+	}
+}
+
+// skillPolicyMaxBytes is the largest file a policy that reads the text (block,
+// redact) is applied to. The detector needs seconds per mebibyte; a larger
+// file cannot be checked within one call, and what cannot be checked is not
+// let out under such a policy.
+const skillPolicyMaxBytes = 4 << 20
+
+const skillTooLargeForPolicy = "the file is larger than the output sanitisation policy can check"
+
+func (p *MCPProxyServer) sanitiseWholeSkillText(pol skillOutputPolicy, text string) skillServed {
+	if len(text) > skillPolicyMaxBytes && pol.detector != nil {
+		return skillServed{blocked: true, reason: skillTooLargeForPolicy}
+	}
+	critical := pol.cfg.IsBlock() && criticalAnywhere(pol.detector, text)
+	d := pol.decide(critical)
+	if d.block {
+		return skillServed{blocked: true, reason: d.reason}
+	}
+	if !d.redact && !d.strip {
+		return skillServed{}
+	}
+	cats, classes := map[string]struct{}{}, map[string]struct{}{}
+	out, n := pol.sanitise(text, d, cats, classes)
+	var e skillServed
+	if out != text {
+		e.text = []byte(out)
+	}
+	if n > 0 || len(classes) > 0 {
+		e.action, e.summary = summariseSanitisation(n, cats, classes)
+	}
+	return e
+}
+
+// skillWordWithheld stands in for an upstream-written word a blocking policy
+// does not let out.
+const skillWordWithheld = "[withheld by the output sanitisation policy]"
+
+// skillWordCleaner applies the policy to one upstream-written word of an
+// answer: a skill name, a description, a file name. These reach the model
+// like the text does. Under a blocking policy a word with a critical secret is
+// replaced whole; under the other policies it is redacted and stripped. The
+// lines mcpproxy writes itself (version, byte range) are never passed through
+// it: a content hash must not be mistaken for a secret and cut out of the
+// continuation.
+func (p *MCPProxyServer) skillWordCleaner(pol skillOutputPolicy) func(string) string {
+	same := func(s string) string { return s }
+	if !pol.mutates {
+		return same
+	}
+	if pol.cfg.IsBlock() {
+		return func(s string) string {
+			if criticalAnywhere(pol.detector, s) {
+				return skillWordWithheld
+			}
+			return s
+		}
+	}
+	d := pol.decide(false)
+	if !d.redact && !d.strip {
+		return same
+	}
+	return func(s string) string {
+		out, _ := pol.sanitise(s, d, map[string]struct{}{}, map[string]struct{}{})
+		return out
+	}
+}
+
+// skillAddressable reports whether a skill can be named to an agent. A skill's
+// id is its path, which the upstream chose; a path the output policy would
+// change cannot be shown without showing what the policy withholds, and cannot
+// be shown changed either, because then it names nothing. Such a skill is left
+// out of every listing.
+func skillAddressable(clean func(string) string, sk *runtime.AvailableSkill) bool {
+	// The address is upstream text as well (its scheme and host are the
+	// upstream's choice) and is shown by the scoped REST list.
+	return clean(sk.Path) == sk.Path && clean(sk.URI) == sk.URI
+}
+
+// CleanSkillForAgents returns a copy of sk whose upstream-written words (name,
+// description, file paths) have passed the output policy, or nil for a skill
+// that cannot be named under the policy (skillAddressable). It is what a
+// scoped REST caller is shown, so that door and the agent tools agree.
+func (p *MCPProxyServer) CleanSkillForAgents(sk *runtime.AvailableSkill) *runtime.AvailableSkill {
+	clean := p.skillWordCleaner(p.skillPolicy())
+	if !skillAddressable(clean, sk) {
+		return nil
+	}
+	out := *sk
+	out.Name = clean(sk.Name)
+	out.Description = clean(sk.Description)
+	out.Files = append([]storage.SkillFile(nil), sk.Files...)
+	for i := range out.Files {
+		out.Files[i].RelPath = clean(out.Files[i].RelPath)
+	}
+	return &out
+}
+
+// SkillTextForAgents returns one approved file as the output policy lets it
+// out, for a door other than the agent tools (a scoped REST read). The second
+// result is a short note for the activity log when the policy changed the
+// text.
+func (p *MCPProxyServer) SkillTextForAgents(serverName, digest string, data []byte) (text []byte, action, summary string, err error) {
+	served := p.servedSkillText(p.skillPolicy(), serverName, digest, data)
+	if served.blocked {
+		return nil, "blocked", served.reason, runtime.ErrSkillOutputBlocked
+	}
+	if served.text != nil {
+		data = served.text
+	}
+	return data, served.action, served.summary, nil
+}
+
+// spotlightLabel is an upstream name made safe for the spotlight fence: one
+// bounded line without the fence's own delimiters.
+func spotlightLabel(s string, max int) string {
+	return strings.NewReplacer("«", "", "»", "").Replace(oneLine(s, max))
+}
+
+// spotlightSkillPart wraps one part in the untrusted-content fence when the
+// policy asks for it. It is a frame around the part, not a change of the text.
+func spotlightSkillPart(pol skillOutputPolicy, part, serverName, skillName string) string {
+	if !pol.spotlight || part == "" {
+		return part
+	}
+	return security.SpotlightUntrusted(part, spotlightLabel(serverName, skillServerMax), spotlightLabel(skillName, skillNameMax))
+}

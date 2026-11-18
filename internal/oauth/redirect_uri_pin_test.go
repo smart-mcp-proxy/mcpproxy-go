@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -28,13 +29,55 @@ func newUnreachableUpstream(t *testing.T) *httptest.Server {
 
 // reserveLoopbackPort picks a currently-free loopback port and releases it, so a
 // pinned redirect_uri in the test can name a port the callback server can bind.
+//
+// The system may give a port that was just released to the next ":0" listen
+// (seen on the Windows CI runner), so two calls could return one number and a
+// test that needs two different ports failed. A port is therefore returned only
+// once per test process, and each further try is made while the earlier
+// listeners are still open, so it cannot get the same port again.
 func reserveLoopbackPort(t *testing.T) int {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	port := ln.Addr().(*net.TCPAddr).Port
-	require.NoError(t, ln.Close())
-	return port
+	var held []net.Listener
+	defer func() {
+		for _, ln := range held {
+			_ = ln.Close()
+		}
+	}()
+	for try := 0; try < 32; try++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		held = append(held, ln)
+		port := ln.Addr().(*net.TCPAddr).Port
+
+		reservedLoopbackPortsMu.Lock()
+		_, given := reservedLoopbackPorts[port]
+		if !given {
+			reservedLoopbackPorts[port] = struct{}{}
+		}
+		reservedLoopbackPortsMu.Unlock()
+		if !given {
+			return port
+		}
+	}
+	t.Fatal("no loopback port that this test process has not used yet")
+	return 0
+}
+
+var (
+	reservedLoopbackPortsMu sync.Mutex
+	reservedLoopbackPorts   = map[int]struct{}{}
+)
+
+// TestReserveLoopbackPort_NeverRepeats: the tests in this package take two ports
+// and require them to differ.
+func TestReserveLoopbackPort_NeverRepeats(t *testing.T) {
+	seen := map[int]struct{}{}
+	for i := 0; i < 200; i++ {
+		port := reserveLoopbackPort(t)
+		_, dup := seen[port]
+		require.False(t, dup, "port %d was returned twice", port)
+		seen[port] = struct{}{}
+	}
 }
 
 func stopCallbackServer(t *testing.T, serverName string) {

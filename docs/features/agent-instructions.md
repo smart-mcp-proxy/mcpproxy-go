@@ -101,6 +101,9 @@ individually.
 - If nothing relevant comes back, retry with different wording or just the
   service name before concluding the tool does not exist.
 - Use `upstream_servers` (operation `list`) to see which servers are connected.
+- For a task that needs know-how (a workflow, a file format, a service's
+  conventions), call `retrieve_skills` with the task; load the best match with
+  `load_skill`. Only offered when skills are turned on in mcpproxy.
 ```
 
 The CLI prints the same snippet, with the workflow adjusted to your configured

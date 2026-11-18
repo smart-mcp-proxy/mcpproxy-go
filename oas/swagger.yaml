@@ -10817,10 +10817,14 @@ paths:
       - security
   /api/v1/servers/{id}/skills:
     get:
-      description: 'Administrator only. Lists every skill record mcpproxy holds for
-        one upstream server: status, hashes, files and the availability an agent would
-        see. With enable_skills off the answer is {"enabled": false, "skills": []}
-        and no upstream is contacted. A scoped agent token is refused with 403.'
+      description: 'Lists the skills of one upstream server. An administrator sees
+        every record: status, hashes, files, scan result and the availability an agent
+        would see. A scoped agent token with the server in its reach sees only the
+        available skills, as the approved copy (id, uri, path, name, description,
+        status "approved", approved_hash, files, total_size; contracts.SkillsAgentListResponse)
+        and nothing about any other skill; a server outside its reach is 404. With
+        enable_skills off the answer is {"enabled": false, "skills": []} and no upstream
+        is contacted.'
       parameters:
       - description: Server ID or name
         in: path
@@ -10835,18 +10839,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.SkillsListResponse'
           description: Skills of the server
-        "403":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Administrator credentials required
         "404":
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Server not found
+          description: Server not found, or outside the caller's reach
         "500":
           content:
             application/json:
@@ -11001,12 +10999,15 @@ paths:
       - servers
   /api/v1/servers/{id}/skills/content:
     get:
-      description: Administrator only. Returns a chunk of one stored text file of
-        a skill. Offsets are byte positions; a chunk never splits a UTF-8 character,
-        so it can be a few bytes shorter than limit. next_offset is absent at the
-        end of the file. 404 for an unknown skill or file (or with enable_skills off),
-        415 for a binary file, 409 stored_copy_damaged when the stored bytes no longer
-        match their digest.
+      description: Returns a chunk of one stored text file of a skill. An administrator
+        reads the current copy by default; a scoped agent token with the server in
+        its reach reads the approved copy of an available skill only (copy is forced
+        to approved), and gets one 404 for every other skill or file. A server outside
+        its reach is 404. Offsets are byte positions; a chunk never splits a UTF-8
+        character, so it can be a few bytes shorter than limit. next_offset is absent
+        at the end of the file. 404 for an unknown skill or file (or with enable_skills
+        off), 415 for a binary file, 409 stored_copy_damaged when the stored bytes
+        no longer match their digest.
       parameters:
       - description: Server ID or name
         in: path
@@ -11057,8 +11058,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Administrator credentials required
+                $ref: '#/components/schemas/contracts.SkillsErrorResponse'
+          description: 'output_blocked: the output sanitisation policy withholds the
+            text (scoped caller)'
         "404":
           content:
             application/json:
@@ -11070,7 +11072,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.SkillsErrorResponse'
-          description: stored_copy_damaged
+          description: stored_copy_damaged (administrator)
         "415":
           content:
             application/json:

@@ -32,7 +32,10 @@ type skillsTestController struct {
 	afterRefresh *internalRuntime.SkillsServerStatus
 	refreshErr   error
 	files        map[string][]byte // "<skill>|<rel>|<current|approved>"
-	fileErr      error
+	accesses     []internalRuntime.SkillAccessActivity
+	// availErr, when set, is what AvailableSkillFile answers for a known file.
+	availErr error
+	fileErr  error
 
 	// approveFn / blockFn stand in for the runtime approval writers (PR-2).
 	approveFn func(ctx context.Context, server string, skills []string, expected map[string]string, by string, inc int64) (int, error)
@@ -70,6 +73,18 @@ func (c *skillsTestController) record(call string) {
 	c.calls = append(c.calls, call)
 }
 
+func (c *skillsTestController) EmitActivitySkillAccess(a internalRuntime.SkillAccessActivity) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.accesses = append(c.accesses, a)
+}
+
+func (c *skillsTestController) accessRows() []internalRuntime.SkillAccessActivity {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]internalRuntime.SkillAccessActivity(nil), c.accesses...)
+}
+
 func (c *skillsTestController) recorded() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -94,6 +109,53 @@ func (c *skillsTestController) ListSkillRecords(server string) ([]*storage.Skill
 func (c *skillsTestController) SkillAvailable(_ string, rec *storage.SkillApprovalRecord) bool {
 	c.record("SkillAvailable")
 	return rec.Status == storage.SkillStatusApproved && !rec.Blocked && rec.Listed
+}
+
+// ListAvailableSkills answers a scoped caller from the approved copies only.
+func (c *skillsTestController) ListAvailableSkills(server string) ([]*internalRuntime.AvailableSkill, error) {
+	c.record("ListAvailableSkills")
+	var out []*internalRuntime.AvailableSkill
+	for _, rec := range c.recs[server] {
+		if rec.Approved == nil || rec.Status != storage.SkillStatusApproved || rec.Blocked || !rec.Listed {
+			continue
+		}
+		a := &internalRuntime.AvailableSkill{
+			ID: server + ":" + rec.SkillPath, Server: server, Path: rec.SkillPath, URI: rec.SkillURI,
+			Name: rec.Name, Description: rec.Description, ApprovedHash: rec.ApprovedHash,
+			Files: append([]storage.SkillFile(nil), rec.Approved.Files...),
+		}
+		for _, f := range a.Files {
+			a.TotalSize += f.Size
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// AvailableSkillFile serves the approved copy of an available skill.
+func (c *skillsTestController) AvailableSkillFile(server, skill, rel string) ([]byte, storage.SkillFile, *internalRuntime.AvailableSkill, error) {
+	c.record("AvailableSkillFile")
+	avail, _ := c.ListAvailableSkills(server)
+	c.mu.Lock()
+	c.calls = c.calls[:len(c.calls)-1] // the nested list is not a call of its own
+	c.mu.Unlock()
+	for _, a := range avail {
+		if a.Path != skill {
+			continue
+		}
+		for _, f := range a.Files {
+			if f.RelPath == rel {
+				if !f.Text {
+					return nil, f, a, internalRuntime.ErrSkillFileBinary
+				}
+				if c.availErr != nil {
+					return nil, f, a, c.availErr
+				}
+				return c.files[skill+"|"+rel+"|approved"], f, a, nil
+			}
+		}
+	}
+	return nil, storage.SkillFile{}, nil, internalRuntime.ErrSkillNotFound
 }
 
 func (c *skillsTestController) SkillFileText(server, skill, rel string, approved bool) ([]byte, storage.SkillFile, error) {
@@ -406,18 +468,13 @@ func TestSkillsRefresh(t *testing.T) {
 	})
 }
 
-// FR-019a: a scoped agent token is refused on all three endpoints and the
-// controller is never reached.
+// FR-019a: a scoped agent token is refused on the refresh endpoint and the
+// controller is never reached. The two GET endpoints answer a scoped caller
+// with available skills only (skills_scoped_test.go).
 func TestSkillsEndpoints_ScopedAgentTokenRefusedWithoutRuntimeCall(t *testing.T) {
 	ctrl, srv, token := skillsServer(t, true, contentFixture("hello"))
-	for _, rt := range []struct{ method, path string }{
-		{http.MethodGet, "/api/v1/servers/alpha/skills"},
-		{http.MethodGet, contentURL(url.Values{"skill": {"s"}})},
-		{http.MethodPost, "/api/v1/servers/alpha/skills/refresh"},
-	} {
-		rec := skillsDo(t, srv, rt.method, rt.path, token)
-		require.Equal(t, http.StatusForbidden, rec.Code, "%s %s: %s", rt.method, rt.path, rec.Body.String())
-		require.Contains(t, rec.Body.String(), "Agent tokens cannot")
-	}
+	rec := skillsDo(t, srv, http.MethodPost, "/api/v1/servers/alpha/skills/refresh", token)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "Agent tokens cannot")
 	require.Empty(t, ctrl.recorded(), "FR-019a: no runtime call for a scoped caller")
 }
