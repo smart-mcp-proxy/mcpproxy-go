@@ -951,6 +951,9 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 				// until a restart. Same shape as RefreshPrompts above: cheap,
 				// idempotent, static construction on this one listener goroutine.
 				s.mcpProxy.RefreshCodeExecutionAvailability()
+				// Spec 125 FR-026: enable_skills is hot-reloadable; the skill
+				// tools follow the live switch on every surface.
+				s.mcpProxy.RefreshSkillsAvailability()
 				// Spec 102 FR-014: direct_tool_response_mode is hot-reloadable,
 				// but unlike the settings above the direct listing is
 				// REGISTERED state — reading the live config on the next call
@@ -4905,6 +4908,51 @@ func (s *Server) ListSkillRecords(serverName string) ([]*storage.SkillApprovalRe
 // SkillFileText returns one stored text file of a skill.
 func (s *Server) SkillFileText(serverName, skillPath, relPath string, approvedCopy bool) ([]byte, storage.SkillFile, error) {
 	return s.runtime.SkillFileText(serverName, skillPath, relPath, approvedCopy)
+}
+
+// ListAvailableSkills returns the approved copies of a server's skills that
+// agents may have.
+//
+// This is the door of a scoped REST caller, so the upstream-written words pass
+// the output policy the agent tools apply.
+func (s *Server) ListAvailableSkills(serverName string) ([]*runtime.AvailableSkill, error) {
+	list, err := s.runtime.ListAvailableSkills(serverName)
+	if err != nil || s.mcpProxy == nil {
+		return list, err
+	}
+	out := list[:0]
+	for _, sk := range list {
+		if c := s.mcpProxy.CleanSkillForAgents(sk); c != nil {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+// EmitActivitySkillAccess records one skill access in the activity log.
+func (s *Server) EmitActivitySkillAccess(a runtime.SkillAccessActivity) {
+	s.runtime.EmitActivitySkillAccess(a)
+}
+
+// AvailableSkillFile returns one text file of the approved copy of an
+// available skill.
+//
+// The text is what the output policy lets out (runtime.ErrSkillOutputBlocked
+// when it lets nothing out), computed on the whole file as for the agent
+// tools: a scoped REST read and load_skill give the same text.
+func (s *Server) AvailableSkillFile(serverName, skillPath, relPath string) ([]byte, storage.SkillFile, *runtime.AvailableSkill, error) {
+	data, meta, sk, err := s.runtime.AvailableSkillFile(serverName, skillPath, relPath)
+	if err != nil || s.mcpProxy == nil {
+		return data, meta, sk, err
+	}
+	text, _, _, perr := s.mcpProxy.SkillTextForAgents(serverName, meta.Digest, data)
+	if perr != nil {
+		return nil, meta, sk, perr
+	}
+	if c := s.mcpProxy.CleanSkillForAgents(sk); c != nil {
+		sk = c
+	}
+	return text, meta, sk, nil
 }
 
 // SkillAvailable reports whether an agent may have the skill.

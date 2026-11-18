@@ -221,7 +221,7 @@ func (r *Runtime) mutateSkillsAt(ctx context.Context, serverName string, paths [
 		r.emitSkillQuarantineChangeCtx(ctx, serverName, c.rec.SkillPath, c.rec.SkillURI, c.action, c.previousHash, c.rec.CurrentHash, c.reason, c.approvedBy)
 	}
 	if len(changes) > 0 {
-		r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": serverName, "counts": counts}))
+		r.publishSkillsChanged(serverName, counts)
 	}
 	return len(changes), nil
 }

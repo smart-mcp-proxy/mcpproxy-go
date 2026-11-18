@@ -183,9 +183,21 @@ Rejected: **raising the scanner's field cap** (affects every tool scan and the e
 - `load_skill` prepends the provenance header and appends the file manifest; offsets and lengths are byte positions in the approved copy, cut on a UTF-8 boundary, and a partial answer ends with `next_offset` (FR-022a). Output then passes the existing sanitisation and sensitive-data detection; the tool response is sized to stay under the response limit so the generic truncator never cuts it.
 - Annotated read-only; activity type `skill_access` with `action` = search, load or read.
 
+**As built (PR-3).** Decided during implementation and review; each is recorded in the contracts too.
+
+- `load_skill` and `read_skill_file` take an optional `version` (the approved hash the header names); a continuation with an older one is refused, so parts of two approved versions are never joined.
+- The output sanitisation policy is applied to the whole file before paging (`internal/server/mcp_skills_output.go`: `servedSkillText`, remembered per server, file digest and policy), so a secret cannot be fetched in two halves; offsets are positions in the text as served. Under a blocking policy the file is scanned in overlapping windows that follow the detector's own payload limit; a file over 4 MiB is withheld under a policy that blocks or redacts. Names, descriptions and file names pass the same policy (`skillWordCleaner`); a skill whose path or address the policy would change is left out of listings. Skills build a detector themselves when a policy is switched on after start.
+- `tool_response_limit` does not shrink a part.
+- A stored copy that fails verification answers the one `skill not found`; the reason is in the activity row and on the record. The damage is confirmed under the approval lock against the file that failed, so a read that raced a new approval withdraws nothing.
+- `skill_access` rows and their SSE event are administrator-only (a row names the id its caller asked for). Scoped REST reads write them too (source `api`).
+- The scoped REST door reads through `Server.ListAvailableSkills` / `Server.AvailableSkillFile`, which apply the same policy as the tools.
+- Records of skills a listing did not name are bounded to 200 per server (`PruneSkillApprovalsNotIn`), blocked ones kept.
+
 ### D12. Skill search index (PR-3)
 
 A memory-only Bleve index (`bleve.NewMemOnly`) in `internal/skills/index`, documents `{id, server, name, description}` for the skills for which `SkillAvailable` is true, rebuilt on `skills.changed` and on any change of `enable_skills`, a server's `expose_skills`, enabled or quarantine state. Because the index is rebuilt asynchronously, every hit is checked again with `SkillAvailable` and the caller's reach before it is returned. It uses the analyzer the tool index uses, so ranking behaves like `retrieve_tools`.
+
+**As built (PR-3).** One index per reach (the sorted set of servers a caller can reach that may serve skills), at most 16 kept: a full-text score depends on how common a word is in the whole index, so one index for everybody would let skills outside a caller's reach move the order of its results. An index is rebuilt lazily when a generation counter moved (every skills change and every configuration change). The index only proposes: every match (up to 1,000 per search) is checked against its record by key before it is returned or counted.
 
 Rejected: **a `kind` field in the tool index** (changes the on-disk mapping and its staleness check, and a skills bug could then damage tool search), and **a hand-written scorer** (a second ranking behaviour to maintain).
 

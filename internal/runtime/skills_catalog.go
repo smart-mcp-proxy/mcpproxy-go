@@ -165,6 +165,14 @@ type skillsCatalogState struct {
 	// under mu, so no refresh can be added once close has started to wait.
 	wg     sync.WaitGroup
 	closed bool
+
+	// The agent search index (agent_search.go), built lazily and rebuilt when
+	// indexGen moved past the generation it was built from.
+	indexGen atomic.Uint64
+	idxMu    sync.Mutex
+	idxCache map[string]*skillIndexEntry
+	idxTick  uint64
+	idxDone  bool
 }
 
 // init allocates the maps; callers hold mu.
@@ -199,6 +207,7 @@ func (s *skillsCatalogState) close() {
 	s.closed = true
 	s.mu.Unlock()
 	s.wg.Wait()
+	s.closeIndex()
 }
 
 func (s *skillsCatalogState) setStatus(serverName string, mut func(*SkillsServerStatus)) {
@@ -608,6 +617,19 @@ func (r *Runtime) runSkillsRefresh(ctx, scanCtx context.Context, serverName stri
 		if _, err := sm.ApplySkillRefresh(serverName, upserts, unlisted, nil); err != nil {
 			return err
 		}
+		// A server that renames its skills on every listing would otherwise
+		// leave a record behind each time, also when its listings are cut
+		// short and prove nothing about what is gone: the records this
+		// listing did not name are bounded, whatever their listed mark says.
+		// The blobs the deleted records referenced are collected by the next
+		// apply.
+		if n, err := sm.PruneSkillApprovalsNotIn(serverName, listed, skills.MaxUnlistedSkillsPerServer); err != nil {
+			return err
+		} else if n > 0 {
+			changed = true
+			r.logger.Info("Dropped the oldest records of skills the server no longer lists",
+				zap.String("server", serverName), zap.Int("dropped", n))
+		}
 		recs, err := sm.ListSkillApprovals(serverName)
 		if err != nil {
 			return err
@@ -643,7 +665,7 @@ func (r *Runtime) runSkillsRefresh(ctx, scanCtx context.Context, serverName stri
 		r.emitSkillTransition(ctx, serverName, t)
 	}
 	if changed {
-		r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": serverName, "counts": counts}))
+		r.publishSkillsChanged(serverName, counts)
 	}
 	return nil
 }
@@ -1027,6 +1049,14 @@ func (r *Runtime) SkillFileText(serverName, skillPath, relPath string, approvedC
 		}
 		content = rec.Approved
 	}
+	return r.readSkillFileOf(serverName, rec, content, relPath, approvedCopy)
+}
+
+// readSkillFileOf reads one file of a copy of a record that the caller already
+// holds: the file is matched by exact relative path, then re-verified against
+// its digest and size. A failing verification marks the record unusable when
+// markDamaged is set (the approved copy).
+func (r *Runtime) readSkillFileOf(serverName string, rec *storage.SkillApprovalRecord, content *storage.SkillContent, relPath string, markDamaged bool) ([]byte, storage.SkillFile, error) {
 	var file *storage.SkillFile
 	for i := range content.Files {
 		if content.Files[i].RelPath == relPath {
@@ -1035,7 +1065,7 @@ func (r *Runtime) SkillFileText(serverName, skillPath, relPath string, approvedC
 		}
 	}
 	if file == nil {
-		return nil, storage.SkillFile{}, fmt.Errorf("%w: %s in %s", ErrSkillFileNotFound, relPath, skillPath)
+		return nil, storage.SkillFile{}, fmt.Errorf("%w: %s in %s", ErrSkillFileNotFound, relPath, rec.SkillPath)
 	}
 	if !file.Text {
 		return nil, *file, fmt.Errorf("%w: %s", ErrSkillFileBinary, relPath)
@@ -1055,8 +1085,8 @@ func (r *Runtime) SkillFileText(serverName, skillPath, relPath string, approvedC
 		} else {
 			detail += ": " + u.Error()
 		}
-		if approvedCopy {
-			r.markSkillStoredCopyDamaged(serverName, rec.SkillURI, detail)
+		if markDamaged {
+			r.markSkillStoredCopyDamaged(serverName, rec.SkillURI, *file, detail)
 		}
 		return nil, *file, fmt.Errorf("%w: %s", ErrSkillStoredCopyDamaged, detail)
 	}
@@ -1087,17 +1117,65 @@ func skillByPath(recs []*storage.SkillApprovalRecord, path string) *storage.Skil
 	return nil
 }
 
-func (r *Runtime) markSkillStoredCopyDamaged(serverName, skillURI, detail string) {
+// skillsByPath resolves every path of recs at once, by the rule of
+// skillByPath: a path that names no single record is absent.
+func skillsByPath(recs []*storage.SkillApprovalRecord) map[string]*storage.SkillApprovalRecord {
+	type group struct {
+		all, listed     int
+		one, onlyListed *storage.SkillApprovalRecord
+	}
+	groups := map[string]*group{}
+	for _, c := range recs {
+		g := groups[c.SkillPath]
+		if g == nil {
+			g = &group{}
+			groups[c.SkillPath] = g
+		}
+		g.all++
+		g.one = c
+		if c.Listed {
+			g.listed++
+			g.onlyListed = c
+		}
+	}
+	out := make(map[string]*storage.SkillApprovalRecord, len(groups))
+	for path, g := range groups {
+		switch {
+		case g.all == 1:
+			out[path] = g.one
+		case g.listed == 1:
+			out[path] = g.onlyListed
+		}
+	}
+	return out
+}
+
+// markSkillStoredCopyDamaged makes a skill unusable because a file of its
+// approved copy failed verification when it was read. The read happened
+// outside the approval lock, so the finding is checked again under it: the
+// record must still approve that very file, and the stored bytes must still
+// fail. A refresh that approved a new version in between (and collected the
+// old version's bytes) therefore withdraws nothing.
+func (r *Runtime) markSkillStoredCopyDamaged(serverName, skillURI string, file storage.SkillFile, detail string) {
 	inc, ok := r.ServerIncarnation(serverName)
 	if !ok {
 		return
 	}
 	var counts map[string]int
+	marked := false
 	err := r.WithServerApprovalLockAt(serverName, inc, func() error {
 		rec, err := r.storageManager.GetSkillApproval(serverName, skillURI)
 		if err != nil {
 			return err
 		}
+		if !approvesFile(rec, file) {
+			return nil // another version is approved now
+		}
+		if data, gerr := r.storageManager.GetSkillFile(serverName, file.Digest); gerr == nil &&
+			skills.VerifyFile(skills.FileRef{URI: file.URI, Digest: file.Digest, Size: file.Size}, data) == nil {
+			return nil // the bytes are there and right: the first read raced a write
+		}
+		marked = true
 		rec.Status = storage.SkillStatusUnusable
 		rec.UnusableReason = skills.ReasonStoredCopyDamaged + ": " + detail
 		rec.UpdatedAt = time.Now()
@@ -1113,7 +1191,23 @@ func (r *Runtime) markSkillStoredCopyDamaged(serverName, skillURI, detail string
 			zap.String("server", serverName), zap.String("skill", skillURI), zap.Error(err))
 		return
 	}
-	r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": serverName, "counts": counts}))
+	if marked {
+		r.publishSkillsChanged(serverName, counts)
+	}
+}
+
+// approvesFile reports whether the record's approved copy contains exactly
+// this file (same path, same digest).
+func approvesFile(rec *storage.SkillApprovalRecord, file storage.SkillFile) bool {
+	if rec == nil || rec.Approved == nil {
+		return false
+	}
+	for i := range rec.Approved.Files {
+		if rec.Approved.Files[i].RelPath == file.RelPath && rec.Approved.Files[i].Digest == file.Digest {
+			return true
+		}
+	}
+	return false
 }
 
 // --- triggers ---
@@ -1175,6 +1269,10 @@ func (r *Runtime) triggerSkillsRefreshAll() {
 // changed one held), and, for every eligible server, when quarantine_enabled
 // changed. Switching off or narrowing never refreshes.
 func (r *Runtime) onSkillsConfigChanged(oldCfg, newCfg *config.Config) {
+	// Any configuration change may alter which skills are available (the
+	// switch, a server's expose_skills, enabled, quarantine, add or remove):
+	// the search index is rebuilt at its next use (spec 125 D12).
+	r.skills.bumpIndexGeneration()
 	if newCfg == nil || !newCfg.EnableSkills {
 		return
 	}

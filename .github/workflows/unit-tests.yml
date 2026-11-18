@@ -300,8 +300,8 @@ jobs:
       # same package takes ~450s), so the default 10m package timeout is one
       # slow runner away from "panic: test timed out" — which is how the leg
       # failed on the first green-again push after #1266. It has since grown to
-      # ~1800s (2400s on a slow runner, which hit the former 40m bound on
-      # #1918), so the bound is 60m.
+      # 2100-2200s on main (measured 2026-11-17: 2116s, 2119s, 2206s), and a
+      # run on #1928 hit the 40m bound at 2401s, so the bound is 60m.
       #
       # The run goes through scripts/go-test-retry-runtime-fault.sh: when the
       # first run dies of a Go runtime fault (`unexpected fault address … /
@@ -321,9 +321,7 @@ jobs:
       # ("panic: test timed out") is no longer enough there. internal/security/
       # scanner also scores the full 1.2k-entry TPA eval corpus (Spec 101 US2,
       # 1047 hard negatives) in several tests and timed out at 20m on
-      # ubuntu-latest. internal/server has since reached ~2250s on macos-latest
-      # on main and hit the former 40m bound on #1918; match the Windows leg's
-      # 60m.
+      # ubuntu-latest; match the Windows leg's 60m.
       - name: Run unit tests (Unix)
         if: matrix.os != 'windows-latest'
         run: go test -v -race -timeout 60m -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...

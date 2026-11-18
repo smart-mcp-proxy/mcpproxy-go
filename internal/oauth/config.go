@@ -2187,9 +2187,20 @@ func GetGlobalCallbackManager() *CallbackServerManager {
 	return globalCallbackManager
 }
 
-// ShouldUseOAuth determines if OAuth should be attempted for a given server
-// Headers are tried first if configured, then OAuth as fallback on auth errors
-func ShouldUseOAuth(serverConfig *config.ServerConfig) bool {
+// ManualLoginApplicable reports whether a user-requested OAuth sign-in can be
+// started for the server at all. It is the preflight of every manual-login
+// entry point (REST, CLI, tray, MCP), and it only rules out what can never
+// work: a stdio server, and the test fixture gate.
+//
+// GH #1922: static headers are NOT a reason to refuse. The connection path
+// tries a server's headers first and falls back to OAuth when the upstream
+// rejects them (headers -> no-auth -> OAuth), so a server with a rejected
+// static credential and no oauth block is parked awaiting sign-in and its
+// health offers "Sign in". A config-only "headers are configured" veto here
+// refused exactly that sign-in before any OAuth request was made. Whether the
+// upstream really supports OAuth is the flow's own question (discovery,
+// client registration), and it answers with a specific error.
+func ManualLoginApplicable(serverConfig *config.ServerConfig) bool {
 	logger := zap.L().Named("oauth")
 
 	// Check if OAuth is disabled for tests
@@ -2203,28 +2214,6 @@ func ShouldUseOAuth(serverConfig *config.ServerConfig) bool {
 		logger.Debug("OAuth not supported for stdio protocol", zap.String("server", serverConfig.Name))
 		return false
 	}
-
-	// A declared oauth block is the operator's word that this upstream needs
-	// OAuth (GH #1271) — it must not be vetoed by unrelated static headers,
-	// or a manual login could never be started for such a server.
-	if serverConfig.OAuth != nil {
-		logger.Debug("oauth block configured - OAuth applies regardless of headers",
-			zap.String("server", serverConfig.Name))
-		return true
-	}
-
-	// If headers are configured, try headers first, not OAuth
-	if len(serverConfig.Headers) > 0 {
-		logger.Debug("Headers configured - will try headers first, OAuth as fallback if needed",
-			zap.String("server", serverConfig.Name),
-			zap.Int("header_count", len(serverConfig.Headers)))
-		return false
-	}
-
-	// For HTTP/SSE servers without headers, try OAuth-enabled clients
-	logger.Debug("No headers configured - OAuth-enabled client will be used",
-		zap.String("server", serverConfig.Name),
-		zap.String("protocol", serverConfig.Protocol))
 
 	return true
 }

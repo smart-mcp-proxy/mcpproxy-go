@@ -2895,8 +2895,8 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 	// Preflight: if server does not appear to require OAuth, avoid starting
 	// OAuth flow and return an informative error (tray will show it).
 	// Attempt a short no-auth initialize to confirm.
-	if !oauth.ShouldUseOAuth(cfg) && !force {
-		m.logger.Info("OAuth not applicable based on config (no headers, protocol)", zap.String("server", cfg.Name))
+	if !oauth.ManualLoginApplicable(cfg) && !force {
+		m.logger.Info("OAuth not applicable based on config", zap.String("server", cfg.Name))
 		return fmt.Errorf("OAuth is not supported or not required for server '%s'", cfg.Name)
 	}
 
@@ -2991,7 +2991,7 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 		zap.String("server", cfg.Name))
 
 	// Preflight: if server does not appear to require OAuth, return error
-	if !oauth.ShouldUseOAuth(cfg) {
+	if !oauth.ManualLoginApplicable(cfg) {
 		m.logger.Info("OAuth not applicable based on config", zap.String("server", cfg.Name))
 		return nil, fmt.Errorf("OAuth is not supported or not required for server '%s'", cfg.Name)
 	}
@@ -3110,8 +3110,8 @@ func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core
 		zap.Bool("force", force))
 
 	// Preflight: if server does not appear to require OAuth, avoid starting
-	if !oauth.ShouldUseOAuth(cfg) && !force {
-		m.logger.Info("OAuth not applicable based on config (no headers, protocol)", zap.String("server", cfg.Name))
+	if !oauth.ManualLoginApplicable(cfg) && !force {
+		m.logger.Info("OAuth not applicable based on config", zap.String("server", cfg.Name))
 		return nil, fmt.Errorf("OAuth is not supported or not required for server '%s'", cfg.Name)
 	}
 

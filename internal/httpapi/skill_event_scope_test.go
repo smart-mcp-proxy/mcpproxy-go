@@ -33,6 +33,21 @@ func TestSSE_SkillQuarantineChangeIsAdminOnly(t *testing.T) {
 	require.True(t, eventVisibleToCaller(context.Background(), evt))
 }
 
+// A skill access event names the id its caller asked for, which may be a held
+// skill on a server another scoped caller can see: administrator-only too.
+func TestSSE_SkillAccessIsAdminOnly(t *testing.T) {
+	evt := internalRuntime.Event{
+		Type:    internalRuntime.EventTypeActivitySkillAccess,
+		Payload: map[string]any{"server_name": "alpha", "skill_id": "alpha:held", "action": "load", "outcome": "not_found"},
+	}
+	scoped := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type: auth.AuthTypeAgent, AgentName: "bot", AllowedServers: []string{"alpha"}, Permissions: []string{auth.PermRead},
+	})
+	require.False(t, eventVisibleToCaller(scoped, evt))
+	admin := auth.WithAuthContext(context.Background(), &auth.AuthContext{Type: auth.AuthTypeAdmin})
+	require.True(t, eventVisibleToCaller(admin, evt))
+}
+
 // A skill approval row names a skill that may be unapproved, so the activity
 // list, its total and the detail route treat it as administrator-only
 // (Spec 125 FR-019a), even on a server the caller may see.

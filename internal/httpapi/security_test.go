@@ -368,6 +368,13 @@ func (m *baseController) ListSkillRecords(_ string) ([]*storage.SkillApprovalRec
 func (m *baseController) SkillFileText(_, _, _ string, _ bool) ([]byte, storage.SkillFile, error) {
 	return nil, storage.SkillFile{}, runtime.ErrSkillNotFound
 }
+func (m *baseController) ListAvailableSkills(_ string) ([]*runtime.AvailableSkill, error) {
+	return nil, nil
+}
+func (m *baseController) EmitActivitySkillAccess(runtime.SkillAccessActivity) {}
+func (m *baseController) AvailableSkillFile(_, _, _ string) ([]byte, storage.SkillFile, *runtime.AvailableSkill, error) {
+	return nil, storage.SkillFile{}, nil, runtime.ErrSkillNotFound
+}
 func (m *baseController) SkillAvailable(_ string, _ *storage.SkillApprovalRecord) bool { return false }
 func (m *baseController) RefreshServerSkills(_ context.Context, _ string) error        { return nil }
 func (m *baseController) ApproveSkillsReviewedAt(_ context.Context, _ string, _ []string, _ map[string]string, _ string, _ int64) (int, error) {

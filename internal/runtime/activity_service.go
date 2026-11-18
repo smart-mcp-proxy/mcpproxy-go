@@ -579,6 +579,8 @@ func (s *ActivityService) handleEvent(evt Event) {
 		s.handleToolQuarantineChange(evt)
 	case EventTypeActivitySkillQuarantineChange:
 		s.handleSkillQuarantineChange(evt)
+	case EventTypeActivitySkillAccess:
+		s.handleSkillAccess(evt)
 	// Spec 077 US4: one settled activity record per server per scan replaces the
 	// former per-scanner started/completed/failed storm (Spec 039).
 	case EventTypeSecurityScanSettled:

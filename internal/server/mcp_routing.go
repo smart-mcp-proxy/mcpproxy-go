@@ -149,6 +149,12 @@ func (p *MCPProxyServer) buildDirectModeTools() ([]mcpserver.ServerTool, *direct
 // lookup — identify a name.
 var builtinDirectToolNames = map[string]struct{}{
 	buildDescribeToolTool().Name: {},
+	// Spec 125 PR-3: the skill tools are listed whether or not enable_skills is
+	// on. The set says what a name IS, not what is registered now, so an
+	// upstream tool can never take or resolve to one of them.
+	toolRetrieveSkills: {},
+	toolLoadSkill:      {},
+	toolReadSkillFile:  {},
 }
 
 // withDirectBuiltins appends the tools mcpproxy serves itself on the direct
@@ -167,10 +173,14 @@ var builtinDirectToolNames = map[string]struct{}{
 // registration, not of the request, so it is bound here rather than sniffed
 // from the context.
 func (p *MCPProxyServer) withDirectBuiltins(tools []mcpserver.ServerTool) []mcpserver.ServerTool {
-	return append(tools, mcpserver.ServerTool{
+	tools = append(tools, mcpserver.ServerTool{
 		Tool:    buildDescribeToolTool(),
 		Handler: p.describeToolHandler(describeSurfaceDirect),
 	})
+	// Spec 125 PR-3: the skill tools ride with the built-ins while
+	// enable_skills is on, on every return path for the same reason as
+	// describe_tool above.
+	return append(tools, p.buildSkillTools()...)
 }
 
 // renderDirectTools turns a catalog into the registrable tool set.
@@ -922,6 +932,9 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 		Handler: p.handleRetrieveToolsForMode(config.RoutingModeCodeExecution),
 	})
 
+	// Spec 125 PR-3: the skill tools, only while enable_skills is on.
+	tools = append(tools, p.buildSkillTools()...)
+
 	// Add management tools (upstream_servers, quarantine, registries)
 	tools = append(tools, p.buildManagementTools()...)
 
@@ -1032,6 +1045,9 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 
 	// code_execution tool (available but not the primary workflow)
 	tools = append(tools, p.buildCodeExecutionTool()...)
+
+	// Spec 125 PR-3: the skill tools, only while enable_skills is on.
+	tools = append(tools, p.buildSkillTools()...)
 
 	// Add management tools (upstream_servers, quarantine, registries)
 	tools = append(tools, p.buildManagementTools()...)
@@ -1651,6 +1667,55 @@ func (p *MCPProxyServer) RefreshCodeExecutionAvailability() {
 	case len(live) == 0 && advertised:
 		p.server.DeleteTools("code_execution")
 		p.logger.Info("code_execution disabled at runtime; withdrawn from the default surface")
+	}
+}
+
+// RefreshSkillsAvailability makes every tool surface agree with the LIVE
+// enable_skills switch (Spec 125 FR-023b, FR-026, SC-005). It is called once at
+// start and from the config-reload listener, next to
+// RefreshCodeExecutionAvailability, and is safe to call at any time:
+//
+//   - call-tool and code-execution surfaces: their builders include the three
+//     tools while the switch is on; the surfaces are rebuilt through their
+//     content-guarded refreshers, so only a real flip re-registers and notifies.
+//   - default registry (p.server, also stdio): exactly the three tools are added
+//     or deleted in place; nothing is called, and no tools/list_changed is
+//     pushed, when the surface already matches the switch.
+//   - direct surface: withDirectBuiltins adds them on a rebuild, and a rebuild
+//     is made when what is registered differs from the switch.
+//   - /mcp/s/<server> carries none of them: every tool there is an upstream
+//     tool under its bare name, and skills are not offered through it by these
+//     tools.
+func (p *MCPProxyServer) RefreshSkillsAvailability() {
+	// The configuration may have changed what the output policy lets out.
+	p.resetSkillOutputState()
+	p.RefreshCallToolModeTools()
+	p.RefreshCodeExecModeTools()
+
+	live := p.buildSkillTools()
+	if p.server != nil {
+		advertised := p.server.GetTool(toolLoadSkill) != nil
+		switch {
+		case len(live) > 0 && !advertised:
+			p.server.AddTools(live...)
+			p.logger.Info("enable_skills is on; skill tools advertised on the default surface")
+		case len(live) == 0 && advertised:
+			p.server.DeleteTools(skillToolNames...)
+			p.logger.Info("enable_skills is off; skill tools withdrawn from the default surface")
+		}
+	}
+
+	if p.directServer != nil {
+		// Same critical section as every direct rebuild: the drift check and the
+		// rebuild it authorizes must not interleave with another publisher.
+		p.directRefreshMu.Lock()
+		advertised := p.directServer.GetTool(toolLoadSkill) != nil
+		if advertised != (len(live) > 0) {
+			p.logger.Info("enable_skills changed; rebuilding the direct tool surface",
+				zap.Bool("enabled", len(live) > 0))
+			p.refreshDirectModeToolsLocked()
+		}
+		p.directRefreshMu.Unlock()
 	}
 }
 
