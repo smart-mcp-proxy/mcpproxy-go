@@ -985,6 +985,7 @@ func isOAuthRelatedError(err string) bool {
 		// Windows wordings (GH #1929 CI)
 		"actively refused",
 		"forcibly closed by the remote host",
+		"aborted by the software in your host machine",
 	}
 	for _, pattern := range connectionPatterns {
 		if stringutil.ContainsIgnoreCase(err, pattern) {

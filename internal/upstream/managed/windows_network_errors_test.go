@@ -2,6 +2,8 @@ package managed
 
 import (
 	"errors"
+	"fmt"
+	"net"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,4 +27,28 @@ func TestNetworkErrorClassifiers_KnowWindowsWordings(t *testing.T) {
 		assert.False(t, isTransientHealthCheckError(err), "a hard failure that trips the health check at once: %v", err)
 		assert.True(t, mc.isRemoteNetworkFailure(err), "a network failure: %v", err)
 	}
+}
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string {
+	return "A connection attempt failed because the connected party did not properly respond after a period of time"
+}
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
+
+// Review r6: classify by type, not only by wording. Any *net.OpError is a
+// connection error; a timeout is a soft health-check miss, everything else
+// (unreachable network/host, refused, reset — in any OS's words) is hard.
+func TestNetworkErrorClassifiers_UseTheErrorType(t *testing.T) {
+	mc := newNetworkRecoveryClient(t, "https://mcp.example.com/mcp")
+	unreachable := fmt.Errorf("transport error: %w", &net.OpError{Op: "dial", Net: "tcp",
+		Err: errors.New("connectex: A socket operation was attempted to an unreachable network.")})
+	assert.True(t, mc.isConnectionError(unreachable))
+	assert.False(t, isTransientHealthCheckError(unreachable), "an unreachable network is a hard failure")
+	assert.True(t, mc.isRemoteNetworkFailure(unreachable))
+
+	timedOut := fmt.Errorf("transport error: %w", &net.OpError{Op: "dial", Net: "tcp", Err: timeoutErr{}})
+	assert.True(t, mc.isConnectionError(timedOut))
+	assert.True(t, isTransientHealthCheckError(timedOut), "a timeout stays a soft miss")
 }

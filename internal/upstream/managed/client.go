@@ -2451,6 +2451,13 @@ func isTransientHealthCheckError(err error) bool {
 	if isDeadTransportError(err) {
 		return false
 	}
+	// A typed socket error decides by type (review r6 on GH #1929): a timeout
+	// is a soft miss, anything else (refused, reset, unreachable network or
+	// host, in any OS's words) is hard.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return opErr.Timeout()
+	}
 	msg := strings.ToLower(err.Error())
 	// Hard failures: short-circuit to "not transient" so the caller flips
 	// Error on the first miss. Order matters — check these BEFORE the
@@ -2872,6 +2879,13 @@ func (mc *Client) isConnectionError(err error) bool {
 		return false
 	}
 	if isDeadTransportError(err) {
+		return true
+	}
+	// A socket-level failure is a connection error whatever the OS calls it
+	// (review r6 on GH #1929: Windows words unreachable networks and timeouts
+	// in ways no phrase list keeps up with).
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
 		return true
 	}
 
