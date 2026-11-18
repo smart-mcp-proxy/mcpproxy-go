@@ -236,7 +236,17 @@ func newE2EFixture(t *testing.T, fetchPath string, withApprovedTool bool) *e2eFi
 	}
 
 	f := &e2eFixture{channel: newE2EChannel(t), acts: &e2eActivations{}}
-	f.upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	f.upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only a request for the configured endpoint that is not a session
+		// close counts: any dial by this core starts with a POST to /mcp.
+		// Clients left by earlier tests in the package keep sending
+		// "DELETE /" close requests to ports the kernel may hand to this
+		// server, and those must not fail the zero-calls check.
+		if r.URL.Path != "/mcp" || r.Method == http.MethodDelete {
+			t.Logf("fake upstream: ignoring a stray %s %s", r.Method, r.URL.Path)
+			http.Error(w, "not this fixture's endpoint", http.StatusNotFound)
+			return
+		}
 		f.upCalls.Add(1)
 		http.Error(w, "the re-protection sweep must never reach an upstream", http.StatusTeapot)
 	}))
