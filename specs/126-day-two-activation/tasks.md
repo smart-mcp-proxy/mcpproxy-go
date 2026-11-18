@@ -36,7 +36,9 @@
 - [ ] T003 [P] [US5] test: `internal/storage/install_anchor_test.go`.
   - (a) A store opened on a new file records `InstallFirstRunAt` once `EnsureInstallAnchor` runs.
   - (b) A store opened on an existing file with data and no anchor stays without one (upgrade).
-  - (c) An existing empty file (0 bytes, or no buckets) counts as new.
+  - (c) An existing empty file (0 bytes, no buckets, or only empty buckets, for example from a standalone CLI command) counts as new.
+  - (c2) An upgraded store with no onboarding record still has no anchor after an MCP initialize and a connect. No safeguard writer exists.
+  - (c3) The anchor survives a write of `OnboardingState` by code that does not know the anchor field. That is the downgrade case: the anchor lives in its own bucket.
   - (d) A second start never changes the anchor.
   - (e) Concurrent callers produce one anchor; run under `-race`.
   - (f) The anchor is recorded with telemetry disabled.
@@ -51,7 +53,13 @@
   - `RecordUpstreamOutcome(succeeded, starter bool)` buckets match `bucketUpstream`.
   - `succeeded_non_starter` excludes starter successes.
   - The counts drain only on an accepted send, and a rejected send keeps them.
-  - `coverage` is `full` on a fresh install's first window and `partial` on the first window of a process over an existing store. It becomes `full` after the first accepted send.
+  - `coverage`:
+    - `full` on a fresh install's first window;
+    - `full` after a restart whose previous window was delivered (marker clear);
+    - `partial` after a restart with the undelivered-window marker set;
+    - `partial` once on the first start of this build over an existing store.
+    - It is frozen in the drained snapshot, so a retry is byte-identical.
+  - `window_age` is the age when the window opened, is frozen, and is absent when the install is not fresh.
   - The server edition also sends `upstream_outcomes`.
 - [ ] T080 [P] [US5] test: `internal/telemetry/success_scope_test.go`.
   - `success_scope_ever` moves only forward: none → starter_only → non_starter. A non-starter success after a starter success moves it to `non_starter`, and nothing moves it back.
@@ -61,12 +69,14 @@
   - a usable result → exactly one `succeeded`;
   - an upstream error, `isError:true`, or a result withheld by an output policy → exactly one `unusable`;
   - a call refused before dispatch (quarantine, validation, a disconnected server) → no outcome;
+  - every post-dispatch exit: wrapper errors (mcp.go ~3808, ~3845), sanitisation block (~3909), validation block (~3943); routing errors (mcp_routing.go ~756, ~771, ~774), routing sanitisation block (~788) → exactly one `unusable` each;
+  - `ReplayToolCallWithOptions` → no outcome and no dispatch;
   - a session-recovery repeat → one outcome and two dispatches;
   - a stub classifier that answers true for one server moves that server's success out of `succeeded_non_starter`.
 - [ ] T082 [US5] impl:
   - `internal/telemetry/upstream_outcomes.go`: counters on `CounterRegistry`, the same reset-on-accept window as `upstream_tool_call_count_bucket`, and the coverage flag.
   - `internal/telemetry/success_scope.go`: the sticky scope in the activation store.
-  - `internal/server/mcp_upstream_telemetry.go`: one `noteUpstreamOutcome(ctx, server, result, err)` beside `noteUpstreamDispatched`, called from the three paths after their output-policy checks (where `recordRealToolCallSuccess` is called today). A logical call with zero dispatches records nothing.
+  - `internal/server/mcp_upstream_telemetry.go`: `noteUpstreamOutcome` beside `noteUpstreamDispatched`, recorded exactly once per logical call by a deferred classifier set up right after `noteUpstreamDispatched`. It is guarded on dispatches > 0, and runs on every exit, including the early error and block returns. A logical call with zero dispatches records nothing.
   - `StarterClassifier` (FR-037): an interface in `internal/runtime` that answers for `(server, incarnation)`, with a default that answers false. Wire it through `Runtime`.
 
 ### Origin and age (FR-034)
@@ -115,10 +125,11 @@
 ### Companion PRs in the owning repositories
 
 - [ ] T084 [US5] `mcpproxy-telemetry` (FR-039):
-  - `counterWindowPayload` also copies `upstream_outcomes` into `heartbeat_events`. It does not copy `day_two`: the age is joined from the daily row (spec FR-039), so a retried window stays byte-identical.
-  - `validateV17Payload` rejects unknown keys and out-of-enum values in those objects, for `schema_version >= 17` only.
+  - `counterWindowPayload` also copies `upstream_outcomes` into `heartbeat_events`: from v17+ only, the known fields (including `window_age`) in a fixed order. It does not copy `day_two`.
+  - A v1–v16 window must stay byte-identical.
+  - `validateV17Payload` rejects out-of-enum values, `null` objects and missing required keys at v17+, and rejects unknown keys only at exactly v17.
   - Vitest coverage: v16 passes unchanged; a valid v17 passes; every invalid v17 shape returns a structured 400; the event payload carries the new keys.
-  - Deploy before the first schema-17 release. The deploy is a maintainer step.
+  - Deploy before the first schema-17 build sends telemetry, release candidates included. Merging to `main` deploys.
 - [ ] T085 [US5] `mcpproxy-dash` (FR-040): a `src/lib/server/queries/day-two-cohort.ts` query module built on `ci-filter.ts` and `identity.ts`. It runs in two modes, pre-17 baseline and schema 17, and reports the research-R13 figures and coverage rows per weekly cohort.
   - Tests use the `ReceiverSim` fixture with synthetic ids and cover:
     - an upgrade that is not eligible;
@@ -127,6 +138,9 @@
     - a dispatch without completion;
     - a window marked `partial`;
     - an `age_unverified` row;
+    - an `identity_predates_anchor` row;
+    - a window attributed by its `window_age`, and one attributed by the nearest-row fallback;
+    - a schema-17 window stored without `upstream_outcomes` (`no_completion_counts`, by presence).
     - a CI id excluded.
   - Add a script or runbook entry that runs the baseline against D1 read-only (`--command`, never `--file`), and record the first baseline in the PR.
 
@@ -474,7 +488,7 @@ These tasks are unchanged in content. They now open PR-B, because their facts on
 ## Dependencies and execution order
 
 - **Phase 1 → Phase 2 (PR-A)** blocks every other phase. PR-A ships alone in a release, with T084 deployed and the T085 baseline recorded. **Phase 2b** opens PR-B.
-- **Phase 3 (PR-B)**, **Phase 4 (PR-C)** and **Phase 5 (PR-D)** depend only on PR-A, so they can be developed in parallel, in separate worktrees. They touch different files, except `OnboardingWizard.vue` (PR-B Servers/Verify tabs, PR-C Clients tab) and `Home.vue` (PR-B Get-started card, PR-D digest card). Merge PR-B first, then rebase PR-C and PR-D.
+- **Phase 3 (PR-B)** depends on PR-A and opens with Phase 2b. **Phase 4 (PR-C)** depends on Phase 2b (client observation, the facts loop, the `second_client_*` marks and `clients_day0`). **Phase 5 (PR-D)** depends only on PR-A. Each of PR-B, PR-C and PR-D also deploys the receiver's closed-set update for its new keys (spec FR-039) before its release. Once their dependencies are met, they can be developed in parallel, in separate worktrees. They touch different files, except `OnboardingWizard.vue` (PR-B Servers/Verify tabs, PR-C Clients tab) and `Home.vue` (PR-B Get-started card, PR-D digest card). Merge PR-B first, then rebase PR-C and PR-D.
 - **Phase 6 (PR-E)** depends on PR-B (starter endpoint), PR-C (`detected_unconnected_clients`) and PR-D (digest).
 - Inside each phase, a `test` task precedes its `impl`. `[P]` tests in one group can be written in parallel.
 

@@ -8,7 +8,7 @@ Base struct: `internal/storage/models.go:102`.
 
 | Field | JSON | Type | Written by | Rules |
 |---|---|---|---|---|
-| `InstallFirstRunAt` | `install_first_run_at` | `time.Time` | `EnsureInstallAnchor` at startup, before any other writer; also the missing-record branch of `UpdateOnboardingState` as a safeguard (research R5) | Set once and never changed. Zero means an upgraded install with no anchor; it is never back-filled. |
+| `InstallFirstRunAt` | (read-only mirror; the anchor lives in its own bucket) | `time.Time` | Only `EnsureInstallAnchor` writes the anchor, at startup, when `config.db` had no records at open. It goes in its own bucket and key, not in this record (research R5, revised). There is no safeguard writer. | Set once and never changed. Zero means an upgraded install with no anchor; it is never back-filled. |
 | `StarterEligibility` | `starter_eligibility` | `string` enum | the first starter eligibility evaluation on a fresh install | Set once. Values: `eligible`, `launcher_missing`, `name_taken`, `reference_overridden`, `already_configured`, `tools_present`, `held_tools`, `not_fresh`. |
 | `StarterLauncher` | `starter_launcher` | `string` enum | every fresh-install evaluation | Values: `uvx`, `npx_only`, `none`. The first value is kept for telemetry (sticky). The live value is recomputed per request and not stored. |
 | `StarterOffered` | `starter_offered` | `bool` | mark endpoint (`starter_offered: true`) | Sticky. Only false → true. |
@@ -129,7 +129,7 @@ All REST bodies use the standard `{"success": true, "data": …}` envelope (`int
 ### 4c. Schema 17 (PR-A, instrumentation only)
 
 ```json
-"upstream_outcomes": {"succeeded": "1-10", "unusable": "0", "succeeded_non_starter": "1-10", "coverage": "full"},
+"upstream_outcomes": {"succeeded": "1-10", "unusable": "0", "succeeded_non_starter": "1-10", "coverage": "full", "window_age": "d0_6"},
 "day_two": {"install_origin": "fresh", "install_age": "d0_6", "success_scope_ever": "non_starter"}
 ```
 
@@ -138,9 +138,11 @@ What each part is:
 - `day_two` is personal edition only. Its `install_age` is present only when `install_origin` is `fresh`.
 
 Where the values come from:
-- **Install anchor** (FR-033): one UTC time in `config.db`, written once when the store was empty at open, and never rewritten.
+- **Install anchor** (FR-033): one UTC time in its own bucket and key in `config.db`. It is written once, when the store had no records in any bucket at open, and never rewritten.
+- **`upstream_outcomes.window_age`** (FR-035): the install age when the window opened, frozen with the counts. Present only for a fresh install.
+- **Undelivered-window marker** (FR-036): a persisted boolean. It is set on the first outcome after an accepted send, and cleared on an accepted send.
 - **`success_scope_ever`** (FR-038): stored in the activation bucket as an ordinal 0, 1 or 2, monotonic.
-- **Outcome counters** (FR-035, FR-036): held in memory on `CounterRegistry`. The coverage flag is `partial` for the first window of a process that opened an existing store.
+- **Outcome counters** (FR-035, FR-036): held in memory on `CounterRegistry`. The coverage flag is `partial` only for a process's first window when the undelivered-window marker was still set at open, or on the first start of this build over an existing store.
 
 ### 4d. Later `day_two` fields (PR-B to PR-D, next free schema version each)
 

@@ -109,7 +109,11 @@ A starter that never completed a capture keeps its `connect_failed` / `capture_t
 - No record: it creates one with `InstallFirstRunAt = now`.
 - A record exists without the field: the install is an upgrade, and the anchor stays zero forever.
 
-As a safeguard, the "missing record" branch of `UpdateOnboardingState` (`internal/storage/bbolt.go:1283-1305`) also sets the anchor when it has to create the record. That covers tests and any writer that runs before startup init. The anchor is never back-filled on an existing anchorless record. Tests cover update-before-get, concurrent first writers, and upgrade.
+**Revised 2026-11-18 (spec review r1 #1, #12, #13)**: there is no safeguard writer. The "missing record" branch of `UpdateOnboardingState` runs on every MCP initialize (`RecordClientSeen`), connect and mark, so a safeguard there would anchor upgraded installs. Only `EnsureInstallAnchor` writes the anchor.
+- It writes only when `config.db` had no records in any bucket at open.
+- It stores the anchor under its own key in its own bucket, because older binaries round-trip `OnboardingState` and would erase it on a downgrade.
+
+The anchor is never back-filled. Tests cover: an upgrade followed by an MCP initialize and a connect (no anchor), an empty-buckets store (fresh), concurrent first writers, and a downgrade round-trip.
 
 **Decision (observation)**: `ClientFirstObservedAt map[string]time.Time` is updated by `observeConnectedClients(ids)`. The IDs are collected **outside** the transaction from `connect.Service.GetConnectedIDs` (`internal/connect/connect.go:371-393`), then merged inside the pure update callback, which never does I/O (`bbolt.go:1272-1276`). Callers:
 - the connect and disconnect handlers (`internal/httpapi/connect.go:332-360`);
@@ -240,7 +244,12 @@ The facts loop, `first_tool_indexed_ever`, `clients_day0` and the starter, secon
   Completion only sets a lifetime flag; there is no per-window completion count. So no schema up to 16 can answer "completed in days 7–13".
 - **`days_since_install` cannot identify new installs on its own.** It comes from schema 7 (`internal/telemetry/funnel.go`). `RecordActivity` stamps it while the payload is built, which happens only with telemetry on. An install that upgrades from a pre-7 build, or opts in late, reports 0 on its first stamped day.
 - **New counters need a receiver change, or most windows are lost.** The receiver (`mcpproxy-telemetry/src/index.ts`) upserts one `heartbeats` row per `(anonymous_id, UTC day)`, and the last heartbeat of the day wins. Reset-on-accept counters survive only in `heartbeat_events` (schema 12 and later, keyed by `heartbeat_id`), and only for the keys that `counterWindowPayload` copies. Any new counter object it does not copy loses every window but the day's last.
-- **Per-anonymous-id matching does not split one install.** The anonymous id lives in the config file and the anchor in `config.db`, both in the same data directory, so wiping the directory resets both together. A reinstall therefore shows up as a new install, which is correct.
+- **Per-anonymous-id matching usually does not split one install.** The anonymous id lives in the config file and the anchor in `config.db`, normally in the same data directory, so wiping the directory resets both. A reinstall then shows up as a new install, which is correct. Three exceptions exist (spec review r1 #6):
+  - `data_dir` is configured apart from the config file;
+  - only `config.db` is deleted;
+  - the 365-day anonymous id rotation fires inside days 0–13.
+
+  They are reported in the coverage row `identity_predates_anchor`, which compares `anonymous_id_created_at` with the first heartbeat, and are never silently merged or split.
 
 **Decision**:
 
@@ -248,7 +257,10 @@ The facts loop, `first_tool_indexed_ever`, `clients_day0` and the starter, secon
   - Schema 17: `install_origin = fresh`, and the first heartbeat reports `install_age = d0_6`.
   - Pre-17 baseline: the identity's first-ever heartbeat, with `days_since_install <= 1`. If that first row is below schema 7, the install falls into the `age_unverified` coverage gap.
 - **Day ranges (days 0–6 and 7–13).**
-  - Schema 17: `install_age` on each daily `heartbeats` row. Each `heartbeat_events` window joins to the same anonymous id's `heartbeats` row for its UTC date. FR-034 defines the age in UTC calendar dates, so it is the same for every heartbeat on one date, and keeping the age out of the event payload keeps retried windows byte-identical, which the receiver requires (otherwise it returns 409).
+  - Schema 17: `install_age` on each daily `heartbeats` row, and `upstream_outcomes.window_age` on each window (spec review r1 #9).
+    - `window_age` is frozen at drain, so retries stay byte-identical.
+    - It is the age when the window opened, so a 24 h window is not labelled a day late.
+    - Fallback, only when `window_age` is absent: the nearest daily row of that anonymous id for `date(received_at)`, which is the latest row before that date or, if there is none, the earliest one after it. A window can land on a date with no daily row of its own when its upsert failed and the retry landed on the next day.
   - Pre-17: calendar offset from D0, the identity's first heartbeat date.
 - **Return** means any heartbeat in days 7–13.
 - **Active return**:
@@ -259,7 +271,8 @@ The facts loop, `first_tool_indexed_ever`, `clients_day0` and the starter, secon
   - `age_unverified`: the first row is below schema 7;
   - `no_events`: no `heartbeat_events` row in the day range (below schema 12);
   - `dispatch_semantics_old`: below schema 14;
-  - `no_completion_counts`: below schema 17;
+  - `no_completion_counts`: a window in days 0–13 whose stored counter payload has no `upstream_outcomes`. This is a presence test (`json_type(counter_payload_json,'$.upstream_outcomes') IS NULL`), not a schema test, so it also catches schema-17 windows stored before the receiver deploy;
+  - `identity_predates_anchor`: `anonymous_id_created_at` is more than 6 days before the first heartbeat;
   - `partial_windows`: `upstream_outcomes.coverage = partial`.
 
   A missing day 7–13 heartbeat is the non-return itself, not a coverage gap.
@@ -272,6 +285,6 @@ The facts loop, `first_tool_indexed_ever`, `clients_day0` and the starter, secon
 
 **Limits accepted**:
 - Installs with telemetry off are invisible.
-- If a process is killed before its first accepted send, that window is lost. The next process's first window is then marked `partial`.
-- A counter window is attributed to the install age on the UTC date it was received, so a window that straddles day 7 counts in `d7_13`.
+- If a process is killed with undelivered counts, those counts are lost. The persisted undelivered-window marker makes the next process's first window `partial`. A plain restart after a delivered window is not marked.
+- A counter window is attributed to its `window_age`, the age when it opened. A window that straddles day 7 therefore counts in `d0_6`.
 - The receiver change (spec FR-039) must be live before the first schema-17 release. Until then, only the last window of each day survives.
