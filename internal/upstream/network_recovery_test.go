@@ -26,8 +26,12 @@ type fakeRecoveryTarget struct {
 	eligible      bool
 	connected     bool
 	failReconnect bool
-	resets        []bool
-	reasons       []string
+	// connectsThenFails: the reconnect connects, and the connection is lost
+	// again before the watcher's next tick.
+	connectsThenFails bool
+	successes         uint64
+	resets            []bool
+	reasons           []string
 }
 
 func (f *fakeRecoveryTarget) NetworkRecoveryProbe() (managed.NetworkProbe, bool) {
@@ -53,10 +57,19 @@ func (f *fakeRecoveryTarget) BeginNetworkRecovery(reset bool, reason string) boo
 	f.reasons = append(f.reasons, reason)
 	return true
 }
+func (f *fakeRecoveryTarget) ConnectSuccessCount() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.successes
+}
 func (f *fakeRecoveryTarget) ReconnectAfterNetworkRecovery(context.Context) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.failReconnect {
+	switch {
+	case f.connectsThenFails:
+		f.successes++ // connected, then lost again before the next tick
+	case !f.failReconnect:
+		f.successes++
 		f.eligible, f.connected = false, true
 	}
 }
@@ -530,4 +543,23 @@ func TestDialProbe_ConnectThroughProxy(t *testing.T) {
 	assert.NoError(t, dialProbe(context.Background(), plain, 2*time.Second), "without ConnectTo a TCP dial is enough")
 	_ = ln.Close()
 	assert.Error(t, dialProbe(context.Background(), plain, 2*time.Second))
+}
+
+// Opus r2 MINOR A: a reconnect that connected and lost the connection again
+// before the next tick (a dark wake cut short) still restores the budget, so a
+// night of such wakes cannot hold back the morning's recovery.
+func TestNetworkRecovery_AMissedConnectionStillRestoresTheBudget(t *testing.T) {
+	cfg := testRecoveryConfig()
+	h := newRecoveryHarness(cfg)
+	target := &fakeRecoveryTarget{addr: "mcp.example.com:443", eligible: true, connectsThenFails: true}
+
+	for i := 0; i < 90; i++ { // 15 minutes of outages and restores
+		h.net.set(target.addr, i%3 == 2)
+		h.step(10*time.Second, target)
+	}
+	resets, _ := target.triggers()
+	require.Greater(t, len(resets), cfg.FreeTriggers)
+	for i, r := range resets {
+		assert.True(t, r, "trigger %d: every reconnect connected, so every restore may reset", i)
+	}
 }

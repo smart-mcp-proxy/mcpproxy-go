@@ -166,17 +166,28 @@ func (mc *Client) BeginNetworkRecovery(resetBackoff bool, reason string) bool {
 	return true
 }
 
+// ConnectSuccessCount reports how many connects of this client reached Ready.
+func (mc *Client) ConnectSuccessCount() uint64 { return mc.connectSuccesses.Load() }
+
 // ReconnectAfterNetworkRecovery runs the reconnect BeginNetworkRecovery
 // admitted. It blocks until the attempt ends. ctx bounds it (the manager's
 // shutdown context), and it honours the health loop's stop channel, so a
 // Disconnect — the server disabled, removed or shut down — that lands first
 // is not undone. It does nothing if the client is no longer eligible.
 func (mc *Client) ReconnectAfterNetworkRecovery(ctx context.Context) {
-	if ctx.Err() != nil || !mc.NetworkRecoveryEligible(time.Now()) {
+	if ctx.Err() != nil {
 		return
 	}
+	// The eligibility re-check and the stop-channel read happen together under
+	// mc.mu, which Disconnect also takes: either the Disconnect already ran (the
+	// state is no longer Error, so nothing is done) or the channel read here is
+	// the one it will close, which stops the reconnect.
 	mc.mu.Lock()
+	eligible := mc.NetworkRecoveryEligible(time.Now())
 	stop := mc.stopMonitoring
 	mc.mu.Unlock()
+	if !eligible {
+		return
+	}
 	mc.tryReconnectWithin(ctx, stop)
 }

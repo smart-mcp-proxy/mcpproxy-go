@@ -207,6 +207,12 @@ type Client struct {
 	// (Spec 105 FR-009, codex review round 8).
 	connectionEpoch atomic.Int64
 
+	// connectSuccesses counts connects that reached Ready. The connectivity
+	// watcher compares it across ticks, so a reconnect that succeeded and
+	// failed again between two ticks still counts as having connected
+	// (GH #1929).
+	connectSuccesses atomic.Uint64
+
 	// epochMu serializes the probe goroutine's final epoch-check-and-SetError
 	// with Connect's epoch bump. Without it a reconnect could complete between
 	// the probe's staleness check and its SetError, letting a stale verdict
@@ -764,6 +770,7 @@ func (mc *Client) connectUnlessStopped(ctx context.Context, stop <-chan struct{}
 	mc.connectionEpoch.Store(nextConnectionEpoch())
 	mc.resetHealthCheckFailures()
 	mc.epochMu.Unlock()
+	mc.connectSuccesses.Add(1)
 
 	// Spec 113-e FR-080: remember the session id this connect obtained, so a
 	// transport that loses it before the first managed request can recover.

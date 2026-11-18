@@ -102,6 +102,7 @@ type recoveryTarget interface {
 	NetworkRecoveryProbe() (managed.NetworkProbe, bool)
 	NetworkRecoveryEligible(now time.Time) bool
 	IsConnected() bool
+	ConnectSuccessCount() uint64
 	BeginNetworkRecovery(resetBackoff bool, reason string) bool
 	ReconnectAfterNetworkRecovery(ctx context.Context)
 }
@@ -111,8 +112,9 @@ type recoveryProbeState struct {
 	lastProbe      time.Time // zero: never probed
 	restorePending bool      // an outage ended; reconnect with a reset
 	eventPending   string    // a wake or network change happened; one attempt
-	lastTrigger    time.Time
-	unproductive   int // reconnects started since the server was last seen connected
+	lastTrigger    time.Time // wall clock
+	unproductive   int       // reconnects started since the server last connected
+	successes      uint64    // ConnectSuccessCount when last looked at
 }
 
 // triggerSpacing is the least time before the next reconnect for a server
@@ -340,8 +342,11 @@ func (r *networkRecovery) tick(ctx context.Context, now time.Time, targets []rec
 			st = &recoveryProbeState{}
 			r.states[t] = st
 		}
-		if t.IsConnected() {
-			st.unproductive = 0 // a reconnect paid off: the budget is restored
+		// A connection since the last tick — even one that failed again before
+		// this tick — means the reconnects paid off: the budget is restored.
+		if n := t.ConnectSuccessCount(); t.IsConnected() || n != st.successes {
+			st.unproductive = 0
+			st.successes = n
 		}
 		if !t.NetworkRecoveryEligible(now) {
 			// Connected, connecting, or failed for another reason: forget the
@@ -416,7 +421,9 @@ func (r *networkRecovery) tick(ctx context.Context, now time.Time, targets []rec
 		if !st.restorePending && st.eventPending == "" {
 			continue
 		}
-		if !st.lastTrigger.IsZero() && now.Sub(st.lastTrigger) < cfg.triggerSpacing(st.unproductive) {
+		// Spacing runs on the wall clock: hours asleep count, so a budget spent
+		// on dark wakes overnight does not defer the morning's recovery.
+		if !st.lastTrigger.IsZero() && wall.Sub(st.lastTrigger) < cfg.triggerSpacing(st.unproductive) {
 			continue // deferred until the spacing has passed
 		}
 		reason := st.eventPending
@@ -428,7 +435,7 @@ func (r *networkRecovery) tick(ctx context.Context, now time.Time, targets []rec
 		reset := st.restorePending && st.unproductive < cfg.FreeTriggers
 		st.restorePending, st.eventPending = false, ""
 		if p.target.BeginNetworkRecovery(reset, reason) {
-			st.lastTrigger = now
+			st.lastTrigger = wall
 			st.unproductive++
 			r.triggerCount++
 			r.reconnects.Add(1)
