@@ -987,8 +987,9 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 		// lost or restored connection. That is not the outcome of a call and
 		// not traffic to the server, and Usage never counts it, so it stays out
 		// of the call tiles and the top lists (Usage errors = errors + blocked
-		// here, F1).
-		if a.Type == storage.ActivityTypeUpstreamEvent {
+		// here, F1). A skill access (Spec 125) stores the outcome of a skill
+		// search, load or read the same way and is not a tool call either.
+		if a.Type == storage.ActivityTypeUpstreamEvent || a.Type == storage.ActivityTypeSkillAccess {
 			otherCount++
 			continue
 		}

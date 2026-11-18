@@ -601,7 +601,11 @@ func (s *WorkSessionSummary) forgetStoredRow(flags byte, server string, at time.
 // session and folds the row into the summary. It is a no-op for a row that is
 // already indexed, so re-saving a row never counts it twice.
 func indexActivityTx(tx *bbolt.Tx, r *ActivityRecord, key []byte, role AttemptRole) error {
-	if r.WorkSessionID == "" {
+	// An administrator-only row (Spec 125 FR-019a) never joins a work
+	// session: the session doors answer scoped callers from the summary and
+	// this index, so its times, row count or position would show it even with
+	// the row withheld. The backfill indexes through here too.
+	if r.WorkSessionID == "" || IsAdminOnlyActivityType(r.Type) {
 		return nil
 	}
 	rows, err := tx.CreateBucketIfNotExists([]byte(WorkSessionRowsBucket))

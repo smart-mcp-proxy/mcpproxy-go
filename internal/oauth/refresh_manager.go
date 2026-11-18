@@ -1100,6 +1100,12 @@ func (m *RefreshManager) rescheduleAfterDelayFor(serverName string, delay time.D
 	if !ok || (expected != nil && schedule != expected) {
 		return
 	}
+	// A transient failure can reach its reschedule after a terminal outcome
+	// gave the schedule up (failScheduleAndNotify). A failed schedule stays
+	// failed until a token save replaces it: no new timer, no next attempt.
+	if schedule.RefreshState == RefreshStateFailed {
+		return
+	}
 
 	// Stop existing timer if any
 	if schedule.Timer != nil {

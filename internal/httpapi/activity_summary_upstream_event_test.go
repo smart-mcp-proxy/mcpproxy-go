@@ -27,6 +27,12 @@ func TestActivitySummary_UpstreamEventIsNotACallError(t *testing.T) {
 			ID: "ue-2", Type: storage.ActivityTypeUpstreamEvent, ServerName: "github",
 			Status: storage.ActivityStatusSuccess, Timestamp: ts,
 		},
+		// Spec 125: a failed skill load is not a tool call either; Usage never
+		// counts it (review round 14, B1).
+		&storage.ActivityRecord{
+			ID: "sa-1", Type: storage.ActivityTypeSkillAccess, ServerName: "github",
+			Status: storage.ActivityStatusError, Timestamp: ts,
+		},
 	)
 	srv := NewServer(&callParityController{
 		activities: records,
@@ -34,10 +40,10 @@ func TestActivitySummary_UpstreamEventIsNotACallError(t *testing.T) {
 	}, zap.NewNop().Sugar(), nil)
 	got := getSummary(t, srv)
 
-	assert.Equal(t, base.ErrorCount, got.ErrorCount, "a lost connection is not a failed call")
+	assert.Equal(t, base.ErrorCount, got.ErrorCount, "a lost connection or a failed skill load is not a failed call")
 	assert.Equal(t, base.SuccessCount, got.SuccessCount, "a recovery is not a successful call")
-	assert.Equal(t, base.OtherCount+2, got.OtherCount)
-	assert.Equal(t, base.TotalCount+2, got.TotalCount)
+	assert.Equal(t, base.OtherCount+3, got.OtherCount)
+	assert.Equal(t, base.TotalCount+3, got.TotalCount)
 	assert.Equal(t, base.CallCount, got.CallCount)
 
 	_, usage := doUsageRequest(t, srv, "?window=24h")

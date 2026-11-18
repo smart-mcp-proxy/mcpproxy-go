@@ -226,3 +226,31 @@ func TestRefreshManager_AScheduleFailsOnce(t *testing.T) {
 	assert.Equal(t, RefreshStateFailed, sched.RefreshState)
 	assert.Equal(t, "invalid_grant: sign in again", sched.LastError, "the actionable error is kept")
 }
+
+// Review round 14 (A1): a transient failure handled before the schedule was
+// given up must not re-arm it when its reschedule runs afterwards.
+func TestRefreshManager_RescheduleDoesNotReviveAFailedSchedule(t *testing.T) {
+	manager := NewRefreshManager(newMockTokenStore(), nil, nil, zaptest.NewLogger(t))
+	manager.SetEventEmitter(&orderEmitter{})
+	require.NoError(t, manager.Start(context.Background()))
+	defer manager.Stop()
+
+	manager.OnTokenSaved("srv", time.Now().Add(time.Hour))
+	manager.mu.RLock()
+	sched := manager.schedules["srv"]
+	manager.mu.RUnlock()
+
+	// The transient failure passed its locked section (state Retrying), then a
+	// terminal outcome gave the schedule up, then the reschedule ran.
+	manager.failScheduleAndNotify("srv", sched, "invalid_grant: sign in again", true, errors.New("invalid_grant"))
+	manager.mu.RLock()
+	timerBefore, nextBefore := sched.Timer, sched.ScheduledRefresh
+	manager.mu.RUnlock()
+	manager.rescheduleAfterDelayFor("srv", time.Minute, sched)
+
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	assert.Equal(t, RefreshStateFailed, sched.RefreshState)
+	assert.Same(t, timerBefore, sched.Timer, "no timer is re-armed on a failed schedule")
+	assert.Equal(t, nextBefore, sched.ScheduledRefresh, "no next attempt is reported")
+}
