@@ -36,15 +36,15 @@
 - [ ] T003 [P] [US5] test: `internal/storage/install_anchor_test.go`.
   - (a) A store opened on a new file records `InstallFirstRunAt` once `EnsureInstallAnchor` runs.
   - (b) A store opened on an existing file with data and no anchor stays without one (upgrade).
-  - (c) An existing empty file (0 bytes, no buckets, or only empty buckets, for example from a standalone CLI command) counts as new.
+  - (c) An existing empty file counts as new. That covers a 0-byte file, and a file that a real `NewBoltDB` open and close left with only `meta/schema_version`. A file in which a command wrote real records counts as `existing`.
   - (c2) An upgraded store with no onboarding record still has no anchor after an MCP initialize and a connect. No safeguard writer exists.
   - (c3) The anchor survives a write of `OnboardingState` by code that does not know the anchor field. That is the downgrade case: the anchor lives in its own bucket.
   - (d) A second start never changes the anchor.
   - (e) Concurrent callers produce one anchor; run under `-race`.
   - (f) The anchor is recorded with telemetry disabled.
 - [ ] T004 [US5] impl:
-  - `wasEmptyAtOpen` is decided in `internal/storage` at open, before any bucket is created.
-  - `EnsureInstallAnchor` and `InstallAnchor()` go in `internal/storage/bbolt.go`, with a `manager.go` wrapper. Use one key in an existing meta bucket or `OnboardingState.InstallFirstRunAt` (data-model §1), `omitempty`.
+  - `wasEmptyAtOpen` is decided in `internal/storage` at open, before `initBuckets`. Empty means absent, 0 bytes, or no records other than `meta/schema_version`.
+  - `EnsureInstallAnchor` and `InstallAnchor()` go in `internal/storage/bbolt.go`, with a `manager.go` wrapper. The anchor goes under one dedicated key in one dedicated bucket (for example bucket `install_anchor`, key `first_run_at`), never in `OnboardingState`.
   - Call `EnsureInstallAnchor` in `internal/server/server.go` startup **before** the HTTP server and MCP initialisation start.
 
 ### Completion counters, coverage and scope (FR-035 to FR-038)
@@ -57,7 +57,9 @@
     - `full` on a fresh install's first window;
     - `full` after a restart whose previous window was delivered (marker clear);
     - `partial` after a restart with the undelivered-window marker set;
-    - `partial` once on the first start of this build over an existing store.
+    - `partial` once on the first start of this build over an existing store (marker absent);
+    - `full` for a fresh install that restarts before any call (marker written `false` at start);
+    - `partial` after: a failed send, outcomes recorded after its drain, the retry accepted, then the process killed (the marker stays `true`).
     - It is frozen in the drained snapshot, so a retry is byte-identical.
   - `window_age` is the age when the window opened, is frozen, and is absent when the install is not fresh.
   - The server edition also sends `upstream_outcomes`.
@@ -74,7 +76,11 @@
   - a session-recovery repeat → one outcome and two dispatches;
   - a stub classifier that answers true for one server moves that server's success out of `succeeded_non_starter`.
 - [ ] T082 [US5] impl:
-  - `internal/telemetry/upstream_outcomes.go`: counters on `CounterRegistry`, the same reset-on-accept window as `upstream_tool_call_count_bucket`, and the coverage flag.
+  - `internal/telemetry/upstream_outcomes.go`: counters on `CounterRegistry`, in the same reset-on-accept window as `upstream_tool_call_count_bucket`. Also:
+    - the window open time, stamped in `Drain`, which gives `window_age`;
+    - the coverage flag, frozen into the snapshot;
+    - the undelivered-window marker in the activation bucket, set `true` on the first outcome after each `Drain` and written `false` at start if absent;
+    - on an accepted send, the marker is set `false` only if no outcome followed the accepted snapshot's drain.
   - `internal/telemetry/success_scope.go`: the sticky scope in the activation store.
   - `internal/server/mcp_upstream_telemetry.go`: `noteUpstreamOutcome` beside `noteUpstreamDispatched`, recorded exactly once per logical call by a deferred classifier set up right after `noteUpstreamDispatched`. It is guarded on dispatches > 0, and runs on every exit, including the early error and block returns. A logical call with zero dispatches records nothing.
   - `StarterClassifier` (FR-037): an interface in `internal/runtime` that answers for `(server, incarnation)`, with a default that answers false. Wire it through `Runtime`.
@@ -113,7 +119,7 @@
 ### Docs (PR-A)
 
 - [ ] T016 [P] [US5] Docs:
-  - `docs/features/telemetry.md`: schema 17; `upstream_outcomes` (dispatch versus completion, logical calls versus requests); `day_two.install_origin` / `install_age` / `success_scope_ever` under "What is collected"; the coverage rule (a field counts only from its introducing schema).
+  - `docs/features/telemetry.md`: schema 17; `upstream_outcomes` (dispatch versus completion, logical calls versus requests); `day_two.install_origin` / `install_age` / `success_scope_ever` under "What is collected"; the coverage rule (a field counts only from its introducing schema, and only where the stored row or event contains it).
   - Add a `CLAUDE.md` "Recent Changes" line.
 - [ ] T017 [US5] PR-A verification:
   - quickstart L4 with a fresh data directory (`install_origin: fresh`, `install_age: d0_6`);
@@ -488,6 +494,10 @@ These tasks are unchanged in content. They now open PR-B, because their facts on
 ## Dependencies and execution order
 
 - **Phase 1 → Phase 2 (PR-A)** blocks every other phase. PR-A ships alone in a release, with T084 deployed and the T085 baseline recorded. **Phase 2b** opens PR-B.
+- Receiver tasks for the later PRs. Each one is a `mcpproxy-telemetry` PR that must be deployed before its client release (spec FR-039):
+  - [ ] T086 (PR-B): allow the PR-B `day_two` and `activation` keys in the receiver's closed set at its schema version.
+  - [ ] T087 (PR-C): allow the PR-C `day_two` keys.
+  - [ ] T088 (PR-D): allow `day_two.summary_views`, and have `counterWindowPayload` copy it into `heartbeat_events` for that schema and later, in a fixed key order. Keep the v1–v(PR-D−1) windows byte-identical.
 - **Phase 3 (PR-B)** depends on PR-A and opens with Phase 2b. **Phase 4 (PR-C)** depends on Phase 2b (client observation, the facts loop, the `second_client_*` marks and `clients_day0`). **Phase 5 (PR-D)** depends only on PR-A. Each of PR-B, PR-C and PR-D also deploys the receiver's closed-set update for its new keys (spec FR-039) before its release. Once their dependencies are met, they can be developed in parallel, in separate worktrees. They touch different files, except `OnboardingWizard.vue` (PR-B Servers/Verify tabs, PR-C Clients tab) and `Home.vue` (PR-B Get-started card, PR-D digest card). Merge PR-B first, then rebase PR-C and PR-D.
 - **Phase 6 (PR-E)** depends on PR-B (starter endpoint), PR-C (`detected_unconnected_clients`) and PR-D (digest).
 - Inside each phase, a `test` task precedes its `impl`. `[P]` tests in one group can be written in parallel.

@@ -8,7 +8,7 @@ Base struct: `internal/storage/models.go:102`.
 
 | Field | JSON | Type | Written by | Rules |
 |---|---|---|---|---|
-| `InstallFirstRunAt` | (read-only mirror; the anchor lives in its own bucket) | `time.Time` | Only `EnsureInstallAnchor` writes the anchor, at startup, when `config.db` had no records at open. It goes in its own bucket and key, not in this record (research R5, revised). There is no safeguard writer. | Set once and never changed. Zero means an upgraded install with no anchor; it is never back-filled. |
+| ~~`InstallFirstRunAt`~~ | not serialised | — | Removed from this record. The anchor lives under its own key in its own bucket, written only by `EnsureInstallAnchor` (research R5, revised; spec FR-033). | — |
 | `StarterEligibility` | `starter_eligibility` | `string` enum | the first starter eligibility evaluation on a fresh install | Set once. Values: `eligible`, `launcher_missing`, `name_taken`, `reference_overridden`, `already_configured`, `tools_present`, `held_tools`, `not_fresh`. |
 | `StarterLauncher` | `starter_launcher` | `string` enum | every fresh-install evaluation | Values: `uvx`, `npx_only`, `none`. The first value is kept for telemetry (sticky). The live value is recomputed per request and not stored. |
 | `StarterOffered` | `starter_offered` | `bool` | mark endpoint (`starter_offered: true`) | Sticky. Only false → true. |
@@ -140,7 +140,11 @@ What each part is:
 Where the values come from:
 - **Install anchor** (FR-033): one UTC time in its own bucket and key in `config.db`. It is written once, when the store had no records in any bucket at open, and never rewritten.
 - **`upstream_outcomes.window_age`** (FR-035): the install age when the window opened, frozen with the counts. Present only for a fresh install.
-- **Undelivered-window marker** (FR-036): a persisted boolean. It is set on the first outcome after an accepted send, and cleared on an accepted send.
+- **Undelivered-window marker** (FR-036): persisted as `true`, `false` or absent.
+  - It is set `true` on the first outcome after each `Drain`.
+  - It is set `false` on an accepted send only when no outcome followed the accepted snapshot's drain.
+  - It is written `false` at every start if absent.
+  - Absent at open means no schema-17+ build has run on this store yet.
 - **`success_scope_ever`** (FR-038): stored in the activation bucket as an ordinal 0, 1 or 2, monotonic.
 - **Outcome counters** (FR-035, FR-036): held in memory on `CounterRegistry`. The coverage flag is `partial` only for a process's first window when the undelivered-window marker was still set at open, or on the first start of this build over an existing store.
 

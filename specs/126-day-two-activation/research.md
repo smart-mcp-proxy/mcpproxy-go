@@ -106,11 +106,11 @@ A starter that never completed a capture keeps its `connect_failed` / `capture_t
 ## R5. Install anchor and client observation
 
 **Decision (anchor, plan review r1 #6)**: `Storage.EnsureInstallAnchor(now)` runs **once at startup**, in a single `Update` transaction, **before** the HTTP server, the connect service or the MCP initialisation can write onboarding state.
-- No record: it creates one with `InstallFirstRunAt = now`.
-- A record exists without the field: the install is an upgrade, and the anchor stays zero forever.
+- ~~No record: it creates one with `InstallFirstRunAt = now`.~~ Superseded by the revision below.
+- ~~A record exists without the field: the install is an upgrade, and the anchor stays zero forever.~~ Superseded by the revision below.
 
 **Revised 2026-11-18 (spec review r1 #1, #12, #13)**: there is no safeguard writer. The "missing record" branch of `UpdateOnboardingState` runs on every MCP initialize (`RecordClientSeen`), connect and mark, so a safeguard there would anchor upgraded installs. Only `EnsureInstallAnchor` writes the anchor.
-- It writes only when `config.db` had no records in any bucket at open.
+- It writes only when `config.db` was empty at open: the file was absent, the file was 0 bytes, or it held no records other than `meta/schema_version`. This is decided before `initBuckets` runs (spec review r2 #5).
 - It stores the anchor under its own key in its own bucket, because older binaries round-trip `OnboardingState` and would erase it on a downgrade.
 
 The anchor is never back-filled. Tests cover: an upgrade followed by an MCP initialize and a connect (no anchor), an empty-buckets store (fresh), concurrent first writers, and a downgrade round-trip.
@@ -260,7 +260,8 @@ The facts loop, `first_tool_indexed_ever`, `clients_day0` and the starter, secon
   - Schema 17: `install_age` on each daily `heartbeats` row, and `upstream_outcomes.window_age` on each window (spec review r1 #9).
     - `window_age` is frozen at drain, so retries stay byte-identical.
     - It is the age when the window opened, so a 24 h window is not labelled a day late.
-    - Fallback, only when `window_age` is absent: the nearest daily row of that anonymous id for `date(received_at)`, which is the latest row before that date or, if there is none, the earliest one after it. A window can land on a date with no daily row of its own when its upsert failed and the retry landed on the next day.
+    - Fallback, only when `window_age` is absent: the anonymous id's nearest daily row for `date(received_at)`. That is the row for that date or the latest one before it; if there is none, the earliest one after it.
+    - Windows are fetched up to D0+20, so a window that opened in days 7–13 but was delivered later (the 24 h cadence, or a retry) is still attributed by its `window_age`. Baseline mode ignores windows received after D0+13. A window can land on a date with no daily row of its own when its upsert failed and the retry landed on the next day.
   - Pre-17: calendar offset from D0, the identity's first heartbeat date.
 - **Return** means any heartbeat in days 7–13.
 - **Active return**:
