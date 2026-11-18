@@ -34,7 +34,7 @@ func SignInRequired(state types.ConnectionState, loggedOut, oauthError bool, err
 	if isLoginCode(terminalCode) {
 		return true
 	}
-	if err == nil || isNetworkFailure(err) {
+	if err == nil || isNetworkFailure(err) || isServerSideAnswer(err) {
 		return false
 	}
 	if oauthError || isAuthorizationRequiredText(err.Error()) {
@@ -88,6 +88,18 @@ func isNetworkFailure(err error) bool {
 		if strings.Contains(msg, phrase) {
 			return true
 		}
+	}
+	return false
+}
+
+// isServerSideAnswer is an HTTP answer that says nothing about credentials:
+// the server or a proxy in front of it failed (5xx), it limits the rate, the
+// endpoint is gone, or it speaks the legacy SSE transport. An OAuth error flag
+// left by an earlier failure does not make such an answer a login need.
+func isServerSideAnswer(err error) bool {
+	switch diagnostics.Classify(err, diagnostics.ClassifierHints{Transport: "http"}) {
+	case diagnostics.HTTPServerErr, diagnostics.HTTPRateLimited, diagnostics.HTTPNotFound, diagnostics.HTTPLegacySSE:
+		return true
 	}
 	return false
 }

@@ -88,6 +88,11 @@ type WorkSessionPartition struct {
 	LastErrorCode  string `json:"last_error_code,omitempty"`
 	LastTool       string `json:"last_tool,omitempty"`
 	LastReason     string `json:"last_reason,omitempty"`
+	// UnavailableFailure: some failure on this server in the session was a
+	// call it could not take (class network or auth). It lets the timeline
+	// show the cause from before the session even when the session's last
+	// failure on the server was another kind (release QA F2).
+	UnavailableFailure bool `json:"unavailable_failure,omitempty"`
 	// LastFailureBlock says whether the last failure was a policy block, so a
 	// list that excludes blocks can tell.
 	LastFailureBlock bool `json:"last_failure_block,omitempty"`
@@ -567,6 +572,9 @@ func (s *WorkSessionSummary) applyRow(r *ActivityRecord, role AttemptRole) {
 		p.Blocks++
 		p.StoredBlocks++
 	}
+	if c := failureClass(r, role); c == "network" || c == "auth" {
+		p.UnavailableFailure = true
+	}
 	if p.FirstFailureAt.IsZero() || ts.Before(p.FirstFailureAt) {
 		p.FirstFailureAt = ts
 	}
@@ -943,7 +951,15 @@ func openEventOf(c *bbolt.Cursor, acts *bbolt.Bucket, server string, before, not
 	} else {
 		k, v = c.Prev()
 	}
-	var restoredUntil time.Time // the latest a recovery seen so far happened
+	// The whole bounded range is read: rows are keyed by their first
+	// occurrence and later repeats merge into them, so a recovery with an
+	// older key can have happened after a newer loss. What is open is the
+	// connection row that happened last, if it happened after every recovery.
+	var (
+		latest        WorkSessionRowRef
+		latestAt      time.Time
+		restoredUntil time.Time
+	)
 	for steps := 0; k != nil && bytes.HasPrefix(k, prefix) && steps < maxOpenEventLookback; k, v = c.Prev() {
 		steps++
 		ak := k[len(prefix):]
@@ -978,15 +994,18 @@ func openEventOf(c *bbolt.Cursor, acts *bbolt.Bucket, server string, before, not
 				restoredUntil = lastAt
 			}
 		case "connection_lost", "process_exited", "login_required":
-			if lastAt.After(restoredUntil) {
-				return WorkSessionRowRef{ActivityKey: append([]byte(nil), ak...), Timestamp: ts, Server: server, Event: true, Owner: owner}, true
+			if lastAt.After(latestAt) {
+				latestAt = lastAt
+				latest = WorkSessionRowRef{ActivityKey: append([]byte(nil), ak...), Timestamp: ts, Server: server, Event: true, Owner: owner}
 			}
-			return WorkSessionRowRef{}, false // a recovery came after it
 		}
 		// Other kinds (a failed token refresh) say nothing about the
-		// connection: keep looking.
+		// connection.
 	}
-	return WorkSessionRowRef{}, false
+	if latest.ActivityKey == nil || !latestAt.After(restoredUntil) {
+		return WorkSessionRowRef{}, false
+	}
+	return latest, true
 }
 
 // UpstreamEventRefs returns the upstream event rows of one server whose time

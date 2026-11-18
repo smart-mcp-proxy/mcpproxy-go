@@ -92,3 +92,46 @@ func TestOpenUpstreamEventsBefore_EvidenceRules(t *testing.T) {
 	assert.True(t, got["relost"], "lost again after the recovery: still open")
 	assert.False(t, got["stale"], "from before the core started: not evidence")
 }
+
+// Review (Opus, F2 round 2): a recovery whose repeat merged into an older
+// row still closes a newer loss. Lost t0, restored t10, lost t62 (a new
+// row), restored t65 (merged into the t10 row): nothing is open at t120.
+func TestOpenUpstreamEventsBefore_MergedRecoveryClosesANewerLoss(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	put := func(first, last time.Duration, kind string) {
+		status := ActivityStatusError
+		if kind == "connection_restored" {
+			status = ActivityStatusSuccess
+		}
+		require.NoError(t, m.SaveActivity(&ActivityRecord{
+			Type: ActivityTypeUpstreamEvent, Status: status, ServerName: "flap", Timestamp: wsBase.Add(first),
+			Source: ActivitySourceInternal, Metadata: map[string]interface{}{
+				"kind": kind, "first_at": wsBase.Add(first).Format(time.RFC3339Nano), "last_at": wsBase.Add(last).Format(time.RFC3339Nano),
+			},
+		}))
+	}
+	put(0, 0, "connection_lost")
+	put(10*time.Second, 65*time.Second, "connection_restored")
+	put(62*time.Second, 62*time.Second, "connection_lost")
+	refs, err := m.OpenUpstreamEventsBefore([]string{"flap"}, wsBase.Add(120*time.Second), time.Time{}, nil)
+	require.NoError(t, err)
+	assert.Empty(t, refs, "the server recovered at t65")
+}
+
+// A failure anywhere in the session that a down server explains marks the
+// partition, whatever the session's last failure on that server was.
+func TestWorkSessionPartition_MarksAnUnreachableFailure(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	require.NoError(t, m.SaveActivity(wsRow("ws-u", 0, func(r *ActivityRecord) { r.Status, r.ErrorClass = ActivityStatusError, "network" })))
+	require.NoError(t, m.SaveActivity(wsRow("ws-u", time.Minute, func(r *ActivityRecord) { r.Status, r.ErrorClass = ActivityStatusError, "tool_error" })))
+	require.NoError(t, m.SaveActivity(wsRow("ws-t", 0, func(r *ActivityRecord) { r.Status, r.ErrorClass = ActivityStatusError, "tool_error" })))
+	u, err := m.GetWorkSessionSummary("ws-u")
+	require.NoError(t, err)
+	assert.True(t, u.Servers["github"].UnavailableFailure)
+	assert.Equal(t, "tool_error", u.Servers["github"].LastErrorClass)
+	tt, err := m.GetWorkSessionSummary("ws-t")
+	require.NoError(t, err)
+	assert.False(t, tt.Servers["github"].UnavailableFailure)
+}

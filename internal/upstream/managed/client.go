@@ -1460,17 +1460,17 @@ func (mc *Client) runListToolsAsLeader(listCtx context.Context, release func() b
 	return tools, nil
 }
 
-// ErrConnectionGenerationChanged is CallToolOnEpoch's refusal: the client's
-// connection generation is no longer the one the caller certified the tool
-// identity against, so the call was NOT sent. It is returned verbatim (never
-// wrapped with server context) so the dispatch paths can map it onto their
-// own unresolved-identity refusal with errors.Is.
 // ErrClientNotConnected is returned by a call on a client that is not
 // connected. Callers that have no not-connected check of their own (the
 // code_execution sub-call) recognise it to record the call by the server's
 // state rather than as a proxy failure (release QA F1).
 var ErrClientNotConnected = errors.New("client not connected")
 
+// ErrConnectionGenerationChanged is CallToolOnEpoch's refusal: the client's
+// connection generation is no longer the one the caller certified the tool
+// identity against, so the call was NOT sent. It is returned verbatim (never
+// wrapped with server context) so the dispatch paths can map it onto their
+// own unresolved-identity refusal with errors.Is.
 var ErrConnectionGenerationChanged = errors.New("connection generation changed since the tool identity was resolved")
 
 // CallTool executes a tool with error handling

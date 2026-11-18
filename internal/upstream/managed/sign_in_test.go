@@ -41,6 +41,9 @@ func TestSignInRequired(t *testing.T) {
 		{"revoked token answered 401", types.StateError, false, true, errors.New("unexpected status code: 401"), "", true},
 		{"server answered 403 after an OAuth failure", types.StateError, false, true, errors.New("request failed with status 403 Forbidden"), "", true},
 
+		{"bad gateway after an earlier OAuth failure", types.StateError, false, true, errors.New("unexpected status code: 502"), "", false},
+		{"rate limited after an earlier OAuth failure", types.StateError, false, true, errors.New("unexpected status code: 429"), "", false},
+		{"not found after an earlier OAuth failure", types.StateError, false, true, errors.New("unexpected status code: 404"), "", false},
 		{"offline", types.StateError, false, false, refused, "", false},
 		{"offline, untyped error text", types.StateError, false, false, refusedText, "", false},
 		{"offline after an earlier OAuth failure", types.StateError, false, true, refused, "", false},

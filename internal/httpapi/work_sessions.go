@@ -524,8 +524,7 @@ func (s *Server) handleWorkSessionTimeline(w http.ResponseWriter, r *http.Reques
 	for _, server := range eventServers {
 		// Only a failure that a down server explains: the call could not
 		// reach it, or it waits for a login.
-		if p := sum.Servers[server]; p != nil && p.Failures > 0 &&
-			(p.LastErrorClass == "network" || p.LastErrorClass == "auth") {
+		if p := sum.Servers[server]; p != nil && p.UnavailableFailure {
 			failedServers = append(failedServers, server)
 		}
 	}
