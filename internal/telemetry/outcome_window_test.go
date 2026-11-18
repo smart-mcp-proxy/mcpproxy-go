@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -75,26 +76,38 @@ func TestOutcomeWindow_FreshInstallIsFull(t *testing.T) {
 	}
 }
 
-// A first-outcome hook that lands after its window was already accepted (the
-// recording goroutine was preempted between counting and the hook) must not
-// set the marker: nothing of that window is undelivered.
-func TestOutcomeWindow_LateHookAfterAcceptWritesNothing(t *testing.T) {
-	srv, _, setStatus := newOutcomeCaptureServer(t)
-	setStatus(http.StatusNoContent)
+// FR-036 (r4): an outcome recorded while a send is in flight does not wait
+// for the network, and the accept that follows can never leave the marker
+// false. The request handler blocks the 2xx until an outcome recorded from
+// another goroutine has returned (bounded, so a tool call stuck behind the
+// HTTP POST fails the test instead of hanging it): the outcome lands after
+// the drain's swap, the accept then sees it and keeps the marker set.
+func TestOutcomeWindow_InFlightOutcomeNeverBlocksNorLeavesMarkerFalse(t *testing.T) {
 	db, _ := openOutcomeDB(t)
-	p := startOutcomeProcess(t, srv.URL, db, true, true)
-	reg := p.Registry()
-	reg.mu.Lock()
-	reg.outcomeSucceeded++ // counted, hook not yet run (epoch 0)
-	reg.mu.Unlock()
-	p.sendHeartbeat(context.Background()) // drains epoch 0, accepted, marker cleared
-	p.markOutcomeWindowUndelivered(0)     // the late hook of epoch 0
-	if set, _ := markerOf(t, db); set {
-		t.Fatal("a late hook for an accepted window must not set the marker")
+	var p *Service
+	recorded := make(chan time.Duration, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		go func() {
+			start := time.Now()
+			p.Registry().RecordUpstreamOutcome(true, false) // a tool call during the POST
+			recorded <- time.Since(start)
+		}()
+		select {
+		case <-recorded:
+		case <-time.After(5 * time.Second):
+			t.Error("an outcome recorded during an in-flight send blocked on the send")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	p = startOutcomeProcess(t, srv.URL, db, true, true)
+	p.Registry().RecordUpstreamOutcome(true, false)
+	p.sendHeartbeat(context.Background()) // drain -> handler (outcome lands) -> 2xx -> accept
+	if !p.Registry().HasPendingUpstreamOutcomes() {
+		t.Fatal("precondition: the in-flight outcome is in the next window")
 	}
-	reg.RecordUpstreamOutcome(true, false) // epoch 1, undelivered
 	if set, _ := markerOf(t, db); !set {
-		t.Fatal("the next window's first outcome must set the marker")
+		t.Fatal("the accept left the marker false while an outcome recorded after the drain is undelivered")
 	}
 }
 
@@ -203,14 +216,14 @@ func TestOutcomeWindow_WindowAgeOpensAtDrainAndIsFrozen(t *testing.T) {
 		clock = t
 		mu.Unlock()
 	}
-	reg.mu.Lock()
 	reg.now = func() time.Time {
 		mu.Lock()
 		defer mu.Unlock()
 		return clock
 	}
-	reg.outcomeWindowOpenedAt = start // process start
-	reg.mu.Unlock()
+	reg.outcomes.mu.Lock()
+	reg.outcomes.openedAt = start // process start
+	reg.outcomes.mu.Unlock()
 	svc.InitOutcomeWindow(true)
 	reg.RecordUpstreamOutcome(true, false)
 
@@ -397,5 +410,69 @@ func TestOutcomeWindow_OutcomeDuringInFlightSendKeepsMarker(t *testing.T) {
 	next := startOutcomeProcess(t, srv.URL, db, false, true)
 	if got := coverageOf(next); got != OutcomeCoveragePartial {
 		t.Fatalf("restart after the kill: %q, want partial", got)
+	}
+}
+
+// FR-035 (r4): an outcome is pending usage data on its own. A window whose
+// only content is an outcome (dispatch counter 0) must still be sent by the
+// graceful-shutdown flush, and Reset must zero it.
+func TestOutcomeWindow_OutcomeOnlyWindowIsFlushedAndReset(t *testing.T) {
+	srv, received, setStatus := newOutcomeCaptureServer(t)
+	setStatus(http.StatusNoContent)
+	db, _ := openOutcomeDB(t)
+	p := startOutcomeProcess(t, srv.URL, db, true, true)
+	reg := p.Registry()
+	reg.RecordUpstreamOutcome(false, false)
+	if got := reg.Snapshot().UpstreamToolCallCountBucket; got != "0" {
+		t.Fatalf("precondition: dispatch bucket %q, want 0", got)
+	}
+	if !reg.HasPendingCounters() {
+		t.Fatal("an outcome alone must count as pending for the shutdown flush")
+	}
+	p.flushEligible.Store(true)
+	p.flushFinalHeartbeat()
+	got := received()
+	if len(got) != 1 {
+		t.Fatalf("the shutdown flush sent %d heartbeats, want 1", len(got))
+	}
+	if o := got[0].payload.UpstreamOutcomes; o == nil || o.Unusable != "1-10" {
+		t.Fatalf("flushed window = %+v, want unusable 1-10", o)
+	}
+	if set, _ := markerOf(t, db); set {
+		t.Fatal("the landed flush must clear the marker")
+	}
+
+	reg.RecordUpstreamOutcome(true, false)
+	reg.Reset()
+	if reg.HasPendingCounters() || reg.HasPendingUpstreamOutcomes() {
+		t.Fatal("Reset must zero the outcome counts")
+	}
+}
+
+// FR-035 (r4): the server edition sends upstream_outcomes without window_age
+// (it has no install_origin), even with an anchor provider wired.
+func TestOutcomeWindow_ServerEditionSendsNoWindowAge(t *testing.T) {
+	srv, received, setStatus := newOutcomeCaptureServer(t)
+	setStatus(http.StatusNoContent)
+	db, _ := openOutcomeDB(t)
+	svc := newOutcomeService(t, srv.URL, "server")
+	svc.SetActivationStore(NewActivationStore(), db)
+	svc.SetInstallAnchorProvider(func() (time.Time, bool, error) { return time.Now().UTC(), true, nil })
+	svc.InitOutcomeWindow(true)
+	svc.Registry().RecordUpstreamOutcome(true, false)
+	svc.sendHeartbeat(context.Background())
+	got := received()
+	if len(got) != 1 {
+		t.Fatalf("received %d heartbeats", len(got))
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(got[0].raw["upstream_outcomes"], &obj); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := obj["window_age"]; has {
+		t.Fatalf("server edition sent window_age: %s", got[0].raw["upstream_outcomes"])
+	}
+	if _, has := got[0].raw["day_two"]; has {
+		t.Fatal("server edition sent day_two")
 	}
 }

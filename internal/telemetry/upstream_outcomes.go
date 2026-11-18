@@ -1,6 +1,9 @@
 package telemetry
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // Schema v17 (Spec 126 FR-035, FR-036): per-window COMPLETION counters.
 //
@@ -23,8 +26,8 @@ import "time"
 // UpstreamOutcomes is the wire form of the completion window. Every count is a
 // bucketUpstream label; Coverage is OutcomeCoverageFull or
 // OutcomeCoveragePartial; WindowAge is the install age (an InstallAge* value)
-// when the window OPENED, present only on a fresh personal-edition install.
-// Every field is frozen into the drained snapshot.
+// when the window OPENED, present only when install_origin is "fresh" (never
+// on the server edition). Every field is frozen into the drained snapshot.
 type UpstreamOutcomes struct {
 	Succeeded           string `json:"succeeded"`
 	Unusable            string `json:"unusable"`
@@ -39,79 +42,122 @@ const (
 	// accepted send (or, on a fresh install, since the store was created).
 	OutcomeCoverageFull = "full"
 	// OutcomeCoveragePartial: the first window of a process whose predecessor
-	// left an undelivered window behind (the persisted marker was still set),
-	// or the first start of this build on an existing store, where no marker
-	// exists yet. Those unsent counts are lost.
+	// left recorded outcomes undelivered (the persisted marker was still set),
+	// or the first schema-17 start of an install whose origin is "existing",
+	// where no marker exists yet. Those unsent counts are lost.
 	OutcomeCoveragePartial = "partial"
 )
+
+// outcomeWindow is the live completion window and the undelivered-window
+// marker it drives (FR-036). One small mutex guards the outcome increment,
+// the "outcome since the last drain" state (counts > 0), Drain's swap and
+// reset of the counts, and both marker writes, so:
+//
+//   - the marker is set (true) in the same critical section as, and before,
+//     the first outcome after process start or after a Drain;
+//   - the post-2xx clear (false) is written only when no outcome was counted
+//     since the Drain whose snapshot was accepted, decided and written in one
+//     critical section.
+//
+// No interleaving can therefore leave the marker false while an undelivered
+// outcome exists. The mutex is NEVER held across network I/O: Drain runs at
+// the start of a send and the clear after its 2xx, each taking the mutex only
+// for the swap or the write. A marker write is a local bbolt commit, once per
+// window, and is the only disk I/O under it. The accept decision itself is
+// made under the service's deliveryMu; only the post-2xx clear takes this
+// mutex, and nothing on the tool-call path ever waits on deliveryMu.
+type outcomeWindow struct {
+	mu                  sync.Mutex
+	succeeded           int64
+	unusable            int64
+	succeededNonStarter int64
+	// partial marks the CURRENT window's coverage (cleared by a Drain).
+	partial bool
+	// openedAt is when the current window opened: registry creation
+	// (process start) or the last Drain. ageFn maps it to window_age; nil
+	// omits window_age.
+	openedAt time.Time
+	ageFn    func(opened time.Time) string
+	// markerWrite persists the undelivered-window marker; nil until the
+	// telemetry service installs it (InitOutcomeWindow).
+	markerWrite func(set bool)
+}
+
+func (w *outcomeWindow) pendingLocked() bool {
+	return w.succeeded > 0 || w.unusable > 0 || w.succeededNonStarter > 0
+}
+
+func (w *outcomeWindow) pending() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.pendingLocked()
+}
+
+func (w *outcomeWindow) viewLocked() UpstreamOutcomes {
+	coverage := OutcomeCoverageFull
+	if w.partial {
+		coverage = OutcomeCoveragePartial
+	}
+	windowAge := ""
+	if w.ageFn != nil {
+		windowAge = w.ageFn(w.openedAt)
+	}
+	return UpstreamOutcomes{
+		Succeeded:           bucketUpstream(w.succeeded),
+		Unusable:            bucketUpstream(w.unusable),
+		SucceededNonStarter: bucketUpstream(w.succeededNonStarter),
+		Coverage:            coverage,
+		WindowAge:           windowAge,
+	}
+}
+
+func (w *outcomeWindow) view() UpstreamOutcomes {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.viewLocked()
+}
+
+// drain detaches the window (frozen, coverage and window_age included) and
+// opens the next one at now.
+func (w *outcomeWindow) drain(now time.Time) UpstreamOutcomes {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := w.viewLocked()
+	w.succeeded, w.unusable, w.succeededNonStarter = 0, 0, 0
+	w.partial = false
+	w.openedAt = now
+	return out
+}
+
+// reset zeroes the window like drain, discarding it.
+func (w *outcomeWindow) reset(now time.Time) {
+	_ = w.drain(now)
+}
 
 // RecordUpstreamOutcome counts one logical upstream call that dispatched at
 // least one request. succeeded is true for a usable result; starter is true
 // when the starter classifier marks the call's server as the starter. The
-// server name never reaches the registry.
-//
-// The first outcome of a window (the first since the last Drain) calls the
-// undelivered-window hook outside the registry lock, with the window's drain
-// epoch; the hook persists the marker FR-036 reads at the next start.
+// server name never reaches the registry. The first outcome of a window (the
+// first since process start or the last Drain) sets the undelivered-window
+// marker in the same critical section.
 func (r *CounterRegistry) RecordUpstreamOutcome(succeeded, starter bool) {
-	r.mu.Lock()
-	first := !r.upstreamOutcomesPendingLocked()
+	w := &r.outcomes
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	// The marker is set BEFORE the increment, inside the same critical
+	// section, so there is never an undelivered outcome with the marker
+	// still false.
+	if !w.pendingLocked() && w.markerWrite != nil {
+		w.markerWrite(true)
+	}
 	if succeeded {
-		r.outcomeSucceeded++
+		w.succeeded++
 		if !starter {
-			r.outcomeSucceededNonStarter++
+			w.succeededNonStarter++
 		}
 	} else {
-		r.outcomeUnusable++
+		w.unusable++
 	}
-	hook := r.outcomeWindowHook
-	epoch := r.outcomeDrainEpoch
-	r.mu.Unlock()
-	if first && hook != nil {
-		hook(epoch)
-	}
-}
-
-// SetUndeliveredWindowHook installs the function called when a window records
-// its first outcome, with that window's drain epoch. The telemetry service
-// installs it to persist the undelivered-window marker.
-func (r *CounterRegistry) SetUndeliveredWindowHook(fn func(epoch uint64)) {
-	r.mu.Lock()
-	r.outcomeWindowHook = fn
-	r.mu.Unlock()
-}
-
-// SetOutcomeWindowAgeFunc installs the window_age mapping: the install age
-// bucket of the time a window opened (registry creation, i.e. process start,
-// or the last Drain). fn must be pure and cheap (it runs under the registry
-// lock); nil omits window_age. Drain freezes the value into the detached
-// snapshot, so a retry carries the age its window opened at.
-func (r *CounterRegistry) SetOutcomeWindowAgeFunc(fn func(opened time.Time) string) {
-	r.mu.Lock()
-	r.outcomeWindowAgeFn = fn
-	r.mu.Unlock()
-}
-
-// HasPendingUpstreamOutcomes reports whether the current (undrained) window
-// holds any outcome.
-func (r *CounterRegistry) HasPendingUpstreamOutcomes() bool {
-	if r == nil {
-		return false
-	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.upstreamOutcomesPendingLocked()
-}
-
-// MarkOutcomeWindowPartial marks the CURRENT counter window's
-// upstream_outcomes as partial. Service.InitOutcomeWindow calls it once at
-// startup when the predecessor left an undelivered window. The flag travels with the window: Drain
-// moves it into the detached snapshot (kept unchanged across retries) and the
-// next window starts full.
-func (r *CounterRegistry) MarkOutcomeWindowPartial() {
-	r.mu.Lock()
-	r.outcomeWindowPartial = true
-	r.mu.Unlock()
 }
 
 // RecordUpstreamOutcomeOn calls reg.RecordUpstreamOutcome if reg is non-nil.
@@ -122,39 +168,64 @@ func RecordUpstreamOutcomeOn(reg *CounterRegistry, succeeded, starter bool) {
 	reg.RecordUpstreamOutcome(succeeded, starter)
 }
 
-// upstreamOutcomesLocked builds the wire form of the current window. The
-// caller holds r.mu (read or write).
-func (r *CounterRegistry) upstreamOutcomesLocked() UpstreamOutcomes {
-	coverage := OutcomeCoverageFull
-	if r.outcomeWindowPartial {
-		coverage = OutcomeCoveragePartial
-	}
-	windowAge := ""
-	if r.outcomeWindowAgeFn != nil {
-		windowAge = r.outcomeWindowAgeFn(r.outcomeWindowOpenedAt)
-	}
-	return UpstreamOutcomes{
-		Succeeded:           bucketUpstream(r.outcomeSucceeded),
-		Unusable:            bucketUpstream(r.outcomeUnusable),
-		SucceededNonStarter: bucketUpstream(r.outcomeSucceededNonStarter),
-		Coverage:            coverage,
-		WindowAge:           windowAge,
+// MarkOutcomeWindowPartial marks the CURRENT window's upstream_outcomes as
+// partial. Service.InitOutcomeWindow calls it once at startup when the
+// predecessor left an undelivered window. The flag travels with the window:
+// Drain moves it into the detached snapshot (kept unchanged across retries)
+// and the next window starts full.
+func (r *CounterRegistry) MarkOutcomeWindowPartial() {
+	r.outcomes.mu.Lock()
+	r.outcomes.partial = true
+	r.outcomes.mu.Unlock()
+}
+
+// SetOutcomeWindowAgeFunc installs the window_age mapping: the install age
+// bucket of the time a window opened (registry creation, i.e. process start,
+// or the last Drain). fn must be pure and cheap (it runs under the window
+// mutex); nil omits window_age. Drain freezes the value into the detached
+// snapshot, so a retry carries the age its window opened at.
+func (r *CounterRegistry) SetOutcomeWindowAgeFunc(fn func(opened time.Time) string) {
+	r.outcomes.mu.Lock()
+	r.outcomes.ageFn = fn
+	r.outcomes.mu.Unlock()
+}
+
+// SetOutcomeMarkerWriter installs the persistence of the undelivered-window
+// marker. When the live window already holds outcomes (recorded before the
+// writer existed) the marker is set at once.
+func (r *CounterRegistry) SetOutcomeMarkerWriter(write func(set bool)) {
+	w := &r.outcomes
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.markerWrite = write
+	if write != nil && w.pendingLocked() {
+		write(true)
 	}
 }
 
-// resetUpstreamOutcomesLocked zeroes the window's counts and its coverage
-// flag. The caller holds r.mu and sets the next window's open time.
-func (r *CounterRegistry) resetUpstreamOutcomesLocked() {
-	r.outcomeSucceeded = 0
-	r.outcomeUnusable = 0
-	r.outcomeSucceededNonStarter = 0
-	r.outcomeWindowPartial = false
+// ClearOutcomeMarkerIfIdle runs after an accepted send (the shutdown flush
+// included): it clears the marker unless an outcome was counted since the
+// Drain whose snapshot was just accepted. Those outcomes are still
+// undelivered, and the marker their first outcome set must stay set.
+func (r *CounterRegistry) ClearOutcomeMarkerIfIdle() {
+	if r == nil {
+		return
+	}
+	w := &r.outcomes
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.markerWrite != nil && !w.pendingLocked() {
+		w.markerWrite(false)
+	}
 }
 
-// upstreamOutcomesPendingLocked reports whether the window holds any outcome.
-// The coverage flag alone is not usage data. The caller holds r.mu.
-func (r *CounterRegistry) upstreamOutcomesPendingLocked() bool {
-	return r.outcomeSucceeded > 0 || r.outcomeUnusable > 0 || r.outcomeSucceededNonStarter > 0
+// HasPendingUpstreamOutcomes reports whether the current (undrained) window
+// holds any outcome.
+func (r *CounterRegistry) HasPendingUpstreamOutcomes() bool {
+	if r == nil {
+		return false
+	}
+	return r.outcomes.pending()
 }
 
 // UpstreamOutcomeTotals returns the raw counts of the current (undrained)
@@ -164,7 +235,7 @@ func (r *CounterRegistry) UpstreamOutcomeTotals() (succeeded, unusable, succeede
 	if r == nil {
 		return 0, 0, 0
 	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.outcomeSucceeded, r.outcomeUnusable, r.outcomeSucceededNonStarter
+	r.outcomes.mu.Lock()
+	defer r.outcomes.mu.Unlock()
+	return r.outcomes.succeeded, r.outcomes.unusable, r.outcomes.succeededNonStarter
 }

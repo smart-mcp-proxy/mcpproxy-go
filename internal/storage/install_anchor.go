@@ -29,8 +29,9 @@ const (
 var errStoreHasRecords = stderrors.New("store has records")
 
 // fileIsAbsentOrEmpty reports whether path does not exist or is 0 bytes long.
-// Any other stat failure counts as "not empty": an install whose store cannot
-// be inspected is reported as existing, never guessed to be new.
+// Any other stat failure returns false, which only means "not known to be
+// empty from the file alone": NewBoltDB then lets the record walk
+// (storeHasRecords) decide.
 func fileIsAbsentOrEmpty(path string) bool {
 	fi, err := os.Stat(path)
 	if err != nil {

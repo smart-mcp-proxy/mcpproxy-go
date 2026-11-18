@@ -271,32 +271,12 @@ func buildObservabilityConfig(cfg *config.Config) observability.Config {
 	return out
 }
 
-// ensureInstallAnchor writes the install anchor when config.db held no prior
-// data at open (Spec 126 FR-033). It never rewrites an anchor and never
-// creates one on an existing store. A failure is logged and startup goes on:
-// the install then reports install_origin "existing", never a guess.
-func ensureInstallAnchor(rt *runtime.Runtime, logger *zap.Logger) {
-	sm := rt.StorageManager()
-	if sm == nil {
-		return
-	}
-	if _, _, err := sm.EnsureInstallAnchor(time.Now()); err != nil {
-		logger.Warn("Failed to record the install anchor", zap.Error(err))
-	}
-}
-
 // NewServerWithConfigPath creates a new server instance with explicit config path tracking
 func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.Logger, opts ...ServerOption) (*Server, error) {
 	rt, err := runtime.New(cfg, configPath, logger)
 	if err != nil {
 		return nil, err
 	}
-
-	// Spec 126 FR-033: record the install anchor at startup, before telemetry
-	// is wired (SetTelemetry below reads it for day_two and window_age) and
-	// before the HTTP server and MCP initialisation start. Whatever the
-	// telemetry opt-out setting: only sending is gated.
-	ensureInstallAnchor(rt, logger)
 
 	// Install the configured offline TPA signature corpus (spec 086 FR-019)
 	// here, at construction, because the trust_mode:scan gate is
