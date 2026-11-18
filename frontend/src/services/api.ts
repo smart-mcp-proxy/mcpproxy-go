@@ -615,7 +615,7 @@ class APIService {
   }
 
   // Spec 125 (skills over MCP, PR-4a): administrator-only skills routes. Failures
-  // carry `errorCode` (review_out_of_date, server_replaced, refresh_in_progress,
+  // carry `errorCode` (review_out_of_date, server_replaced, refresh_superseded,
   // skill_unusable, ...). approve is bound to the reviewed hashes (expectedHashes:
   // skill path -> current_hash) and to the server incarnation; the core answers
   // 409 and writes nothing when either moved.

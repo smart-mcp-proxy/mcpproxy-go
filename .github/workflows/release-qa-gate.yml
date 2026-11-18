@@ -567,16 +567,23 @@ jobs:
       # Spec 125: the Skills tab sweep needs enable_skills and a skills-capable
       # upstream, so it has its own launcher (throwaway core + cmd/skillsfixture
       # on free loopback ports). It runs even when the sweep above failed, inside
-      # this advisory job; its results file (skills-sweep-results.json) and
-      # screenshots land under tmp/web-smoke-artifacts/, which the Playwright
-      # report upload below already carries.
+      # this advisory job, and records its own ADVISORY manifest entry
+      # (advisory/skills-tab-sweep), so a red run is listed under the verdict's
+      # advisory_failures; its fragment lands in GATE_REPORT_DIR, which the
+      # fragment upload below carries. Its results file (skills-sweep-results.json)
+      # and screenshots land under tmp/web-smoke-artifacts/, which the Playwright
+      # report upload below already carries. --self-test-first first proves that
+      # an ambient MCPPROXY_DATA_DIR never reaches the core and that the results
+      # writer redacts the API key.
       - name: Run Skills tab sweep (spec 125)
         if: ${{ !cancelled() }}
         env:
           MCPPROXY_BINARY_PATH: ${{ github.workspace }}/dist-bin/mcpproxy
           SKILLS_FIXTURE_BINARY: ${{ github.workspace }}/dist-bin/skillsfixture
         run: |
-          bash scripts/run-skills-tab-sweep.sh --out "${GITHUB_WORKSPACE}/tmp/web-smoke-artifacts/skills-sweep"
+          ./dist-bin/release-gate run-suite \
+            --name advisory/skills-tab-sweep --advisory --report-dir "${GATE_REPORT_DIR}" \
+            -- bash scripts/run-skills-tab-sweep.sh --self-test-first --out "${GITHUB_WORKSPACE}/tmp/web-smoke-artifacts/skills-sweep"
 
       - name: Upload Playwright report
         if: always()

@@ -131,15 +131,74 @@ describe('SkillsPanel', () => {
     expect(api.getServerSkills).toHaveBeenCalledTimes(3)
   })
 
-  it('refresh replaces the listing; a 409 refresh_in_progress shows a notice', async () => {
+  // Round-2 finding 4: the backend sends refresh_superseded (never refresh_in_progress),
+  // and the notice says the list was reloaded, so a failed refresh reloads it.
+  it('refresh replaces the listing; a 409 refresh_superseded shows a notice and reloads the listing', async () => {
     m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('a')])))
     const w = mountPanel(); await flushPromises()
     m(api.refreshServerSkills).mockResolvedValueOnce(ok(makeListing([makeSkill('a'), makeSkill('new')])))
     await w.get('[data-test="skills-refresh"]').trigger('click'); await flushPromises()
     expect(w.find('[data-test="skill-row-new"]').exists()).toBe(true)
-    m(api.refreshServerSkills).mockResolvedValueOnce({ success: false, error: 'refresh_in_progress: x', errorCode: 'refresh_in_progress' })
+    expect(api.getServerSkills).toHaveBeenCalledTimes(1)
+    m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('a'), makeSkill('after')])))
+    m(api.refreshServerSkills).mockResolvedValueOnce({ success: false, error: 'server srv reconnected during the refresh', errorCode: 'refresh_superseded' })
     await w.get('[data-test="skills-refresh"]').trigger('click'); await flushPromises()
-    expect(w.get('[data-test="skills-notice"]').text()).toMatch(/already running/i)
+    expect(w.get('[data-test="skills-notice"]').text()).toMatch(/reconnected during the refresh/i)
+    expect(w.get('[data-test="skills-notice"]').text()).toMatch(/reloaded/i)
+    expect(api.getServerSkills).toHaveBeenCalledTimes(2)
+    expect(w.find('[data-test="skill-row-after"]').exists()).toBe(true)
+  })
+
+  it('a refresh failing with skills_not_supported or a 500 also reloads the listing', async () => {
+    m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('a')])))
+    const w = mountPanel(); await flushPromises()
+    m(api.refreshServerSkills).mockResolvedValueOnce({ success: false, error: 'server srv does not announce the skills extension', errorCode: 'skills_not_supported' })
+    await w.get('[data-test="skills-refresh"]').trigger('click'); await flushPromises()
+    expect(w.get('[data-test="skills-notice"]').text()).toMatch(/does not announce the skills extension/i)
+    expect(api.getServerSkills).toHaveBeenCalledTimes(2)
+    m(api.refreshServerSkills).mockResolvedValueOnce({ success: false, error: 'boom' })
+    await w.get('[data-test="skills-refresh"]').trigger('click'); await flushPromises()
+    expect(w.get('[data-test="skills-notice"]').text()).toContain('boom')
+    expect(api.getServerSkills).toHaveBeenCalledTimes(3)
+  })
+
+  // Round-2 finding 5: a write notice belongs to the review it answered.
+  it('opening another skill clears the write notice', async () => {
+    m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('a'), makeSkill('b')])))
+    m(api.approveSkills).mockResolvedValue(ok({ approved: 1 }))
+    const w = mountPanel(); await flushPromises()
+    await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
+    await w.get('[data-test="skill-approve"]').trigger('click'); await flushPromises()
+    expect(w.get('[data-test="skills-notice"]').text()).toMatch(/approved/i)
+    await w.get('[data-test="skill-row-b"]').trigger('click'); await flushPromises()
+    expect(w.find('[data-test="skills-notice"]').exists()).toBe(false)
+  })
+
+  it('switching skill after the write answer but before its reload finishes shows no notice on the new one', async () => {
+    m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([makeSkill('a'), makeSkill('b')])))
+    m(api.approveSkills).mockResolvedValue(ok({ approved: 1 }))
+    let releaseReload: (v: unknown) => void = () => {}
+    m(api.getServerSkills).mockReturnValueOnce(new Promise(r => { releaseReload = r }))
+    const w = mountPanel(); await flushPromises()
+    await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
+    await w.get('[data-test="skill-approve"]').trigger('click'); await flushPromises()
+    // The answer is in; the reload is still in flight.
+    expect(api.getServerSkills).toHaveBeenCalledTimes(2)
+    await w.get('[data-test="skill-row-b"]').trigger('click'); await flushPromises()
+    releaseReload(ok(makeListing([makeSkill('a', { status: 'approved' }), makeSkill('b')]))); await flushPromises()
+    expect(w.get('[data-test="skill-name"]').text()).toBe('b')
+    expect(w.find('[data-test="skills-notice"]').exists()).toBe(false)
+  })
+
+  // Round-2 finding 11: the agent-token listing shape has no scan block.
+  it('renders an entry without a scan block (agent shape) without throwing', async () => {
+    const s = makeSkill('a', { status: 'approved' }) as any
+    delete s.scan
+    m(api.getServerSkills).mockResolvedValue(ok(makeListing([s])))
+    const w = mountPanel(); await flushPromises()
+    expect(w.get('[data-test="skill-chip-a"]').text()).toBe('Approved')
+    await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
+    expect(w.find('[data-test="skill-detail"]').exists()).toBe(true)
   })
 
   it('reloads on mcpproxy:skills-changed for its own server only', async () => {

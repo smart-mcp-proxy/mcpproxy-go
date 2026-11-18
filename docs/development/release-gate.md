@@ -34,7 +34,7 @@ fragments against a hardcoded manifest and exits per the verdict.
 | `suite-scan-eval` | `suite/scan-eval` | 10 min | `go run ./cmd/scan-eval --gate --min-recall 0.90 --max-fp 0.05` over the detect corpus — runs on **every** tag regardless of changed paths (FR-015). |
 | `matrix-invariants` | `matrix/{stdio,http,sse,docker,oauth}`, `invariant/{activity-request-id,counters,quarantine-flow,upgrade-in-place}` | 20 min | Boots the candidate against five local fixture upstreams (connect → list → call → kill/reconnect) and asserts the US2 invariants against the live instance. |
 | `surface-consistency` | `invariant/surface-consistency` (T4) | 20 min | Boots the same matrix, adds quarantined/disabled/unhealthy/live servers and asserts the CLI, MCP and rendered Web UI agree with the core on every server's state — see [Surface consistency](#surface-consistency-t4--blocking). |
-| `web-ui-sweep` | — (advisory `advisory/web-ui-sweep`, T2) | 20 min | Playwright sweep over the Web UI **served by the candidate binary**, with a live stdio fixture upstream. `continue-on-error: true` — see [Web UI sweep](#web-ui-sweep-t2--advisory). |
+| `web-ui-sweep` | — (advisory `advisory/web-ui-sweep`, T2, and `advisory/skills-tab-sweep`, spec 125) | 20 min | Playwright sweep over the Web UI **served by the candidate binary**, with a live stdio fixture upstream. `continue-on-error: true` — see [Web UI sweep](#web-ui-sweep-t2--advisory). |
 | `verdict` | (merges all) | 10 min | `release-gate report` → `gate-report.json` + `$GITHUB_STEP_SUMMARY`; its exit code **is** the gate verdict. |
 
 Every job uploads its fragment with `if: always()`, so a job that dies before
@@ -148,10 +148,22 @@ page disagree):
   fixture command line and port, each scenario's pass/fail, and the skill
   records read back after the approve, block and unblock steps) under
   `tmp/web-smoke-artifacts/skills-sweep/`, so it is uploaded with the
-  `web-ui-sweep-playwright-report` artifact. The step runs even when the
-  standing sweep failed; a red step marks the job failed, which
-  `continue-on-error` keeps advisory. Its outcome is not a separate manifest
-  entry: read the results file.
+  `web-ui-sweep-playwright-report` artifact. It runs with `--self-test-first`,
+  which first proves (no browser) that an ambient `MCPPROXY_DATA_DIR` /
+  `MCPPROXY_DATA` never reaches the throwaway core and that the results writer
+  redacts the API key and local paths. The step runs even when the
+  standing sweep failed, through `release-gate run-suite --name
+  advisory/skills-tab-sweep --advisory`, so its outcome is its own
+  non-blocking manifest entry: a red run is recorded as `advisory-fail` and
+  listed in the verdict's `advisory_failures` (a run that died before writing
+  its fragment is a missing advisory entry, listed there too), and
+  `continue-on-error` keeps the job from blocking the tag. The Playwright
+  config retries a failed test once in CI, but the skills spec is one stateful
+  serial group and turns retries off for itself (a retry would replay against
+  state the first attempt already changed); the results file records the first
+  failed attempt's error. `TestEveryRunSuiteNameIsInTheManifest` fails when a
+  `run-suite --name` in the workflow is not a manifest entry, or an advisory
+  entry has no step.
 
 Setup is not duplicated in YAML: the job calls
 [`scripts/run-web-smoke.sh`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/scripts/run-web-smoke.sh),
@@ -182,7 +194,7 @@ It is **advisory**, on purpose while the sweep earns its flake record:
 > `TestPublishersDoNotShipSweepArtifacts` guards this.
 
 **Promotion to blocking** is a two-line change: set `Blocking: true` on the
-`advisory/web-ui-sweep` manifest entry and drop `continue-on-error` from the job
+`advisory/web-ui-sweep` (and/or `advisory/skills-tab-sweep`) manifest entry and drop `continue-on-error` from the job
 (the FR-016 end state). Do it once the sweep has passed on three consecutive
 release tags with no flaky or infrastructure failure — the same criterion T3
 uses (FR-021).

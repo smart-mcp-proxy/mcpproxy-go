@@ -7,12 +7,15 @@
 //   2. a skill's SKILL.md opens in the viewer, a 150 KiB file pages with Load more,
 //      and a binary file is listed but not offered for viewing;
 //   3. approving a skill turns its chip to Approved;
-//   4. changing the upstream bytes and pressing Refresh while the skill is open
-//      marks the open review stale (Approve off) until it is re-opened; then it
-//      is Changed, with the file-set diff and a line diff against the approved
-//      copy, and approving binds the new hash;
-//   5. block and unblock;
-//   6. no uncaught page error anywhere.
+//   4. changing an APPROVED skill's upstream bytes and pressing Refresh while it
+//      is open marks the open review stale (it shows the approved version, so it
+//      offers no Approve) until it is re-opened; then it is Changed, with the
+//      file-set diff and a line diff against the approved copy, and approving
+//      binds the new hash;
+//   5. changing a PENDING skill's bytes while it is open marks the review stale
+//      and keeps its Approve button on screen but disabled;
+//   6. block and unblock;
+//   7. no uncaught page error anywhere.
 //
 // Normally run by scripts/run-skills-tab-sweep.sh, which starts everything and
 // sets the environment (docs/development/web-ui-verification.md):
@@ -32,14 +35,26 @@ const SERVER = process.env.SWEEP_SERVER_NAME || 'skillsfx'
 const FIXTURE = process.env.SKILLS_FIXTURE_URL || ''
 
 test.skip(!FIXTURE, 'SKILLS_FIXTURE_URL is not set: start cmd/skillsfixture and register it as an upstream')
-test.describe.configure({ mode: 'serial' })
+// One stateful serial group: each scenario builds on the records the previous
+// one wrote (approved, changed, blocked). A retry would replay a scenario
+// against state its first attempt already changed and always fail, hiding the
+// original error, so this group never retries (the config retries once in CI).
+test.describe.configure({ mode: 'serial', retries: 0 })
 
 const pageErrors: string[] = []
 
+// The key never goes into a page URL: a goto failure message (and so the
+// results file and the HTML report) would carry it. The Web UI reads it from
+// localStorage instead (frontend/src/services/api.ts initializeAPIKey), which an
+// init script sets on the core's origin before any page script runs.
 function url(route: string): string {
-  const sep = route.includes('?') ? '&' : '?'
-  return KEY ? `${BASE}/ui${route}${sep}apikey=${encodeURIComponent(KEY)}` : `${BASE}/ui${route}`
+  return `${BASE}/ui${route}`
 }
+
+// The Web UI's own SSE request carries the key as ?apikey=, so a trace's
+// network log would hold it: this spec records no traces (failure screenshots
+// show the page only, never the address bar).
+test.use({ trace: 'off' })
 
 async function shot(page: Page, name: string, focus?: string) {
   // The detail pane sits below the list; scroll the part worth seeing into view.
@@ -73,6 +88,11 @@ const chip = (page: Page, skill: string) => page.locator(`[data-test="skill-chip
 
 test.beforeEach(async ({ page }) => {
   page.on('pageerror', err => pageErrors.push(err.message))
+  if (KEY) {
+    await page.addInitScript(({ key, origin }) => {
+      if (window.location.origin === origin) window.localStorage.setItem('mcpproxy-api-key', key)
+    }, { key: KEY, origin: new URL(BASE).origin })
+  }
 })
 
 test('the Skills tab lists the fixture skills as awaiting review', async ({ page }) => {
@@ -178,6 +198,31 @@ test('an upstream change plus Refresh shows Changed with a file diff and a line 
   await page.locator('[data-test="skill-approve"]').click()
   await expect(chip(page, 'plain')).toHaveText('Approved')
   await saveState('approve-changed')
+})
+
+test('a pending skill changed while open is stale, with Approve disabled until re-opened', async ({ page }) => {
+  await page.goto(url(`/servers/${SERVER}?tab=skills`))
+  await row(page, 'with-files').click()
+  const approve = page.locator('[data-test="skill-approve"]')
+  // Pending and not stale: Approve is offered and enabled.
+  await expect(approve).toBeEnabled()
+  await expect(page.locator('[data-test="skill-stale"]')).toHaveCount(0)
+  const res = await fetch(`${FIXTURE}/_fixture/mutate?skill=with-files&file=notes.txt`, {
+    method: 'POST', body: 'Supporting notes\nsecond line\na third line added upstream\n', headers: MUTATE_HEADERS,
+  })
+  expect(res.status).toBe(204)
+  await page.locator('[data-test="skills-refresh"]').click()
+  await expect(page.locator('[data-test="skill-stale"]')).toContainText('This skill changed while you were reviewing it')
+  // Still pending (never approved), so the chip does not move...
+  await expect(chip(page, 'with-files')).toHaveText('Awaiting review')
+  // ...and SkillsPanel keeps the reviewed version on screen: its Approve stays,
+  // disabled, so the changed bytes cannot be approved unseen.
+  await expect(approve).toHaveCount(1)
+  await expect(approve).toBeDisabled()
+  await shot(page, '05b-pending-stale', '[data-test="skill-stale"]')
+  await page.locator('[data-test="skill-reopen"]').click()
+  await expect(page.locator('[data-test="skill-stale"]')).toHaveCount(0)
+  await expect(approve).toBeEnabled()
 })
 
 test('block and unblock', async ({ page }) => {

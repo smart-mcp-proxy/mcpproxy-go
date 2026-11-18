@@ -164,6 +164,38 @@ describe('ServerDetail Skills tab (Spec 125)', () => {
     wrapper.unmount()
   })
 
+  // Round-2 finding 3: a failed background re-check keeps the open review.
+  it('a failed re-check after a skills change (409 or 500) keeps the tab and the open panel', async () => {
+    const { wrapper, router } = await mountServerDetail('/servers/alpha?tab=skills')
+    expect(wrapper.find('[data-test="skills-panel"]').exists()).toBe(true)
+    for (const failure of [
+      { success: false, error: 'server_replaced: x', errorCode: 'server_replaced' },
+      { success: false, error: 'internal error' },
+    ]) {
+      ;(api.getServerSkills as any).mockResolvedValue(failure)
+      window.dispatchEvent(new CustomEvent('mcpproxy:skills-changed', { detail: { server: 'alpha' } }))
+      await flushPromises(); await flushPromises()
+      expect(wrapper.find('[data-test="skills-tab"]').exists()).toBe(true)
+      expect(wrapper.find('[data-test="skills-panel"]').exists()).toBe(true)
+      expect(router.currentRoute.value.query.tab).toBe('skills')
+    }
+    // A thrown request is a failure too.
+    ;(api.getServerSkills as any).mockRejectedValue(new Error('network'))
+    window.dispatchEvent(new CustomEvent('mcpproxy:skills-changed', { detail: { server: 'alpha' } }))
+    await flushPromises(); await flushPromises()
+    expect(wrapper.find('[data-test="skills-panel"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  // Round-2 finding 11: an agent-token listing (no `supported`) offers no tab.
+  it('hides the tab for an agent-shaped listing without `supported`', async () => {
+    ;(api.getServerSkills as any).mockResolvedValue({ success: true, data: { enabled: true, server: 'alpha', skills: [{ path: 'hf', status: 'approved', files: [] }] } })
+    const { wrapper, router } = await mountServerDetail('/servers/alpha?tab=skills')
+    expect(wrapper.find('[data-test="skills-tab"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="skills-panel"]').exists()).toBe(false)
+    expect(router.currentRoute.value.query.tab).toBe('tools')
+  })
+
   it('an in-place change to a server that offers skills honours its ?tab=skills (not judged by the previous server)', async () => {
     ;(api.getServerSkills as any).mockResolvedValue({ success: true, data: makeListing([], { enabled: false }) })
     const { wrapper, router } = await mountServerDetail('/servers/alpha')

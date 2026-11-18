@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -95,6 +96,51 @@ func TestWebUISweepJobReportsAndUploads(t *testing.T) {
 	}
 	if !strings.Contains(skillsStep.Run, "tmp/web-smoke-artifacts/") {
 		t.Errorf("run-skills-tab-sweep.sh must write into tmp/web-smoke-artifacts/ so its results file is uploaded with the job's artifacts: %s", skillsStep.Run)
+	}
+	// Its outcome must reach the gate verdict: wrapped in run-suite under its
+	// own advisory manifest entry, so a red skills sweep is listed under
+	// advisory_failures instead of vanishing inside continue-on-error.
+	for _, want := range []string{"release-gate run-suite", "--name " + gatereport.EntryAdvisorySkillsTabSweep, "--advisory", "--report-dir", "--self-test-first"} {
+		if !strings.Contains(skillsStep.Run, want) {
+			t.Errorf("the Skills tab sweep step must run through `release-gate run-suite --name %s --advisory --report-dir ... -- bash scripts/run-skills-tab-sweep.sh --self-test-first ...` (missing %q): %s",
+				gatereport.EntryAdvisorySkillsTabSweep, want, skillsStep.Run)
+		}
+	}
+	if skillsStep.If == "" || !strings.Contains(skillsStep.If, "!cancelled()") {
+		t.Errorf("the Skills tab sweep step must run even when the sweep before it failed (if: !cancelled()), got %q", skillsStep.If)
+	}
+}
+
+// runSuiteNameRe matches the entry name of every `release-gate run-suite` call.
+var runSuiteNameRe = regexp.MustCompile(`run-suite\s*\\?\s*--name\s+(\S+)`)
+
+// TestEveryRunSuiteNameIsInTheManifest: a run-suite call whose --name no
+// manifest entry declares writes a fragment the merger treats as unexpected,
+// and a manifest entry no step writes is a missing fragment. Every suite the
+// gate workflow runs must be a declared entry, and every advisory entry that is
+// a workflow step must be run by one.
+func TestEveryRunSuiteNameIsInTheManifest(t *testing.T) {
+	wf := parseWorkflow(t, gateWorkflowPath)
+	declared := map[string]bool{}
+	for _, m := range gatereport.Manifest() {
+		declared[m.Name] = true
+	}
+	seen := map[string]bool{}
+	for jobName, job := range wf.Jobs {
+		for _, s := range job.Steps {
+			for _, m := range runSuiteNameRe.FindAllStringSubmatch(s.Run, -1) {
+				name := strings.Trim(m[1], `"'`)
+				seen[name] = true
+				if !declared[name] {
+					t.Errorf("job %q runs suite %q, which no gatereport.Manifest() entry declares", jobName, name)
+				}
+			}
+		}
+	}
+	for _, name := range []string{gatereport.EntryAdvisoryWebUISweep, gatereport.EntryAdvisorySkillsTabSweep, gatereport.EntryAdvisoryMacOSSmoke} {
+		if !seen[name] {
+			t.Errorf("no workflow step runs the advisory suite %q (its fragment would always be missing)", name)
+		}
 	}
 }
 

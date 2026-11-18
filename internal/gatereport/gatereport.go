@@ -116,6 +116,13 @@ const (
 	// listed under advisory_failures) without blocking publication.
 	EntryAdvisoryWebUISweep = "advisory/web-ui-sweep"
 
+	// EntryAdvisorySkillsTabSweep is the Spec 125 Skills tab browser sweep
+	// (scripts/run-skills-tab-sweep.sh), a second step of the advisory
+	// web-ui-sweep job. ADVISORY like the T2 sweep: a red run (or one that
+	// died before writing its fragment) is listed under advisory_failures and
+	// never blocks the tag.
+	EntryAdvisorySkillsTabSweep = "advisory/skills-tab-sweep"
+
 	// EntryAdvisoryMacOSSmoke is the Spec 081 T3 macOS tray smoke (US4,
 	// FR-019/FR-020). ADVISORY until it has passed on 3 consecutive release
 	// tags (FR-021); a failure lands in advisory_failures and never blocks.
@@ -130,7 +137,8 @@ const (
 
 // Manifest returns the hardcoded expected-entries manifest: 5 matrix cells +
 // 5 invariants (incl. the T4 surface-consistency check) + 5 assembled suite
-// jobs (FR-003) + 2 advisory entries (the T2 Web UI sweep, the T3 macOS smoke).
+// jobs (FR-003) + 3 advisory entries (the T2 Web UI sweep, the Spec 125 Skills
+// tab sweep, the T3 macOS smoke).
 func Manifest() []ManifestEntry {
 	return []ManifestEntry{
 		{Name: EntryMatrixStdio, Blocking: true},
@@ -152,6 +160,7 @@ func Manifest() []ManifestEntry {
 		{Name: EntrySuiteScanEval, Blocking: true},
 
 		{Name: EntryAdvisoryWebUISweep, Blocking: false},
+		{Name: EntryAdvisorySkillsTabSweep, Blocking: false},
 
 		{Name: EntryAdvisoryMacOSSmoke, Blocking: false},
 	}

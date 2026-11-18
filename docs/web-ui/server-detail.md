@@ -45,8 +45,9 @@ offered opens the Tools tab instead (and the URL says `?tab=tools`).
 - **Changes.** For a skill with an approved copy, the files are compared by
   path and digest (added, removed, changed, same). **Show line diff** compares
   one changed text file line by line; a file over 256 KiB on either side is not
-  compared in the browser. A removed text file has **View approved**, which
-  opens its approved copy.
+  compared in the browser. A file whose approved copy is text has **View
+  approved**, which opens that copy; this covers a removed file and a text file
+  replaced by a binary file at the same path, which has no line diff.
 - **Scan.** The verdict, whether the scan was complete and why not, and each
   finding with its file, position, rule, severity and excerpt.
 - **Approve, Block, Unblock.** Approve names the content hash and the server

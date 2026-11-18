@@ -52,7 +52,7 @@ Admin only until PR-3; afterwards a scoped caller may read the approved copy of 
 
 ## `POST /servers/{id}/skills/refresh`
 
-Admin only. Starts a refresh and returns the listing once applied, or 409 `refresh_in_progress` joined to the running one. 409 `skills_not_supported` when the server does not announce the extension.
+Admin only. Starts a refresh and returns the listing once applied. Refresh is single-flight: a caller that arrives while a refresh of the server is running joins it and gets its result (no error). 409 `refresh_superseded` when the server reconnected during the refresh (its skills are read again after the reconnect), 409 `skills_disabled` when `enable_skills` is off or was turned off during the refresh, 409 `skills_not_supported` when the server does not announce the extension, 409 `server_replaced` when the server was removed or replaced while its skills were read.
 
 ## `POST /servers/{id}/skills/approve` (PR-2)
 

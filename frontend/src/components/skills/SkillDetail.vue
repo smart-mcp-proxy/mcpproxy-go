@@ -61,7 +61,8 @@
           <span class="badge badge-xs" :class="diffBadge[r.state]">{{ r.state }}</span>
           <code class="break-all" v-text="r.path"></code>
           <button v-if="r.state === 'changed' && r.before?.text && r.after?.text" class="btn btn-xs btn-ghost" :data-test="`skill-line-diff-${r.path}`" @click="showLineDiff(r)">Show line diff</button>
-          <button v-if="r.state === 'removed' && r.before?.text" class="btn btn-xs btn-ghost" :data-test="`skill-view-approved-${r.path}`" @click="viewFile(r.path, 'approved')">View approved</button>
+          <!-- Whenever the approved copy is text, whatever the current file is (removed, or replaced by a binary file). -->
+          <button v-if="r.state !== 'same' && r.before?.text" class="btn btn-xs btn-ghost" :data-test="`skill-view-approved-${r.path}`" @click="viewFile(r.path, 'approved')">View approved</button>
         </li>
       </ul>
       <div v-if="lineDiffState" class="space-y-1" data-test="skill-line-diff">
@@ -74,22 +75,23 @@
 
     <div class="space-y-1" data-test="skill-scan">
       <h4 class="font-medium text-sm">Scan</h4>
+      <!-- `scan` is guarded: a listing for a scoped caller carries none. -->
       <p class="text-sm">
-        Verdict: <strong v-text="skill.scan.verdict || 'not scanned'"></strong>
-        <span v-if="skill.scan.scanned_at" class="text-xs text-base-content/60"> at {{ formatDateTime(skill.scan.scanned_at) }}</span>
+        Verdict: <strong v-text="scan?.verdict || 'not scanned'"></strong>
+        <span v-if="scan?.scanned_at" class="text-xs text-base-content/60"> at {{ formatDateTime(scan.scanned_at) }}</span>
       </p>
-      <p v-if="skill.scan.verdict && !skill.scan.complete" class="text-sm text-warning">
-        Scan incomplete<span v-if="skill.scan.incomplete">: <span v-text="skill.scan.incomplete"></span></span>
+      <p v-if="scan?.verdict && !scan.complete" class="text-sm text-warning">
+        Scan incomplete<span v-if="scan.incomplete">: <span v-text="scan.incomplete"></span></span>
       </p>
-      <ul v-if="skill.scan.findings.length" class="text-sm space-y-1">
-        <li v-for="(f, i) in skill.scan.findings" :key="i" data-test="skill-finding" class="border-l-2 border-warning pl-2">
+      <ul v-if="scan?.findings?.length" class="text-sm space-y-1">
+        <li v-for="(f, i) in scan.findings" :key="i" data-test="skill-finding" class="border-l-2 border-warning pl-2">
           <code v-text="f.file"></code> @ {{ f.offset }}
           <span class="badge badge-xs ml-1" v-text="f.severity"></span>
           <code class="ml-1" v-text="f.rule"></code>
           <pre class="whitespace-pre-wrap break-words text-xs text-base-content/70" v-text="f.evidence"></pre>
         </li>
       </ul>
-      <p v-if="skill.scan.findings_truncated" class="text-xs text-base-content/60" data-test="skill-findings-truncated">More findings exist than are listed.</p>
+      <p v-if="scan?.findings_truncated" class="text-xs text-base-content/60" data-test="skill-findings-truncated">More findings exist than are listed.</p>
     </div>
   </section>
 </template>
@@ -117,6 +119,7 @@ const emit = defineEmits<{
 const LINE_DIFF_MAX_BYTES = 256 * 1024
 
 const chip = computed(() => skillStateChip(props.skill))
+const scan = computed(() => props.skill.scan as SkillEntry['scan'] | undefined)
 const chipClass = computed(() => `badge-${({ error: 'error', warning: 'warning', info: 'info', success: 'success', neutral: 'ghost' })[chip.value.tone]}`)
 const canApprove = computed(() => !props.skill.blocked && (props.skill.status === 'pending' || props.skill.status === 'changed'))
 const diffRows = computed<FileDiffRow[] | null>(() => props.skill.approved_files ? skillFileDiff(props.skill.approved_files, props.skill.files) : null)

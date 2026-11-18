@@ -220,6 +220,30 @@ describe('SkillDetail', () => {
     expect(w.get('[data-test="skill-viewer-text"]').text()).toBe('approved text')
   })
 
+  // Round-2 finding 6: a text file replaced by a binary file at the same path.
+  it('offers View approved when the approved copy is text and the current file is binary', async () => {
+    m(api.getSkillContent).mockResolvedValue(ok({ text: 'old text', offset: 0, size: 8, digest: 'sha256:t' }))
+    const w = mountDetail(makeSkill('a', {
+      status: 'changed', approved_hash: 'sk1-old',
+      approved_files: [skillFile('SKILL.md'), skillFile('notes', 'sha256:t', 8, true)],
+      files: [skillFile('SKILL.md'), skillFile('notes', 'sha256:bin', 8, false)],
+    }))
+    expect(w.get('[data-test="skill-diff-notes"]').attributes('data-state')).toBe('changed')
+    // No line diff (the current copy is binary), but the approved copy can be read.
+    expect(w.find('[data-test="skill-line-diff-notes"]').exists()).toBe(false)
+    await w.get('[data-test="skill-view-approved-notes"]').trigger('click'); await flushPromises()
+    expect(api.getSkillContent).toHaveBeenCalledWith('srv', { skill: 'a', file: 'notes', copy: 'approved', offset: 0 })
+    expect(w.get('[data-test="skill-viewer-text"]').text()).toBe('old text')
+  })
+
+  // Round-2 finding 11: an entry without a scan block (the agent shape) does not throw.
+  it('renders an entry without a scan block', () => {
+    const s = makeSkill('a') as any
+    delete s.scan
+    const w = mountDetail(s)
+    expect(w.get('[data-test="skill-scan"]').text()).toContain('not scanned')
+  })
+
   it('disables Approve while the review is stale', () => {
     const w = mount(SkillDetail, { props: { serverName: 'srv', skill: makeSkill('a'), busy: false, stale: true } })
     expect(w.get('[data-test="skill-approve"]').attributes('disabled')).toBeDefined()

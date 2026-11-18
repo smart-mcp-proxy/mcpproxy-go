@@ -136,9 +136,15 @@ export function skillFileDigest(entry: Pick<SkillEntry, 'files' | 'approved_file
   return list?.find(f => f.path === file)?.digest
 }
 
-/** The tab is offered when the feature is on and the server supports skills or has records. */
+/**
+ * The tab is offered when the feature is on and the server supports skills or
+ * has records. Only the administrator listing carries `supported`: a listing
+ * without it (the scoped/agent-token shape, SkillsAgentListResponse, which has
+ * no scan block either) is not offered.
+ */
 export function skillsTabVisible(listing: SkillsListResponse | undefined | null): boolean {
-  return !!listing && listing.enabled && (listing.supported || (listing.skills?.length ?? 0) > 0)
+  if (!listing || typeof listing.supported !== 'boolean') return false
+  return listing.enabled === true && (listing.supported || (listing.skills?.length ?? 0) > 0)
 }
 
 /** Operator-facing words for an error code of the skills routes. */
@@ -148,8 +154,13 @@ export function skillErrorNotice(code: string | undefined, message: string | und
       return 'This skill changed since you opened it, so nothing was approved. The list was reloaded; review it again.'
     case 'server_replaced':
       return 'This server was removed and added again since you opened it, so nothing was changed. The list was reloaded.'
-    case 'refresh_in_progress':
-      return 'A refresh is already running for this server. The list updates when it finishes.'
+    // The refresh codes of POST /skills/refresh (a concurrent refresh is joined, never refused).
+    case 'refresh_superseded':
+      return 'The server reconnected during the refresh, so its skills are read again after the reconnect. The list was reloaded.'
+    case 'skills_not_supported':
+      return 'This server does not announce the skills extension, so there is nothing to refresh. The list was reloaded.'
+    case 'skills_disabled':
+      return 'Skills over MCP was turned off (enable_skills), so nothing was refreshed. The list was reloaded.'
     default:
       return message || 'The request failed'
   }

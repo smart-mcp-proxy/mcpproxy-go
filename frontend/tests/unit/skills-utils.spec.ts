@@ -127,13 +127,22 @@ describe('skillsTabVisible', () => {
     expect(skillsTabVisible({ enabled: true, supported: true, skills: [] } as any)).toBe(true)
     expect(skillsTabVisible({ enabled: true, supported: false, skills: [{}] } as any)).toBe(true)
   })
+
+  // Round-2 finding 11: the agent-token shape has no `supported` (and no scan).
+  it('treats a listing without `supported` (the agent shape) as not offered', () => {
+    expect(skillsTabVisible({ enabled: true, skills: [{ path: 'a', status: 'approved' }] } as any)).toBe(false)
+    expect(skillsTabVisible({ enabled: true, skills: [] } as any)).toBe(false)
+  })
 })
 
 describe('skillErrorNotice', () => {
   it('names the stale-review and replaced-server cases and passes the rest through', () => {
     expect(skillErrorNotice('review_out_of_date', 'x')).toMatch(/changed since you opened it/i)
     expect(skillErrorNotice('server_replaced', 'x')).toMatch(/removed and added again/i)
-    expect(skillErrorNotice('refresh_in_progress', 'x')).toMatch(/already running/i)
+    // The refresh codes the backend sends (internal/httpapi/skills.go).
+    expect(skillErrorNotice('refresh_superseded', 'x')).toMatch(/reconnected during the refresh/i)
+    expect(skillErrorNotice('skills_not_supported', 'x')).toMatch(/does not announce the skills extension/i)
+    expect(skillErrorNotice('skills_disabled', 'x')).toMatch(/turned off/i)
     expect(skillErrorNotice('skill_unusable', 'cannot approve: bad')).toBe('cannot approve: bad')
     expect(skillErrorNotice(undefined, 'plain')).toBe('plain')
   })

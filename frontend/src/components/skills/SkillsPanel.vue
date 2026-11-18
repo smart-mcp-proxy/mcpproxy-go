@@ -51,8 +51,8 @@
             <span class="font-medium break-all" v-text="s.name || s.path"></span>
             <span class="badge badge-sm" :class="chipClass(s)" :data-test="`skill-chip-${s.path}`" v-text="skillStateChip(s).label"></span>
             <span class="text-xs text-base-content/60">{{ s.available ? 'Offered to agents' : 'Not offered' }}</span>
-            <span class="text-xs text-base-content/60">{{ s.files.length }} file{{ s.files.length === 1 ? '' : 's' }}</span>
-            <span v-if="s.scan.verdict" class="text-xs text-base-content/60">scan: <span v-text="s.scan.verdict"></span></span>
+            <span class="text-xs text-base-content/60">{{ s.files?.length ?? 0 }} file{{ (s.files?.length ?? 0) === 1 ? '' : 's' }}</span>
+            <span v-if="s.scan?.verdict" class="text-xs text-base-content/60">scan: <span v-text="s.scan.verdict"></span></span>
           </button>
         </li>
       </ul>
@@ -108,7 +108,10 @@ let reviewToken = 0
 const selectedPath = computed(() => review.value?.path ?? null)
 const liveSelected = computed(() => listing.value?.skills.find(s => s.path === selectedPath.value) ?? null)
 
+// Opening (or re-opening) a skill starts a new review: a notice that answered
+// the previous one (e.g. "Approved.") is not carried over to it.
 function open(s: SkillEntry) {
+  notice.value = ''
   review.value = { path: s.path, entry: s, incarnation: listing.value?.incarnation ?? 0, token: ++reviewToken, stale: false }
 }
 
@@ -152,8 +155,12 @@ async function refresh() {
   const res = await api.refreshServerSkills(server)
   if (!isCurrent(server, v)) return
   refreshing.value = false
-  if (res.success && res.data) { requestSeq++; apply(res.data) }
-  else notice.value = skillErrorNotice(res.errorCode, res.error)
+  if (res.success && res.data) { requestSeq++; apply(res.data); return }
+  // A failed refresh (refresh_superseded, skills_not_supported, skills_disabled,
+  // server_replaced, a 500) reloads the listing: the notice says it was reloaded,
+  // and the stored records may have moved even though this refresh did not apply.
+  notice.value = skillErrorNotice(res.errorCode, res.error)
+  await load()
 }
 
 // Spec 117 style binding: the approval names the hash and the incarnation of
