@@ -1,6 +1,6 @@
-# Tasks: Day-Two Activation, Experiment E3 (Spec 124)
+# Tasks: Day-Two Activation, Experiment E3 (Spec 126)
 
-**Input**: the design documents in `/specs/124-day-two-activation/`
+**Input**: the design documents in `/specs/126-day-two-activation/`
 **Prerequisites**: plan.md, spec.md, research.md (R1-R12), data-model.md, contracts/, quickstart.md
 
 **TDD rule (constitution V)**: write each `test` task first. It must FAIL for the stated behavioural reason on a build that compiles, before its paired `impl` task starts. Where a new symbol is needed, add a stub, so the failure is behavioural and not a compile error. Record the failing output in the PR description.
@@ -19,28 +19,127 @@
 
 ---
 
-## Phase 1: Setup (PR-A branch `124-pr-a-measure`)
+## Phase 1: Setup (PR-A branch `126-pr-a-measure`)
 
-- [ ] T001 Branch from `origin/main`. Record baseline timings (artifact: the PR-A description) for `go test -race ./internal/storage/... ./internal/telemetry/... ./internal/runtime/... ./internal/httpapi/...` in the PR description.
-- [ ] T002 [P] Create the empty package `internal/onboarding/` (`doc.go` with the package contract: pure domain logic, no storage or HTTP imports). Add an import-boundary test, `internal/onboarding/imports_test.go`, that fails if the package imports `internal/storage`, `internal/httpapi` or `internal/server`.
+- [ ] T001 Branch from `origin/main`. Record baseline timings for `go test -race ./internal/storage/... ./internal/telemetry/... ./internal/runtime/... ./internal/server/...` in the PR description.
 
 ---
 
-## Phase 2: User Story 5, measure first (P1; foundational, blocks Phases 3-6; PR-A) 🎯 ships first
+## Phase 2: User Story 5, instrumentation first (P1; foundational; PR-A, schema 17) 🎯 ships first
 
-**Goal**: persist every local fact and send schema 17, with no visible UI change. This gives a release of baseline data (research R12).
-**Independent test**: schema-17 payload tests, plus quickstart L4.
+**Goal**: send schema 17 with the instrumentation slice only (spec FR-033 to FR-038). Nothing in onboarding, the UI or the API surface changes. One release of this instrument exists before any onboarding change (research R12, R13).
+**Independent test**: the schema-17 payload tests, plus quickstart L4.
+**Companion PRs** (separate repos, reviewed on their own): T084 (receiver) and T085 (cohort query).
 
-### Install anchor and onboarding state
+### Install anchor (FR-033)
 
-- [ ] T003 [P] [US5] test: `internal/storage/onboarding_anchor_test.go`.
-  - (a) `EnsureInstallAnchor` on an empty store creates the record with `InstallFirstRunAt`.
-  - (b) On an existing record without the field, it leaves it zero (upgrade).
-  - (c) `UpdateOnboardingState` on a missing record sets the anchor (the safeguard).
-  - (d) Update-before-get keeps the anchor.
-  - (e) Two concurrent first writers produce one anchor; run under `-race`.
-  - (f) The anchor is never changed by later updates.
-- [ ] T004 [US5] impl: the `internal/storage/models.go` `OnboardingState` additions (data-model §1, all `omitempty`). `EnsureInstallAnchor` and the missing-record branch go in `internal/storage/bbolt.go` (~1221-1305), with a `manager.go` wrapper. Call `EnsureInstallAnchor` in `internal/server/server.go` startup **before** the HTTP server, connect service and MCP initialisation start.
+- [ ] T003 [P] [US5] test: `internal/storage/install_anchor_test.go`.
+  - (a) A store opened on a new file records `InstallFirstRunAt` once `EnsureInstallAnchor` runs.
+  - (b) A store opened on an existing file with data and no anchor stays without one (upgrade).
+  - (c) An existing empty file (0 bytes, or no buckets) counts as new.
+  - (d) A second start never changes the anchor.
+  - (e) Concurrent callers produce one anchor; run under `-race`.
+  - (f) The anchor is recorded with telemetry disabled.
+- [ ] T004 [US5] impl:
+  - `wasEmptyAtOpen` is decided in `internal/storage` at open, before any bucket is created.
+  - `EnsureInstallAnchor` and `InstallAnchor()` go in `internal/storage/bbolt.go`, with a `manager.go` wrapper. Use one key in an existing meta bucket or `OnboardingState.InstallFirstRunAt` (data-model §1), `omitempty`.
+  - Call `EnsureInstallAnchor` in `internal/server/server.go` startup **before** the HTTP server and MCP initialisation start.
+
+### Completion counters, coverage and scope (FR-035 to FR-038)
+
+- [ ] T079 [P] [US5] test: `internal/telemetry/upstream_outcomes_test.go`.
+  - `RecordUpstreamOutcome(succeeded, starter bool)` buckets match `bucketUpstream`.
+  - `succeeded_non_starter` excludes starter successes.
+  - The counts drain only on an accepted send, and a rejected send keeps them.
+  - `coverage` is `full` on a fresh install's first window and `partial` on the first window of a process over an existing store. It becomes `full` after the first accepted send.
+  - The server edition also sends `upstream_outcomes`.
+- [ ] T080 [P] [US5] test: `internal/telemetry/success_scope_test.go`.
+  - `success_scope_ever` moves only forward: none → starter_only → non_starter. A non-starter success after a starter success moves it to `non_starter`, and nothing moves it back.
+  - The value is persisted and survives a reopen.
+  - It is recorded with telemetry disabled.
+- [ ] T081 [P] [US5] test: `internal/server/upstream_outcome_paths_test.go`. For each dispatch path (the `call_tool_*` wrapper, direct routing, a `code_execution` sub-call):
+  - a usable result → exactly one `succeeded`;
+  - an upstream error, `isError:true`, or a result withheld by an output policy → exactly one `unusable`;
+  - a call refused before dispatch (quarantine, validation, a disconnected server) → no outcome;
+  - a session-recovery repeat → one outcome and two dispatches;
+  - a stub classifier that answers true for one server moves that server's success out of `succeeded_non_starter`.
+- [ ] T082 [US5] impl:
+  - `internal/telemetry/upstream_outcomes.go`: counters on `CounterRegistry`, the same reset-on-accept window as `upstream_tool_call_count_bucket`, and the coverage flag.
+  - `internal/telemetry/success_scope.go`: the sticky scope in the activation store.
+  - `internal/server/mcp_upstream_telemetry.go`: one `noteUpstreamOutcome(ctx, server, result, err)` beside `noteUpstreamDispatched`, called from the three paths after their output-policy checks (where `recordRealToolCallSuccess` is called today). A logical call with zero dispatches records nothing.
+  - `StarterClassifier` (FR-037): an interface in `internal/runtime` that answers for `(server, incarnation)`, with a default that answers false. Wire it through `Runtime`.
+
+### Origin and age (FR-034)
+
+- [ ] T083 [P] [US5] test: `internal/telemetry/install_age_test.go`.
+  - `install_origin` is `fresh` with an anchor and `existing` without one.
+  - `install_age` boundaries: day 6 23:59 → `d0_6`, day 7 00:00 → `d7_13`, day 14 → `d14_plus`. A future anchor counts as `d0_6`.
+  - `install_age` is absent when the origin is `existing`.
+  - The server edition omits `day_two`.
+
+### Payload, privacy and pins (schema 17)
+
+- [ ] T012 [P] [US5] test: `internal/telemetry/payload_v17_test.go` (`TestPayloadV17`).
+  - `schema_version == 17`.
+  - The `upstream_outcomes` and `day_two` keys match `contracts/telemetry-day-two.schema.json` (schema 17 part) exactly.
+  - The server edition omits `day_two` but keeps `upstream_outcomes`.
+  - Opt-out sends nothing.
+  - Log one sample payload (quickstart L4).
+- [ ] T013 [P] [US5] test: `internal/telemetry/anonymity_day_two_test.go` (`TestScanForPII*DayTwo`). It rejects:
+  - an unknown key in `upstream_outcomes` or `day_two`;
+  - an out-of-enum value for every field;
+  - a non-string bucket;
+  - a nested map;
+  - an RFC3339 timestamp;
+  - a server-name-like string.
+
+  A violation must not echo the offending key. A valid full object is accepted.
+- [ ] T014 [US5] impl:
+  - `internal/telemetry/day_two.go`: `DayTwoPayload` (`install_origin`, `install_age`, `success_scope_ever`) and an anchor provider set next to `SetOnboardingProvider`.
+  - `internal/telemetry/telemetry.go`: `SchemaVersion = 17`, a change-log paragraph that cites the dispatch/completion split, and the payload mapping.
+  - `internal/telemetry/anonymity.go`: `scanUpstreamOutcomes` and `scanDayTwo`, modelled on `scanTrustModeDistribution`.
+- [ ] T015 [US5] Move every pin of the then-current schema (16 on `origin/main`, re-verified 2026-11-18) to 17. List the pins with `grep -rnE 'schema_version.{0,3}16|want 16|SchemaVersion.{0,4}16' internal/telemetry docs`; afterwards the grep must find none. If main has bumped again, use the next free version and update this spec. Keep `schema_version_guard_test.go` green.
+
+### Docs (PR-A)
+
+- [ ] T016 [P] [US5] Docs:
+  - `docs/features/telemetry.md`: schema 17; `upstream_outcomes` (dispatch versus completion, logical calls versus requests); `day_two.install_origin` / `install_age` / `success_scope_ever` under "What is collected"; the coverage rule (a field counts only from its introducing schema).
+  - Add a `CLAUDE.md` "Recent Changes" line.
+- [ ] T017 [US5] PR-A verification:
+  - quickstart L4 with a fresh data directory (`install_origin: fresh`, `install_age: d0_6`);
+  - a second run over an older `config.db` (`existing`, first window `partial`);
+  - one call that succeeds and one that the upstream answers with `isError`, which give `succeeded` and `unusable`;
+  - the Sol 6.1 review loop;
+  - merge.
+
+### Companion PRs in the owning repositories
+
+- [ ] T084 [US5] `mcpproxy-telemetry` (FR-039):
+  - `counterWindowPayload` also copies `upstream_outcomes`, and `day_two.install_origin` / `install_age`, into `heartbeat_events`.
+  - `validateV17Payload` rejects unknown keys and out-of-enum values in those objects, for `schema_version >= 17` only.
+  - Vitest coverage: v16 passes unchanged; a valid v17 passes; every invalid v17 shape returns a structured 400; the event payload carries the new keys.
+  - Deploy before the first schema-17 release. The deploy is a maintainer step.
+- [ ] T085 [US5] `mcpproxy-dash` (FR-040): a `src/lib/server/queries/day-two-cohort.ts` query module built on `ci-filter.ts` and `identity.ts`. It runs in two modes, pre-17 baseline and schema 17, and reports the research-R13 figures and coverage rows per weekly cohort.
+  - Tests use the `ReceiverSim` fixture with synthetic ids and cover:
+    - an upgrade that is not eligible;
+    - a fresh install that returns in days 7–13;
+    - a starter-only install;
+    - a dispatch without completion;
+    - a window marked `partial`;
+    - an `age_unverified` row;
+    - a CI id excluded.
+  - Add a script or runbook entry that runs the baseline against D1 read-only (`--command`, never `--file`), and record the first baseline in the PR.
+
+**Checkpoint**: PR-A, T084 and T085 are merged, and the receiver is deployed. Schema 17 is live, the baseline is recorded, and no onboarding behaviour has changed.
+
+---
+
+## Phase 2b: onboarding facts (moved from PR-A to PR-B on 2026-11-18; ship in PR-B at the next free schema version)
+
+These tasks are unchanged in content. They now open PR-B, because their facts only mean something once the starter and second-client flows that produce them exist (spec FR-027, FR-028).
+
+- [ ] T002 [P] Create the empty package `internal/onboarding/` (`doc.go` with the package contract: pure domain logic, no storage or HTTP imports). Add an import-boundary test, `internal/onboarding/imports_test.go`, that fails if the package imports `internal/storage`, `internal/httpapi` or `internal/server`.
+
 - [ ] T005 [P] [US5] test: `internal/onboarding/facts_test.go`.
   - sticky boolean merge (true never reverts);
   - `MergeObservedClients` adds unseen IDs only and never overwrites a time;
@@ -75,54 +174,19 @@
   - Agent tokens are denied (the existing `requireAdminRead` rule).
 - [ ] T010 [US5] impl: in `internal/httpapi/onboarding.go` and `internal/httpapi/connect.go`, add the mark fields, observation calls, and the `day_two` local-facts block in the state response (contracts/onboarding-starter.openapi.yaml).
 
-### Telemetry schema 17
+### Activation flag `first_tool_indexed_*` (PR-B)
 
 - [ ] T011 [P] [US5] test: `internal/telemetry/activation_tool_indexed_test.go`.
   - `MarkFirstToolIndexed` is sticky.
   - `first_tool_indexed_at` is stored and **never** serialised.
   - `first_tool_indexed_after` is derived correctly, and `""` without an anchor.
   - Every fake `ActivationStore` in the repo compiles with the new method; grep the test tree.
-- [ ] T012 [P] [US5] test: `internal/telemetry/payload_v17_test.go` (`TestPayloadV17`).
-  - `schema_version == 17`.
-  - The `day_two` keys match `contracts/telemetry-day-two.schema.json` exactly.
-  - Server edition omits `day_two`.
-  - Opt-out sends nothing.
-  - `summary_views` drains only on an accepted send.
-  - Log one sample payload (quickstart L4).
-- [ ] T013 [P] [US5] test: `internal/telemetry/anonymity_day_two_test.go` (`TestScanForPII*DayTwo`). Rejections:
-  - an unknown `day_two` key;
-  - an unknown `summary_views` key;
-  - out-of-enum values for every enum field;
-  - a non-boolean flag;
-  - an RFC3339 timestamp or a map value inside `day_two`;
-  - a server-name-like string in `starter_kind`.
+**Checkpoint (PR-B prerequisite)**: facts, the facts loop and `first_tool_indexed_*` land at the start of PR-B, before its starter tasks.
 
-  The violation must not echo the offending key. Accept: a valid full object.
-- [ ] T014 [US5] impl:
-  - `internal/telemetry/activation.go`: key, field, load, save, `MarkFirstToolIndexed`.
-  - `internal/telemetry/day_two.go`: `DayTwoPayload`, `SetDayTwoProvider`, summary-view counter with an atomic per-surface 1-hour debounce, bucketing.
-  - `internal/telemetry/telemetry.go`: `SchemaVersion = 17`, a change-log paragraph, payload mapping.
-  - `internal/telemetry/anonymity.go`: `scanDayTwo` plus the activation enum rule.
-  - Provider wiring in `internal/server/server.go`, next to `SetOnboardingProvider` (~3234).
-- [ ] T015 [US5] Move every pin of the then-current schema (16 on `origin/main` at 2026-10-25) to the new version. List them with `grep -rnE 'schema_version.{0,3}16|want 16' internal/telemetry docs` and get no hits afterwards. If main has bumped again, use the next free version and update this spec. Keep `schema_version_guard_test.go` green.
-
-### Docs (PR-A)
-
-- [ ] T016 [P] [US5] Docs:
-  - `docs/features/telemetry.md`: schema 17, `day_two` and activation fields under "What is collected", privacy notes, the comparability note for `tool_count` versus `first_tool_indexed_ever`.
-  - `docs/features/connect-clients.md`: client observation.
-  - A `CLAUDE.md` "Recent Changes" line.
-- [ ] T017 [US5] PR-A verification:
-  - quickstart L4;
-  - opt-out run (`MCPPROXY_TELEMETRY=false`) shows facts recorded locally (`GET /onboarding/state`);
-  - Sol 6.1 review loop;
-  - merge.
-
-**Checkpoint**: PR-A merged. Facts and schema 17 are live; no UI has changed.
 
 ---
 
-## Phase 3: User Story 1 + User Story 2 (Web): starter (PR-B branch `124-pr-b-starter`) 🎯 MVP
+## Phase 3: User Story 1 + User Story 2 (Web): starter (PR-B branch `126-pr-b-starter`) 🎯 MVP
 
 **Goal**: a fresh install reaches indexed tools through add → inspect → bound approval, with the security model unchanged.
 **Independent test**: quickstart L1 and L2 (steps 2-4).
@@ -228,7 +292,7 @@
 
 ---
 
-## Phase 4: User Story 3 (Web): second client (PR-C branch `124-pr-c-second-client`)
+## Phase 4: User Story 3 (Web): second client (PR-C branch `126-pr-c-second-client`)
 
 **Goal**: offer every detected, unconnected client right after the first one connects.
 **Independent test**: quickstart L2 step 1.
@@ -257,7 +321,7 @@
 
 ---
 
-## Phase 5: User Story 4: weekly digest, core + Web + CLI (PR-D branch `124-pr-d-digest`)
+## Phase 5: User Story 4: weekly digest, core + Web + CLI (PR-D branch `126-pr-d-digest`)
 
 **Goal**: a local "what MCPProxy did" summary, identical on every surface.
 **Independent test**: quickstart L3.
@@ -353,7 +417,7 @@
 
 ---
 
-## Phase 6: Native macOS: US2, US3 and US4 native (PR-E branch `124-pr-e-native`)
+## Phase 6: Native macOS: US2, US3 and US4 native (PR-E branch `126-pr-e-native`)
 
 **Goal**: the same starter, second-client and weekly surfaces in the tray app, with bound approvals.
 **Independent test**: quickstart L5.
@@ -409,19 +473,20 @@
 
 ## Dependencies and execution order
 
-- **Phase 1 → Phase 2 (PR-A)** blocks every other phase. The facts, loop and telemetry are shared.
+- **Phase 1 → Phase 2 (PR-A)** blocks every other phase. PR-A ships alone in a release, with T084 deployed and the T085 baseline recorded. **Phase 2b** opens PR-B.
 - **Phase 3 (PR-B)**, **Phase 4 (PR-C)** and **Phase 5 (PR-D)** depend only on PR-A, so they can be developed in parallel, in separate worktrees. They touch different files, except `OnboardingWizard.vue` (PR-B Servers/Verify tabs, PR-C Clients tab) and `Home.vue` (PR-B Get-started card, PR-D digest card). Merge PR-B first, then rebase PR-C and PR-D.
 - **Phase 6 (PR-E)** depends on PR-B (starter endpoint), PR-C (`detected_unconnected_clients`) and PR-D (digest).
 - Inside each phase, a `test` task precedes its `impl`. `[P]` tests in one group can be written in parallel.
 
 ## Parallel examples
 
-- PR-A: T003, T005, T007, T009, T011, T012 and T013 are all test files in different packages, so they can be written together. Then come T004, T006, T008, T010, T014, ordered by import dependency: storage → onboarding → runtime → httpapi/telemetry.
+- PR-A: T003, T079, T080, T081, T083, T012 and T013 are test files that can be written together. Then come T004, T082 and T014, ordered by import dependency: storage → telemetry → runtime → server. T084 and T085 run in their own repositories, in parallel with PR-A.
+- PR-B opens with Phase 2b: T002, T005, T007, T009 and T011 together, then T006, T008 and T010.
 - PR-D: T044, T046, T048 and T050 can be written in parallel (server, server, runtime, storage). T052 needs T045, T047, T049 and T051 merged into the branch.
 
 ## Implementation strategy
 
-1. **MVP** = PR-A + PR-B (US5 + US1/US2 Web). It lifts the primary metric SC-001 and is measurable.
+1. **Measure first** = PR-A + T084 + T085, released alone. **MVP** = then PR-B (Phase 2b + US1/US2 Web). It lifts the primary metric SC-001 and is measured against the PR-A baseline.
 2. Add PR-C (US3) and PR-D (US4) in the same release if they are ready.
 3. Add PR-E (native) in the same release or the next.
 4. Read the E3 cohorts two releases after PR-B (T078).

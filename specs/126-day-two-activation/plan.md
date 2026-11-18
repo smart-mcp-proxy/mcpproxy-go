@@ -1,6 +1,6 @@
 # Implementation Plan: Day-Two Activation (Experiment E3)
 
-**Branch**: `124-day-two-activation` (design; PR branch `claude/spec-day-two-activation-1fad2a`) → implementation branches `124-pr-a-measure`, `124-pr-b-starter`, `124-pr-c-second-client`, `124-pr-d-digest`, `124-pr-e-native` | **Date**: 2026-10-20 | **Spec**: [spec.md](spec.md)
+**Branch**: `126-day-two-activation` (design; PR branch `claude/spec-day-two-activation-1fad2a`) → implementation branches `126-pr-a-measure`, `126-pr-b-starter`, `126-pr-c-second-client`, `126-pr-d-digest`, `126-pr-e-native` | **Date**: 2026-10-20 | **Spec**: [spec.md](spec.md)
 **Input**: spec.md, which the OpenCode Sol 6.1 review approved in round 3, and research.md R1-R12.
 
 ## Summary
@@ -91,7 +91,7 @@ No violations, so Complexity Tracking is empty.
 ### Documentation (this feature)
 
 ```text
-specs/124-day-two-activation/
+specs/126-day-two-activation/
 ├── spec.md          # approved spec (Sol r3)
 ├── plan.md          # this file
 ├── research.md      # R1-R12 decisions
@@ -248,8 +248,8 @@ Scoped callers already have `filter.AllowedServers` applied to the stream (`inte
 
 | PR | Contains | Depends on | Ships |
 |---|---|---|---|
-| PR-A | facts, facts loop, telemetry, docs (tasks.md Phases 1-2) | none | first, alone if the calendar allows (R12) |
-| PR-B | starter core + Web (tasks.md Phase 3) | PR-A | next release |
+| PR-A | instrumentation only: install anchor, `install_origin`/`install_age`, `upstream_outcomes` + coverage, starter classifier, `success_scope_ever`, schema 17, docs (tasks.md Phases 1-2). Companion PRs: receiver (`mcpproxy-telemetry`, FR-039), cohort query (`mcpproxy-dash`, FR-040) | none | first, in a release before any onboarding change (R12, R13); the receiver deploys before that release |
+| PR-B | facts loop + `first_tool_indexed_*` + starter core + Web (tasks.md Phase 3), next free schema version | PR-A | next release |
 | PR-C | second client Web (tasks.md Phase 4) | PR-A | with PR-B |
 | PR-D | digest core + Web + CLI (tasks.md Phase 5) | PR-A for view counting; it otherwise stands alone | with PR-B |
 | PR-E | native (tasks.md Phase 6) | PR-B, PR-C, PR-D | same release if ready, otherwise the next | Merge each PR on its own, with no stacking and at most two reviews in flight (memory: merge early, don't stack). Each PR gets the OpenCode Sol 6.1 review loop, with the 10-round cap.

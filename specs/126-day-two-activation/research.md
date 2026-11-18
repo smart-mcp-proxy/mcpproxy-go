@@ -1,4 +1,4 @@
-# Research: Day-Two Activation (Spec 124)
+# Research: Day-Two Activation (Spec 126)
 
 Every decision below resolves a design unknown from spec.md. Code references are to `origin/main` at `9dfdb2f19`.
 
@@ -208,6 +208,8 @@ Mapping table (`internal/storage/activity_digest.go`, `BlockClass(rec)`):
 
 ## R11. Telemetry schema 17
 
+**Revised 2026-11-18**: schema 17 now carries only the instrumentation slice (spec FR-033 to FR-038; see R13). The `activation.first_tool_indexed_*` keys and the `day_two` onboarding fields below ship with PR-B to PR-D, each PR at the next free schema version. The mechanics are unchanged: the provider, `scanDayTwo`, and pin regeneration.
+
 **Decision**:
 - `SchemaVersion = 17` (`internal/telemetry/telemetry.go:194` on 2026-10-25), with a change-log paragraph.
 - `ActivationState` gains `FirstToolIndexedEver` (`activationKeyFirstToolIndexedEver`) and a derived `FirstToolIndexedAfter` bucket. The latter is computed at payload build from the stored `first_tool_indexed_at` and the install anchor, and is never stored as a timestamp on the wire.
@@ -219,8 +221,57 @@ Mapping table (`internal/storage/activity_digest.go`, `BlockClass(rec)`):
 
 ## R12. Release order: measure before exposing
 
-**Decision**: PR-A, which carries telemetry and the onboarding facts, merges first and ships in a release before the starter UI. This gives one release of schema-17 baseline data for `clients_day0` and `first_tool_indexed_ever` (spec SC-004).
+**Decision (revised 2026-11-18)**: PR-A is instrumentation only (spec FR-033 to FR-040: install anchor, origin and age, completion counters, window coverage, the starter classifier, lifetime scope). It merges first and ships in a release before any onboarding change, so the pre-change cohort is measured with the schema-17 instrument.
+
+The facts loop, `first_tool_indexed_ever`, `clients_day0` and the starter, second-client and summary fields move to the PRs that produce them, and each of those PRs takes the next free schema version (spec FR-027, FR-028). Before this revision, PR-A also carried the onboarding facts, so that `clients_day0` and `first_tool_indexed_ever` would have one release of baseline data (spec SC-004).
 
 **Rationale**: SC-004's richer diagnostic has no pre-release baseline otherwise. The primary metrics (SC-001, SC-002) use pre-release-comparable instruments and do not depend on this.
 
 **Risk accepted**: if the starter and PR-A must ship in the same release because of the strategy calendar ("E3 shipped in the next release", W5-W8), the diagnostic baseline comes from the first release cohort. The plan allows that order.
+
+## R13. Cohort matching, completion and coverage (release handoff 2026-11-18)
+
+**Findings in code and in the receiver**:
+
+- **Dispatch and completion are already separate in the core, but completion is lifetime-only.** The split is the schema-14 contract in `internal/server/mcp_upstream_telemetry.go`:
+  - `noteUpstreamDispatched` counts the requests handed to the transport;
+  - `noteUpstreamSuccess` and `recordRealToolCallSuccess` fire only on a usable result, on all three paths: the wrapper (`mcp.go` ~3998), direct routing (`mcp_routing.go` ~880) and `code_execution` sub-calls (`mcp_code_execution.go` ~1096).
+
+  Completion only sets a lifetime flag; there is no per-window completion count. So no schema up to 16 can answer "completed in days 7–13".
+- **`days_since_install` cannot identify new installs on its own.** It comes from schema 7 (`internal/telemetry/funnel.go`). `RecordActivity` stamps it while the payload is built, which happens only with telemetry on. An install that upgrades from a pre-7 build, or opts in late, reports 0 on its first stamped day.
+- **New counters need a receiver change, or most windows are lost.** The receiver (`mcpproxy-telemetry/src/index.ts`) upserts one `heartbeats` row per `(anonymous_id, UTC day)`, and the last heartbeat of the day wins. Reset-on-accept counters survive only in `heartbeat_events` (schema 12 and later, keyed by `heartbeat_id`), and only for the keys that `counterWindowPayload` copies. Any new counter object it does not copy loses every window but the day's last.
+- **Per-anonymous-id matching does not split one install.** The anonymous id lives in the config file and the anchor in `config.db`, both in the same data directory, so wiping the directory resets both together. A reinstall therefore shows up as a new install, which is correct.
+
+**Decision**:
+
+- **Eligible new installation.** In both modes the install must be non-CI and personal edition, and matured: its first heartbeat is at least 14 days old.
+  - Schema 17: `install_origin = fresh`, and the first heartbeat reports `install_age = d0_6`.
+  - Pre-17 baseline: the identity's first-ever heartbeat, with `days_since_install <= 1`. If that first row is below schema 7, the install falls into the `age_unverified` coverage gap.
+- **Day ranges (days 0–6 and 7–13).**
+  - Schema 17: `install_age` on each `heartbeats` row and each `heartbeat_events` window.
+  - Pre-17: calendar offset from D0, the identity's first heartbeat date.
+- **Return** means any heartbeat in days 7–13.
+- **Active return**:
+  - schema 17: a `heartbeat_events` window in days 7–13 with `succeeded_non_starter != '0'`;
+  - pre-17: only dispatch-based activity can be measured (`upstream_tool_call_count_bucket != '0'` in an event at schema 14 or later), and it is reported under that name.
+- **Starter-only** means `success_scope_ever = starter_only` on the install's last heartbeat in days 0–13. Before PR-B this is always zero, because no starter exists; that is a true zero, not missing data.
+- **Coverage rows** are reported per weekly cohort:
+  - `age_unverified`: the first row is below schema 7;
+  - `no_events`: no `heartbeat_events` row in the day range (below schema 12);
+  - `dispatch_semantics_old`: below schema 14;
+  - `no_completion_counts`: below schema 17;
+  - `partial_windows`: `upstream_outcomes.coverage = partial`.
+
+  A missing day 7–13 heartbeat is the non-return itself, not a coverage gap.
+- **Counting unit.**
+  - Install-level figures count per anonymous id.
+  - Machine-level figures use the canonical identity key, and a machine returns if any of its eligible installs returns.
+  - Trends hold the IP key constant: the share of rows carrying a machine id has grown, which bends any trend on the canonical key.
+
+**Rationale**: every pre/post comparison stays on one instrument, and the query says what old schemas cannot answer instead of inferring it.
+
+**Limits accepted**:
+- Installs with telemetry off are invisible.
+- If a process is killed before its first accepted send, that window is lost. The next process's first window is then marked `partial`.
+- A counter window is attributed to the install age when it is sent, so a window that straddles day 7 counts in `d7_13`.
+- The receiver change (spec FR-039) must be live before the first schema-17 release. Until then, only the last window of each day survives.

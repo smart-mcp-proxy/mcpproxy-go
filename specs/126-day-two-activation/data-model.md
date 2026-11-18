@@ -1,4 +1,4 @@
-# Data Model: Day-Two Activation (Spec 124)
+# Data Model: Day-Two Activation (Spec 126)
 
 All persisted additions are additive and `omitempty`. An older binary ignores them (downgrade-safe), and a newer binary treats their absence as "unknown" or "false".
 
@@ -126,7 +126,23 @@ All REST bodies use the standard `{"success": true, "data": …}` envelope (`int
 - `held_for_review.coverage` is `partial` while legacy records without `entered_hold` exist in the window.
 - `new + changed` may exceed `entered`: a tool counts once in `entered` but may appear under both kinds if it entered twice with different kinds.
 
-### 4c. `telemetry.DayTwoPayload` (`day_two` in the heartbeat, schema 17, personal edition only)
+### 4c. Schema 17 (PR-A, instrumentation only)
+
+```json
+"upstream_outcomes": {"succeeded": "1-10", "unusable": "0", "succeeded_non_starter": "1-10", "coverage": "full"},
+"day_two": {"install_origin": "fresh", "install_age": "d0_6", "success_scope_ever": "non_starter"}
+```
+
+What each part is:
+- `upstream_outcomes` is a reset-on-accept window and is sent by both editions.
+- `day_two` is personal edition only. Its `install_age` is present only when `install_origin` is `fresh`.
+
+Where the values come from:
+- **Install anchor** (FR-033): one UTC time in `config.db`, written once when the store was empty at open, and never rewritten.
+- **`success_scope_ever`** (FR-038): stored in the activation bucket as an ordinal 0, 1 or 2, monotonic.
+- **Outcome counters** (FR-035, FR-036): held in memory on `CounterRegistry`. The coverage flag is `partial` for the first window of a process that opened an existing store.
+
+### 4d. Later `day_two` fields (PR-B to PR-D, next free schema version each)
 
 ```json
 "day_two": {

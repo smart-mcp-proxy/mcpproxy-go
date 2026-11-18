@@ -1,6 +1,6 @@
 # Feature Specification: Day-Two Activation (Experiment E3)
 
-**Feature Branch**: `124-day-two-activation` (PR branch `claude/spec-day-two-activation-1fad2a`)
+**Feature Branch**: `126-day-two-activation` (PR branch `claude/spec-day-two-activation-1fad2a`)
 **Created**: 2026-10-20
 **Status**: Draft (design only; implementation not started)
 **Input**: Growth experiment E3 from the Q4 2026 promotion strategy (maintainer-approved). Three product changes: (1) first run always ends with a working tool indexed, (2) the connect wizard offers a second client, (3) a weekly "what MCPProxy did" summary gives users a reason to come back. A fourth part adds the telemetry needed to judge the experiment.
@@ -34,7 +34,7 @@ What the product does today:
 | "Tools indexed" | `tool_count` = search-index document count, sampled when the heartbeat is built. Quarantined or held tools are not in the index. | `internal/runtime/runtime.go:~4026`, `internal/telemetry/telemetry.go:189` |
 | Activity summary | `GET /api/v1/activity/summary?period=1h|24h|7d|30d` and `mcpproxy activity summary --period` exist. They return totals, status counts, top servers and tools, and per-server counts. They have no held-for-review, blocked-by-reason, by-client or sensitive-data breakdown. | `internal/httpapi/activity.go:~886`, `internal/contracts/activity.go:132`, `cmd/mcpproxy/activity_cmd.go` |
 | Tray | The AppKit menu has a glance block with a 24h activity line and an "Open Activity…" row. There is no weekly view. The native app has no onboarding wizard and never calls `/onboarding/*`. | `native/macos/MCPProxy/MCPProxy/MCPProxyApp.swift:~1041-1450`, `Menu/Glance/GlanceSection.swift` |
-| Telemetry | Schema 16 on `origin/main` as of 2026-10-25; it was 14 when this spec was drafted, and 101-tpa-db added 15 and 16. This feature therefore bumps to schema 17. It reports wizard fields (`wizard_engaged`, `wizard_connect_step`, `wizard_server_step`, `wizard_shown`), `connected_client_count` / `connected_client_ids` and `activation.*` first-ever flags. It has nothing for a starter offer, a second-client step, summary views, or a sticky "a tool was ever indexed" flag. | `internal/telemetry/telemetry.go:163-190`, `internal/telemetry/activation.go:42` |
+| Telemetry | Schema 16 on `origin/main` as of 2026-10-25, re-verified 2026-11-18 with no open PR claiming 17 (#1711 and #1918 do not bump); it was 14 when this spec was drafted, and 101-tpa-db added 15 and 16. This feature therefore bumps to schema 17. It reports wizard fields (`wizard_engaged`, `wizard_connect_step`, `wizard_server_step`, `wizard_shown`), `connected_client_count` / `connected_client_ids` and `activation.*` first-ever flags. It has nothing for a starter offer, a second-client step, summary views, or a sticky "a tool was ever indexed" flag. | `internal/telemetry/telemetry.go:163-190`, `internal/telemetry/activation.go:42` |
 
 The experiment's success bar comes from the strategy report:
 - at least 82% of post-release new installs reach "tools indexed";
@@ -53,6 +53,23 @@ Answered by the spec author under the zero-interruption policy; each answer is t
 - Q: What if a server named like the starter (`time`) already exists with a different command? → A: That candidate is skipped with reason `name_taken` and the next candidate is tried; the starter never renames or overwrites a user server.
 - Q: When the wizard opens with a client already connected (connected before or outside the wizard), is the second-client section shown? → A: Yes, immediately, listing the remaining detected clients.
 - Q: What counts as a summary "view" for telemetry? → A: A summary request that names its surface (`view=web|tray|cli`): Web when the Home card renders in a visible tab, tray when the menu opens with the line shown, CLI per `activity summary` run. The core debounces to at most one view per surface per hour.
+
+### Session 2026-11-18 (release handoff: instrumentation first)
+
+The maintainer's release handoff renumbered this spec to 126 (Spec 124 is `124-session-failure-timeline`, #1918) and asked for an instrumentation-first slice. Answers by the spec author:
+
+- Q: What ships first? → A: PR-A: instrumentation only, schema 17, with no change to onboarding behaviour. It ships in a release before any starter, second-client or summary UI. The pre-change cohort is therefore measured with the same instrument as the post-change cohort.
+- Q: How are "dispatched" and "successfully completed" kept apart? → A:
+  - *Dispatched* keeps the schema-14 meaning: a request that the core client handed to the transport (`upstream_tool_call_count_bucket`).
+  - *Completed* is a logical call that dispatched at least one request and got a usable result. Usable means no error, no `isError:true`, and not withheld by an output policy. This is the predicate of `activation.first_real_tool_call_ever`.
+  - Schema 17 adds a per-window count of completions next to the dispatch count, so neither is ever inferred from the other.
+- Q: How are new installations matched across days 0–6 and days 7–13? → A: Through a local install anchor, written only when the data store was empty at first open. Every heartbeat reports it as an age bucket. An install upgraded from an older build has no anchor, reports `install_origin: existing`, and is never counted as a new install.
+- Q: What is starter-only traffic? → A: Completions on the server that the starter door added, identified locally by name and incarnation. All other completions are non-starter traffic. Until PR-B ships, no starter exists, so every completion is non-starter. The field is still sent, so the instrument stays the same across releases.
+- Q: How is missing coverage reported? → A:
+  - A field counts only on heartbeats whose schema version introduced it. When it is absent, it is "not measured", never false or zero.
+  - Each later PR that adds fields takes the next free schema version.
+  - The counter window carries its own coverage flag.
+  - The baseline query reports every coverage gap as its own row.
 
 ## Scope Boundary
 
@@ -298,12 +315,62 @@ The maintainer queries the telemetry store for post-release cohorts. Without any
 - **FR-025**: The tray glance block MUST show one line, "This week: N calls · H held · B blocked", that opens the native Activity view. The line MUST be hidden when the core is unreachable.
 - **FR-026**: The CLI MUST accept `mcpproxy activity summary --since 7d` as an alias of `--period 7d`, with the same values. The table output MUST print the digest, and `-o json|yaml` MUST include it additively.
 
-### Functional Requirements: telemetry (US5)
+### Functional Requirements: instrumentation-first slice (US5, PR-A, schema 17)
 
-- **FR-027**: The heartbeat MUST bump to schema 17 and add:
+These requirements are the whole of PR-A. PR-A changes no onboarding behaviour and no UI.
+
+- **FR-033 (install anchor)**: At startup, before the HTTP server starts, the core MUST record an install anchor (the UTC first-run time).
+  - It does so only when the data store held no prior data when this process opened it: a new or empty `config.db`.
+  - An existing store without an anchor MUST stay without one.
+  - Later starts and later writes MUST never change an anchor.
+  - The anchor is recorded whatever the telemetry opt-out setting.
+- **FR-034 (origin and age)**: The personal-edition heartbeat MUST carry:
+  - `day_two.install_origin`: `fresh` when the anchor exists, `existing` otherwise;
+  - only when the origin is `fresh`, `day_two.install_age`: `d0_6 | d7_13 | d14_plus`. This is the whole UTC days from the anchor to the time the heartbeat is built. A negative age (clock skew) counts as `d0_6`.
+
+  `days_since_install` (schema 7) is unchanged but is not used for cohorts. It is stamped on the first telemetry-enabled heartbeat, so it cannot tell an upgrade from a new install, or a late opt-in from a new install.
+- **FR-035 (completion counters)**: The heartbeat MUST carry a reset-on-accept object `upstream_outcomes`, in both editions. It has three counts:
+  - `succeeded`: logical upstream calls with a usable result;
+  - `unusable`: logical calls that dispatched at least one request but ended without a usable result. That covers a transport or upstream error, `isError:true`, and a result withheld by an output policy;
+  - `succeeded_non_starter`: the subset of `succeeded` that is not on the starter server (FR-037).
+
+  Each count is bucketed like `upstream_tool_call_count_bucket` (`0 | 1-10 | 11-100 | 101-1000 | 1000+`). Every path that dispatches to an upstream MUST feed exactly one outcome per logical call: the `call_tool_*` wrapper, direct routing, and each `code_execution` sub-call. A call refused before dispatch feeds none of them. Dispatch counts requests, so a session-recovery repeat counts twice. Outcomes count logical calls. The window is the existing delta-counter window, keyed by `heartbeat_id` and drained only on an accepted send.
+- **FR-036 (window coverage)**: `upstream_outcomes.coverage` MUST be:
+  - `full` when the counts cover the whole time since the previous accepted send;
+  - `partial` on the first window of a process that opened an existing store, because the previous process's unsent counts are lost.
+
+  The first window of a fresh install is `full`.
+- **FR-037 (starter classification)**: One local classifier MUST decide starter-ness for a `(server name, incarnation)` pair.
+  - In PR-A it answers false for every server.
+  - PR-B wires it to the server that the starter door added.
+  - A user's own add of the same catalog entry is never starter traffic.
+  - Names are used only locally and never leave the machine.
+- **FR-038 (lifetime scope)**: `day_two.success_scope_ever` MUST be one of `none | starter_only | non_starter`.
+  - It moves forward only, in the order `none` → `starter_only` → `non_starter`, and never goes back.
+  - It is persisted and set from the same completion events as FR-035.
+  - On an `existing` install it covers the time since the upgrade. Cohorts use `fresh` installs only.
+- **FR-039 (receiver, `mcpproxy-telemetry`)**: The receiver MUST:
+  - copy `upstream_outcomes` and `day_two.install_origin` / `install_age` into the idempotent `heartbeat_events` counter payload, so a later same-day heartbeat cannot overwrite an earlier window. Today the daily `heartbeats` row keeps only the last snapshot of the day;
+  - for `schema_version >= 17` only, reject out-of-enum values and unknown keys in the new objects with its existing structured 400.
+
+  This receiver change MUST be deployed before the first schema-17 build is released.
+- **FR-040 (cohort query, `mcpproxy-dash`)**: The dashboard repository MUST own the E3 cohort query. The query is built on the dashboard's canonical CI filter and identity key, and reports these figures for each weekly cohort:
+  - eligible new installs;
+  - day 0–6 activity;
+  - day 7–13 return, meaning any heartbeat;
+  - day 7–13 active return, meaning a non-starter completion;
+  - starter-only installs.
+
+  Every figure carries its coverage. The query has two modes, a pre-17 baseline and schema 17, defined in research R13.
+
+### Functional Requirements: telemetry for the onboarding changes (US5, PR-B to PR-D)
+
+Each field below ships with the PR that produces it. That PR takes the next free schema version when it merges (18, 19, …). A field is never sent as a constant before its producer exists, because a constant `false` would read as a measurement. The coverage predicate for every field is `schema_version >= <its introducing version>`.
+
+- **FR-027**: The heartbeat MUST add (PR-B, with the facts loop):
   - `activation.first_tool_indexed_ever`: bool, sticky and persisted, stamped per the Definitions;
   - `activation.first_tool_indexed_after`: enum `"" | lt_10m | 10m_1h | 1h_24h | 1d_7d | gt_7d`, measured from the install anchor and set once; `""` when there is no anchor.
-- **FR-028**: The heartbeat MUST add a `day_two` object, in the personal edition only. It contains only booleans, closed enums and buckets:
+- **FR-028**: The heartbeat MUST add these fields to the `day_two` object (personal edition only): the starter fields with PR-B, the second-client and `clients_day0*` fields with PR-C, and `summary_views` with PR-D. `summary_views` is a reset-on-accept counter, so PR-D also extends the FR-039 receiver copy. The object contains only booleans, closed enums and buckets:
 
   | Field | Values |
   |---|---|
@@ -318,7 +385,7 @@ The maintainer queries the telemetry store for post-release cohorts. Without any
   | `clients_day0_final` | bool, true once day 0 has ended (the value is then frozen) |
   | `summary_views` | `{web, tray, cli}`, each `0 | 1 | 2_5 | 6_plus`: views since the last accepted send, the same reset-on-accept window as other delta counters, kept in memory (a restart loses unsent views) |
 
-- **FR-029**: The new fields MUST NOT carry server names, tool names, paths, timestamps, free text or new identifiers. `ScanForPII` MUST reject unknown keys inside `day_two` and `summary_views`, out-of-enum values, non-boolean flags and any serialized map or timestamp in these objects, following the closed-object precedent of `scanTrustModeDistribution`. The telemetry docs MUST list each field under "What is collected".
+- **FR-029**: The new fields (`upstream_outcomes`, `day_two`, the new `activation` keys) MUST NOT carry server names, tool names, paths, timestamps, free text or new identifiers. `ScanForPII` MUST reject unknown keys inside `upstream_outcomes`, `day_two` and `summary_views`, out-of-enum values, non-boolean flags and any serialized map or timestamp in these objects, following the closed-object precedent of `scanTrustModeDistribution`. The telemetry docs MUST list each field under "What is collected".
 - **FR-030**: `approval_abandoned` MUST be recorded when a starter stays captured but unapproved for 24 h. It is an observation only and MUST NOT trigger any action.
 - **FR-031**: The local onboarding state MUST record all facts whatever the telemetry opt-out setting. Opt-out gates only sending.
 - **FR-032**: A summary view MUST be counted in the core when a summary request carries `view=web|tray|cli`, at most once per surface per hour. Surfaces MUST pass `view` only for user-visible renders, never for background refreshes.
@@ -339,24 +406,33 @@ The maintainer queries the telemetry store for post-release cohorts. Without any
 
 ## Success Criteria *(mandatory)*
 
-Cohort definition for SC-001 to SC-004:
+Cohort definition for SC-001 to SC-004 (implemented once, by the FR-040 query in `mcpproxy-dash`):
 - non-CI installs per the dashboard CI filter;
 - personal edition;
-- continuity identity key (`cont`), with the IP key reported alongside;
-- first seen on a build that includes this feature, with at least 14 days of observation.
+- **eligible new installation**:
+  - on schema-17 builds, `install_origin = fresh`, and the first heartbeat in the window reports `install_age = d0_6`;
+  - on pre-17 builds (the baseline), the identity's first heartbeat ever, with `days_since_install <= 1` on that row. Rows below schema 7 cannot be verified and are reported as the coverage gap `age_unverified`, never silently included;
+- **matching across days 0–6 and days 7–13**:
+  - schema 17 matches by the anchor-derived `install_age` on each heartbeat and each `heartbeat_events` window, per anonymous id. The anchor and the anonymous id live in the same data directory, so they reset together;
+  - the pre-17 baseline matches by calendar offset from the identity's first heartbeat date (D0): days D0 to D0+6, and days D0+7 to D0+13;
+  - machines are counted on the canonical identity key, with the IP key reported alongside, held constant over any trend;
+- matured: the first heartbeat is at least 14 days before the query date.
 
 The release-to-release comparison is pre/post. It is associative, not causal: release composition, autostart behaviour and heartbeat availability are confounds and are reported with the result.
 
 ### Measurable Outcomes
 
 - **SC-001 (primary)**: at least **82%** of the cohort have `tool_count > 0` on at least one heartbeat. This is the same heartbeat-sampled instrument as the 71.5% Aug-Oct 2026 baseline. The sticky `first_tool_indexed_ever` rate is reported separately and never substituted. A movement counts as real if it exceeds the larger of 3 points and the 95% interval of the previous four monthly cohorts.
-- **SC-002 (primary)**: day-7 return on the IP key is **at least 18%** for the cohort, against 14.9% pooled Jun-Sep. The machine key is reported alongside, with the same noise rule as SC-001.
+- **SC-002 (primary)**: day 7–13 return, meaning at least one heartbeat in days 7–13, is **at least 18%** of eligible new installations on the IP key. The 14.9% Jun-Sep figure came from an older script with a different day-7 definition, so it is not the comparison point. The FR-040 query recomputes the pre-17 baseline before the starter release, and that recomputed value becomes the reference. The machine key is reported alongside, with the same noise rule as SC-001. Two companions are reported and never substituted:
+  - **active return**: a non-starter completion (`upstream_outcomes.succeeded_non_starter != '0'`) in days 7–13. This is measurable on schema 17 only. The pre-17 baseline can only show dispatch-based activity (`upstream_tool_call_count_bucket != '0'` in `heartbeat_events`, schema 14 and later), and is labelled that way;
+  - **starter-only**: the share of eligible installs whose `success_scope_ever` is `starter_only` at the end of day 13. These installs never count as active.
 - **SC-003 (diagnostic)**:
   - Launcher availability: `starter_launcher = none` is below 15% of installs with a non-empty `starter_launcher`. That field is evaluated independently of every other eligibility outcome, so `tools_present` or `name_taken` installs never dilute it. Above 15%, follow-up O1 (an embedded starter) is triggered.
   - Conversion: at least 60% of installs with `starter_offered` reach `starter_live`.
 - **SC-004 (diagnostic)**: the share of cohort installs with at least one connected client whose day-0 heartbeats show at least two distinct ids rises by at least 8 points over the pre-release baseline. Both sides use the same instrument: the union of `connected_client_ids` over heartbeats received within 26 h of the identity's first heartbeat. Today that is the startup heartbeat at about 5 minutes and the first daily one. The baseline uses pre-release cohorts (schema 16 or older); the comparison uses schema-17 cohorts. The richer `clients_day0` / `clients_day0_final` fields are a separate diagnostic with no pre-release baseline. Their first release cohort becomes the baseline for later releases.
 - **SC-005 (safety)**: no code path makes a starter tool callable without an explicit user approval when a normal catalog add of the same server would be quarantined. A test asserts this for the wizard, Web Home and native doors. No starter code runs before the user clicks "Add and inspect".
 - **SC-006 (performance)**: the 7-day summary with digest returns in under 1.5 s on a 100k-record activity log, measured with a new benchmark next to the summary handler tests. The Home card renders its figures within 2 s of Home load.
+- **SC-008 (coverage)**: every figure states its coverage: the share of eligible installs whose heartbeats carry the fields the figure needs, and the share of counter windows with `coverage = full`. A weekly cohort below 80% coverage for a figure is reported but not judged against SC-001 or SC-002. Coverage gaps are reported as their own rows, and no query treats a missing field as `false` or `0`.
 - **SC-007 (privacy)**: the schema-17 privacy tests pass. There are no new identifier fields. Every new field is enum-closed, and unknown keys are rejected.
 - **Kill rule**: if SC-001 and SC-002 show no movement beyond the noise rule after two releases and four weeks of cohort data, the starter pre-selection and the summary card revert to opt-in. The telemetry stays.
 

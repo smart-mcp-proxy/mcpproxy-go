@@ -1,17 +1,17 @@
-# Quickstart: verifying Spec 124 (Day-Two Activation)
+# Quickstart: verifying Spec 126 (Day-Two Activation)
 
 Live checks run on an isolated scratch instance: high port, scratch data dir, own log dir. Never run them against the maintainer's live app. Kill any scratch core before you rebuild, because the core locks the DB.
 
 ```bash
-go build -o /tmp/s124/mcpproxy ./cmd/mcpproxy
-mkdir -p /tmp/s124/data /tmp/s124/logs
-echo '{"listen":"127.0.0.1:18919","api_key":"s124-test-key","mcpServers":[]}' > /tmp/s124/mcp_config.json
+go build -o /tmp/s126/mcpproxy ./cmd/mcpproxy
+mkdir -p /tmp/s126/data /tmp/s126/logs
+echo '{"listen":"127.0.0.1:18919","api_key":"s126-test-key","mcpServers":[]}' > /tmp/s126/mcp_config.json
 # --config is mandatory: --data-dir alone still reads ~/.mcpproxy/mcp_config.json
-MCPPROXY_TELEMETRY=false /tmp/s124/mcpproxy serve --config /tmp/s124/mcp_config.json \
-  --data-dir /tmp/s124/data --log-dir /tmp/s124/logs &
-# Stop only this instance: pkill -f 'mcpproxy serve.*s124'
+MCPPROXY_TELEMETRY=false /tmp/s126/mcpproxy serve --config /tmp/s126/mcp_config.json \
+  --data-dir /tmp/s126/data --log-dir /tmp/s126/logs &
+# Stop only this instance: pkill -f 'mcpproxy serve.*s126'
 set -euo pipefail   # every assertion below stops the run on failure
-K='X-API-Key: s124-test-key'; B=http://127.0.0.1:18919/api/v1
+K='X-API-Key: s126-test-key'; B=http://127.0.0.1:18919/api/v1
 ```
 
 ## L1. Starter offer → add → bound approval → indexed (US1, SC-005)
@@ -35,11 +35,11 @@ N0=$(curl -s -H "$K" "$B/activity?type=policy_decision&server=time&tool=get_curr
 # If the core is on mcp-go >= v1.0, also send `Mcp-Method: <method>` on each POST.
 # Use the daemon's MCP endpoint, NOT `mcpproxy call` (it falls back to a standalone mode that bypasses the daemon).
 M=http://127.0.0.1:18919/mcp; HJ='Content-Type: application/json'; HA='Accept: application/json, text/event-stream'
-SID=$(curl -s -D - -o /dev/null -H "$HJ" -H "$HA" $M -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"s124-qa","version":"0"}}}' | awk -F': ' 'tolower($1)=="mcp-session-id"{print $2}' | tr -d '\r')
+SID=$(curl -s -D - -o /dev/null -H "$HJ" -H "$HA" $M -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"s126-qa","version":"0"}}}' | awk -F': ' 'tolower($1)=="mcp-session-id"{print $2}' | tr -d '\r')
 curl -s -H "$HJ" -H "$HA" -H "Mcp-Session-Id: $SID" $M -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
 curl -s -H "$HJ" -H "$HA" -H "Mcp-Session-Id: $SID" $M -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"call_tool_read","arguments":{"name":"time:get_current_time","args_json":"{\"timezone\":\"UTC\"}"}}}' \
-  | tee /tmp/s124/refused.txt | grep -q '"isError":true'      # must be refused
-grep -qi 'quarantin' /tmp/s124/refused.txt                      # names quarantine
+  | tee /tmp/s126/refused.txt | grep -q '"isError":true'      # must be refused
+grep -qi 'quarantin' /tmp/s126/refused.txt                      # names quarantine
 # The quarantine gate writes a policy_decision (no tool_call completion). Zero upstream dispatch is proven by the SC-005 safety test's upstream spy, not here.
 N1=$(curl -s -H "$K" "$B/activity?type=policy_decision&server=time&tool=get_current_time&status=blocked&limit=1000" | jq '.data.activities | length')
 [ "$N1" -eq $((N0 + 1)) ]   # exactly one NEW blocked decision, for this attempt
@@ -79,9 +79,9 @@ Seed the activity log with the fixture from task T052 (`internal/storage/testdat
 ```bash
 curl -s -H "$K" "$B/activity/summary?period=7d&view=cli" | jq .data.digest
 # Pin the CLI to the scratch instance; without these it may query the live daemon via the default socket.
-MCPPROXY_TRAY_ENDPOINT=http://127.0.0.1:18919 MCPPROXY_API_KEY=s124-test-key \
-  /tmp/s124/mcpproxy activity summary --since 7d -o json \
-  --config /tmp/s124/mcp_config.json --data-dir /tmp/s124/data | jq .digest     # identical
+MCPPROXY_TRAY_ENDPOINT=http://127.0.0.1:18919 MCPPROXY_API_KEY=s126-test-key \
+  /tmp/s126/mcpproxy activity summary --since 7d -o json \
+  --config /tmp/s126/mcp_config.json --data-dir /tmp/s126/data | jq .digest     # identical
 ```
 
 The figures must equal the fixture's expected values (`internal/storage/testdata/digest_expected.json`).
@@ -92,6 +92,11 @@ The figures must equal the fixture's expected values (`internal/storage/testdata
 go test ./internal/telemetry -run TestPayloadV17 -v              # T012: asserts and logs a sample schema-17 payload
 go test ./internal/telemetry -run 'TestScanForPII.*DayTwo' -v
 ```
+
+Then run a fresh instance, with telemetry on, against a local receiver stub:
+- `GET /api/v1/telemetry/payload` (or `mcpproxy telemetry show-payload`) shows `day_two.install_origin: fresh`, `install_age: d0_6` and `upstream_outcomes.coverage: full`.
+- After one usable call and one `isError` call, it shows `succeeded: 1-10` and `unusable: 1-10`.
+- Restart over the same data directory: the first window shows `coverage: partial`.
 
 ## L5. Native (US2, US3, US4)
 
@@ -127,4 +132,14 @@ FROM hb_noci WHERE schema_version >= 17 AND l != '' GROUP BY l;
 
 **SC-004: day-0 clients, same instrument on both sides.** Take the union of `connected_client_ids` over heartbeats with `created_at <= first_seen + 26h`, and compute the share with at least 2 distinct IDs among those with at least 1. Run it for pre-release cohorts (schema 16 or older) (baseline) and for schema-17 cohorts.
 
-**SC-002: D7 return on the IP key.** Use the existing retention script (`telemetry_data_method_scripts.py.txt`), restricted to cohorts first seen on version >= `:release_v`.
+**SC-002 and SC-008: return in days 7–13, active return, starter-only, coverage.** These come from the FR-040 query in `mcpproxy-dash` (`src/lib/server/queries/day-two-cohort.ts`, tasks T085), never from a one-off script.
+- Run it in `baseline` mode before the starter release, and record the result as the SC-002 reference.
+- Run it in `schema17` mode for the release cohorts.
+
+It reports, per weekly cohort:
+- eligible new installs;
+- day 0–6 activity;
+- return in days 7–13;
+- active return, which is dispatch-based in the baseline and completion-based on schema 17;
+- starter-only installs;
+- the research-R13 coverage rows.
