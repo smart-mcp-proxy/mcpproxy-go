@@ -191,7 +191,28 @@ import (
 // bundle_version "other" and no sequence). Like every counter they ride the
 // telemetry opt-out. tpa_scanner is emitted when only these counters are
 // non-zero. The age-of-bundle join of SC-006 is a receiver-side computation.
-const SchemaVersion = 16
+//
+// v17 (Spec 126 PR-A, instrumentation only) keeps DISPATCH and COMPLETION
+// apart. upstream_tool_call_count_bucket keeps its v14 meaning (requests handed
+// to the transport; a session-recovery repeat counts twice). The new
+// upstream_outcomes object counts LOGICAL calls that dispatched at least one
+// request: succeeded (a usable result: no error, no isError:true, not withheld
+// by an output policy — the first_real_tool_call_ever predicate), unusable
+// (dispatched, no usable result) and succeeded_non_starter (succeeded minus
+// the starter server; every success until the starter ships), each a
+// bucketUpstream label, plus coverage ("partial" for the first window of a
+// process that opened an existing config.db, whose predecessor's unsent counts
+// are lost; "full" otherwise). It is a reset-on-accept counter window like the
+// others, frozen with heartbeat_id until a 2xx, and sent by both editions. The
+// personal edition also sends day_two: install_origin ("fresh" when config.db
+// holds the install anchor, written once when the store was empty at first
+// open; "existing" otherwise), install_age (d0_6|d7_13|d14_plus, UTC calendar
+// dates since the anchor, only when fresh) and success_scope_ever
+// (none|starter_only|non_starter, persisted, forward-only). day_two is state,
+// not part of the counter window. Closed enums only; no timestamp, name or
+// identifier is added. A field counts only on heartbeats whose schema_version
+// introduced it: absence before v17 means "not measured", never zero.
+const SchemaVersion = 17
 
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
 // Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.
@@ -432,6 +453,20 @@ type HeartbeatPayload struct {
 	// email, group or IdP subject. The wire key deliberately avoids the
 	// substring "user" (see the SchemaVersion comment).
 	UserCountBucket string `json:"member_count_bucket,omitempty"`
+
+	// Schema v17 (Spec 126 FR-035, FR-036): the per-window COMPLETION counts,
+	// next to the dispatch count above (upstream_tool_call_count_bucket).
+	// Dispatch counts requests handed to the transport; these count logical
+	// calls that dispatched at least one request, by outcome. Reset-on-accept,
+	// part of the drained counter window keyed by heartbeat_id, so a retry of
+	// an undelivered window re-sends it byte-identical. Both editions.
+	UpstreamOutcomes *UpstreamOutcomes `json:"upstream_outcomes,omitempty"`
+
+	// Schema v17 (Spec 126 FR-034, FR-038): install origin, install age bucket
+	// and lifetime success scope. STATE, read fresh at every build and never
+	// part of the counter window. Personal edition only; nil (omitted) on the
+	// server edition and when the install-anchor provider is not wired.
+	DayTwo *DayTwoPayload `json:"day_two,omitempty"`
 }
 
 // OnboardingSnapshot is the data the telemetry service needs to populate
@@ -553,6 +588,13 @@ type Service struct {
 	// and the BBolt-backed OnboardingState. nil-safe: when unset the
 	// onboarding fields are simply omitted from the heartbeat.
 	onboardingProvider func() *OnboardingSnapshot
+
+	// installAnchorProvider (Spec 126 FR-033/FR-034) reads the install anchor
+	// from config.db; nil until the runtime wires it. See day_two.go.
+	installAnchorProvider func() (time.Time, bool, error)
+	// outcomeMarkerMu serialises the writes of the undelivered-window marker
+	// (Spec 126 FR-036; see outcome_window.go).
+	outcomeMarkerMu sync.Mutex
 
 	// Spec 101 FR-021: optional provider for the active TPA bundle's
 	// provenance tuple (source, signature_verified, schema line, sequence).
@@ -1264,6 +1306,9 @@ func (s *Service) sendHeartbeatWithOneShots(ctx context.Context, consumeOneShots
 	if resp.StatusCode/100 == 2 {
 		s.pendingCounterSnapshot = nil
 		s.rotateHeartbeatWindowID()
+		// Spec 126 FR-036: the next window opens now (window_age), and the
+		// undelivered-window marker is cleared.
+		s.onCounterWindowAccepted()
 		s.advanceUpgradeFunnel()
 	}
 }
@@ -1602,6 +1647,11 @@ func (s *Service) buildHeartbeatWithOneShots(consumeOneShots bool) HeartbeatPayl
 		}
 	}
 
+	// Schema v17 (Spec 126 FR-034, FR-038): day_two, personal edition only.
+	// State, not a counter: built fresh here and never part of the drained
+	// counter window.
+	payload.DayTwo = s.buildDayTwo(time.Now().UTC())
+
 	// Spec 044 (T051): LaunchSource. One-shot "installer" override consumes
 	// the installer_heartbeat_pending flag set at process startup when
 	// MCPPROXY_LAUNCHED_BY=installer was observed. Otherwise the runtime
@@ -1720,6 +1770,10 @@ func applyRegistrySnapshot(payload *HeartbeatPayload, snap RegistrySnapshot) {
 	// Schema v8: security-scanner counters. nil (and therefore omitted) when
 	// the install never completed or failed a scan in the window.
 	payload.TPAScanner = snap.TPAScannerStats()
+	// Schema v17: the completion window rides the same frozen snapshot, so a
+	// retry of an undelivered heartbeat_id re-sends it byte-identical.
+	outcomes := snap.UpstreamOutcomes
+	payload.UpstreamOutcomes = &outcomes
 	// Bundle state is per-heartbeat state, not a reset-on-accept counter: the
 	// counter view above just replaced TPAScanner, so merge it back in.
 	applyTPABundle(payload)

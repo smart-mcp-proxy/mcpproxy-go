@@ -1049,6 +1049,8 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 		result, err = client.CallTool(dispatchCtx, toolName, args)
 	}
 	u.proxy.noteUpstreamDispatched(dispatchCtx) // each JS sub-call counts its own requests; nil-safe
+	outcome := u.proxy.beginUpstreamOutcome(dispatchCtx, serverName, callInc)
+	defer outcome.record() // Spec 126 FR-035: one outcome on every exit below; nil-safe
 	callerr.Observe(ctx, result, err)
 	fwdOut := fwdSink.Outbound()
 	parentFwdSink.Merge(fwdOut)
@@ -1094,6 +1096,7 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	}
 	// Activation: only after the output policy above let the result through.
 	u.proxy.noteUpstreamSuccess(result, err)
+	outcome.markUsable(result, err)
 	duration := time.Since(startTime)
 
 	// Record the tool call with timing and result. Issue #935: code_execution

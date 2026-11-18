@@ -203,6 +203,10 @@ type Runtime struct {
 	refreshManager    *oauth.RefreshManager // Proactive OAuth token refresh
 	updateChecker     *updatecheck.Checker  // Background version checking
 	telemetryService  *telemetry.Service    // Anonymous usage telemetry (Spec 036)
+	// starterClassifier decides starter-ness of a (server, incarnation) for the
+	// schema-17 completion counters (Spec 126 FR-037). nil: the default, which
+	// answers false. See upstream_outcome.go.
+	starterClassifier atomic.Pointer[starterClassifierHolder]
 
 	// bundleRefresher is the TPA bundle refresh scheduler (Spec 087 / Spec 101
 	// US3 B19), registered by the server and started in
@@ -4227,6 +4231,10 @@ func (r *Runtime) SetTelemetry(version, edition string) {
 			if err := funnelStore.RecordActivity(db, time.Now().UTC()); err != nil {
 				r.logger.Debug("Failed to record funnel activity at startup", zap.Error(err))
 			}
+
+			// Spec 126 (schema 17): install anchor provider for day_two and
+			// window_age, and the first counter window's coverage.
+			r.wireDayTwoTelemetry()
 		}
 	}
 

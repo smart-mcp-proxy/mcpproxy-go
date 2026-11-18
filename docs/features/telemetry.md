@@ -10,7 +10,7 @@ MCPProxy collects anonymous usage statistics to help improve the product. This p
 
 ## What is collected
 
-MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 16** (`schema_version: 16` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
+MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 17** (`schema_version: 17` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize. A field counts only on heartbeats whose `schema_version` introduced it: before that version it is **not measured**, never zero or false (see [Coverage](#coverage-a-field-counts-only-from-its-schema-version)).
 
 | Field | Example | Purpose |
 |-------|---------|---------|
@@ -47,6 +47,8 @@ MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying 
 | `feature_flags.idp_provider` | `none` | The configured identity-provider **family** for server-edition SSO (schema v13) — fixed enum `google` / `github` / `microsoft` / `oidc` / `none`. The kind only: never the issuer URL, tenant, client id or display name. `none` when the block is disabled or unset |
 | `member_count_bucket` | `1-10` | Number of server-edition user accounts, bucketed (schema v13) — fixed enum `0` / `1-10` / `11-100` / `101-1000` / `1000+`. `0` on the personal edition (no counter is installed); omitted only when the counter fails. A count only, never an identity. (Named `member_…`, not `user_…`: the anonymity scanner blocks the home-dir basename as a substring of the whole payload, and `user` is the username of every `USER user` container image) |
 | `env_markers.is_container` | `true` | Unchanged in v13; read together with the fields above to see how server-edition installs are deployed |
+| `upstream_outcomes` | `{"succeeded":"1-10","unusable":"0","succeeded_non_starter":"1-10","coverage":"full","window_age":"d0_6"}` | Completed upstream calls in this counter window, by outcome (schema v17). Bucket labels, a coverage flag and the install age when the window opened — never a name or a timestamp. Both editions; `window_age` only on a fresh personal install. See [Schema v17](#schema-v17--dispatch-vs-completion-and-install-cohorts-spec-126) |
+| `day_two` | `{"install_origin":"fresh","install_age":"d7_13","success_scope_ever":"non_starter"}` | Install origin, install age bucket and lifetime success scope (schema v17). Closed enums only; personal edition only. See [Schema v17](#schema-v17--dispatch-vs-completion-and-install-cohorts-spec-126) |
 | `preflight` | `{"filter_diag_emitted_24h":3,"availability_block_24h":2,"availability_block_reasons_24h":{"server_quarantined":2},"discovery_omission_24h":5}` | Preflight baseline counters (issue #969) — counts only, reason map keyed by a fixed enum. Omitted entirely when nothing was counted. See below |
 
 The `server_protocol_counts` map uses a **fixed enum of keys** (`stdio`, `http`, `sse`, `streamable_http`, `auto`) — server names and URLs are never included. Unknown or misconfigured protocol values are bucketed into `auto`.
@@ -264,6 +266,57 @@ Five reset-on-accept counters count the refresh lifecycle (the daily check of th
 **Not a partition.** A cycle that found nothing new (unchanged, not modified, superseded, or fetch disabled) counts only in `bundle_refresh_cycles`, so the three class counters do not sum to it. Do not add them to the v8 `scans_*` counters either: the unit is a refresh cycle (or a server), not a scan job.
 
 **What is deliberately absent.** The bundle's age, `generated_at`, the last-checked and last-activated times, the next-check time, the fetch URL and host, refusal reasons and digests are never transmitted. The freshness view ("how old is the bundle in the fleet") is computed on the receiver by joining `bundle_sequence` against the release timeline, not reported by the client. The anonymity scanner rejects any `tpa_scanner` key outside the whitelist, and the five counters above must be non-negative integers (strings, negatives and floats block the heartbeat). With telemetry disabled (`MCPPROXY_TELEMETRY=false`, `DO_NOT_TRACK`, the CLI or config opt-out) none of these keys, and no `tpa_scanner` object, is sent.
+
+## Schema v17 — dispatch vs completion, and install cohorts (Spec 126)
+
+Schema v17 is instrumentation only: it adds two objects and changes nothing else. They exist so that new installs can be followed from their first week to their second, and so that "an upstream was called" and "an upstream call worked" are never inferred from each other.
+
+### Dispatch vs completion
+
+Two instruments now sit side by side, and they count different things:
+
+| Instrument | Since | Counts | Unit |
+|-----------|-------|--------|------|
+| `upstream_tool_call_count_bucket` | v14 | **Dispatches**: requests the core client handed to the transport | Requests. A request repeated after an upstream session was re-initialized counts twice |
+| `upstream_outcomes` | v17 | **Completions**: logical calls that dispatched at least one request, by outcome | Logical calls. The same session-recovery repeat is one call and one outcome |
+
+A logical call is one `call_tool_*` call, one direct-routing call, or one `code_execution` sub-call. A call refused before dispatch (validation, quarantine, a profile or policy, a disconnected server, the concurrency limiter, a moved connection generation) records neither a dispatch nor an outcome. An operator replaying a stored call from the REST API or Web UI records neither.
+
+### `upstream_outcomes` (both editions)
+
+A reset-on-accept counter window, like `upstream_tool_call_count_bucket`: it is part of the window keyed by `heartbeat_id`, frozen until an accepted (2xx) heartbeat, and a retry of an undelivered window re-sends it byte-identical. Calls made while a send is being retried go to the next window.
+
+| Field | Values | Meaning |
+|-------|--------|---------|
+| `upstream_outcomes.succeeded` | `0` / `1-10` / `11-100` / `101-1000` / `1000+` | Logical calls with a **usable** result: no error, no `isError: true` answer, and not withheld by an output policy (output sanitisation or output-schema validation). The same predicate as `activation.first_real_tool_call_ever` |
+| `upstream_outcomes.unusable` | same buckets | Logical calls that dispatched but ended without a usable result: a transport or upstream error, `isError: true`, or a result an output policy withheld |
+| `upstream_outcomes.succeeded_non_starter` | same buckets | The subset of `succeeded` that is not on the starter server. No starter exists yet, so it equals `succeeded`; the field is sent anyway so the instrument stays the same when one ships |
+| `upstream_outcomes.coverage` | `full` / `partial` | `full` when the counts cover the whole time since the previous accepted heartbeat. `partial` for the first window of a process whose predecessor left recorded outcomes undelivered (a persisted local marker, cleared on every accepted heartbeat, says so), and once for the first start of this build on an existing install, where no marker exists yet. A fresh install's first window, and a plain restart after a delivered window, are `full` |
+| `upstream_outcomes.window_age` | `d0_6` / `d7_13` / `d14_plus` | The install age (as `day_two.install_age` below) at the moment the window **opened**: process start, or the previous accepted heartbeat. Present only when the install is fresh; always absent on the server edition. Frozen with the window, so a retry carries the age it opened at |
+
+### `day_two` (personal edition only)
+
+State, read fresh at every heartbeat build; it is not part of the counter window. Omitted on the server edition.
+
+| Field | Values | Meaning |
+|-------|--------|---------|
+| `day_two.install_origin` | `fresh` / `existing` | `fresh` when the local data store holds an **install anchor**: a UTC time written once, at startup, only when `config.db` held no prior data when it was opened (no file, an empty file, or no record in any bucket). An install upgraded from a build without the anchor has none and reports `existing`; it is never counted as a new install. The anchor is recorded whatever the telemetry setting and is never sent — only the buckets derived from it are |
+| `day_two.install_age` | `d0_6` / `d7_13` / `d14_plus` | The difference in **UTC calendar dates** between the anchor's date and the date the heartbeat is built (constant within one UTC date). A negative difference (clock skew) counts as `d0_6`. Present only when `install_origin` is `fresh` |
+| `day_two.success_scope_ever` | `none` / `starter_only` / `non_starter` | Whether this install ever got a usable upstream result, and where. Persisted locally, recorded whatever the telemetry setting, and moves forward only (`none` → `starter_only` → `non_starter`). On an `existing` install it covers the time since the upgrade |
+
+`days_since_install` (v7) is unchanged, but it is not a cohort key: it is stamped on the first telemetry-enabled heartbeat, so it cannot tell an upgrade or a late opt-in from a new install. Use `install_origin` and `install_age` for cohorts.
+
+**Privacy.** Both objects carry closed enums and bucket labels only: no server or tool name, path, timestamp, free text or new identifier. The anonymity scanner treats them as closed objects and blocks the heartbeat on an unknown key, an out-of-enum value, a non-string value, a nested object, a `window_age` next to `install_origin: existing`, or an `install_age` that does not match the origin; the violation never echoes the offending key or value. With telemetry disabled nothing is sent; the anchor and `success_scope_ever` are still recorded locally.
+
+### Coverage: a field counts only from its schema version
+
+A field is measured only on heartbeats with `schema_version >=` the version that introduced it. When a heartbeat is older, the field is **not measured** — do not read its absence as `false`, `0` or `none`. For the day-two questions that means:
+
+- no `install_origin` / `install_age` below v17 (fall back to the first heartbeat date, and say so);
+- no completion counts below v17 (only dispatch-based activity, v14 and later, can be measured, and it is reported under that name);
+- `coverage: partial` windows are reported as their own gap, not silently merged.
+
+Later onboarding fields (the starter, second-client and summary fields) each ship with the release that produces them, at the next free schema version, and follow the same rule.
 
 ## Preflight baseline counters (issue #969)
 

@@ -721,6 +721,8 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 			result, err = p.upstreamManager.CallTool(dispatchCtx, qualifiedName, args)
 		}
 		p.noteUpstreamDispatched(dispatchCtx) // one attempt per request that reached the transport
+		outcome := p.beginUpstreamOutcome(dispatchCtx, serverName, p.toolCallIncarnation(serverName))
+		defer outcome.record() // Spec 126 FR-035: one outcome on every exit below
 		callerr.Observe(ctx, result, err)
 		fwdOut := fwdSink.Outbound()
 
@@ -878,6 +880,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// Activation: same success contract as call_tool_* (usable result only).
 		if activityStatus == "success" {
 			p.recordRealToolCallSuccess()
+			outcome.markUsable(forwarded, nil)
 		}
 
 		return forwarded, nil
