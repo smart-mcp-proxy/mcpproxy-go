@@ -111,6 +111,7 @@ func (r *Runtime) StartBackgroundInitialization() {
 				zap.Duration("valid_for", time.Until(expiresAt)),
 				zap.String("binding", binding.String()))
 			r.refreshManager.OnTokenSavedFor(serverName, expiresAt, binding)
+			r.notifyTokenSaved(serverName)
 		})
 		r.logger.Info("Token saved callback registered for proactive refresh")
 	}

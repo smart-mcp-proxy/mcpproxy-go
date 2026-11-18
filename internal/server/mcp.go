@@ -288,6 +288,29 @@ type MCPProxyServer struct {
 	// publishDirectCatalog cannot interleave with another rebuild's pair.
 	directRefreshMu sync.Mutex
 
+	// Direct rebuild retry (GH #1929 release QA). A rebuild that ran while a
+	// connected server's tools/list failed transiently published the catalog
+	// without that server's tools, and the server can recover on the same
+	// connection without any servers.changed event — leaving /mcp/s/<server>
+	// and the direct surface stale. While a rebuild sees such a server, it is
+	// retried: base delay, doubling, capped, at most directRetryLimit times
+	// (each retry lists every connected server, so a server whose listing
+	// fails for good must not keep the fleet polled). After the last retry
+	// directUnlisted stays set, so an OAuth token refresh — the usual moment
+	// such a server lists again — still rebuilds; otherwise the next
+	// servers.changed does. All fields are guarded by directRefreshMu.
+	// directDiscovery replaces the upstream manager's discovery in tests;
+	// nil uses DiscoverToolsWithFailures.
+	directDiscovery     func(ctx context.Context) ([]*config.ToolMetadata, []string, error)
+	directRetryTimer    *time.Timer
+	directRetryDelay    time.Duration
+	directRetryBase     time.Duration
+	directRetryMax      time.Duration
+	directRetryLimit    int
+	directRetryAttempts int
+	directUnlisted      bool
+	directClosed        bool
+
 	// directRebuildPause, when non-nil, is invoked BETWEEN SetTools and the
 	// catalog publish. Nil in production; the only writer is a test.
 	//
@@ -962,6 +985,7 @@ func NewMCPProxyServer(
 
 // Close gracefully shuts down the MCP proxy server and releases resources
 func (p *MCPProxyServer) Close() error {
+	p.stopDirectRebuildRetry()
 	if p.profileNotifier != nil {
 		p.profileNotifier.close()
 	}
@@ -5375,6 +5399,7 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 		// Read through the runtime seam so a stale schedule for a server that
 		// no longer uses OAuth is not reported here either (GH #1172).
 		if p.mainServer != nil && p.mainServer.runtime != nil {
+			healthInput.NetworkFailure, healthInput.NetworkGaveUp, healthInput.NextRetryAt = p.mainServer.runtime.NetworkRetryState(server.Name)
 			if refreshState := p.mainServer.runtime.HealthRefreshState(server.Name, server); refreshState != nil {
 				healthInput.RefreshState = health.RefreshState(refreshState.State)
 				healthInput.RefreshRetryCount = refreshState.RetryCount

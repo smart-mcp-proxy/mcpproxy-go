@@ -137,6 +137,8 @@ func (c *Client) refreshWithStoredCredentials(ctx context.Context, handler *tran
 	// Spec 116 PR2b: bound to the instance's credential binding, so a
 	// refresh of an instance a commit superseded persists nothing.
 	oauth.BeforePersistHook(c.config.Name, binding)
+	// See oauth.RefreshCoordinator.BeginTokenSaveFor (GH #1929).
+	defer oauth.DefaultRefreshCoordinator().BeginTokenSaveFor(serverKey, binding)()
 	if qahooks.ParkOAuthPersist != nil {
 		qahooks.ParkOAuthPersist(c.config.Name)
 	}

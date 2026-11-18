@@ -123,6 +123,12 @@ file-only — reference secrets with `${env:NAME}` inside the config file instea
 |----------|-------------|---------|
 | `MCPPROXY_KEYRING_WRITE` | macOS only: `1`, `true` or `yes` allows storing secrets in the Keychain (`mcpproxy secrets set`, the Web UI and REST secret endpoints). The tray app sets it for the core it launches; a terminal command or a hand-started `mcpproxy serve` must set it itself. Reading secrets never needs it, and Linux and Windows ignore it. See [macOS: storing a secret from a terminal](../features/keyring-integration.md#macos-storing-a-secret-from-a-terminal) | unset (writes refused) |
 
+### Upstream Reconnection
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCPPROXY_NETWORK_RECOVERY` | `off`, `false`, `0` or `no` turns off the watcher that reconnects remote servers as soon as the network returns after an outage or sleep. Servers then wait for their normal backoff. See [Reconnecting after a failure](upstream-servers.md#reconnecting-after-a-failure) | on |
+
 ### Browser Detection
 
 These variables control browser behavior for OAuth flows:

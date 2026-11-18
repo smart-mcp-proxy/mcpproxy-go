@@ -90,6 +90,18 @@ type HealthCalculatorInput struct {
 	// only to say how many were made before giving up.
 	RetryCount int
 
+	// NetworkFailure reports that the server's current Error is a network
+	// failure (DNS, dial, refused, timeout before any upstream answered):
+	// mcpproxy retries it automatically and reconnects it as soon as the
+	// network is back (GH #1929). NextRetryAt is when the next automatic
+	// attempt is due, nil when unknown.
+	NetworkFailure bool
+	NextRetryAt    *time.Time
+	// NetworkGaveUp: the client stopped its regular retries (20 failures) and
+	// now probes every 30 minutes, besides reconnecting when the network is
+	// back. The outage then stays an attention item (status error).
+	NetworkGaveUp bool
+
 	// Refresh state (for health status integration - Spec 023)
 	RefreshState       RefreshState // Current refresh state from RefreshManager
 	RefreshRetryCount  int          // Number of retry attempts
@@ -401,15 +413,27 @@ func calculateHealthBase(input HealthCalculatorInput, cfg *HealthCalculatorConfi
 		if input.HasEndpointURL && isEndpointAddressError(input.LastError) {
 			action = ActionEditURL
 		}
+		detail := input.LastError
 		if oauthActionApplies(input) {
 			level, action, summary = oauthAttentionState(input.LastError)
+		} else if input.NetworkFailure {
+			// GH #1929: a network failure is temporary from mcpproxy's side —
+			// it retries on its own and reconnects as soon as the network is
+			// back — so it reads as amber "Reconnecting", with when the next
+			// attempt is due. Restart / Edit URL stay offered.
+			level, summary, detail = networkFailureState(summary, input)
 		}
 		statusVal, usable, actions := connectionErrorStatus(action)
+		if input.NetworkFailure && !input.NetworkGaveUp && action == ActionRestart && !oauthActionApplies(input) {
+			// Still retrying on its own: "Connecting" (CLI STATUS, tray, Web
+			// UI), not an attention item. After give-up it stays "error".
+			statusVal = StatusConnecting
+		}
 		return &contracts.HealthStatus{
 			Level:      level,
 			AdminState: StateEnabled,
 			Summary:    summary,
-			Detail:     input.LastError,
+			Detail:     detail,
 			Action:     action,
 			Status:     statusVal,
 			Usable:     usable,
@@ -505,6 +529,25 @@ func calculateHealthBase(input HealthCalculatorInput, cfg *HealthCalculatorConfi
 
 		// Token expired
 		if input.OAuthStatus == "expired" {
+			// GH #1929: an expired token whose refresh is being retried after a
+			// temporary failure (offline, provider 5xx) needs no sign-in — the
+			// refresh succeeds once the network or provider is back. Offering
+			// "Sign in" here sent operators through a browser login for an
+			// outage. A refresh that failed for good (invalid_grant) is
+			// RefreshStateFailed and keeps the sign-in action below.
+			if input.HasRefreshToken && input.RefreshState == RefreshStateRetrying {
+				return &contracts.HealthStatus{
+					Level:      LevelDegraded,
+					AdminState: StateEnabled,
+					Summary:    "Token refresh pending",
+					Detail: "The access token expired and refreshing it failed temporarily; MCPProxy retries automatically. " +
+						formatRefreshRetryDetail(input.RefreshRetryCount, input.RefreshNextAttempt, input.RefreshLastError),
+					Action:  ActionViewLogs,
+					Status:  StatusConnecting,
+					Usable:  false,
+					Actions: []string{ActionViewLogs},
+				}
+			}
 			return &contracts.HealthStatus{
 				Level:      LevelUnhealthy,
 				AdminState: StateEnabled,
@@ -786,6 +829,8 @@ func formatErrorSummary(lastError string) string {
 		// Specific patterns first
 		{"no such host", "Host not found"},
 		{"connection refused", "Connection refused"},
+		{"actively refused", "Connection refused"},
+		{"forcibly closed by the remote host", "Connection reset"},
 		{"connection reset", "Connection reset"},
 		{"timeout", "Connection timeout"},
 		{"EOF", "Connection closed"},
@@ -829,6 +874,39 @@ func formatExpiringTokenSummary(timeUntilExpiry time.Duration) string {
 		return "Token expiring in 1h"
 	}
 	return fmt.Sprintf("Token expiring in %dh", hours)
+}
+
+// networkFailureState renders a network failure as temporary: amber, a
+// "Reconnecting" summary naming the cause, and a detail saying that mcpproxy
+// retries on its own, when the next attempt is due, and the last error.
+func networkFailureState(cause string, input HealthCalculatorInput) (level, summary, detail string) {
+	if cause == "" {
+		cause = "Network unreachable"
+	}
+	summary = "Reconnecting: " + strings.ToLower(cause[:1]) + cause[1:]
+	detail = "MCPProxy could not reach the server and retries automatically; it reconnects as soon as the network is back."
+	if input.NextRetryAt != nil && !input.NextRetryAt.IsZero() {
+		if until := time.Until(*input.NextRetryAt); until > 0 {
+			detail += fmt.Sprintf(" Next scheduled attempt in about %s (%s).", formatRetryWait(until), input.NextRetryAt.Format(time.RFC3339))
+		} else {
+			detail += " Next attempt: at the next health check."
+		}
+	}
+	if input.NetworkGaveUp {
+		detail += " Regular retries stopped after repeated failures; it is probed every 30 minutes and reconnected at once when the network changes or comes back."
+	}
+	if input.LastError != "" {
+		detail += " Last error: " + input.LastError
+	}
+	return LevelDegraded, summary, detail
+}
+
+// formatRetryWait renders a wait as whole seconds or minutes.
+func formatRetryWait(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Round(time.Second)/time.Second))
+	}
+	return fmt.Sprintf("%dm", int(d.Round(time.Minute)/time.Minute))
 }
 
 // formatRefreshRetryDetail formats the detail message for a refresh retry state.
@@ -904,6 +982,10 @@ func isOAuthRelatedError(err string) bool {
 		"i/o timeout",
 		"context deadline exceeded",
 		"no route to host",
+		// Windows wordings (GH #1929 CI)
+		"actively refused",
+		"forcibly closed by the remote host",
+		"aborted by the software in your host machine",
 	}
 	for _, pattern := range connectionPatterns {
 		if stringutil.ContainsIgnoreCase(err, pattern) {
