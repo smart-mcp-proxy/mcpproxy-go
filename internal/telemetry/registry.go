@@ -156,6 +156,19 @@ type CounterRegistry struct {
 	tpaBundleRefreshRejections  int64
 	tpaBundleRefreshUnavailable int64
 	tpaBundleReprotectHits      int64
+
+	// Schema v17 (Spec 126 FR-035, FR-036): completion counters per logical
+	// upstream call, and the current window's coverage flag. Under mu so a
+	// Snapshot/Drain sees one consistent window. See upstream_outcomes.go.
+	outcomeSucceeded           int64
+	outcomeUnusable            int64
+	outcomeSucceededNonStarter int64
+	outcomeWindowPartial       bool
+	// outcomeWindowAge is the install age of the current window when it
+	// opened ("" on an existing install or the server edition).
+	outcomeWindowAge string
+	// outcomeWindowHook runs when a window records its first outcome.
+	outcomeWindowHook func()
 }
 
 // NewCounterRegistry creates an empty registry. All counters start at zero.
@@ -460,6 +473,10 @@ type RegistrySnapshot struct {
 	TPABundleRefreshRejections  int64 `json:"tpa_bundle_refresh_rejections"`
 	TPABundleRefreshUnavailable int64 `json:"tpa_bundle_refresh_unavailable"`
 	TPABundleReprotectHits      int64 `json:"tpa_bundle_reprotect_hits"`
+
+	// Schema v17 (Spec 126 FR-035, FR-036): the completion window, bucketed,
+	// with the window's own coverage flag.
+	UpstreamOutcomes UpstreamOutcomes `json:"upstream_outcomes"`
 }
 
 // TPAScannerStats projects the schema-v8 scanner counters out of the snapshot,
@@ -548,6 +565,7 @@ func (r *CounterRegistry) Snapshot() RegistrySnapshot {
 	snap.TPABundleRefreshRejections = r.tpaBundleRefreshRejections
 	snap.TPABundleRefreshUnavailable = r.tpaBundleRefreshUnavailable
 	snap.TPABundleReprotectHits = r.tpaBundleReprotectHits
+	snap.UpstreamOutcomes = r.upstreamOutcomesLocked()
 	for k, v := range r.tpaFindings {
 		snap.TPAFindings[k] = v
 	}
@@ -606,6 +624,7 @@ func (r *CounterRegistry) Drain() RegistrySnapshot {
 	snap.TPABundleRefreshRejections = r.tpaBundleRefreshRejections
 	snap.TPABundleRefreshUnavailable = r.tpaBundleRefreshUnavailable
 	snap.TPABundleReprotectHits = r.tpaBundleReprotectHits
+	snap.UpstreamOutcomes = r.upstreamOutcomesLocked()
 	for _, sev := range tpaSeverityKeys {
 		snap.TPAFindings[sev] = r.tpaFindings[sev]
 	}
@@ -625,6 +644,7 @@ func (r *CounterRegistry) Drain() RegistrySnapshot {
 	r.tpaBundleRefreshRejections = 0
 	r.tpaBundleRefreshUnavailable = 0
 	r.tpaBundleReprotectHits = 0
+	r.resetUpstreamOutcomesLocked()
 
 	return snap
 }
@@ -669,6 +689,9 @@ func (r *CounterRegistry) HasPendingCounters() bool {
 		r.tpaBundleRefreshUnavailable > 0 || r.tpaBundleReprotectHits > 0 {
 		return true
 	}
+	if r.upstreamOutcomesPendingLocked() {
+		return true
+	}
 	for _, v := range r.tpaFindings {
 		if v > 0 {
 			return true
@@ -710,6 +733,7 @@ func (r *CounterRegistry) Reset() {
 	r.tpaBundleRefreshRejections = 0
 	r.tpaBundleRefreshUnavailable = 0
 	r.tpaBundleReprotectHits = 0
+	r.resetUpstreamOutcomesLocked()
 }
 
 // bucketUpstream maps an upstream tool call count to its log bucket label.

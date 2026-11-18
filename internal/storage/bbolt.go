@@ -42,6 +42,10 @@ type BoltDB struct {
 	// oauthKey seals and opens oauth_tokens values (Spec 123); nil when
 	// encryption is off. Set once at open, never changed.
 	oauthKey *tokenseal.Key
+	// wasEmptyAtOpen is true when config.db held no prior data when this
+	// process opened it (absent, 0 bytes, or no record in any bucket). Decided once in
+	// NewBoltDB before initBuckets creates anything (Spec 126 FR-033).
+	wasEmptyAtOpen bool
 }
 
 // noSync opens databases with bbolt's NoSync. Only tests set it, through
@@ -61,6 +65,9 @@ func DisableSyncForTesting() { noSync.Store(true) }
 func NewBoltDB(dataDir string, logger *zap.SugaredLogger, opts ...Option) (*BoltDB, error) {
 	o := resolveOpenOptions(opts)
 	dbPath := filepath.Join(dataDir, "config.db")
+	// Spec 126 FR-033: decide "no prior data" before bbolt.Open creates the
+	// file, and (below) before initBuckets creates any bucket.
+	emptyFile := fileIsAbsentOrEmpty(dbPath)
 
 	// Try to open with timeout, if it fails, immediately return database locked error.
 	// The database holds OAuth tokens and DCR client secrets as plain JSON
@@ -91,9 +98,10 @@ func NewBoltDB(dataDir string, logger *zap.SugaredLogger, opts ...Option) (*Bolt
 	tightenFilePermissions(dbPath, logger)
 
 	boltDB := &BoltDB{
-		db:       db,
-		logger:   logger,
-		oauthKey: o.oauthKey,
+		db:             db,
+		logger:         logger,
+		oauthKey:       o.oauthKey,
+		wasEmptyAtOpen: emptyFile || !storeHasRecords(db),
 	}
 
 	// Initialize buckets and schema
