@@ -248,7 +248,7 @@ The facts loop, `first_tool_indexed_ever`, `clients_day0` and the starter, secon
   - Schema 17: `install_origin = fresh`, and the first heartbeat reports `install_age = d0_6`.
   - Pre-17 baseline: the identity's first-ever heartbeat, with `days_since_install <= 1`. If that first row is below schema 7, the install falls into the `age_unverified` coverage gap.
 - **Day ranges (days 0–6 and 7–13).**
-  - Schema 17: `install_age` on each `heartbeats` row and each `heartbeat_events` window.
+  - Schema 17: `install_age` on each daily `heartbeats` row. Each `heartbeat_events` window joins to the same anonymous id's `heartbeats` row for its UTC date. FR-034 defines the age in UTC calendar dates, so it is the same for every heartbeat on one date, and keeping the age out of the event payload keeps retried windows byte-identical, which the receiver requires (otherwise it returns 409).
   - Pre-17: calendar offset from D0, the identity's first heartbeat date.
 - **Return** means any heartbeat in days 7–13.
 - **Active return**:
@@ -273,5 +273,5 @@ The facts loop, `first_tool_indexed_ever`, `clients_day0` and the starter, secon
 **Limits accepted**:
 - Installs with telemetry off are invisible.
 - If a process is killed before its first accepted send, that window is lost. The next process's first window is then marked `partial`.
-- A counter window is attributed to the install age when it is sent, so a window that straddles day 7 counts in `d7_13`.
+- A counter window is attributed to the install age on the UTC date it was received, so a window that straddles day 7 counts in `d7_13`.
 - The receiver change (spec FR-039) must be live before the first schema-17 release. Until then, only the last window of each day survives.

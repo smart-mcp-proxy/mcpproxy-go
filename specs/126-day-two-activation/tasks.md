@@ -73,7 +73,7 @@
 
 - [ ] T083 [P] [US5] test: `internal/telemetry/install_age_test.go`.
   - `install_origin` is `fresh` with an anchor and `existing` without one.
-  - `install_age` boundaries: day 6 23:59 → `d0_6`, day 7 00:00 → `d7_13`, day 14 → `d14_plus`. A future anchor counts as `d0_6`.
+  - `install_age` uses UTC calendar dates. With the anchor at 23:50 UTC on D, a heartbeat at 00:10 UTC on D+7 is `d7_13`, and one at 23:59 on D+6 is `d0_6`. D+14 is `d14_plus`. A future anchor counts as `d0_6`.
   - `install_age` is absent when the origin is `existing`.
   - The server edition omits `day_two`.
 
@@ -115,7 +115,7 @@
 ### Companion PRs in the owning repositories
 
 - [ ] T084 [US5] `mcpproxy-telemetry` (FR-039):
-  - `counterWindowPayload` also copies `upstream_outcomes`, and `day_two.install_origin` / `install_age`, into `heartbeat_events`.
+  - `counterWindowPayload` also copies `upstream_outcomes` into `heartbeat_events`. It does not copy `day_two`: the age is joined from the daily row (spec FR-039), so a retried window stays byte-identical.
   - `validateV17Payload` rejects unknown keys and out-of-enum values in those objects, for `schema_version >= 17` only.
   - Vitest coverage: v16 passes unchanged; a valid v17 passes; every invalid v17 shape returns a structured 400; the event payload carries the new keys.
   - Deploy before the first schema-17 release. The deploy is a maintainer step.

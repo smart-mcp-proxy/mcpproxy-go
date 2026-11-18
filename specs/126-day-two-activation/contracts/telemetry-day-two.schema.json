@@ -6,7 +6,7 @@
   "type": "object",
   "properties": {
     "upstream_outcomes": {
-      "description": "Reset-on-accept, both editions, same window as heartbeat_id. One outcome per logical upstream call that dispatched at least one request. Copied by the receiver into heartbeat_events (FR-039).",
+      "description": "Reset-on-accept, both editions, same window as heartbeat_id. One outcome per logical upstream call that dispatched at least one request. Copied by the receiver into heartbeat_events (FR-039); day_two is not, it is joined from the daily heartbeats row by UTC date.",
       "type": "object",
       "additionalProperties": false,
       "required": ["succeeded", "unusable", "succeeded_non_starter", "coverage"],
@@ -25,7 +25,7 @@
       "properties": {
         "install_origin": { "enum": ["fresh", "existing"] },
         "install_age": {
-          "description": "Present only when install_origin = fresh.",
+          "description": "Present only when install_origin = fresh. Difference in UTC calendar dates between the anchor and payload build time (constant within one UTC date).",
           "enum": ["d0_6", "d7_13", "d14_plus"]
         },
         "success_scope_ever": { "enum": ["none", "starter_only", "non_starter"] }

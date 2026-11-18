@@ -326,7 +326,7 @@ These requirements are the whole of PR-A. PR-A changes no onboarding behaviour a
   - The anchor is recorded whatever the telemetry opt-out setting.
 - **FR-034 (origin and age)**: The personal-edition heartbeat MUST carry:
   - `day_two.install_origin`: `fresh` when the anchor exists, `existing` otherwise;
-  - only when the origin is `fresh`, `day_two.install_age`: `d0_6 | d7_13 | d14_plus`. This is the whole UTC days from the anchor to the time the heartbeat is built. A negative age (clock skew) counts as `d0_6`.
+  - only when the origin is `fresh`, `day_two.install_age`: `d0_6 | d7_13 | d14_plus`. The age is the difference in UTC calendar dates between the anchor and the moment the heartbeat is built, so it is the same for every heartbeat on one UTC date. A negative age (clock skew) counts as `d0_6`.
 
   `days_since_install` (schema 7) is unchanged but is not used for cohorts. It is stamped on the first telemetry-enabled heartbeat, so it cannot tell an upgrade from a new install, or a late opt-in from a new install.
 - **FR-035 (completion counters)**: The heartbeat MUST carry a reset-on-accept object `upstream_outcomes`, in both editions. It has three counts:
@@ -350,7 +350,8 @@ These requirements are the whole of PR-A. PR-A changes no onboarding behaviour a
   - It is persisted and set from the same completion events as FR-035.
   - On an `existing` install it covers the time since the upgrade. Cohorts use `fresh` installs only.
 - **FR-039 (receiver, `mcpproxy-telemetry`)**: The receiver MUST:
-  - copy `upstream_outcomes` and `day_two.install_origin` / `install_age` into the idempotent `heartbeat_events` counter payload, so a later same-day heartbeat cannot overwrite an earlier window. Today the daily `heartbeats` row keeps only the last snapshot of the day;
+  - copy `upstream_outcomes` into the idempotent `heartbeat_events` counter payload, so a later same-day heartbeat cannot overwrite an earlier window. Today the daily `heartbeats` row keeps only the last snapshot of the day;
+  - keep `install_origin` and `install_age` out of the event payload. A retried window must send a byte-identical counter payload or the receiver returns 409, and the age can change between retries. Each event takes its age from the same anonymous id's `heartbeats` row for the event's UTC date. The calendar-date age of FR-034 makes that join exact;
   - for `schema_version >= 17` only, reject out-of-enum values and unknown keys in the new objects with its existing structured 400.
 
   This receiver change MUST be deployed before the first schema-17 build is released.
@@ -413,7 +414,7 @@ Cohort definition for SC-001 to SC-004 (implemented once, by the FR-040 query in
   - on schema-17 builds, `install_origin = fresh`, and the first heartbeat in the window reports `install_age = d0_6`;
   - on pre-17 builds (the baseline), the identity's first heartbeat ever, with `days_since_install <= 1` on that row. Rows below schema 7 cannot be verified and are reported as the coverage gap `age_unverified`, never silently included;
 - **matching across days 0–6 and days 7–13**:
-  - schema 17 matches by the anchor-derived `install_age` on each heartbeat and each `heartbeat_events` window, per anonymous id. The anchor and the anonymous id live in the same data directory, so they reset together;
+  - schema 17 matches by the anchor-derived `install_age` per anonymous id. A `heartbeat_events` window takes the `install_age` of that anonymous id's `heartbeats` row for the window's UTC date. The anchor and the anonymous id live in the same data directory, so they reset together;
   - the pre-17 baseline matches by calendar offset from the identity's first heartbeat date (D0): days D0 to D0+6, and days D0+7 to D0+13;
   - machines are counted on the canonical identity key, with the IP key reported alongside, held constant over any trend;
 - matured: the first heartbeat is at least 14 days before the query date.
