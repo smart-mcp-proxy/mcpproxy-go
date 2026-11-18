@@ -222,9 +222,9 @@ func TestNotifySecretsChanged_LeavesDisabledServersDisabled(t *testing.T) {
 	require.NoError(t, rt.storageManager.SaveUpstreamServer(disabled))
 
 	require.NoError(t, rt.NotifySecretsChanged(context.Background(), "store", "tok"))
-	time.Sleep(300 * time.Millisecond) // restarts run in the background
-	srv := rt.Config().Servers[0]
-	assert.False(t, srv.Enabled, "storing a secret must not enable a disabled server")
+	// Restarts run in the background: the server must stay disabled.
+	assert.Never(t, func() bool { return rt.Config().Servers[0].Enabled }, time.Second, 20*time.Millisecond,
+		"storing a secret must not enable a disabled server")
 }
 
 func TestServerReferencesSecret_Fields(t *testing.T) {

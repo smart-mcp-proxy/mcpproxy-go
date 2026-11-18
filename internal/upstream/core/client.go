@@ -245,7 +245,8 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 		errs := secretResolver.ExpandStructSecretsCollectErrors(ctx, resolvedServerConfig)
 		// Only an HTTP-family server sends its URL, headers and OAuth
 		// settings; a stdio server's copies of those fields are never used.
-		overHTTP := proxytransport.DetermineTransportType(serverConfig) != proxytransport.TransportStdio
+		// Decided on the resolved copy, exactly as Connect decides.
+		overHTTP := proxytransport.DetermineTransportType(resolvedServerConfig) != proxytransport.TransportStdio
 		for _, e := range errs {
 			// Log the references only, never the field's value (release QA
 			// F9): the value may hold literal credentials around them.
