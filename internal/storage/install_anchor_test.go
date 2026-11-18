@@ -97,22 +97,19 @@ func TestInstallAnchor_EmptyFileCountsAsNew(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, ok)
 	})
-	t.Run("only empty buckets", func(t *testing.T) {
-		// A standalone CLI command run before the first serve opens the store:
-		// it creates every bucket and the meta schema-version key, nothing else.
+	t.Run("only the buckets and schema version a real open writes", func(t *testing.T) {
+		// A standalone CLI command run before the first serve opens the store
+		// through the real NewBoltDB: it creates every bucket and writes
+		// meta/schema_version (initBuckets), nothing else.
 		dir := t.TempDir()
-		cli := openAnchorTestManager(t, dir)
+		cli, err := NewBoltDB(dir, zap.NewNop().Sugar())
+		require.NoError(t, err)
 		require.True(t, cli.WasEmptyAtOpen())
-		require.NoError(t, cli.GetDB().Update(func(tx *bbolt.Tx) error {
-			// An empty nested bucket is not data either.
-			_, err := tx.Bucket([]byte(UpstreamsBucket)).CreateBucketIfNotExists([]byte("nested-empty"))
-			return err
-		}))
 		require.NoError(t, cli.Close())
 
 		m := openAnchorTestManager(t, dir)
 		defer m.Close()
-		require.True(t, m.WasEmptyAtOpen(), "buckets without records still count as empty")
+		require.True(t, m.WasEmptyAtOpen(), "buckets without records, and meta/schema_version, still count as empty")
 		_, ok, err := m.EnsureInstallAnchor(time.Now())
 		require.NoError(t, err)
 		require.True(t, ok)

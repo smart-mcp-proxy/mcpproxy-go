@@ -1,5 +1,7 @@
 package telemetry
 
+import "time"
+
 // Schema v17 (Spec 126 FR-035, FR-036): per-window COMPLETION counters.
 //
 // upstream_tool_call_count_bucket (schema 14) counts DISPATCHES: requests the
@@ -48,8 +50,9 @@ const (
 // when the starter classifier marks the call's server as the starter. The
 // server name never reaches the registry.
 //
-// The first outcome of a window calls the undelivered-window hook (outside the
-// registry lock), which persists the marker FR-036 reads at the next start.
+// The first outcome of a window (the first since the last Drain) calls the
+// undelivered-window hook outside the registry lock, with the window's drain
+// epoch; the hook persists the marker FR-036 reads at the next start.
 func (r *CounterRegistry) RecordUpstreamOutcome(succeeded, starter bool) {
 	r.mu.Lock()
 	first := !r.upstreamOutcomesPendingLocked()
@@ -62,28 +65,30 @@ func (r *CounterRegistry) RecordUpstreamOutcome(succeeded, starter bool) {
 		r.outcomeUnusable++
 	}
 	hook := r.outcomeWindowHook
+	epoch := r.outcomeDrainEpoch
 	r.mu.Unlock()
 	if first && hook != nil {
-		hook()
+		hook(epoch)
 	}
 }
 
 // SetUndeliveredWindowHook installs the function called when a window records
-// its first outcome. The telemetry service installs it to persist the
-// undelivered-window marker.
-func (r *CounterRegistry) SetUndeliveredWindowHook(fn func()) {
+// its first outcome, with that window's drain epoch. The telemetry service
+// installs it to persist the undelivered-window marker.
+func (r *CounterRegistry) SetUndeliveredWindowHook(fn func(epoch uint64)) {
 	r.mu.Lock()
 	r.outcomeWindowHook = fn
 	r.mu.Unlock()
 }
 
-// SetOutcomeWindowAge sets the install age of the CURRENT window: the age
-// when it opened (process start, or the previous accepted send). "" omits
-// window_age. Drain freezes it into the detached snapshot and does not reset
-// it: the service sets the next window's age when that window opens.
-func (r *CounterRegistry) SetOutcomeWindowAge(age string) {
+// SetOutcomeWindowAgeFunc installs the window_age mapping: the install age
+// bucket of the time a window opened (registry creation, i.e. process start,
+// or the last Drain). fn must be pure and cheap (it runs under the registry
+// lock); nil omits window_age. Drain freezes the value into the detached
+// snapshot, so a retry carries the age its window opened at.
+func (r *CounterRegistry) SetOutcomeWindowAgeFunc(fn func(opened time.Time) string) {
 	r.mu.Lock()
-	r.outcomeWindowAge = age
+	r.outcomeWindowAgeFn = fn
 	r.mu.Unlock()
 }
 
@@ -124,18 +129,21 @@ func (r *CounterRegistry) upstreamOutcomesLocked() UpstreamOutcomes {
 	if r.outcomeWindowPartial {
 		coverage = OutcomeCoveragePartial
 	}
+	windowAge := ""
+	if r.outcomeWindowAgeFn != nil {
+		windowAge = r.outcomeWindowAgeFn(r.outcomeWindowOpenedAt)
+	}
 	return UpstreamOutcomes{
 		Succeeded:           bucketUpstream(r.outcomeSucceeded),
 		Unusable:            bucketUpstream(r.outcomeUnusable),
 		SucceededNonStarter: bucketUpstream(r.outcomeSucceededNonStarter),
 		Coverage:            coverage,
-		WindowAge:           r.outcomeWindowAge,
+		WindowAge:           windowAge,
 	}
 }
 
-// resetUpstreamOutcomesLocked zeroes the window and its coverage flag; the
-// window age is kept until the service sets the next one. The caller holds
-// r.mu.
+// resetUpstreamOutcomesLocked zeroes the window's counts and its coverage
+// flag. The caller holds r.mu and sets the next window's open time.
 func (r *CounterRegistry) resetUpstreamOutcomesLocked() {
 	r.outcomeSucceeded = 0
 	r.outcomeUnusable = 0

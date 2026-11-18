@@ -201,8 +201,11 @@ import (
 // (dispatched, no usable result) and succeeded_non_starter (succeeded minus
 // the starter server; every success until the starter ships), each a
 // bucketUpstream label, plus coverage ("partial" for the first window of a
-// process that opened an existing config.db, whose predecessor's unsent counts
-// are lost; "full" otherwise). It is a reset-on-accept counter window like the
+// process whose predecessor left recorded outcomes undelivered, per a
+// persisted marker, and once on the first schema-17 start over an existing
+// config.db; "full" otherwise, a plain restart after a delivered window
+// included) and window_age (the install age when the window opened, fresh
+// personal installs only). It is a reset-on-accept counter window like the
 // others, frozen with heartbeat_id until a 2xx, and sent by both editions. The
 // personal edition also sends day_two: install_origin ("fresh" when config.db
 // holds the install anchor, written once when the store was empty at first
@@ -589,12 +592,22 @@ type Service struct {
 	// onboarding fields are simply omitted from the heartbeat.
 	onboardingProvider func() *OnboardingSnapshot
 
-	// installAnchorProvider (Spec 126 FR-033/FR-034) reads the install anchor
+	// installAnchorProvider (Spec 126 FR-033/FR-034) reads the install anchor;
+	// installAnchorOnce caches its ONE answer per process (see
+	// installAnchor in day_two.go).
+	installAnchorMu     sync.Mutex
+	installAnchorRead   bool
+	installAnchorValue  time.Time
+	installAnchorExists bool
+	installAnchorErr    error
 	// from config.db; nil until the runtime wires it. See day_two.go.
 	installAnchorProvider func() (time.Time, bool, error)
 	// outcomeMarkerMu serialises the writes of the undelivered-window marker
-	// (Spec 126 FR-036; see outcome_window.go).
-	outcomeMarkerMu sync.Mutex
+	// and guards the delivered-epoch pair below (Spec 126 FR-036; see
+	// outcome_window.go).
+	outcomeMarkerMu       sync.Mutex
+	outcomeDelivered      bool
+	outcomeDeliveredEpoch uint64
 
 	// Spec 101 FR-021: optional provider for the active TPA bundle's
 	// provenance tuple (source, signature_verified, schema line, sequence).
@@ -1304,11 +1317,12 @@ func (s *Service) sendHeartbeatWithOneShots(ctx context.Context, consumeOneShots
 	// counter window and rotate its id, and (b) advance the upgrade funnel
 	// cursor. Failures preserve the detached snapshot for retry.
 	if resp.StatusCode/100 == 2 {
+		acceptedEpoch := s.pendingCounterSnapshot.outcomeEpoch
 		s.pendingCounterSnapshot = nil
 		s.rotateHeartbeatWindowID()
-		// Spec 126 FR-036: the next window opens now (window_age), and the
-		// undelivered-window marker is cleared.
-		s.onCounterWindowAccepted()
+		// Spec 126 FR-036: clear the undelivered-window marker unless an
+		// outcome was recorded after the accepted snapshot was drained.
+		s.onCounterWindowAccepted(acceptedEpoch)
 		s.advanceUpgradeFunnel()
 	}
 }

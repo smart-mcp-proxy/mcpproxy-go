@@ -79,9 +79,36 @@ func BuildDayTwo(anchor time.Time, hasAnchor bool, scope SuccessScope, now time.
 // SetInstallAnchorProvider wires the install-anchor reader (Spec 126 FR-033):
 // it returns the anchor, whether the store holds one, and a read error. The
 // runtime installs it over the storage manager. Without it, or on the server
-// edition, the heartbeat omits day_two. Call it before Start.
+// edition, the heartbeat omits day_two. Call it before InitOutcomeWindow and
+// Start.
 func (s *Service) SetInstallAnchorProvider(fn func() (time.Time, bool, error)) {
+	s.installAnchorMu.Lock()
+	defer s.installAnchorMu.Unlock()
 	s.installAnchorProvider = fn
+	s.installAnchorRead = false
+}
+
+// installAnchor reads the install anchor ONCE per process and returns that
+// same answer to every caller: day_two (install_origin, install_age) and
+// window_age. The anchor is written at startup before telemetry is wired and
+// never rewritten, so one read is exact, and one shared value means the two
+// objects can never disagree on "fresh". A disagreement would be fatal: the
+// receiver answers 400 to window_age next to install_origin "existing", a
+// non-2xx keeps the window pending, and the same rejected window would be
+// re-sent forever. A read error is cached too: both objects then omit their
+// anchor-derived fields for the whole process. wired is false when no
+// provider is installed.
+func (s *Service) installAnchor() (anchor time.Time, exists bool, err error, wired bool) {
+	s.installAnchorMu.Lock()
+	defer s.installAnchorMu.Unlock()
+	if s.installAnchorProvider == nil {
+		return time.Time{}, false, nil, false
+	}
+	if !s.installAnchorRead {
+		s.installAnchorValue, s.installAnchorExists, s.installAnchorErr = s.installAnchorProvider()
+		s.installAnchorRead = true
+	}
+	return s.installAnchorValue, s.installAnchorExists, s.installAnchorErr, true
 }
 
 // buildDayTwo returns the day_two block for this heartbeat, or nil when it
@@ -89,10 +116,13 @@ func (s *Service) SetInstallAnchorProvider(fn func() (time.Time, bool, error)) {
 // wired, or a read error. A read error omits the block for this heartbeat
 // rather than guessing "existing" or "none"; absence reads as "not measured".
 func (s *Service) buildDayTwo(now time.Time) *DayTwoPayload {
-	if s.edition == editionServer || s.installAnchorProvider == nil || s.activationDB == nil {
+	if s.edition == editionServer || s.activationDB == nil {
 		return nil
 	}
-	anchor, ok, err := s.installAnchorProvider()
+	anchor, ok, err, wired := s.installAnchor()
+	if !wired {
+		return nil
+	}
 	if err != nil {
 		s.logger.Debug("telemetry: install anchor unreadable; omitting day_two", zap.Error(err))
 		return nil

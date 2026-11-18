@@ -715,13 +715,17 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
 		dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
 		dispatchCtx = p.withReviewDirtyRecheck(dispatchCtx, serverName)
+		// Spec 126 FR-037: the incarnation the call is dispatched against, read
+		// BEFORE the dispatch so a remove + re-add while the call is in flight
+		// cannot reclassify its outcome against the replacement.
+		callInc := p.toolCallIncarnation(serverName)
 		if epoch, ok := p.liveConnectionEpoch(serverName); ok {
 			result, err = p.upstreamManager.CallToolOnEpoch(dispatchCtx, qualifiedName, args, epoch)
 		} else {
 			result, err = p.upstreamManager.CallTool(dispatchCtx, qualifiedName, args)
 		}
 		p.noteUpstreamDispatched(dispatchCtx) // one attempt per request that reached the transport
-		outcome := p.beginUpstreamOutcome(dispatchCtx, serverName, p.toolCallIncarnation(serverName))
+		outcome := p.beginUpstreamOutcome(dispatchCtx, serverName, callInc)
 		defer outcome.record() // Spec 126 FR-035: one outcome on every exit below
 		callerr.Observe(ctx, result, err)
 		fwdOut := fwdSink.Outbound()
