@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -89,31 +90,19 @@ func TestUnresolvedWireSecret_RefusesConnectLoginAndRefresh(t *testing.T) {
 	assert.True(t, IsUnresolvedSecretError(c.RefreshOAuthTokenDirect(ctx)), "token refresh refused")
 	assert.Equal(t, int32(0), hits.Load(), "still nothing sent")
 
-	for _, e := range logs.All() {
-		line := e.Message
-		for _, f := range e.Context {
-			line += " " + f.String
-			if f.Interface != nil {
-				line += " " + toString(f.Interface)
-			}
-		}
-		assert.NotContains(t, line, present, "resolved value logged in %q", e.Message)
-		assert.NotContains(t, line, literal, "field value logged in %q", e.Message)
-	}
+	assertNoValueLogged(t, logs, present, literal)
 }
 
-func toString(v interface{}) string {
-	switch x := v.(type) {
-	case error:
-		return x.Error()
-	case []string:
-		out := ""
-		for _, s := range x {
-			out += s + " "
+// assertNoValueLogged checks every logged message and field (strings, errors,
+// arrays: through ContextMap) for any of the values.
+func assertNoValueLogged(t *testing.T, logs *observer.ObservedLogs, values ...string) {
+	t.Helper()
+	for _, e := range logs.All() {
+		line := e.Message + " " + fmt.Sprint(e.ContextMap())
+		for _, v := range values {
+			assert.NotContains(t, line, v, "a value was logged in %q", e.Message)
 		}
-		return out
 	}
-	return ""
 }
 
 // Only fields an HTTP upstream receives block the connection; a stdio
@@ -126,6 +115,15 @@ func TestUnresolvedSecret_OnlyWireFieldsBlock(t *testing.T) {
 	c, err := NewClient(stdio.Name, stdio, zap.NewNop(), nil, &config.Config{}, nil, r)
 	require.NoError(t, err)
 	assert.NoError(t, c.UnresolvedSecrets())
+
+	// A stdio server never sends its headers, URL or OAuth settings, so a
+	// stale reference there does not stop it (review r1).
+	stdioHeaders := &config.ServerConfig{Name: "local-h", Command: "true", URL: "https://x.example/mcp", Protocol: "stdio", Enabled: true,
+		Headers: map[string]string{"Authorization": "${keyring:missing}"},
+		OAuth:   &config.OAuthConfig{ClientSecret: "${keyring:missing}"}}
+	c, err = NewClient(stdioHeaders.Name, stdioHeaders, zap.NewNop(), nil, &config.Config{}, nil, r)
+	require.NoError(t, err)
+	assert.NoError(t, c.UnresolvedSecrets(), "a stdio server's headers never reach a wire")
 
 	good := &config.ServerConfig{Name: "good", URL: "http://127.0.0.1:1/mcp", Protocol: "http", Enabled: true,
 		Headers: map[string]string{"Authorization": "Bearer ${keyring:ok}"}}
@@ -150,4 +148,39 @@ func TestUnresolvedSecret_OnlyWireFieldsBlock(t *testing.T) {
 			assert.Contains(t, c.UnresolvedSecrets().Error(), tc.want)
 		})
 	}
+}
+
+// With OAuth applicable, both manual sign-in flows stop at the guard: they
+// would send the unresolved settings to the authorization server.
+func TestUnresolvedWireSecret_SignInFlowsRefused(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &config.ServerConfig{Name: "f9-oauth", URL: srv.URL + "/mcp", Protocol: "http", Enabled: true,
+		OAuth: &config.OAuthConfig{ClientID: "id", ClientSecret: "${keyring:missing}"}}
+	c, err := NewClient(cfg.Name, cfg, zap.NewNop(), nil, &config.Config{}, nil, resolverWith(mapKeyring{}))
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = c.StartOAuthFlowQuick(ctx)
+	assert.True(t, IsUnresolvedSecretError(err), "quick sign-in: %v", err)
+	_, err = c.ForceOAuthFlowWithResult(ctx)
+	assert.True(t, IsUnresolvedSecretError(err), "forced sign-in: %v", err)
+	assert.Contains(t, err.Error(), "in OAuth.ClientSecret")
+	assert.Equal(t, int32(0), hits.Load(), "nothing sent to the upstream or its authorization server")
+}
+
+// The fix hint matches what recovers: a keyring or file secret is picked up by
+// a server restart; an environment variable only by restarting mcpproxy.
+func TestUnresolvedSecretError_FixHints(t *testing.T) {
+	keyring := &UnresolvedSecretError{Server: "s", Refs: []UnresolvedSecretRef{{Field: "Headers[A]", Reference: "${keyring:k}", Type: "keyring", Name: "k"}}}
+	assert.Contains(t, keyring.Error(), "mcpproxy secrets set k, then restart the server (mcpproxy upstream restart s)")
+	env := &UnresolvedSecretError{Server: "s", Refs: []UnresolvedSecretRef{{Field: "Headers[A]", Reference: "${env:TOKEN}", Type: "env", Name: "TOKEN"}}}
+	assert.Contains(t, env.Error(), "Set the environment variable TOKEN and restart mcpproxy")
+	assert.NotContains(t, env.Error(), "upstream restart")
+	assert.Equal(t, "TOKEN", health.ExtractMissingSecret(env.Error()))
 }

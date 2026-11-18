@@ -243,6 +243,9 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 	if secretResolver != nil {
 		ctx := context.Background()
 		errs := secretResolver.ExpandStructSecretsCollectErrors(ctx, resolvedServerConfig)
+		// Only an HTTP-family server sends its URL, headers and OAuth
+		// settings; a stdio server's copies of those fields are never used.
+		overHTTP := proxytransport.DetermineTransportType(serverConfig) != proxytransport.TransportStdio
 		for _, e := range errs {
 			// Log the references only, never the field's value (release QA
 			// F9): the value may hold literal credentials around them.
@@ -250,17 +253,22 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 			for _, ref := range secret.FindSecretRefs(e.Reference) {
 				refNames = append(refNames, ref.Original)
 			}
+			// e.Err names the reference and the provider's reason (not found,
+			// keyring unavailable), never a value.
 			logger.Error("Failed to resolve secret reference",
 				zap.String("server", serverConfig.Name),
 				zap.String("field", e.FieldPath),
 				zap.Strings("references", refNames),
-				zap.Bool("blocks_connection", wireSecretField(e.FieldPath)),
+				zap.Bool("blocks_connection", overHTTP && wireSecretField(e.FieldPath)),
+				zap.Error(e.Err),
 				zap.String("help", "Add the secret (mcpproxy secrets set <name>, or the Web UI), then restart the server"))
 		}
-		unresolved = unresolvedWireSecrets(serverConfig.Name, errs, func(ref secret.Ref) bool {
-			_, err := secretResolver.Resolve(ctx, ref)
-			return err == nil
-		})
+		if overHTTP {
+			unresolved = unresolvedWireSecrets(serverConfig.Name, errs, func(ref secret.Ref) bool {
+				_, err := secretResolver.Resolve(ctx, ref)
+				return err == nil
+			})
+		}
 	}
 
 	c := &Client{

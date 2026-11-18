@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -194,15 +195,7 @@ func testUnresolvedHeaderSecret(t *testing.T, restart func(*Runtime) error) {
 
 	// No secret value reaches the logs.
 	for _, e := range logs.All() {
-		line := e.Message
-		for _, f := range e.Context {
-			line += " " + f.String
-			if f.Interface != nil {
-				if err, ok := f.Interface.(error); ok {
-					line += " " + err.Error()
-				}
-			}
-		}
+		line := e.Message + " " + fmt.Sprint(e.ContextMap())
 		for _, v := range []string{presentValue, addedValue} {
 			assert.NotContains(t, line, v, "a secret value was logged: %q", e.Message)
 		}
@@ -214,4 +207,38 @@ func firstAuthorization(h *headerRecorder) string {
 		return r[0].Get("Authorization")
 	}
 	return ""
+}
+
+// Review r1: a secret change restarts the servers that reference it, and a
+// restart enables a disabled server, so a disabled server is skipped.
+func TestNotifySecretsChanged_LeavesDisabledServersDisabled(t *testing.T) {
+	quarantineOff := false
+	disabled := &config.ServerConfig{Name: "off", URL: "http://127.0.0.1:1/mcp", Protocol: "streamable-http", Enabled: false,
+		Headers: map[string]string{"Authorization": "Bearer ${keyring:tok}"}}
+	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", QuarantineEnabled: &quarantineOff,
+		Servers: []*config.ServerConfig{disabled}}, "", zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rt.Close() })
+	require.NoError(t, rt.storageManager.SaveUpstreamServer(disabled))
+
+	require.NoError(t, rt.NotifySecretsChanged(context.Background(), "store", "tok"))
+	time.Sleep(300 * time.Millisecond) // restarts run in the background
+	srv := rt.Config().Servers[0]
+	assert.False(t, srv.Enabled, "storing a secret must not enable a disabled server")
+}
+
+func TestServerReferencesSecret_Fields(t *testing.T) {
+	ref := "${keyring:tok}"
+	for name, cfg := range map[string]*config.ServerConfig{
+		"header": {Headers: map[string]string{"A": "Bearer " + ref}},
+		"url":    {URL: "https://x/" + ref},
+		"oauth":  {OAuth: &config.OAuthConfig{ClientSecret: ref}},
+		"extra":  {OAuth: &config.OAuthConfig{ExtraParams: map[string]string{"k": ref}}},
+		"env":    {Env: map[string]string{"T": ref}},
+		"args":   {Args: []string{"--t=" + ref}},
+	} {
+		assert.True(t, serverReferencesSecret(cfg, ref), name)
+	}
+	assert.False(t, serverReferencesSecret(&config.ServerConfig{Headers: map[string]string{"A": "${keyring:other}"}}, ref))
+	assert.False(t, serverReferencesSecret(nil, ref))
 }

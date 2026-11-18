@@ -44,23 +44,26 @@ func (e *UnresolvedSecretError) Error() string {
 		}
 		fmt.Fprintf(&b, "unresolved secret reference %s in %s", r.Reference, r.Field)
 	}
-	fmt.Fprintf(&b, ": the secret is not available, so nothing was sent to the upstream. %s, then restart the server (mcpproxy upstream restart %s)",
-		e.fixHint(), e.Server)
+	fmt.Fprintf(&b, ": the secret is not available, so nothing was sent to the upstream. %s", e.fixHint())
 	return b.String()
 }
 
-// fixHint names the command that makes the first missing reference available.
+// fixHint says how to make the first missing reference available and pick it
+// up: secrets are resolved when the server's connection is created.
 func (e *UnresolvedSecretError) fixHint() string {
 	r := e.Refs[0]
+	restart := fmt.Sprintf("then restart the server (mcpproxy upstream restart %s)", e.Server)
 	switch r.Type {
 	case "keyring":
-		return fmt.Sprintf("Add it with: mcpproxy secrets set %s", r.Name)
+		return fmt.Sprintf("Add it with: mcpproxy secrets set %s, %s", r.Name, restart)
 	case "env":
-		return fmt.Sprintf("Set the environment variable %s for mcpproxy", r.Name)
+		// The env provider reads mcpproxy's own environment, which a server
+		// restart cannot change.
+		return fmt.Sprintf("Set the environment variable %s and restart mcpproxy", r.Name)
 	case "file":
-		return fmt.Sprintf("Make the file %s readable by mcpproxy", r.Name)
+		return fmt.Sprintf("Make the file %s readable by mcpproxy, %s", r.Name, restart)
 	default:
-		return "Make the secret available"
+		return "Make the secret available, " + restart
 	}
 }
 
@@ -79,8 +82,10 @@ func IsUnresolvedSecretError(err error) bool {
 
 // wireSecretField reports whether a ServerConfig field path is sent to an HTTP
 // upstream or its authorization server: the URL, the headers and every OAuth
-// setting. Fields only a local process sees (command, args, env, working dir,
-// isolation) keep the existing behaviour: logged, used as written.
+// setting. It applies to HTTP-family servers only (see NewClientWithOptions);
+// fields only a local process sees (command, args, env, working dir,
+// isolation), and every field of a stdio server, keep the existing behaviour:
+// logged, used as written.
 func wireSecretField(path string) bool {
 	return path == "URL" ||
 		strings.HasPrefix(path, "Headers[") ||
@@ -112,11 +117,12 @@ func unresolvedWireSecrets(server string, errs []secret.SecretExpansionError, re
 			out.Refs = append(out.Refs, UnresolvedSecretRef{Field: e.FieldPath, Reference: ref.Original, Type: ref.Type, Name: ref.Name})
 			added = true
 		}
-		if !added {
+		if !added && len(refs) > 0 {
 			// The field failed but each reference resolves on its own now (a
-			// secret added meanwhile): still refuse, naming the field, since
-			// the client holds the unresolved value.
-			out.Refs = append(out.Refs, UnresolvedSecretRef{Field: e.FieldPath, Reference: "a secret reference"})
+			// secret added meanwhile): still refuse, since the client holds the
+			// unresolved value, naming the field's first reference.
+			r := refs[0]
+			out.Refs = append(out.Refs, UnresolvedSecretRef{Field: e.FieldPath, Reference: r.Original, Type: r.Type, Name: r.Name})
 		}
 	}
 	if len(out.Refs) == 0 {

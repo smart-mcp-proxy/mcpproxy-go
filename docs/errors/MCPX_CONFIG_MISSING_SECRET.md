@@ -30,7 +30,14 @@ unresolved secret reference ${keyring:my_api_key} in Headers[Authorization]: the
 
 Other servers are not affected. A missing reference in a local (stdio)
 server's `env`, `args` or `working_dir` is logged and the value is used as
-written.
+written; a stdio server never sends its `headers`, `url` or `oauth` values, so
+a reference there does not stop it either.
+
+This also applies to `${env:NAME}` references and to any text in those fields
+that has the `${type:name}` form: earlier versions sent them literally when
+they could not be resolved, and mcpproxy now refuses instead. A `${env:NAME}`
+reference reads mcpproxy's own environment, so set the variable and restart
+mcpproxy (or its service) rather than the server.
 
 ## How to fix
 
@@ -42,8 +49,9 @@ mcpproxy secrets list
 
 If the name you referenced isn't there, add it.
 
-Secrets are resolved when the server's connection is created, so after adding
-one restart the server:
+Secrets are resolved when the server's connection is created. Storing a
+secret through the Web UI or REST API restarts the enabled servers that use it;
+after `mcpproxy secrets set`, restart the server:
 
 ```bash
 mcpproxy upstream restart <server>

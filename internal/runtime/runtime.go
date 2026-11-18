@@ -1502,6 +1502,11 @@ func (r *Runtime) NotifySecretsChanged(ctx context.Context, operation, secretNam
 	var affectedServers []string
 
 	for _, server := range cfg.Servers {
+		// A restart enables a disabled server (RestartServerCtx), and a
+		// secret change is no reason to undo the operator's disable.
+		if !server.Enabled {
+			continue
+		}
 		if serverReferencesSecret(server, secretRef) {
 			affectedServers = append(affectedServers, server.Name)
 		}
