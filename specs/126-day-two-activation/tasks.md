@@ -45,7 +45,7 @@
 - [ ] T004 [US5] impl:
   - `wasEmptyAtOpen` is decided in `internal/storage` at open, before `initBuckets`. Empty means absent, 0 bytes, or no records other than `meta`/`SchemaVersionKey`.
   - `EnsureInstallAnchor` and `InstallAnchor()` go in `internal/storage/bbolt.go`, with a `manager.go` wrapper. The anchor goes under one dedicated key in one dedicated bucket (for example bucket `install_anchor`, key `first_run_at`), never in `OnboardingState`.
-  - Call `EnsureInstallAnchor` in `internal/server/server.go` startup **before** the HTTP server and MCP initialisation start.
+  - Call `EnsureInstallAnchor` inside `runtime.New`, right after `storage.NewManager`. That is before `rt.SetTelemetry`, before `funnelStore.RecordActivity`, and before the HTTP server and MCP initialisation start. Test that the first heartbeat built in the real startup order on an empty data directory carries `fresh`, `d0_6` and `window_age`.
 
 ### Completion counters, coverage and scope (FR-035 to FR-038)
 
@@ -57,6 +57,9 @@
     - `full` on the first window of an `install_origin = fresh` install, and `full` for such an install whose marker is absent;
     - `partial` after this sequence: the marker is written `false` at start, outcomes are recorded before the first send, and the process is killed;
     - under `-race`, concurrent outcome and accept paths never leave the marker `false` while undelivered outcomes exist;
+    - an outcome recorded during an in-flight send does not block on the send;
+    - a window that holds only outcomes is pending, so the shutdown flush does not skip it;
+    - server-edition windows carry no `window_age`;
     - `full` after a restart whose previous window was delivered (marker clear);
     - `partial` after a restart with the undelivered-window marker set;
     - `partial` once on the first start of this build over an existing store (marker absent);
@@ -82,7 +85,9 @@
     - the window open time, stamped in `Drain`, which gives `window_age`;
     - the coverage flag, frozen into the snapshot;
     - the undelivered-window marker in the activation bucket, set `true` on the first outcome after process start or after each `Drain`, and written `false` at start if absent. Its writes run under the same lock as the accept decision;
-    - one anchor read per process, used for both `day_two` and `window_age`;
+    - one anchor read per process, taken after `EnsureInstallAnchor`, used for both `day_two` and `window_age`;
+    - a dedicated small mutex for the outcome increment, the since-drain flag, `Drain`'s outcome swap and the post-2xx marker write. Never `deliveryMu`;
+    - the outcome counters added to `HasPendingCounters()` and `Reset()`;
     - on an accepted send, the marker is set `false` only if no outcome followed the accepted snapshot's drain.
   - `internal/telemetry/success_scope.go`: the sticky scope in the activation store.
   - `internal/server/mcp_upstream_telemetry.go`: `noteUpstreamOutcome` beside `noteUpstreamDispatched`, recorded exactly once per logical call by a deferred classifier set up right after `noteUpstreamDispatched`. It is guarded on dispatches > 0, and runs on every exit, including the early error and block returns. A logical call with zero dispatches records nothing.

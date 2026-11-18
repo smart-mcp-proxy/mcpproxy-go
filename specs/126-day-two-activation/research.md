@@ -205,7 +205,7 @@ Mapping table (`internal/storage/activity_digest.go`, `BlockClass(rec)`):
 
 **Decision**:
 - `GET /api/v1/activity/summary` accepts an optional `view=web|tray|cli`. Any other value is ignored, with no error, to stay compatible.
-- The handler calls `telemetry.RecordSummaryView(surface)`. This is an in-memory counter with a per-surface last-counted time (1 h debounce), drained into `day_two.summary_views` on an accepted send, like other delta counters (`internal/telemetry/registry.go:449-621`).
+- The handler calls `telemetry.RecordSummaryView(surface)`. This is an in-memory counter with a per-surface last-counted time (1 h debounce), drained into `day_two.summary_views` by `Drain` at the start of a send and discarded from the pending snapshot on an accepted send, like other delta counters (`internal/telemetry/registry.go:449-621`).
 - Web sends `view=web` only when the Home card mounts with `document.visibilityState === 'visible'`, not on its 5-minute refresh. The tray sends `view=tray` only from `menuWillOpen`. The CLI always sends `view=cli`.
 
 **Rationale**: one aggregation path (A6). No client-side telemetry.
@@ -253,7 +253,7 @@ The facts loop, `first_tool_indexed_ever`, `clients_day0` and the starter, secon
 
 **Decision**:
 
-- **Eligible new installation.** In both modes the install must be non-CI and personal edition, and matured: its first heartbeat is at least 14 days old.
+- **Eligible new installation.** In both modes the install must be non-CI and personal edition, and matured: its first heartbeat is at least 21 days old (windows are fetched to D0+20).
   - Schema 17: `install_origin = fresh`, and the first heartbeat reports `install_age = d0_6`.
   - Pre-17 baseline: the identity's first-ever heartbeat, with `days_since_install <= 1`. If that first row is below schema 7, the install falls into the `age_unverified` coverage gap.
 - **Day ranges (days 0–6 and 7–13).**
@@ -279,7 +279,7 @@ The facts loop, `first_tool_indexed_ever`, `clients_day0` and the starter, secon
   A missing day 7–13 heartbeat is the non-return itself, not a coverage gap.
 - **Counting unit.**
   - Install-level figures count per anonymous id.
-  - Machine-level figures use the canonical identity key, and a machine returns if any of its eligible installs returns.
+  - Machine-level figures exist in `baseline` mode only. They use the canonical identity key, and a machine returns if any of its eligible installs returns. `schema17` runs per install.
   - Trends hold the IP key constant: the share of rows carrying a machine id has grown, which bends any trend on the canonical key.
 
 **Rationale**: every pre/post comparison stays on one instrument, and the query says what old schemas cannot answer instead of inferring it.

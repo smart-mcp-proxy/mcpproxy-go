@@ -333,14 +333,14 @@ These requirements are the whole of PR-A. PR-A changes no onboarding behaviour a
   - `day_two.install_origin`: `fresh` when the anchor exists, `existing` otherwise;
   - only when the origin is `fresh`, `day_two.install_age`: `d0_6 | d7_13 | d14_plus`. The age is the difference in UTC calendar dates between the anchor and the moment the heartbeat is built, so it is the same for every heartbeat on one UTC date. A negative age (clock skew) counts as `d0_6`.
 
-  `days_since_install` (schema 7) is unchanged but is not used for cohorts. It is stamped on the first telemetry-enabled heartbeat, so it cannot tell an upgrade from a new install, or a late opt-in from a new install.
+  `days_since_install` (schema 7) is unchanged but is not used for cohorts. Since Spec 080 its `first_install_day` stamp is written at every process start whatever the opt-out. But a store upgraded from a build older than schema 7 gets the stamp on its first start of a newer build, so `days_since_install` alone cannot tell such an upgrade from a new install.
 - **FR-035 (completion counters)**: The heartbeat MUST carry a reset-on-accept object `upstream_outcomes`, in both editions. It has three counts:
   - `succeeded`: logical upstream calls with a usable result;
   - `unusable`: logical calls that dispatched at least one request but ended without a usable result. That covers a transport or upstream error, `isError:true`, and a result withheld by an output policy;
   - `succeeded_non_starter`: the subset of `succeeded` that is not on the starter server (FR-037).
 
   Each count is bucketed like `upstream_tool_call_count_bucket` (`0 | 1-10 | 11-100 | 101-1000 | 1000+`). The object also carries `window_age` (`d0_6 | d7_13 | d14_plus`), only when `install_origin = fresh` (an anchor exists). The core reads the anchor once per process and uses that one value for both `day_two` and `window_age`, so the two can never disagree; a disagreement would be a 400 that the client retries forever:
-  - it is the install age, in the FR-034 calendar-date sense, at the moment the window opened. A window opens at process start or at the last `CounterRegistry.Drain`, which happens at the start of each send. The open time is stamped inside `Drain`;
+  - it is the install age, in the FR-034 calendar-date sense, at the moment the window opened. A window opens at process start or at the last `CounterRegistry.Drain`. `Drain` runs at the start of a send when no snapshot is pending; a retry of a pending snapshot does not drain. The open time is stamped inside `Drain`. The server edition sends no `install_origin`, so its windows never carry `window_age`;
   - it is frozen into the drained snapshot with the counts;
   - it attributes the window to days 0–6 or days 7–13 without a join, and without the one-day lag that labelling at send time would add.
 
@@ -352,7 +352,8 @@ These requirements are the whole of PR-A. PR-A changes no onboarding behaviour a
     - At every start, once the first window's coverage is decided, the core writes the marker as `false` if it is absent.
   - The first window of a process is `partial` only when the marker was `true` at open, meaning the previous process ended with counts it never delivered.
   - An *absent* marker at open means that no build at schema 17 or later has run on this store yet. When `install_origin = existing`, this counts as `partial` once. When `install_origin = fresh`, an absent marker (a crash before the start-time write) gives `full`. A fresh install that restarts before any call has the marker `false`, so it stays `full`.
-  - The marker's `true` write on an outcome and the accept path's `false` write run under one lock, shared with the accept decision, so a stale `false` can never overwrite a newer `true`.
+  - One dedicated small mutex guards the outcome increment, the "outcome since drain" flag, `Drain`'s outcome swap and flag reset, and the post-2xx `false` write. A stale `false` can therefore never overwrite a newer `true`. It is not `deliveryMu`, which is held across the HTTP send: a tool call never waits on network I/O.
+  - The outcome counters count as pending counters (`HasPendingCounters`, `Reset`), so the shutdown flush never skips a window that holds only outcomes.
   - An `install_origin = fresh` install's first window is `full`.
   - A plain restart after a delivered window stays `full`.
   - The flag is frozen into the drained snapshot, so retries are byte-identical.
@@ -422,7 +423,7 @@ Each field below ships with the PR that produces it. That PR takes the next free
 - **ActivationState addition**: `first_tool_indexed_ever` and `first_tool_indexed_at` in the existing `activation` bucket.
 - **CoverageWatermark**: one persisted timestamp next to the activity bucket.
 - **ActivityDigest**: derived. The additive summary section of FR-018.
-- **SummaryViewCounter**: an in-memory delta counter per surface, with per-surface last-counted time for the hourly debounce. Drained on an accepted send.
+- **SummaryViewCounter**: an in-memory delta counter per surface, with per-surface last-counted time for the hourly debounce. Drained with the other counters by `Drain` at the start of a send (FR-035), and kept in the pending snapshot until an accepted send discards it.
 
 ## Success Criteria *(mandatory)*
 
@@ -451,8 +452,12 @@ The release-to-release comparison is pre/post. It is associative, not causal: re
 
 ### Measurable Outcomes
 
-- **SC-001 (primary)**: at least **82%** of the cohort have `tool_count > 0` on at least one heartbeat. This is the same heartbeat-sampled instrument as the 71.5% Aug-Oct 2026 baseline. The sticky `first_tool_indexed_ever` rate is reported separately and never substituted. A movement counts as real if it exceeds the larger of 3 points and the 95% interval of the previous four monthly cohorts.
-- **SC-002 (primary)**: day 7–13 return, meaning at least one heartbeat in days 7–13, is **at least 18%** of eligible new installations. Units are counted on the IP key; the unit is the IP identity, and its first heartbeat ever is D0.
+- **SC-001 (primary)**: the share of eligible new installations with `tool_count > 0` on a day 0–13 row at schema 11 or later. This is the FR-040 `tools_indexed_d0_13` figure in `baseline` mode, on the IP key, with the machine key alongside. The denominator excludes `tool_count_semantics_old`.
+  - **Reference**: the strategy's 71.5% → 82% came from an earlier instrument (any heartbeat, no new-install test), so it is not the comparison point. The PR-A baseline run on this instrument is the reference.
+  - **Target**: the maintainer MUST restate the target against that reference before the starter release. The strategy's intent was to cut the not-indexed share by about a third (28.5% → 18%). Until the target is restated, SC-001 is reported but not judged.
+  - The sticky `first_tool_indexed_ever` rate ships with PR-B and is reported separately, never substituted.
+  - A movement counts as real if it exceeds the larger of 3 points and the 95% interval of the previous four monthly cohorts.
+- **SC-002 (primary)**: day 7–13 return, meaning at least one heartbeat in days 7–13, is **at least 18%** of eligible new installations. That 18% bar was set against the old 14.9% instrument, so the maintainer MUST restate it against the recomputed reference before the starter release; until then SC-002 is reported but not judged. Units are counted on the IP key; the unit is the IP identity, and its first heartbeat ever is D0.
   - **One instrument on both sides.** The primary comparison runs the FR-040 `baseline` definition on every cohort, before and after the change. It stays computable on schema 17 and later, because the first heartbeat and `days_since_install` are still sent.
   - **Reference.** The 14.9% Jun–Sep figure came from an older script with a different day-7 definition, so it is not the comparison point. The FR-040 query recomputes the baseline before the starter release, and that value becomes the reference.
   - **Keys.** The IP key is primary for SC-002, because it can be held constant over the trend. The canonical machine key is reported alongside for levels, with the same noise rule as SC-001.
@@ -463,15 +468,15 @@ The release-to-release comparison is pre/post. It is associative, not causal: re
 - **SC-003 (diagnostic)**:
   - Launcher availability: `starter_launcher = none` is below 15% of installs with a non-empty `starter_launcher`. That field is evaluated independently of every other eligibility outcome, so `tools_present` or `name_taken` installs never dilute it. Above 15%, follow-up O1 (an embedded starter) is triggered.
   - Conversion: at least 60% of installs with `starter_offered` reach `starter_live`.
-- **SC-004 (diagnostic)**: the share of cohort installs with at least one connected client whose day-0 heartbeats show at least two distinct ids rises by at least 8 points over the pre-release baseline. Both sides use the same instrument: the union of `connected_client_ids` over heartbeats received within 26 h of the identity's first heartbeat. Today that is the startup heartbeat at about 5 minutes and the first daily one. The baseline uses pre-release cohorts (schema 16 or older), plus the PR-A release cohort for the same-instrument fields. The comparison uses cohorts first seen on a build that contains PR-C, because the second-client step ships there. The richer `clients_day0` / `clients_day0_final` fields are a separate diagnostic with no pre-release baseline. Their first release cohort becomes the baseline for later releases.
+- **SC-004 (diagnostic)**: the share of cohort installs with at least one connected client whose day-0 heartbeats show at least two distinct ids rises by at least 8 points over the pre-release baseline. Both sides use the FR-040 instrument: the distinct `connected_client_ids` on the unit's D0 and D0+1 daily rows. Each row is the last snapshot of its UTC date, so this covers up to about 48 h after the first heartbeat, and earlier same-day snapshots are not kept. The figure is FR-040 `clients_2plus_day0 ÷ clients_1plus_day0`, in `baseline` mode on the IP key. The baseline uses pre-release cohorts (schema 16 or older), plus the PR-A release cohort for the same-instrument fields. The comparison uses cohorts first seen on a build that contains PR-C, because the second-client step ships there. The richer `clients_day0` / `clients_day0_final` fields are a separate diagnostic with no pre-release baseline. Their first release cohort becomes the baseline for later releases.
 - **SC-005 (safety)**: no code path makes a starter tool callable without an explicit user approval when a normal catalog add of the same server would be quarantined. A test asserts this for the wizard, Web Home and native doors. No starter code runs before the user clicks "Add and inspect".
 - **SC-006 (performance)**: the 7-day summary with digest returns in under 1.5 s on a 100k-record activity log, measured with a new benchmark next to the summary handler tests. The Home card renders its figures within 2 s of Home load.
 - **SC-008 (coverage)**: every figure states its coverage, and the denominator is defined per figure:
   - **return (SC-002)**: eligible ÷ (eligible + `age_unverified`).
-  - **dispatch-based activity (baseline)**: eligible minus `dispatch_semantics_old` and `no_events`, over eligible.
+  - **dispatch-based activity (baseline)**: (eligible − `dispatch_uncovered`) ÷ eligible. `dispatch_uncovered` is the union of `dispatch_semantics_old` and `no_events`, and FR-040 reports it per cohort.
   - **completion-based activity (schema17)**: `windows.with_outcomes ÷ windows.total` and `windows.full ÷ windows.total`. The `coverage = full` share applies to schema-17 completion figures only, because pre-17 windows have no `coverage` field.
   - **SC-001**: eligible minus `tool_count_semantics_old`, over eligible.
-  - **SC-004**: units with at least one client id, over eligible.
+  - **SC-004**: `clients_1plus_day0` is the denominator, not coverage. Coverage is complete by construction, because `connected_client_ids` exists from schema 4 and every eligible row is schema 7 or later.
 
   A weekly cohort whose coverage is below 80% for a figure is reported but not judged against SC-001 or SC-002. Coverage gaps are reported as their own rows, and no query treats a missing field as `false` or `0`.
 - **SC-007 (privacy)**: the schema-17 privacy tests pass. There are no new identifier fields. Every new field is enum-closed, and unknown keys are rejected.

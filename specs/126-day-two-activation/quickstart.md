@@ -124,8 +124,8 @@ GROUP BY l;
 ```
 
 **SC-002 and SC-008: return in days 7–13, active return, starter-only, coverage.** These come from the FR-040 query in `mcpproxy-dash` (`src/lib/server/queries/day-two-cohort.ts`, tasks T085), never from a one-off script.
-- Run it in `baseline` mode before the starter release, and record the result as the SC-002 reference.
-- Run it in `schema17` mode for the release cohorts.
+- Run `baseline` mode on every cohort, before and after the starter release. This gives the primary SC-001, SC-002 and SC-004 figures on one instrument. The pre-release run is the reference.
+- Also run `schema17` mode (install unit) for the companion figures: completion-based activity and return, starter-only, and window coverage.
 
 It reports, per weekly cohort:
 - eligible new installs;
