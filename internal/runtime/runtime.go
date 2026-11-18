@@ -207,6 +207,9 @@ type Runtime struct {
 	// schema-17 completion counters (Spec 126 FR-037). nil: the default, which
 	// answers false. See upstream_outcome.go.
 	starterClassifier atomic.Pointer[starterClassifierHolder]
+	// successScopeReached caches the success_scope_ever ordinal this process
+	// has persisted, so RecordUpstreamOutcome skips the store once reached.
+	successScopeReached atomic.Uint32
 
 	// bundleRefresher is the TPA bundle refresh scheduler (Spec 087 / Spec 101
 	// US3 B19), registered by the server and started in
@@ -544,6 +547,16 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		logger.Info("OAuth token encryption enabled",
 			zap.String("key_id", oauthTokenKey.ID()), zap.Int("sealed_plaintext_rows", sealed))
 	}
+
+	// Spec 126 FR-033: record the install anchor right after the shutdown
+	// marker (Spec 080 FR-010 keeps that the first DB operation) and the
+	// Spec 123 OAuth boot sweep, and before every other startup write, before
+	// telemetry is wired (SetTelemetry reads the anchor once, for day_two and
+	// window_age) and before the HTTP server and MCP initialisation. Emptiness
+	// was decided when the store opened, so those earlier writes cannot change
+	// it; an early write only shrinks the window in which a crash would leave
+	// a new store without an anchor. Whatever the telemetry opt-out setting.
+	ensureInstallAnchor(storageManager, logger)
 
 	// Close any stale sessions from previous runs
 	if err := storageManager.CloseAllActiveSessions(); err != nil {

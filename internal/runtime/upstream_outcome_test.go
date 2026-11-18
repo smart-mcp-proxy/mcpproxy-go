@@ -6,12 +6,13 @@ import (
 	"go/token"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.etcd.io/bbolt"
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
 
@@ -106,12 +107,14 @@ func TestRecordUpstreamOutcome_NoTelemetryService(t *testing.T) {
 // coverage from the store's state at open (FR-034, FR-036).
 func TestSetTelemetry_WiresDayTwoAndCoverage(t *testing.T) {
 	t.Run("fresh install", func(t *testing.T) {
+		// The real startup order on an empty data directory: New records the
+		// anchor right after the store opens, SetTelemetry reads it once.
 		rt := newOutcomeRuntime(t, t.TempDir(), true)
 		defer rt.Close()
 		require.True(t, rt.StorageManager().WasEmptyAtOpen())
-		_, ok, err := rt.StorageManager().EnsureInstallAnchor(time.Now())
+		_, ok, err := rt.StorageManager().InstallAnchor()
 		require.NoError(t, err)
-		require.True(t, ok)
+		require.True(t, ok, "runtime.New records the anchor on an empty store")
 		rt.SetTelemetry("v0.0.0-test", "personal")
 
 		p := rt.TelemetryService().BuildPayload()
@@ -125,15 +128,20 @@ func TestSetTelemetry_WiresDayTwoAndCoverage(t *testing.T) {
 	})
 	t.Run("existing install, first start of this build", func(t *testing.T) {
 		dir := t.TempDir()
-		older := newOutcomeRuntime(t, dir, true) // an older build: no anchor, no marker
+		// An older build's store: data, no anchor, no marker.
+		older, err := storage.NewManager(dir, zap.NewNop().Sugar())
+		require.NoError(t, err)
+		require.NoError(t, older.GetDB().Update(func(tx *bbolt.Tx) error {
+			return tx.Bucket([]byte(storage.UpstreamsBucket)).Put([]byte("github"), []byte(`{"name":"github"}`))
+		}))
 		require.NoError(t, older.Close())
 
 		rt := newOutcomeRuntime(t, dir, true)
 		defer rt.Close()
 		require.False(t, rt.StorageManager().WasEmptyAtOpen())
-		_, ok, err := rt.StorageManager().EnsureInstallAnchor(time.Now())
+		_, ok, err := rt.StorageManager().InstallAnchor()
 		require.NoError(t, err)
-		require.False(t, ok)
+		require.False(t, ok, "an upgraded store never gets an anchor")
 		rt.SetTelemetry("v0.0.0-test", "personal")
 
 		p := rt.TelemetryService().BuildPayload()
@@ -147,8 +155,6 @@ func TestSetTelemetry_WiresDayTwoAndCoverage(t *testing.T) {
 	t.Run("server edition", func(t *testing.T) {
 		rt := newOutcomeRuntime(t, t.TempDir(), true)
 		defer rt.Close()
-		_, _, err := rt.StorageManager().EnsureInstallAnchor(time.Now())
-		require.NoError(t, err)
 		rt.SetTelemetry("v0.0.0-test", "server")
 		require.Nil(t, rt.TelemetryService().BuildPayload().DayTwo)
 		require.Empty(t, rt.TelemetryRegistry().Snapshot().UpstreamOutcomes.WindowAge)

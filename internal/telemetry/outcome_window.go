@@ -28,11 +28,12 @@ import (
 // when it is absent and install_origin is "existing" (once). A fresh origin
 // with an absent marker (a crash before the start-time write) is "full", as
 // are a plain restart after a delivered window and every window after an
-// accepted send with nothing recorded since its drain. The marker writes are
-// serialised by outcomeMarkerMu, which the accept path holds across its
-// "anything recorded since the drain?" check and its write, so a stale clear
-// can never overwrite a set. (deliveryMu is not used for the set: it is held
-// across the HTTP request, and the set runs on the tool-call path.)
+// accepted send with nothing recorded since its drain. Both marker writes run
+// under the outcome window's own small mutex (outcomeWindow in
+// upstream_outcomes.go), together with the outcome increment and Drain's
+// swap, so a stale clear can never overwrite a set. deliveryMu is NOT used:
+// it is held across the HTTP POST, and a tool call must never wait on
+// network I/O.
 //
 // Each window also opens at a time — registry creation (process start) or the
 // last Drain — and window_age is the install age at that time, frozen into
@@ -72,15 +73,15 @@ func storeOutcomeWindowMarker(db *bbolt.DB, set bool) error {
 
 // InitOutcomeWindow sets up the first counter window of this process. The
 // runtime calls it once at startup, after SetActivationStore and
-// SetInstallAnchorProvider. storeWasEmpty is true when config.db held no prior
-// data when this process opened it (a fresh install).
+// SetInstallAnchorProvider (and after storage recorded the install anchor).
+// storeWasEmpty is true when config.db held no prior data when this process
+// opened it.
 //
-// It installs the window_age mapping (the anchor is constant for the process:
-// it is written at startup before telemetry is wired, and never rewritten),
+// It installs the window_age mapping (from the once-per-process anchor read),
 // decides the first window's coverage from the persisted marker, writes the
-// marker as cleared when absent, and installs the hook that sets it when a
-// window records its first outcome. Without an activation DB no marker can be
-// kept, so coverage stays full.
+// marker as cleared when absent, and installs the marker writer, which the
+// outcome window then drives under its own mutex. Without an activation DB no
+// marker can be kept, so coverage stays full.
 func (s *Service) InitOutcomeWindow(storeWasEmpty bool) {
 	reg := s.registry
 	if reg == nil {
@@ -94,7 +95,6 @@ func (s *Service) InitOutcomeWindow(storeWasEmpty bool) {
 		return
 	}
 
-	s.outcomeMarkerMu.Lock()
 	set, exists, err := loadOutcomeWindowMarker(db)
 	switch {
 	case err != nil:
@@ -114,57 +114,32 @@ func (s *Service) InitOutcomeWindow(storeWasEmpty bool) {
 		if !s.installOriginFresh() {
 			reg.MarkOutcomeWindowPartial()
 		}
-		if err := storeOutcomeWindowMarker(db, false); err != nil {
-			s.logger.Debug("telemetry: failed to initialise outcome window marker", zap.Error(err))
-		}
+		s.writeOutcomeMarker(false)
 	case set:
 		reg.MarkOutcomeWindowPartial()
 	}
-	s.outcomeMarkerMu.Unlock()
 
-	reg.SetUndeliveredWindowHook(s.markOutcomeWindowUndelivered)
+	reg.SetOutcomeMarkerWriter(s.writeOutcomeMarker)
 }
 
-// markOutcomeWindowUndelivered persists the marker for the first outcome of
-// the window with drain epoch epoch. A hook that lands after that window was
-// already accepted (the recording goroutine was preempted between counting
-// and calling the hook) writes nothing, so it cannot leave a false "partial".
-// Serialised with the clear on an accepted send.
-func (s *Service) markOutcomeWindowUndelivered(epoch uint64) {
+// writeOutcomeMarker persists the undelivered-window marker. The outcome
+// window calls it under its own mutex (see outcomeWindow); errors are logged
+// only: a lost write can only misreport coverage, never block a call.
+func (s *Service) writeOutcomeMarker(set bool) {
 	db := s.activationDB
 	if db == nil {
 		return
 	}
-	s.outcomeMarkerMu.Lock()
-	defer s.outcomeMarkerMu.Unlock()
-	if s.outcomeDelivered && epoch <= s.outcomeDeliveredEpoch {
-		return
-	}
-	if err := storeOutcomeWindowMarker(db, true); err != nil {
-		s.logger.Debug("telemetry: failed to set outcome window marker", zap.Error(err))
+	if err := storeOutcomeWindowMarker(db, set); err != nil {
+		s.logger.Debug("telemetry: failed to write outcome window marker", zap.Bool("set", set), zap.Error(err))
 	}
 }
 
-// onCounterWindowAccepted runs after a 2xx (the shutdown flush included) for
-// the drained snapshot of epoch acceptedEpoch. It clears the undelivered
-// marker unless an outcome was recorded since that drain (its own hook set
-// the marker, and those outcomes are still undelivered).
-func (s *Service) onCounterWindowAccepted(acceptedEpoch uint64) {
-	reg := s.registry
-	db := s.activationDB
-	if reg == nil || db == nil {
-		return
-	}
-	s.outcomeMarkerMu.Lock()
-	defer s.outcomeMarkerMu.Unlock()
-	s.outcomeDelivered = true
-	s.outcomeDeliveredEpoch = acceptedEpoch
-	if reg.HasPendingUpstreamOutcomes() {
-		return
-	}
-	if err := storeOutcomeWindowMarker(db, false); err != nil {
-		s.logger.Debug("telemetry: failed to clear outcome window marker", zap.Error(err))
-	}
+// onCounterWindowAccepted runs after a 2xx (the shutdown flush included): it
+// clears the undelivered marker unless an outcome was recorded since the
+// accepted snapshot's drain.
+func (s *Service) onCounterWindowAccepted() {
+	s.registry.ClearOutcomeMarkerIfIdle()
 }
 
 // installOriginFresh reports whether day_two would say install_origin

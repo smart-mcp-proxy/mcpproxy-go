@@ -43,10 +43,15 @@ func TestServerStartup_RecordsInstallAnchorWithTelemetryDisabled(t *testing.T) {
 	require.True(t, ok, "a new data directory records the anchor at startup, telemetry off")
 	require.False(t, anchor.Before(before.Add(-time.Second)))
 
+	// The first heartbeat of the first process: day_two and the first
+	// counter window (what the first send drains) both say fresh / d0_6.
 	p := srv.runtime.TelemetryService().BuildPayload()
 	require.NotNil(t, p.DayTwo)
 	require.Equal(t, "fresh", p.DayTwo.InstallOrigin)
 	require.Equal(t, "d0_6", p.DayTwo.InstallAge)
+	window := srv.runtime.TelemetryRegistry().Snapshot().UpstreamOutcomes
+	require.Equal(t, "d0_6", window.WindowAge)
+	require.Equal(t, "full", window.Coverage)
 	require.NoError(t, srv.Shutdown())
 	time.Sleep(50 * time.Millisecond)
 

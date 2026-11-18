@@ -602,12 +602,6 @@ type Service struct {
 	installAnchorErr    error
 	// from config.db; nil until the runtime wires it. See day_two.go.
 	installAnchorProvider func() (time.Time, bool, error)
-	// outcomeMarkerMu serialises the writes of the undelivered-window marker
-	// and guards the delivered-epoch pair below (Spec 126 FR-036; see
-	// outcome_window.go).
-	outcomeMarkerMu       sync.Mutex
-	outcomeDelivered      bool
-	outcomeDeliveredEpoch uint64
 
 	// Spec 101 FR-021: optional provider for the active TPA bundle's
 	// provenance tuple (source, signature_verified, schema line, sequence).
@@ -1317,12 +1311,11 @@ func (s *Service) sendHeartbeatWithOneShots(ctx context.Context, consumeOneShots
 	// counter window and rotate its id, and (b) advance the upgrade funnel
 	// cursor. Failures preserve the detached snapshot for retry.
 	if resp.StatusCode/100 == 2 {
-		acceptedEpoch := s.pendingCounterSnapshot.outcomeEpoch
 		s.pendingCounterSnapshot = nil
 		s.rotateHeartbeatWindowID()
 		// Spec 126 FR-036: clear the undelivered-window marker unless an
 		// outcome was recorded after the accepted snapshot was drained.
-		s.onCounterWindowAccepted(acceptedEpoch)
+		s.onCounterWindowAccepted()
 		s.advanceUpgradeFunnel()
 	}
 }
