@@ -117,6 +117,21 @@ func mcpServerVersion() string {
 
 // MCPProxyServer implements an MCP server that acts as a proxy
 type MCPProxyServer struct {
+	// skillsCatalogOverride replaces the runtime as the source of skills for
+	// the three agent tools (Spec 125 PR-3). Unit tests inject a fake; nil in
+	// production, where skills() resolves to the runtime.
+	skillsCatalogOverride skillsCatalog
+	// skillAccessEmit, when set, receives skill_access activity instead of the
+	// runtime (tests).
+	skillAccessEmit func(runtime.SkillAccessActivity)
+	// skillServedCache remembers skill files as the output sanitisation
+	// policy lets them out (mcp_skills_output.go).
+	skillServedMu    sync.Mutex
+	skillServedCache map[string]*skillServed
+	skillServedTick  uint64
+	// skillDetector is the secret detector skills use, built from the live
+	// detection settings (see skillSecretDetector).
+	skillDetector *security.Detector
 	// inventoryMu guards lastInventoryKey, the reachable-server set last
 	// announced via tools/list_changed (NotifyUpstreamInventoryChanged).
 	inventoryMu      sync.Mutex
@@ -936,6 +951,11 @@ func NewMCPProxyServer(
 	// Initialize routing mode server instances (Spec 031)
 	proxy.initRoutingModeServers()
 	proxy.seedInventoryKey()
+
+	// Spec 125 PR-3: advertise the skill tools on the default surface and the
+	// direct surface when enable_skills is on at start. The routing-mode
+	// builders above already carry them; this call is a no-op for those.
+	proxy.RefreshSkillsAvailability()
 
 	return proxy
 }
@@ -7700,6 +7720,20 @@ func (p *MCPProxyServer) callToolDirect(ctx context.Context, request mcp.CallToo
 		// tool that answers "unknown tool: read_cache" (HTTP 500) and the
 		// parked payload is unreachable outside an MCP session.
 		result, err = p.handleReadCache(ctx, request)
+	case toolRetrieveSkills, toolLoadSkill, toolReadSkillFile:
+		// Spec 125 PR-3: routable here exactly while the switch is on, like the
+		// other read built-ins. The handlers apply the caller's reach.
+		if !p.skillsEnabled() {
+			return nil, fmt.Errorf("unknown tool: %s", toolName)
+		}
+		switch toolName {
+		case toolRetrieveSkills:
+			result, err = p.handleRetrieveSkills(ctx, request)
+		case toolLoadSkill:
+			result, err = p.handleLoadSkill(ctx, request)
+		default:
+			result, err = p.handleReadSkillFile(ctx, request)
+		}
 	case "quarantine_security":
 		result, err = p.handleQuarantineSecurity(ctx, request)
 	case "code_execution":

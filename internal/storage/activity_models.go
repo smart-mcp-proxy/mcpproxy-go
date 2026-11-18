@@ -39,6 +39,14 @@ const (
 	// current_hash, reason, approved_by, actor_kind, actor_name, surface.
 	// Administrator-only: it names skills that may not be approved.
 	ActivityTypeSkillQuarantineChange ActivityType = "skill_quarantine_change"
+	// ActivityTypeSkillAccess represents one agent search, load or file read of
+	// a skill (Spec 125 FR-024). Metadata: action (search|load|read), tool,
+	// outcome (success|not_found|binary|damaged|stale_version), skill, skill_id,
+	// file, hash, offset, bytes, total_bytes, results, matches. The skill text is
+	// never stored. Administrator-only: a row names the id a caller asked for,
+	// which may be a skill that is held now or was held then, even on a server
+	// a scoped reader may see (FR-019a).
+	ActivityTypeSkillAccess ActivityType = "skill_access"
 	// ActivityTypeSecurityScan represents a security scan event (Spec 039)
 	ActivityTypeSecurityScan ActivityType = "security_scan"
 	// ActivityTypeCredentialBroker represents a per-user credential brokering
@@ -79,6 +87,7 @@ var ValidActivityTypes = []string{
 	string(ActivityTypeConfigChange),
 	string(ActivityTypeToolQuarantineChange),
 	string(ActivityTypeSkillQuarantineChange),
+	string(ActivityTypeSkillAccess),
 	string(ActivityTypeSecurityScan),
 	string(ActivityTypeCredentialBroker),
 	string(ActivityTypePreflight),
@@ -88,9 +97,10 @@ var ValidActivityTypes = []string{
 
 // IsAdminOnlyActivityType reports whether rows of the type may be read by
 // administrators only. A skill approval row names a skill that may be
-// unapproved, even on a server a scoped caller may see (Spec 125 FR-019a).
+// unapproved, even on a server a scoped caller may see, and a skill access row
+// names whatever id its caller asked for (Spec 125 FR-019a).
 func IsAdminOnlyActivityType(t ActivityType) bool {
-	return t == ActivityTypeSkillQuarantineChange
+	return t == ActivityTypeSkillQuarantineChange || t == ActivityTypeSkillAccess
 }
 
 // Activity status vocabulary. Activity status is a CLOSED vocabulary: every

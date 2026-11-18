@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -232,10 +233,7 @@ func (b *BoltDB) ListSkillApprovals(serverName string) ([]*SkillApprovalRecord, 
 
 func listSkillApprovalsTx(tx *bbolt.Tx, serverName string) ([]*SkillApprovalRecord, error) {
 	var records []*SkillApprovalRecord
-	err := tx.Bucket([]byte(SkillApprovalBucket)).ForEach(func(k, v []byte) error {
-		if serverName != "" && !bytes.HasPrefix(k, []byte(serverName+":")) {
-			return nil
-		}
+	add := func(v []byte) error {
 		r := &SkillApprovalRecord{}
 		if err := r.UnmarshalBinary(v); err != nil {
 			return err
@@ -245,8 +243,21 @@ func listSkillApprovalsTx(tx *bbolt.Tx, serverName string) ([]*SkillApprovalReco
 		}
 		records = append(records, r)
 		return nil
-	})
-	return records, err
+	}
+	bucket := tx.Bucket([]byte(SkillApprovalBucket))
+	if serverName == "" {
+		return records, bucket.ForEach(func(_, v []byte) error { return add(v) })
+	}
+	// Keys are "server:<address>": seek to the server's keys and stop after
+	// them, so one server's listing does not walk every other server's.
+	prefix := []byte(serverName + ":")
+	c := bucket.Cursor()
+	for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+		if err := add(v); err != nil {
+			return nil, err
+		}
+	}
+	return records, nil
 }
 
 // DeleteSkillApproval deletes one record (absent is not an error).
@@ -457,6 +468,46 @@ func (b *BoltDB) ApplySkillRefresh(serverName string, upserts []*SkillApprovalRe
 	return removed, err
 }
 
+// PruneSkillApprovalsNotIn bounds the records of skills the server's latest
+// listing did not name: the oldest of them are deleted so that at most keep
+// remain. current holds the addresses the listing named; those records are
+// never touched. A blocked record is never deleted either: the mark is a
+// person's decision and must still be there when the skill comes back. It
+// returns how many records it deleted.
+func (b *BoltDB) PruneSkillApprovalsNotIn(serverName string, current map[string]struct{}, keep int) (int, error) {
+	var removed int
+	err := b.db.Update(func(tx *bbolt.Tx) error {
+		recs, err := listSkillApprovalsTx(tx, serverName)
+		if err != nil {
+			return err
+		}
+		var old []*SkillApprovalRecord
+		for _, r := range recs {
+			if _, named := current[r.SkillURI]; !named && !r.Blocked {
+				old = append(old, r)
+			}
+		}
+		if len(old) <= keep {
+			return nil
+		}
+		sort.Slice(old, func(i, j int) bool {
+			if !old[i].UpdatedAt.Equal(old[j].UpdatedAt) {
+				return old[i].UpdatedAt.Before(old[j].UpdatedAt)
+			}
+			return old[i].SkillURI < old[j].SkillURI
+		})
+		approvals := tx.Bucket([]byte(SkillApprovalBucket))
+		for _, r := range old[:len(old)-keep] {
+			if err := approvals.Delete([]byte(SkillApprovalKey(serverName, r.SkillURI))); err != nil {
+				return err
+			}
+			removed++
+		}
+		return nil
+	})
+	return removed, err
+}
+
 // --- Manager mirrors ---
 
 // SaveSkillApproval upserts a skill approval record.
@@ -535,4 +586,11 @@ func (m *Manager) ApplySkillRefresh(serverName string, upserts []*SkillApprovalR
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.db.ApplySkillRefresh(serverName, upserts, unlistedURIs, newFiles)
+}
+
+// PruneSkillApprovalsNotIn bounds the records the latest listing did not name.
+func (m *Manager) PruneSkillApprovalsNotIn(serverName string, current map[string]struct{}, keep int) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.db.PruneSkillApprovalsNotIn(serverName, current, keep)
 }

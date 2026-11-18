@@ -600,6 +600,7 @@ func TestSSE_EveryRuntimeEventTypeIsClassified(t *testing.T) {
 		"credentials.changed":              "administrator-only credential lifecycle invalidation (Spec 115 FR-024): names identities and profiles; dropped for scoped callers",
 		"skills.changed":                   "administrator-only skills catalog invalidation (Spec 125 FR-019a): carries per-state skill counts; dropped for scoped callers",
 		"activity.skill_quarantine_change": "administrator-only skill approval row (Spec 125 FR-019a): names skills that may be unapproved, even on a visible server; dropped for scoped callers",
+		"activity.skill_access":            "administrator-only skill access row (Spec 125 FR-019a): names the id its caller asked for, which may be a held skill on a visible server; dropped for scoped callers",
 		"config.reloaded":                  "admin config document — dropped for a scoped caller",
 		"config.saved":                     "admin config document — dropped for a scoped caller",
 		"secrets.changed":                  "admin config document — dropped for a scoped caller",

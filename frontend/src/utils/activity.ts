@@ -40,7 +40,8 @@ export const ACTIVITY_TYPE_LABELS: Record<string, string> = {
   'credential_broker': 'Credential Broker', // Spec 074, server edition only
   'prompt_get': 'Prompt Fetch',
   'profile_change': 'Profile Change', // Spec 108: client binding / credential change
-  'skill_quarantine_change': 'Skill Approval Change' // Spec 125: a skill's approval state (administrator-only)
+  'skill_quarantine_change': 'Skill Approval Change', // Spec 125: a skill's approval state (administrator-only)
+  'skill_access': 'Skill Access' // Spec 125: an agent searched, loaded or read a skill
 }
 
 const typeLabels = ACTIVITY_TYPE_LABELS
@@ -97,7 +98,8 @@ const typeIcons: Record<string, string> = {
   'credential_broker': '🔑',
   'prompt_get': '💬',
   'profile_change': '🪪',
-  'skill_quarantine_change': '📚'
+  'skill_quarantine_change': '📚',
+  'skill_access': '📖'
 }
 
 // Status labels

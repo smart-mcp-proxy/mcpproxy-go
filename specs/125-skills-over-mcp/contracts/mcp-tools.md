@@ -2,7 +2,9 @@
 
 Registered only while `enable_skills` is on. All three are annotated read-only. Offered on the surfaces that offer `retrieve_tools` and on the direct surface; not on `/mcp/s/<server>`; not callable from `code_execution`.
 
-One refusal covers every reason a skill is not available to the caller (out of reach, pending, changed, blocked, unusable, not listed, server excluded, disabled or quarantined, unknown): an error result with the text `skill not found: <id>`. No other wording may distinguish the cases.
+One refusal covers every reason a skill is not available to the caller (out of reach, pending, changed, blocked, unusable, not listed, server excluded, disabled or quarantined, unknown, and a stored copy that failed verification at the moment it was read): an error result with the text `skill not found: <id>`. No other wording may distinguish the cases. The reason is recorded for administrators in the `skill_access` row (outcome `not_found`, `damaged`, …) and on the skill's record.
+
+**As built (PR-3).** `load_skill` and `read_skill_file` take an optional `version` (the approved content hash named in the header) and refuse a continuation whose version is no longer the approved one. The output sanitisation policy (block, redact, strip) is applied to the whole file before it is cut into parts, and to the upstream-written words of an answer (names, descriptions, file names); offsets are positions in the text as served. A skill whose path the policy would change is left out of search answers and listings (its id cannot be shown, and a changed id names nothing). Every match of a search is checked against its record before it is counted (at most 1,000 matches per search). `skill_access` rows are administrator-only.
 
 ## `retrieve_skills`
 

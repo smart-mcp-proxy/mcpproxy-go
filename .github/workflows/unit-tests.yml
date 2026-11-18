@@ -300,7 +300,8 @@ jobs:
       # same package takes ~450s), so the default 10m package timeout is one
       # slow runner away from "panic: test timed out" — which is how the leg
       # failed on the first green-again push after #1266. It has since grown to
-      # ~1100-1200s, so the bound is 40m to leave real headroom.
+      # 2100-2200s on main (measured 2026-11-17: 2116s, 2119s, 2206s), and a
+      # run on #1928 hit the 40m bound at 2401s, so the bound is 60m.
       #
       # The run goes through scripts/go-test-retry-runtime-fault.sh: when the
       # first run dies of a Go runtime fault (`unexpected fault address … /
@@ -311,7 +312,7 @@ jobs:
       - name: Run unit tests (Windows)
         if: matrix.os == 'windows-latest'
         shell: bash
-        run: bash scripts/go-test-retry-runtime-fault.sh -v -race -timeout 40m -coverprofile=coverage.out -covermode=atomic -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" -- ./...
+        run: bash scripts/go-test-retry-runtime-fault.sh -v -race -timeout 60m -coverprofile=coverage.out -covermode=atomic -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" -- ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
@@ -320,10 +321,10 @@ jobs:
       # ("panic: test timed out") is no longer enough there. internal/security/
       # scanner also scores the full 1.2k-entry TPA eval corpus (Spec 101 US2,
       # 1047 hard negatives) in several tests and timed out at 20m on
-      # ubuntu-latest; match the Windows leg's 40m.
+      # ubuntu-latest; match the Windows leg's 60m.
       - name: Run unit tests (Unix)
         if: matrix.os != 'windows-latest'
-        run: go test -v -race -timeout 40m -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
+        run: go test -v -race -timeout 60m -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 

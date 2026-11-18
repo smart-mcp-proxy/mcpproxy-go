@@ -6,6 +6,8 @@ Authentication as for the rest of the API. "Admin" = the API key, the socket, or
 
 A skill is **available** when the feature is on, its server is enabled, not quarantined and not excluded (`expose_skills: false`), and the skill is approved, not blocked and listed. An admin sees every skill of a server it can see. Any other caller sees available skills of servers in its reach and nothing else: no entry, no count, no review or attention row, no event for a skill that is not available. This holds on the endpoints below and on the existing review, attention and SSE endpoints (from PR-2).
 
+**Server edition.** A tenant user session (cookie or bearer JWT of a non-administrator user) is refused with `403` on every skills endpoint in this spec, reads included: skills are a personal-edition feature for now, and a user's reach over shared and personal servers is not defined for skills yet. "Any other caller" above therefore means a scoped agent token.
+
 ## `GET /servers/{id}/skills`
 
 - Admin: every record of the server.
@@ -46,7 +48,7 @@ A skill is **available** when the feature is on, its server is enabled, not quar
 
 ## `GET /servers/{id}/skills/content?skill=<path>&file=<relpath>&copy=current|approved&offset=<n>&limit=<n>`
 
-Admin only until PR-3; afterwards a scoped caller may read the approved copy of an available skill. `file` defaults to `SKILL.md`, `copy` to `current` for admin and is forced to `approved` for a scoped caller. Returns `{"text", "offset", "next_offset" (absent at the end), "size", "digest"}`. 404 for an unknown skill or file, 415 for a binary file.
+Admin only until PR-3; afterwards a scoped caller may read the approved copy of an available skill. `file` defaults to `SKILL.md`, `copy` to `current` for admin and is forced to `approved` for a scoped caller. Returns `{"text", "offset", "next_offset" (absent at the end), "size", "digest"}`. 404 for an unknown skill or file, 415 for a binary file. For a scoped caller the text is what the output sanitisation policy lets out (as for `load_skill`), `403 output_blocked` when it lets nothing out, and a damaged stored copy is the same 404 as an unknown skill (an administrator gets `409 stored_copy_damaged`). Every scoped read that reaches these two handlers writes a `skill_access` row, whatever its outcome (found, not found, feature off, bad request, withheld, failed). A request for a server outside the caller's reach is refused by the server-scope guard in front of every `/servers/{id}` route, like any other request for that server, and is not a skill access.
 
 ## `POST /servers/{id}/skills/refresh`
 
