@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "mcpproxy/telemetry/schema-17/day_two",
   "title": "Heartbeat schema 17 additions (Spec 126 PR-A, instrumentation only)",
-  "description": "Schema 17 carries only the instrumentation slice (spec FR-033..FR-038). Onboarding fields (starter_*, second_client_*, clients_day0*, summary_views, activation.first_tool_indexed_*) ship with PR-B..PR-D at the next free schema version each; see later_versions. A field is measured only on heartbeats with schema_version >= its introducing version; absence means 'not measured'.",
+  "description": "Schema 17 carries only the instrumentation slice (spec FR-033..FR-038). Onboarding fields (starter_*, second_client_*, clients_day0*, summary_views, activation.first_tool_indexed_*) ship with PR-B..PR-D at the next free schema version each; see later_versions. A field is measured only on heartbeats with schema_version >= its introducing version; absence means 'not measured'. Cross-field rules (enforced by the receiver too): a fresh install_origin requires install_age, an existing one forbids it, and upstream_outcomes.window_age is forbidden when day_two.install_origin is existing.",
   "type": "object",
   "properties": {
     "upstream_outcomes": {
@@ -71,7 +71,45 @@
             "non_starter"
           ]
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "install_origin": {
+                "const": "fresh"
+              }
+            },
+            "required": [
+              "install_origin"
+            ]
+          },
+          "then": {
+            "required": [
+              "install_age"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "install_origin": {
+                "const": "existing"
+              }
+            },
+            "required": [
+              "install_origin"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "install_age"
+              ]
+            }
+          }
+        }
+      ]
     }
   },
   "$defs": {
@@ -225,5 +263,37 @@
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "day_two": {
+            "properties": {
+              "install_origin": {
+                "const": "existing"
+              }
+            },
+            "required": [
+              "install_origin"
+            ]
+          }
+        },
+        "required": [
+          "day_two"
+        ]
+      },
+      "then": {
+        "properties": {
+          "upstream_outcomes": {
+            "not": {
+              "required": [
+                "window_age"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
 }
