@@ -246,6 +246,25 @@ func (c *RefreshCoordinator) ForgetServer(serverKey string) {
 	c.mu.Unlock()
 }
 
+// ClearTransientCooldown lifts the transient-failure cooldown of one
+// credential binding of serverKey and restarts its backoff, reporting whether
+// one was set. The upstream manager's connectivity watcher calls it when the
+// network demonstrably came back (GH #1929): refreshes that failed while the
+// machine was offline must not make the reconnect wait up to five minutes for
+// a refresh that would now succeed. The terminal latch (a revoked grant) is
+// left alone, so a rejected credential is still not retried.
+func (c *RefreshCoordinator) ClearTransientCooldown(serverKey string, b commitview.CredentialBinding) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.keys[flightKey{serverKey, b}]
+	if st == nil || (st.cooldownUntil.IsZero() && st.transientFailures == 0) {
+		return false
+	}
+	st.cooldownGen, st.cooldownUntil, st.cooldownErr = "", time.Time{}, nil
+	st.transientFailures = 0
+	return true
+}
+
 // Do runs at most one refresh flight per key. A caller arriving while a flight
 // is running waits for it and gets the same token or the same error. skipped
 // reports that the flight made no network request (another flight had already

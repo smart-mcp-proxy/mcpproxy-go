@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	mcpclient "github.com/mark3labs/mcp-go/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -329,6 +330,8 @@ func fastRecoveryConfig() networkRecoveryConfig {
 		WakeSlack:         time.Hour, // no wake detection under a loaded test runner
 		OutageProbes:      2,
 		MinTriggerSpacing: time.Second,
+		FreeTriggers:      3,
+		MaxTriggerSpacing: 30 * time.Second,
 	}
 }
 
@@ -436,4 +439,80 @@ func TestNetworkRecovery_RejectedOAuthTokenIsNotRetriedAsANetworkFailure(t *test
 
 	time.Sleep(12 * cfg.Interval)
 	assert.Equal(t, 1, f.m.networkRecovery.triggers(), "a credential failure is not retried by the watcher")
+}
+
+// Opus r1 MAJOR 1, the issue's own case: the OAuth access token expired
+// overnight, and refreshes that ran while the machine was offline left the
+// refresh coordinator's transient cooldown on the credential. When the network
+// returns the reconnect must refresh at once, not wait out that cooldown.
+func TestNetworkRecovery_ExpiredOAuthTokenIsRefreshedOnRecovery(t *testing.T) {
+	cfg := fastRecoveryConfig()
+	f := newRecoveryFixture(t, &cfg)
+	const name = "oauth-expired"
+	serverURL := f.relay.mcpURL(f.srv)
+	require.NoError(t, f.m.AddServerConfig(name, &config.ServerConfig{
+		Name: name, URL: serverURL, Protocol: "http", Enabled: true,
+		OAuth: &config.OAuthConfig{ClientID: f.srv.ClientID, ClientSecret: f.srv.ClientSecret, Scopes: []string{"read"}},
+	}))
+	t.Cleanup(func() {
+		if mgr := oauth.GetGlobalCallbackManager(); mgr != nil {
+			_ = mgr.StopCallbackServer(name)
+		}
+	})
+	c, ok := f.m.GetClient(name)
+	require.True(t, ok)
+
+	// Sign in for real, so the store holds a refresh token.
+	result, err := f.m.StartManualOAuthQuick(name)
+	require.NoError(t, err)
+	completeTestSignIn(t, f.srv, result.AuthURL)
+	key := oauth.GenerateServerKey(name, serverURL)
+	require.Eventually(t, func() bool {
+		rec, err := f.db.GetOAuthToken(key)
+		return err == nil && rec != nil && rec.RefreshToken != ""
+	}, 10*time.Second, 50*time.Millisecond, "the sign-in stores a refresh token")
+	require.Eventually(t, c.IsConnected, 30*time.Second, 50*time.Millisecond, "connected after sign-in")
+
+	f.relay.Down()
+	waitNetworkFailure(t, c)
+	giveUp(t, c)
+
+	// Overnight: the access token expired …
+	rec, err := f.db.GetOAuthToken(key)
+	require.NoError(t, err)
+	staleAccess := rec.AccessToken
+	rec.ExpiresAt = time.Now().Add(-time.Hour)
+	require.NoError(t, f.db.SaveOAuthToken(rec))
+	// … and a refresh attempted without a network failed, leaving a cooldown.
+	coord := oauth.DefaultRefreshCoordinator()
+	load := func() (*storage.OAuthTokenRecord, error) { return f.db.GetOAuthToken(key) }
+	_, _, _ = coord.Do(context.Background(), oauth.RefreshRequest{
+		Key: key, Binding: c.CredentialBinding(), ServerName: name, ObservedRefreshToken: rec.RefreshToken,
+		Trigger: oauth.RefreshTriggerReactive, Load: load,
+		Refresh: func(context.Context, *storage.OAuthTokenRecord) (*mcpclient.Token, error) {
+			return nil, &net.DNSError{Err: "no such host", Name: "auth.example", IsNotFound: true}
+		},
+	})
+	_, _, err = coord.Do(context.Background(), oauth.RefreshRequest{
+		Key: key, Binding: c.CredentialBinding(), ServerName: name, ObservedRefreshToken: rec.RefreshToken,
+		Trigger: oauth.RefreshTriggerReactive, Load: load,
+		Refresh: func(context.Context, *storage.OAuthTokenRecord) (*mcpclient.Token, error) {
+			return nil, errors.New("must not be called inside the cooldown")
+		},
+	})
+	require.ErrorIs(t, err, oauth.ErrTokenRefreshTransient, "the cooldown is in place")
+	time.Sleep(4 * cfg.Interval)
+
+	restored := time.Now()
+	f.relay.Up()
+	d := waitRecovered(t, c, restored, 60*time.Second)
+	t.Logf("expired-token OAuth upstream recovered %s after the network returned", d.Round(time.Millisecond))
+	// The cooldown alone is 10s; recovering well inside it proves it was lifted.
+	assert.Less(t, d, 8*time.Second, "the reconnect refreshed at once instead of waiting out the cooldown")
+
+	after, err := f.db.GetOAuthToken(key)
+	require.NoError(t, err)
+	assert.NotEqual(t, staleAccess, after.AccessToken, "the token was refreshed")
+	assert.True(t, after.ExpiresAt.After(time.Now()))
+	callGetTime(t, c)
 }

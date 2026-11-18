@@ -74,7 +74,10 @@ func (c *Client) initialize(ctx context.Context) error {
 			// keep the typed deadline in the chain, so the failure stays a
 			// network failure (IsNetworkError) for the retry policy.
 			if c.transportType != transportStdio {
-				return fmt.Errorf("%s did not respond to MCP initialize within %s (network unreachable or upstream not answering); will retry: %w",
+				// The wording deliberately avoids "did not respond to MCP
+				// initialize": the diagnostics classifier reads that sentence
+				// as the stdio handshake timeout, whatever the transport.
+				return fmt.Errorf("%s did not answer the MCP initialize request within %s (network unreachable or upstream not answering); will retry: %w",
 					c.initializeTimeoutTarget(), waited, err)
 			}
 			stderrBlock := c.formatRecentStderr()

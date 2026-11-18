@@ -366,6 +366,27 @@ func (sm *StateManager) SetError(err error) {
 	sm.setError(err, false)
 }
 
+// ClearNetworkBackoff restarts the retry ladder of a server whose current
+// failure is still a network failure, and reports whether it did. The check
+// and the clear happen under one lock, so a connect that started (Connecting),
+// finished (Ready) or failed differently (OAuth, permanent, Retry-After) since
+// the caller looked is never overwritten. The state stays StateError; the
+// reconnect that follows moves it. Used by the connectivity watcher when the
+// network demonstrably came back (GH #1929).
+func (sm *StateManager) ClearNetworkBackoff(now time.Time) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.currentState != StateError || !sm.networkFailure || sm.terminal || sm.isOAuthError || sm.userLoggedOut {
+		return false
+	}
+	if !sm.retryAfter.IsZero() && now.Before(sm.retryAfter) {
+		return false
+	}
+	sm.retryCount = 0
+	sm.lastRetryTime = time.Time{}
+	return true
+}
+
 // SetNetworkError is SetError for a connect attempt that failed before any
 // upstream answered — DNS, dial, connection refused, timeout (GH #1929). It
 // advances the backoff exactly like SetError; it only marks the failure so the

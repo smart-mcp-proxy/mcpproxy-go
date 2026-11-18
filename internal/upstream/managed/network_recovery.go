@@ -1,6 +1,8 @@
 package managed
 
 import (
+	"context"
+	"encoding/base64"
 	"net"
 	"net/http"
 	"net/url"
@@ -9,6 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
@@ -17,49 +20,80 @@ import (
 // A remote upstream that failed because the network was gone — a laptop
 // asleep overnight, Wi-Fi switching, a VPN dropping — keeps failing while it is
 // gone, and every failure advances the reconnect backoff until the client gives
-// up and only probes every 30 minutes. When the network returns nothing used to
-// shorten that wait. The upstream manager's connectivity watcher
-// (upstream.networkRecovery) now probes such servers cheaply and calls
-// RecoverFromNetworkOutage once their address is reachable again.
+// up and only probes every 30 minutes. The upstream manager's connectivity
+// watcher (upstream.networkRecovery) probes such servers cheaply and, once the
+// network is demonstrably back, admits a reconnect with BeginNetworkRecovery
+// and runs it with ReconnectAfterNetworkRecovery.
 
-// NetworkRecoveryProbeAddress returns the host:port a connectivity probe for
-// this server dials: the URL's host (default port by scheme), or the HTTP proxy
-// that requests to it go through. ok is false for a server with no remote
-// address (stdio).
-func (mc *Client) NetworkRecoveryProbeAddress() (string, bool) {
-	cfg := mc.GetConfig()
-	if cfg == nil || cfg.URL == "" || cfg.Command != "" || strings.EqualFold(cfg.Protocol, "stdio") {
-		return "", false
-	}
-	return probeAddressFor(cfg.URL, http.ProxyFromEnvironment)
+// NetworkProbe says how the connectivity watcher checks that a server is
+// reachable: a TCP dial to Addr and, when ConnectTo is set, an HTTP CONNECT to
+// ConnectTo through the proxy at Addr, which proves the path beyond the proxy.
+// ProxyAuth is a ready Proxy-Authorization value (never logged).
+type NetworkProbe struct {
+	Addr      string
+	ConnectTo string
+	ProxyAuth string
 }
 
-// probeAddressFor resolves the address to probe for rawURL. A configured
-// proxy is probed instead of the upstream: when one is in use, reaching it is
-// what the upstream's own connection depends on.
-func probeAddressFor(rawURL string, proxy func(*http.Request) (*url.URL, error)) (string, bool) {
+// Key identifies the probe: servers with equal keys share one probe per tick.
+func (p NetworkProbe) Key() string { return p.Addr + "|" + p.ConnectTo }
+
+// NetworkRecoveryProbe returns how to probe this server's reachability. ok is
+// false for a server with no remote address (stdio).
+func (mc *Client) NetworkRecoveryProbe() (NetworkProbe, bool) {
+	cfg := mc.GetConfig()
+	if cfg == nil || cfg.URL == "" || cfg.Command != "" || strings.EqualFold(cfg.Protocol, "stdio") {
+		return NetworkProbe{}, false
+	}
+	return probeFor(cfg.URL, http.ProxyFromEnvironment)
+}
+
+// probeFor resolves the probe for rawURL. Through an http:// proxy, an https
+// upstream is probed with CONNECT to the upstream, so a proxy that stays
+// reachable while the network behind it is down does not hide the outage. A
+// plain-http upstream, or an https:// or SOCKS proxy, is probed at the proxy
+// only.
+func probeFor(rawURL string, proxy func(*http.Request) (*url.URL, error)) (NetworkProbe, bool) {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Host == "" {
-		return "", false
+		return NetworkProbe{}, false
 	}
-	switch strings.ToLower(u.Scheme) {
-	case "http", "https":
-	default:
-		return "", false
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return NetworkProbe{}, false
 	}
-	target := u
+	target, ok := hostPort(u)
+	if !ok {
+		return NetworkProbe{}, false
+	}
 	if proxy != nil {
 		if p, perr := proxy(&http.Request{URL: u}); perr == nil && p != nil && p.Host != "" {
-			target = p
+			paddr, pok := hostPort(p)
+			if !pok {
+				return NetworkProbe{}, false
+			}
+			probe := NetworkProbe{Addr: paddr}
+			if scheme == "https" && strings.EqualFold(p.Scheme, "http") {
+				probe.ConnectTo = target
+				if p.User != nil {
+					pw, _ := p.User.Password()
+					probe.ProxyAuth = "Basic " + base64.StdEncoding.EncodeToString([]byte(p.User.Username()+":"+pw))
+				}
+			}
+			return probe, true
 		}
 	}
-	host := target.Hostname()
+	return NetworkProbe{Addr: target}, true
+}
+
+func hostPort(u *url.URL) (string, bool) {
+	host := u.Hostname()
 	if host == "" {
 		return "", false
 	}
-	port := target.Port()
+	port := u.Port()
 	if port == "" {
-		switch strings.ToLower(target.Scheme) {
+		switch strings.ToLower(u.Scheme) {
 		case "https":
 			port = "443"
 		case "socks5", "socks5h":
@@ -72,13 +106,20 @@ func probeAddressFor(rawURL string, proxy func(*http.Request) (*url.URL, error))
 }
 
 // NetworkRecoveryEligible reports whether a restored network may reconnect
-// this client: its current failure is a plain network failure (SetNetworkError)
-// — not an auth failure, a pending sign-in, a proven-permanent fault or a user
-// logout — and the upstream's own Retry-After window, if any, has passed.
-// Give-up is NOT a bar: a server that gave up during a long outage is exactly
-// the one waiting 30 minutes for no reason.
+// this client: it is enabled and not quarantined, and its current failure is a
+// plain network failure (SetNetworkError) — not an auth failure, a pending
+// sign-in, a proven-permanent fault or a user logout — and the upstream's own
+// Retry-After window, if any, has passed. Give-up is NOT a bar: a server that
+// gave up during a long outage is exactly the one waiting 30 minutes for no
+// reason. A quarantined server is refused even when a review had it connect
+// (an inspection exemption): the watcher cannot see whether that is still
+// current, and the supervisor reconnects it while it is.
 func (mc *Client) NetworkRecoveryEligible(now time.Time) bool {
 	if mc == nil || mc.retired.Load() || mc.unregistered.Load() || mc.IsUserLoggedOut() {
+		return false
+	}
+	cfg := mc.GetConfig()
+	if cfg == nil || !cfg.Enabled || cfg.Quarantined {
 		return false
 	}
 	info := mc.StateManager.GetConnectionInfo()
@@ -91,36 +132,51 @@ func (mc *Client) NetworkRecoveryEligible(now time.Time) bool {
 	return true
 }
 
-// RecoverFromNetworkOutage starts one reconnect attempt for a client whose
-// network failure is over, and reports whether it did. resetBackoff clears the
-// retry ladder first — the watcher passes it only when it observed the outage
-// end (probes failed, then succeeded), so the next failure, if any, starts the
-// ladder over at 1s instead of waiting out a backoff built while the network
-// was down. Without it the attempt is made on the current ladder, and a failure
-// simply advances it: one attempt per wake or network change, then the normal
-// backoff resumes (#1013).
-func (mc *Client) RecoverFromNetworkOutage(resetBackoff bool, reason string) bool {
-	if !mc.NetworkRecoveryEligible(time.Now()) || mc.IsConnecting() {
+// BeginNetworkRecovery admits one reconnect for a client whose network failure
+// is over and reports whether it did; the caller then runs
+// ReconnectAfterNetworkRecovery. resetBackoff restarts the retry ladder — the
+// watcher passes it only when it observed the outage end — atomically with the
+// eligibility check (StateManager.ClearNetworkBackoff), so a connect that
+// started or finished meanwhile is never overwritten. Without it the attempt
+// is made on the current ladder and a failure simply advances it.
+//
+// Either way the OAuth refresh cooldown of the server's credential is lifted:
+// refreshes that failed while the machine was offline would otherwise make the
+// reconnect wait up to five minutes for a refresh that now succeeds. A revoked
+// grant stays latched.
+func (mc *Client) BeginNetworkRecovery(resetBackoff bool, reason string) bool {
+	now := time.Now()
+	if !mc.NetworkRecoveryEligible(now) || mc.IsConnecting() {
 		return false
 	}
-	mc.reconnectMu.Lock()
-	busy := mc.reconnectInProgress
-	mc.reconnectMu.Unlock()
-	if busy {
+	if resetBackoff && !mc.StateManager.ClearNetworkBackoff(now) {
 		return false
 	}
-
+	cfg := mc.GetConfig()
+	if cfg.URL != "" {
+		oauth.DefaultRefreshCoordinator().ClearTransientCooldown(oauth.GenerateServerKey(cfg.Name, cfg.URL), mc.CredentialBinding())
+	}
 	info := mc.StateManager.GetConnectionInfo()
 	mc.logger.Info("Network connectivity to upstream is back; reconnecting now",
-		zap.String("server", mc.GetConfig().Name),
+		zap.String("server", cfg.Name),
 		zap.String("reason", reason),
 		zap.Bool("reset_backoff", resetBackoff),
 		zap.Int("retry_count", info.RetryCount),
 		zap.Bool("gave_up", info.GaveUp))
-
-	if resetBackoff {
-		mc.StateManager.Reset()
-	}
-	go mc.tryReconnect()
 	return true
+}
+
+// ReconnectAfterNetworkRecovery runs the reconnect BeginNetworkRecovery
+// admitted. It blocks until the attempt ends. ctx bounds it (the manager's
+// shutdown context), and it honours the health loop's stop channel, so a
+// Disconnect — the server disabled, removed or shut down — that lands first
+// is not undone. It does nothing if the client is no longer eligible.
+func (mc *Client) ReconnectAfterNetworkRecovery(ctx context.Context) {
+	if ctx.Err() != nil || !mc.NetworkRecoveryEligible(time.Now()) {
+		return
+	}
+	mc.mu.Lock()
+	stop := mc.stopMonitoring
+	mc.mu.Unlock()
+	mc.tryReconnectWithin(ctx, stop)
 }

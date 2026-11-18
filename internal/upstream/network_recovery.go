@@ -1,9 +1,12 @@
 package upstream
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -11,6 +14,9 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
 // Connectivity watcher (GH #1929).
@@ -32,6 +38,14 @@ import (
 //
 // A server whose address answers all along (the upstream itself is broken) is
 // never reconnected by the watcher, so the backoff still protects a dead remote.
+//
+// Reconnects are budgeted per server. The first FreeTriggers reconnects after
+// the server was last seen connected are immediate (MinTriggerSpacing apart)
+// and may reset the backoff; past that — a remote that is only intermittently
+// reachable, a network that keeps flapping — no reset is granted and the
+// spacing doubles up to MaxTriggerSpacing (the 30-minute give-up probe), so the
+// watcher can never restart the short retry ladder over and over (#1013). A
+// successful connection restores the budget.
 
 const (
 	reasonNetworkRestored = "network_restored"
@@ -62,6 +76,11 @@ type networkRecoveryConfig struct {
 	// MinTriggerSpacing is the least time between two reconnects the watcher
 	// starts for one server. A restore inside it is deferred, not dropped.
 	MinTriggerSpacing time.Duration
+	// FreeTriggers is how many reconnects may follow one another without the
+	// server being seen connected before the budget kicks in.
+	FreeTriggers int
+	// MaxTriggerSpacing caps the doubling spacing once the budget is spent.
+	MaxTriggerSpacing time.Duration
 }
 
 func defaultNetworkRecoveryConfig() networkRecoveryConfig {
@@ -73,14 +92,18 @@ func defaultNetworkRecoveryConfig() networkRecoveryConfig {
 		WakeSlack:         30 * time.Second,
 		OutageProbes:      2,
 		MinTriggerSpacing: 30 * time.Second,
+		FreeTriggers:      3,
+		MaxTriggerSpacing: types.GaveUpProbeInterval,
 	}
 }
 
 // recoveryTarget is the part of a managed client the watcher uses.
 type recoveryTarget interface {
-	NetworkRecoveryProbeAddress() (string, bool)
+	NetworkRecoveryProbe() (managed.NetworkProbe, bool)
 	NetworkRecoveryEligible(now time.Time) bool
-	RecoverFromNetworkOutage(resetBackoff bool, reason string) bool
+	IsConnected() bool
+	BeginNetworkRecovery(resetBackoff bool, reason string) bool
+	ReconnectAfterNetworkRecovery(ctx context.Context)
 }
 
 type recoveryProbeState struct {
@@ -89,6 +112,24 @@ type recoveryProbeState struct {
 	restorePending bool      // an outage ended; reconnect with a reset
 	eventPending   string    // a wake or network change happened; one attempt
 	lastTrigger    time.Time
+	unproductive   int // reconnects started since the server was last seen connected
+}
+
+// triggerSpacing is the least time before the next reconnect for a server
+// that already had `unproductive` reconnects without connecting.
+func (cfg networkRecoveryConfig) triggerSpacing(unproductive int) time.Duration {
+	if unproductive < cfg.FreeTriggers {
+		return cfg.MinTriggerSpacing
+	}
+	shift := unproductive - cfg.FreeTriggers + 1
+	if shift > 16 {
+		shift = 16
+	}
+	d := cfg.MinTriggerSpacing << uint(shift)
+	if cfg.MaxTriggerSpacing > 0 && (d > cfg.MaxTriggerSpacing || d <= 0) {
+		d = cfg.MaxTriggerSpacing
+	}
+	return d
 }
 
 type networkRecovery struct {
@@ -96,7 +137,7 @@ type networkRecovery struct {
 	cfg    networkRecoveryConfig
 	logger *zap.Logger
 
-	probe       func(ctx context.Context, addr string, timeout time.Duration) error
+	probe       func(ctx context.Context, p managed.NetworkProbe, timeout time.Duration) error
 	fingerprint func() (string, bool)
 
 	lastTick     time.Time // wall clock of the previous tick
@@ -104,11 +145,12 @@ type networkRecovery struct {
 	lastPrintOK  bool
 	states       map[recoveryTarget]*recoveryProbeState
 	kick         chan struct{}
-	triggerCount int // for tests and logs
+	triggerCount int            // for tests and logs
+	reconnects   sync.WaitGroup // reconnects the watcher started; run waits for them
 }
 
 func newNetworkRecovery(cfg networkRecoveryConfig, logger *zap.Logger,
-	probe func(ctx context.Context, addr string, timeout time.Duration) error,
+	probe func(ctx context.Context, p managed.NetworkProbe, timeout time.Duration) error,
 	fingerprint func() (string, bool)) *networkRecovery {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -131,16 +173,45 @@ func networkRecoveryEnabled() bool {
 	return true
 }
 
-// dialProbe is the production probe: a TCP dial, closed at once.
-func dialProbe(ctx context.Context, addr string, timeout time.Duration) error {
+// dialProbe is the production probe: a TCP dial, closed at once, and through
+// an HTTP proxy a CONNECT to the upstream that must be answered 2xx. Nothing
+// else is sent: no TLS, no request to the upstream, no credentials of its own.
+func dialProbe(ctx context.Context, p managed.NetworkProbe, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var d net.Dialer
-	conn, err := d.DialContext(ctx, "tcp", addr)
+	conn, err := d.DialContext(ctx, "tcp", p.Addr)
 	if err != nil {
 		return err
 	}
-	return conn.Close()
+	defer conn.Close()
+	if p.ConnectTo == "" {
+		return nil
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	req := &http.Request{
+		Method: http.MethodConnect,
+		URL:    &url.URL{Opaque: p.ConnectTo},
+		Host:   p.ConnectTo,
+		Header: make(http.Header),
+	}
+	if p.ProxyAuth != "" {
+		req.Header.Set("Proxy-Authorization", p.ProxyAuth)
+	}
+	if err := req.Write(conn); err != nil {
+		return err
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("proxy answered CONNECT %s with %s", p.ConnectTo, resp.Status)
+	}
+	return nil
 }
 
 // networkFingerprint summarizes the machine's network attachment: the up,
@@ -219,6 +290,7 @@ func (r *networkRecovery) run(ctx context.Context, targets func() []recoveryTarg
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			r.reconnects.Wait() // bounded by ctx: the reconnects abort on it
 			return
 		case <-r.kick:
 			timer.Stop()
@@ -253,12 +325,12 @@ func (r *networkRecovery) tick(ctx context.Context, now time.Time, targets []rec
 	present := make(map[recoveryTarget]bool, len(targets))
 	type pending struct {
 		target recoveryTarget
-		addr   string
+		probe  managed.NetworkProbe
 		state  *recoveryProbeState
 	}
 	var due []pending
 	for _, t := range targets {
-		addr, ok := t.NetworkRecoveryProbeAddress()
+		probe, ok := t.NetworkRecoveryProbe()
 		if !ok {
 			continue
 		}
@@ -267,6 +339,9 @@ func (r *networkRecovery) tick(ctx context.Context, now time.Time, targets []rec
 		if st == nil {
 			st = &recoveryProbeState{}
 			r.states[t] = st
+		}
+		if t.IsConnected() {
+			st.unproductive = 0 // a reconnect paid off: the budget is restored
 		}
 		if !t.NetworkRecoveryEligible(now) {
 			// Connected, connecting, or failed for another reason: forget the
@@ -283,7 +358,7 @@ func (r *networkRecovery) tick(ctx context.Context, now time.Time, targets []rec
 			cadence = cfg.SlowInterval
 		}
 		if st.lastProbe.IsZero() || now.Sub(st.lastProbe) >= cadence || st.eventPending != "" || st.restorePending {
-			due = append(due, pending{target: t, addr: addr, state: st})
+			due = append(due, pending{target: t, probe: probe, state: st})
 		}
 	}
 	for t := range r.states {
@@ -299,26 +374,26 @@ func (r *networkRecovery) tick(ctx context.Context, now time.Time, targets []rec
 
 	// One probe per distinct address, concurrently. The address list is
 	// built before any probe starts; results is read only after wg.Wait.
-	var addrs []string
+	var probes []managed.NetworkProbe
 	seen := map[string]bool{}
 	for _, p := range due {
-		if !seen[p.addr] {
-			seen[p.addr] = true
-			addrs = append(addrs, p.addr)
+		if !seen[p.probe.Key()] {
+			seen[p.probe.Key()] = true
+			probes = append(probes, p.probe)
 		}
 	}
-	results := make(map[string]error, len(addrs))
+	results := make(map[string]error, len(probes))
 	var resMu sync.Mutex
 	var wg sync.WaitGroup
-	for _, addr := range addrs {
+	for _, probe := range probes {
 		wg.Add(1)
-		go func(addr string) {
+		go func(probe managed.NetworkProbe) {
 			defer wg.Done()
-			err := r.probe(ctx, addr, cfg.ProbeTimeout)
+			err := r.probe(ctx, probe, cfg.ProbeTimeout)
 			resMu.Lock()
-			results[addr] = err
+			results[probe.Key()] = err
 			resMu.Unlock()
-		}(addr)
+		}(probe)
 	}
 	wg.Wait()
 
@@ -330,7 +405,7 @@ func (r *networkRecovery) tick(ctx context.Context, now time.Time, targets []rec
 	for _, p := range due {
 		st := p.state
 		st.lastProbe = now
-		if err := results[p.addr]; err != nil {
+		if err := results[p.probe.Key()]; err != nil {
 			st.failures++
 			continue
 		}
@@ -341,18 +416,26 @@ func (r *networkRecovery) tick(ctx context.Context, now time.Time, targets []rec
 		if !st.restorePending && st.eventPending == "" {
 			continue
 		}
-		if !st.lastTrigger.IsZero() && now.Sub(st.lastTrigger) < cfg.MinTriggerSpacing {
+		if !st.lastTrigger.IsZero() && now.Sub(st.lastTrigger) < cfg.triggerSpacing(st.unproductive) {
 			continue // deferred until the spacing has passed
 		}
-		reset := st.restorePending
 		reason := st.eventPending
-		if reset {
+		if st.restorePending {
 			reason = reasonNetworkRestored
 		}
+		// A reset only while the budget lasts: past it the attempt is made on
+		// the server's current ladder, which keeps climbing toward give-up.
+		reset := st.restorePending && st.unproductive < cfg.FreeTriggers
 		st.restorePending, st.eventPending = false, ""
-		if p.target.RecoverFromNetworkOutage(reset, reason) {
+		if p.target.BeginNetworkRecovery(reset, reason) {
 			st.lastTrigger = now
+			st.unproductive++
 			r.triggerCount++
+			r.reconnects.Add(1)
+			go func(t recoveryTarget) {
+				defer r.reconnects.Done()
+				t.ReconnectAfterNetworkRecovery(ctx)
+			}(p.target)
 		}
 	}
 }

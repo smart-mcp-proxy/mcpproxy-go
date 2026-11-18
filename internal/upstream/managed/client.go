@@ -2528,6 +2528,13 @@ func (mc *Client) tryReconnect() {
 // Disconnect closed stop, the reconnect tears nothing down and does not
 // Connect, so it cannot bring back a server that was just disconnected.
 func (mc *Client) tryReconnectFor(stop <-chan struct{}) {
+	mc.tryReconnectWithin(context.Background(), stop)
+}
+
+// tryReconnectWithin is tryReconnectFor bounded by parent as well: the
+// connectivity watcher passes the manager's shutdown context, so a reconnect
+// it started is abandoned when the manager shuts down (GH #1929).
+func (mc *Client) tryReconnectWithin(parent context.Context, stop <-chan struct{}) {
 	if mc.IsUserLoggedOut() {
 		mc.logger.Info("Skipping reconnection attempt - user explicitly logged out",
 			zap.String("server", mc.GetConfig().Name))
@@ -2553,7 +2560,7 @@ func (mc *Client) tryReconnectFor(stop <-chan struct{}) {
 	}()
 
 	// Create a timeout context for the reconnection attempt - increased for OAuth flows
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Minute)
 	defer cancel()
 
 	mc.logger.Info("Starting reconnection attempt",

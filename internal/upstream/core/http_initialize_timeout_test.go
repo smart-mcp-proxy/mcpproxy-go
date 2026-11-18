@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 )
 
 // GH #1929: an HTTP upstream that does not answer `initialize` before the
@@ -52,4 +53,8 @@ func TestHTTPInitializeTimeout_StaysANetworkFailureWithHTTPWording(t *testing.T)
 	assert.NotContains(t, msg, "stderr", "an HTTP upstream has no stderr to blame")
 	assert.NotContains(t, msg, "help banner")
 	assert.Contains(t, msg, strings.TrimPrefix(srv.URL, "http://"), "the message names the upstream host")
+
+	// The diagnostics shown in the UI follow the transport too.
+	code := diagnostics.Classify(err, diagnostics.ClassifierHints{Transport: "http"})
+	assert.Equal(t, diagnostics.HTTPTimeout, code, "an HTTP initialize timeout is not the stdio handshake timeout")
 }
