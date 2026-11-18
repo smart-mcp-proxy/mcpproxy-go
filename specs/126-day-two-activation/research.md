@@ -242,7 +242,7 @@ The facts loop, `first_tool_indexed_ever`, `clients_day0` and the starter, secon
   - `noteUpstreamSuccess` and `recordRealToolCallSuccess` fire only on a usable result, on all three paths: the wrapper (`mcp.go` ~3998), direct routing (`mcp_routing.go` ~880) and `code_execution` sub-calls (`mcp_code_execution.go` ~1096).
 
   Completion only sets a lifetime flag; there is no per-window completion count. So no schema up to 16 can answer "completed in days 7–13".
-- **`days_since_install` cannot identify new installs on its own.** It comes from schema 7 (`internal/telemetry/funnel.go`). `RecordActivity` stamps it while the payload is built, which happens only with telemetry on. An install that upgrades from a pre-7 build, or opts in late, reports 0 on its first stamped day.
+- **`days_since_install` cannot identify new installs on its own.** It comes from schema 7 (`internal/telemetry/funnel.go`). Since Spec 080 (#813), `first_install_day` is stamped at every process start, whatever the opt-out (`internal/runtime/runtime.go` ~4225), so a late opt-in reports a large value and reads as `not_new`. A store upgraded from a build older than schema 7 gets its stamp on its first start of a newer build, though, and reports 0 there. The baseline's `days_since_install <= 1` test cannot exclude it, which is why the schema-17 anchor exists.
 - **New counters need a receiver change, or most windows are lost.** The receiver (`mcpproxy-telemetry/src/index.ts`) upserts one `heartbeats` row per `(anonymous_id, UTC day)`, and the last heartbeat of the day wins. Reset-on-accept counters survive only in `heartbeat_events` (schema 12 and later, keyed by `heartbeat_id`), and only for the keys that `counterWindowPayload` copies. Any new counter object it does not copy loses every window but the day's last.
 - **Per-anonymous-id matching usually does not split one install.** The anonymous id lives in the config file and the anchor in `config.db`, normally in the same data directory, so wiping the directory resets both. A reinstall then shows up as a new install, which is correct. Three exceptions exist (spec review r1 #6):
   - `data_dir` is configured apart from the config file;
@@ -274,12 +274,19 @@ The facts loop, `first_tool_indexed_ever`, `clients_day0` and the starter, secon
   - `dispatch_semantics_old`: below schema 14;
   - `no_completion_counts`: a window in days 0–13 whose stored counter payload has no `upstream_outcomes`. This is a presence test (`json_type(counter_payload_json,'$.upstream_outcomes') IS NULL`), not a schema test, so it also catches schema-17 windows stored before the receiver deploy;
   - `identity_predates_anchor`: `anonymous_id_created_at` is more than 6 days before the first heartbeat;
-  - `partial_windows`: `upstream_outcomes.coverage = partial`.
+  - `partial_windows`: `upstream_outcomes.coverage = partial`;
+  - `dispatch_uncovered` (baseline): the union of `dispatch_semantics_old` and `no_events`, the SC-008 dispatch denominator;
+  - `tool_count_semantics_old`: no day 0–13 row at schema 11 or later, so SC-001 cannot be judged;
+  - `origin_missing` (schema17): a personal first row at schema 17 or later without `day_two.install_origin`. The receiver allows `day_two` to be omitted. Such an install is never counted as an upgrade;
+  - `late_first_heartbeat` (schema17): a fresh install whose first heartbeat already reports an age past `d0_6`;
+  - `mixed_ci_identity`: a machine or IP unit with at least one CI anonymous id.
+
+  Coverage rows are counted only for units at least 21 days old, so SC-008 ratios compare like with like.
 
   A missing day 7–13 heartbeat is the non-return itself, not a coverage gap.
 - **Counting unit.**
   - Install-level figures count per anonymous id.
-  - Machine-level figures exist in `baseline` mode only. They use the canonical identity key, and a machine returns if any of its eligible installs returns. `schema17` runs per install.
+  - Machine-level and IP-level figures exist in `baseline` mode only. A unit is judged on its D0 calendar, but only over the rows and windows of its *eligible* installs. Those are the install holding the unit's first heartbeat, plus any other install whose first heartbeat ever falls inside the unit's days 0–13 and passes the new-install test (schema ≥ 7, `days_since_install <= 1`). An existing install that roams onto the same IP key, or opts in late on the same machine, therefore never makes the unit return. `schema17` runs per install.
   - Trends hold the IP key constant: the share of rows carrying a machine id has grown, which bends any trend on the canonical key.
 
 **Rationale**: every pre/post comparison stays on one instrument, and the query says what old schemas cannot answer instead of inferring it.

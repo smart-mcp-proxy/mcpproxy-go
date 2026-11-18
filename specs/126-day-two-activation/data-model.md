@@ -141,7 +141,7 @@ Where the values come from:
 - **Install anchor** (FR-033): one UTC time in its own bucket and key in `config.db`. It is written once, when the store was empty at open in the FR-033 sense, and never rewritten.
 - **`upstream_outcomes.window_age`** (FR-035): the install age when the window opened, frozen with the counts. Present only for a fresh install.
 - **Undelivered-window marker** (FR-036): persisted as `true`, `false` or absent.
-  - It is set `true` on the first outcome after process start or after each `Drain`, under the same lock as the accept path's `false` write.
+  - It is set `true` on the first outcome after process start or after each `Drain`. The write happens inside the dedicated outcome mutex, before the increment becomes visible. The same mutex guards `Drain`'s swap and the post-2xx `false` write. It is never `deliveryMu`.
   - It is set `false` on an accepted send only when no outcome followed the accepted snapshot's drain.
   - It is written `false` at every start if absent.
   - Absent at open means no schema-17+ build has run on this store yet.

@@ -96,7 +96,9 @@ go test ./internal/telemetry -run 'TestScanForPII.*DayTwo' -v
 Then run a fresh instance, with telemetry on, against a local receiver stub:
 - `GET /api/v1/telemetry/payload` (or `mcpproxy telemetry show-payload`) shows `day_two.install_origin: fresh`, `install_age: d0_6` and `upstream_outcomes.coverage: full`.
 - After one usable call and one `isError` call, it shows `succeeded: 1-10` and `unusable: 1-10`.
-- Restart over the same data directory: the first window shows `coverage: partial`.
+- Restart over the same data directory:
+  - After `kill -9` of the core following the calls, or with a stub that answers 5xx, the first window shows `coverage: partial`.
+  - After a graceful stop with a stub that answers 2xx, the shutdown flush delivers the window, and the restart shows `full`.
 
 ## L5. Native (US2, US3, US4)
 

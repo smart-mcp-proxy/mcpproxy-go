@@ -45,7 +45,7 @@
 - [ ] T004 [US5] impl:
   - `wasEmptyAtOpen` is decided in `internal/storage` at open, before `initBuckets`. Empty means absent, 0 bytes, or no records other than `meta`/`SchemaVersionKey`.
   - `EnsureInstallAnchor` and `InstallAnchor()` go in `internal/storage/bbolt.go`, with a `manager.go` wrapper. The anchor goes under one dedicated key in one dedicated bucket (for example bucket `install_anchor`, key `first_run_at`), never in `OnboardingState`.
-  - Call `EnsureInstallAnchor` inside `runtime.New`, right after `storage.NewManager`. That is before `rt.SetTelemetry`, before `funnelStore.RecordActivity`, and before the HTTP server and MCP initialisation start. Test that the first heartbeat built in the real startup order on an empty data directory carries `fresh`, `d0_6` and `window_age`.
+  - Call `EnsureInstallAnchor` inside `runtime.New`, after `ArmShutdownMarker` (Spec 080 FR-010 requires it to be the first DB operation after `storage.NewManager`) and after the Spec 123 OAuth boot sweep. That is before `rt.SetTelemetry`, before `funnelStore.RecordActivity`, and before the HTTP server and MCP initialisation start. Test that the first heartbeat built in the real startup order on an empty data directory carries `fresh`, `d0_6` and `window_age`.
 
 ### Completion counters, coverage and scope (FR-035 to FR-038)
 
@@ -84,7 +84,7 @@
   - `internal/telemetry/upstream_outcomes.go`: counters on `CounterRegistry`, in the same reset-on-accept window as `upstream_tool_call_count_bucket`. Also:
     - the window open time, stamped in `Drain`, which gives `window_age`;
     - the coverage flag, frozen into the snapshot;
-    - the undelivered-window marker in the activation bucket, set `true` on the first outcome after process start or after each `Drain`, and written `false` at start if absent. Its writes run under the same lock as the accept decision;
+    - the undelivered-window marker in the activation bucket, set `true` on the first outcome after process start or after each `Drain`, and written `false` at start if absent. The `true` write runs inside the dedicated outcome mutex before the increment becomes visible; the post-2xx `false` write takes the same mutex. The accept decision stays under `deliveryMu`;
     - one anchor read per process, taken after `EnsureInstallAnchor`, used for both `day_two` and `window_age`;
     - a dedicated small mutex for the outcome increment, the since-drain flag, `Drain`'s outcome swap and the post-2xx marker write. Never `deliveryMu`;
     - the outcome counters added to `HasPendingCounters()` and `Reset()`;
@@ -158,6 +158,8 @@
     - a window received between D0+14 and D0+20 and attributed by its `window_age`, and baseline ignoring windows received after D0+13;
     - SC-001 (`tool_count`, with the `tool_count_semantics_old` row) and SC-004 (distinct client ids on D0/D0+1);
     - `schema17` refusing machine and IP units.
+    - baseline machine/IP units counting only their eligible installs; coverage rows for matured units only; release cohorts via `minFirstVersion`;
+    - starter-only precedence (active wins).
     - a CI id excluded.
   - Add a script or runbook entry that runs the baseline against D1 read-only (`--command`, never `--file`), and record the first baseline in the PR.
 

@@ -209,14 +209,18 @@ The maintainer queries the telemetry store for post-release cohorts. Without any
 
 **Why this priority**: without it the experiment cannot be judged or killed.
 
-**Independent Test**: schema-17 payload tests assert the new fields' presence, enum closure, bucket edges and stickiness. The PII scan rejects unknown keys and values in every new object.
+**Independent Test** (PR-A): schema-17 payload tests assert the presence of `upstream_outcomes` and `day_two`, enum closure, bucket edges and coverage. The PII scan rejects unknown keys and values in every new object. The FR-040 query recomputes the baseline. The scenarios below that name starter, `first_tool_indexed_*` or `clients_day0` fields are tested with PR-B and PR-C, at their schema versions.
 
 **Acceptance Scenarios**:
 
-1. **Given** a starter accepted and approved, **Then** later heartbeats carry `day_two.starter_live = true` and `day_two.starter_kind = "time"`, and `activation.first_tool_indexed_ever = true` from then on, even if the tool count later drops to 0.
-2. **Given** a heartbeat built while the index is still loading at startup, **Then** `first_tool_indexed_ever` still reflects the persisted history, while `tool_count` keeps today's sampled semantics.
-3. **Given** two clients observed 1 hour after the install anchor and the core stopping 2 hours after it, **Then** the heartbeats sent before the stop carry `clients_day0 = "2"` with `clients_day0_final = false`.
-4. **Given** three clients observed within day 0 and a fourth on day 3, **Then** heartbeats after day 0 carry `clients_day0 = "3_plus"` and `clients_day0_final = true`, and the value never changes again.
+0a. (PR-A) **Given** a fresh install that makes one call with a usable result and one call that the upstream answers with `isError`, **Then** its window carries `succeeded: "1-10"` and `unusable: "1-10"`. The dispatch count is `upstream_tool_call_count_bucket` and is never inferred from those two. A call refused before dispatch changes neither.
+0b. (PR-A) **Given** an install anchored on D, **Then** its heartbeats on D to D+6 report `install_age = d0_6` and those on D+7 to D+13 report `d7_13`. Its windows carry the age at which they opened. The FR-040 query matches them to days 0–6 and 7–13 per anonymous id. A store that existed before this build reports `install_origin = existing` and is never a new install.
+0c. (PR-A) **Given** a process killed with undelivered outcomes, **Then** the next process's first window is `coverage: partial`. A restart after a delivered window stays `full`. The FR-040 query reports such windows, and windows stored without `upstream_outcomes`, as their own coverage rows, never as zero.
+
+1. (PR-B) **Given** a starter accepted and approved, **Then** later heartbeats carry `day_two.starter_live = true` and `day_two.starter_kind = "time"`, and `activation.first_tool_indexed_ever = true` from then on, even if the tool count later drops to 0.
+2. (PR-B) **Given** a heartbeat built while the index is still loading at startup, **Then** `first_tool_indexed_ever` still reflects the persisted history, while `tool_count` keeps today's sampled semantics.
+3. (PR-C) **Given** two clients observed 1 hour after the install anchor and the core stopping 2 hours after it, **Then** the heartbeats sent before the stop carry `clients_day0 = "2"` with `clients_day0_final = false`.
+4. (PR-C) **Given** three clients observed within day 0 and a fourth on day 3, **Then** heartbeats after day 0 carry `clients_day0 = "3_plus"` and `clients_day0_final = true`, and the value never changes again.
 5. **Given** telemetry is disabled, **Then** nothing new is sent. The local onboarding state still records every fact, so the UI behaves the same.
 
 ---
@@ -352,7 +356,7 @@ These requirements are the whole of PR-A. PR-A changes no onboarding behaviour a
     - At every start, once the first window's coverage is decided, the core writes the marker as `false` if it is absent.
   - The first window of a process is `partial` only when the marker was `true` at open, meaning the previous process ended with counts it never delivered.
   - An *absent* marker at open means that no build at schema 17 or later has run on this store yet. When `install_origin = existing`, this counts as `partial` once. When `install_origin = fresh`, an absent marker (a crash before the start-time write) gives `full`. A fresh install that restarts before any call has the marker `false`, so it stays `full`.
-  - One dedicated small mutex guards the outcome increment, the "outcome since drain" flag, `Drain`'s outcome swap and flag reset, and the post-2xx `false` write. A stale `false` can therefore never overwrite a newer `true`. It is not `deliveryMu`, which is held across the HTTP send: a tool call never waits on network I/O.
+  - One dedicated small mutex guards the marker's `true` write (made before the outcome increment becomes visible to `Drain`), the outcome increment, the "outcome since drain" flag, `Drain`'s outcome swap and flag reset, and the post-2xx `false` write. The accept decision itself stays under `deliveryMu`; only its `false` write takes the dedicated mutex. A stale `false` can therefore never overwrite a newer `true`. It is not `deliveryMu`, which is held across the HTTP send: a tool call never waits on network I/O.
   - The outcome counters count as pending counters (`HasPendingCounters`, `Reset`), so the shutdown flush never skips a window that holds only outcomes.
   - An `install_origin = fresh` install's first window is `full`.
   - A plain restart after a delivered window stays `full`.
@@ -382,7 +386,7 @@ These requirements are the whole of PR-A. PR-A changes no onboarding behaviour a
   - SC-004: distinct `connected_client_ids` over the D0 and D0+1 daily rows (one or more, and two or more);
   - counter-window totals for SC-008.
 
-  Every figure carries its coverage. `schema17` mode runs on the install unit only. The query has two modes, a pre-17 baseline and schema 17, defined in research R13.
+  Every figure carries its coverage. `schema17` mode runs on the install unit only. A `minFirstVersion` option selects release cohorts: it keeps only the units whose first heartbeat ever reports that build or a later one. Weekly cohorts are grouped into 4-week blocks for the noise rule. The query has two modes, a pre-17 baseline and schema 17, defined in research R13.
 
 ### Functional Requirements: telemetry for the onboarding changes (US5, PR-B to PR-D)
 
@@ -456,7 +460,8 @@ The release-to-release comparison is pre/post. It is associative, not causal: re
   - **Reference**: the strategy's 71.5% → 82% came from an earlier instrument (any heartbeat, no new-install test), so it is not the comparison point. The PR-A baseline run on this instrument is the reference.
   - **Target**: the maintainer MUST restate the target against that reference before the starter release. The strategy's intent was to cut the not-indexed share by about a third (28.5% → 18%). Until the target is restated, SC-001 is reported but not judged.
   - The sticky `first_tool_indexed_ever` rate ships with PR-B and is reported separately, never substituted.
-  - A movement counts as real if it exceeds the larger of 3 points and the 95% interval of the previous four monthly cohorts.
+  - A movement counts as real if it exceeds the larger of 3 points and the 95% interval of the previous four 4-week blocks of weekly cohorts.
+  - Pre/post is decided by release cohort: units whose first heartbeat ever is on the release build or later (FR-040 `minFirstVersion`), against the cohorts before it.
 - **SC-002 (primary)**: day 7–13 return, meaning at least one heartbeat in days 7–13, is **at least 18%** of eligible new installations. That 18% bar was set against the old 14.9% instrument, so the maintainer MUST restate it against the recomputed reference before the starter release; until then SC-002 is reported but not judged. Units are counted on the IP key; the unit is the IP identity, and its first heartbeat ever is D0.
   - **One instrument on both sides.** The primary comparison runs the FR-040 `baseline` definition on every cohort, before and after the change. It stays computable on schema 17 and later, because the first heartbeat and `days_since_install` are still sent.
   - **Reference.** The 14.9% Jun–Sep figure came from an older script with a different day-7 definition, so it is not the comparison point. The FR-040 query recomputes the baseline before the starter release, and that value becomes the reference.
@@ -464,7 +469,7 @@ The release-to-release comparison is pre/post. It is associative, not causal: re
   - Three companions are reported and never substituted:
   - **schema-17 return** (install unit): the anchor-based, fresh-only `schema17` figure. Its reference is the PR-A release cohort, and its noise rule starts once four monthly cohorts of it exist;
   - **active return** (install unit on schema 17; IP and machine units in the dispatch-based baseline): a non-starter completion (`upstream_outcomes.succeeded_non_starter != '0'`) in days 7–13. This is measurable on schema 17 only. The pre-17 baseline can only show dispatch-based activity (`upstream_tool_call_count_bucket != '0'` in `heartbeat_events`, schema 14 and later), and is labelled that way;
-  - **starter-only** (install unit): the share of eligible installs whose `success_scope_ever` is `starter_only` at the end of day 13. These installs never count as active.
+  - **starter-only** (install unit). Precedence: an install with any non-starter completion in days 0–13 is active, never starter-only. A window that opened on day 13 can carry such a completion after the last day-13 heartbeat still said `starter_only`, and in that case active wins. The figure is the share of eligible installs whose `success_scope_ever` is `starter_only` at the end of day 13. These installs never count as active.
 - **SC-003 (diagnostic)**:
   - Launcher availability: `starter_launcher = none` is below 15% of installs with a non-empty `starter_launcher`. That field is evaluated independently of every other eligibility outcome, so `tools_present` or `name_taken` installs never dilute it. Above 15%, follow-up O1 (an embedded starter) is triggered.
   - Conversion: at least 60% of installs with `starter_offered` reach `starter_live`.
