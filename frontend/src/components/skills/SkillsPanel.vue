@@ -25,6 +25,8 @@
         <span v-if="listing.truncated" class="badge badge-warning badge-sm" data-test="skills-truncated">List truncated</span>
       </div>
       <p v-if="listing.error" class="text-sm text-error" data-test="skills-last-error" v-text="listing.error"></p>
+      <!-- A reload that failed while a listing is on screen: the listing stays, the error is shown. -->
+      <p v-if="error" class="text-sm text-error" data-test="skills-load-error" v-text="error"></p>
     </template>
 
     <div v-if="notice" class="alert alert-info text-sm" data-test="skills-notice" role="status">
@@ -139,21 +141,36 @@ function apply(data: SkillsListResponse) {
   else r.stale = true
 }
 
+// A thrown request (a network error) is an answer like any other failure: it
+// is turned into {success:false} so the spinner and the buttons are reset and
+// the error is shown, but only while the request is still the current one.
+type Answer<T> = { success: boolean; data?: T; error?: string; errorCode?: string }
+async function settle<T>(run: () => Promise<Answer<T>>): Promise<Answer<T>> {
+  try {
+    return await run()
+  } catch (e) {
+    return { success: false, error: e instanceof Error && e.message ? e.message : 'The request failed' }
+  }
+}
+
 async function load() {
   const server = props.serverName, v = visit, seq = ++requestSeq
   loading.value = true
-  const res = await api.getServerSkills(server)
+  const res = await settle(() => api.getServerSkills(server))
   if (!isCurrent(server, v, seq)) return
   loading.value = false
   if (res.success && res.data) apply(res.data)
   else error.value = res.error || 'Could not load skills'
 }
 
+// One refresh in flight per visit: a late answer of an earlier one never
+// resets the button of a newer one.
+let refreshSeq = 0
 async function refresh() {
-  const server = props.serverName, v = visit
+  const server = props.serverName, v = visit, mine = ++refreshSeq
   refreshing.value = true
-  const res = await api.refreshServerSkills(server)
-  if (!isCurrent(server, v)) return
+  const res = await settle(() => api.refreshServerSkills(server))
+  if (!isCurrent(server, v) || mine !== refreshSeq) return
   refreshing.value = false
   if (res.success && res.data) { requestSeq++; apply(res.data); return }
   // A failed refresh (refresh_superseded, skills_not_supported, skills_disabled,
@@ -171,7 +188,7 @@ async function refresh() {
 async function write(run: () => Promise<{ success: boolean; error?: string; errorCode?: string }>, done: string) {
   const server = props.serverName, v = visit, token = review.value?.token
   busy.value = true
-  const res = await run()
+  const res = await settle(run)
   if (!isCurrent(server, v)) return
   busy.value = false
   if (review.value?.token === token) notice.value = res.success ? done : skillErrorNotice(res.errorCode, res.error)
@@ -200,9 +217,11 @@ function setBlocked(block: boolean) {
   )
 }
 
+// The store re-dispatches the core's frame whole ({payload: {server, counts},
+// timestamp}), like every other runtime event.
 function onSkillsChanged(e: Event) {
-  const detail = (e as CustomEvent).detail as { server?: string } | null
-  if (detail?.server === props.serverName) void load()
+  const detail = (e as CustomEvent).detail as { payload?: { server?: string } } | null
+  if (detail?.payload?.server === props.serverName) void load()
 }
 
 watch(() => props.serverName, () => {

@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import SkillsPanel from '@/components/skills/SkillsPanel.vue'
 import api from '@/services/api'
-import { makeListing, makeSkill, ok } from './fixtures/skills125'
+import { createPinia, setActivePinia } from 'pinia'
+import { connectSkillsSSE, makeListing, makeSkill, ok } from './fixtures/skills125'
 
 vi.mock('@/services/api', () => ({ default: {
   getServerSkills: vi.fn(), refreshServerSkills: vi.fn(), getSkillContent: vi.fn(),
@@ -11,10 +12,14 @@ vi.mock('@/services/api', () => ({ default: {
 
 const m = (f: unknown) => f as ReturnType<typeof vi.fn>
 const mountPanel = (serverName = 'srv') => mount(SkillsPanel, { props: { serverName } })
+// Round-3 finding 1: every skills.changed goes through the real store's re-dispatch of the core's frame.
+let emitSkillsChanged: (server: string) => void = () => { throw new Error('not connected') }
 
 describe('SkillsPanel', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks()
+    setActivePinia(createPinia())
+    emitSkillsChanged = await connectSkillsSSE(api)
     m(api.getSkillContent).mockResolvedValue(ok({ text: 'body', offset: 0, size: 4, digest: 'd' }))
   })
 
@@ -204,14 +209,14 @@ describe('SkillsPanel', () => {
   it('reloads on mcpproxy:skills-changed for its own server only', async () => {
     m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('a')])))
     const w = mountPanel(); await flushPromises()
-    window.dispatchEvent(new CustomEvent('mcpproxy:skills-changed', { detail: { server: 'other' } }))
+    emitSkillsChanged('other')
     await flushPromises()
     expect(api.getServerSkills).toHaveBeenCalledTimes(1)
-    window.dispatchEvent(new CustomEvent('mcpproxy:skills-changed', { detail: { server: 'srv' } }))
+    emitSkillsChanged('srv')
     await flushPromises()
     expect(api.getServerSkills).toHaveBeenCalledTimes(2)
     w.unmount()
-    window.dispatchEvent(new CustomEvent('mcpproxy:skills-changed', { detail: { server: 'srv' } }))
+    emitSkillsChanged('srv')
     await flushPromises()
     expect(api.getServerSkills).toHaveBeenCalledTimes(2)
   })
@@ -233,7 +238,7 @@ describe('SkillsPanel', () => {
     await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
     expect(w.find('[data-test="skill-detail"]').exists()).toBe(true)
     m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('b')])))
-    window.dispatchEvent(new CustomEvent('mcpproxy:skills-changed', { detail: { server: 'srv' } }))
+    emitSkillsChanged('srv')
     await flushPromises()
     expect(w.find('[data-test="skill-detail"]').exists()).toBe(false)
   })
@@ -247,7 +252,7 @@ describe('SkillsPanel', () => {
     expect(w.find('[data-test="skill-stale"]').exists()).toBe(false)
     // A skills.changed reload replaces the entry; the chip still says Awaiting review.
     m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('a', { current_hash: 'sk1-unread' })], { incarnation: 3 })))
-    window.dispatchEvent(new CustomEvent('mcpproxy:skills-changed', { detail: { server: 'srv' } }))
+    emitSkillsChanged('srv')
     await flushPromises()
     expect(w.get('[data-test="skill-chip-a"]').text()).toBe('Awaiting review')
     expect(w.get('[data-test="skill-stale"]').text()).toMatch(/This skill changed while you were reviewing it/)
@@ -269,7 +274,7 @@ describe('SkillsPanel', () => {
     const w = mountPanel(); await flushPromises()
     await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
     m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('a')], { incarnation: 4 })))
-    window.dispatchEvent(new CustomEvent('mcpproxy:skills-changed', { detail: { server: 'srv' } }))
+    emitSkillsChanged('srv')
     await flushPromises()
     expect(w.find('[data-test="skill-stale"]').exists()).toBe(true)
     expect(w.get('[data-test="skill-approve"]').attributes('disabled')).toBeDefined()
@@ -280,7 +285,7 @@ describe('SkillsPanel', () => {
     const w = mountPanel(); await flushPromises()
     await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
     m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('a', { blocked: true })])))
-    window.dispatchEvent(new CustomEvent('mcpproxy:skills-changed', { detail: { server: 'srv' } }))
+    emitSkillsChanged('srv')
     await flushPromises()
     expect(w.find('[data-test="skill-stale"]').exists()).toBe(false)
     expect(w.find('[data-test="skill-unblock"]').exists()).toBe(true)
@@ -310,5 +315,66 @@ describe('SkillsPanel', () => {
     await w.get('[data-test="skill-view-SKILL.md"]').trigger('click'); await flushPromises()
     expect(w.get('[data-test="skill-viewer-error"]').text()).toMatch(/This file changed/)
     expect(api.getServerSkills).toHaveBeenCalledTimes(2)
+  })
+  // Round-3 finding 2: a thrown request (network error) never leaves an
+  // unhandled rejection or a stuck spinner/disabled button.
+  it('a thrown load shows an error with a retry and stops loading', async () => {
+    m(api.getServerSkills).mockRejectedValueOnce(new Error('network'))
+    const w = mountPanel(); await flushPromises()
+    expect(w.get('[data-test="skills-error"]').text()).toContain('network')
+    expect(w.find('.loading-spinner').exists()).toBe(false)
+    m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([makeSkill('a')])))
+    await w.get('[data-test="skills-retry"]').trigger('click'); await flushPromises()
+    expect(w.find('[data-test="skill-row-a"]').exists()).toBe(true)
+    expect(w.find('[data-test="skills-error"]').exists()).toBe(false)
+  })
+
+  it('a thrown reload keeps the listing on screen and shows the error', async () => {
+    m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([makeSkill('a')])))
+    const w = mountPanel(); await flushPromises()
+    m(api.getServerSkills).mockRejectedValueOnce(new Error('network'))
+    emitSkillsChanged('srv'); await flushPromises()
+    expect(w.find('[data-test="skill-row-a"]').exists()).toBe(true)
+    expect(w.get('[data-test="skills-load-error"]').text()).toContain('network')
+  })
+
+  it('a thrown refresh resets the Refresh button, says so and reloads', async () => {
+    m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('a')])))
+    const w = mountPanel(); await flushPromises()
+    m(api.refreshServerSkills).mockRejectedValueOnce(new Error('network'))
+    await w.get('[data-test="skills-refresh"]').trigger('click'); await flushPromises()
+    expect(w.get('[data-test="skills-refresh"]').attributes('disabled')).toBeUndefined()
+    expect(w.get('[data-test="skills-notice"]').text()).toContain('network')
+    expect(api.getServerSkills).toHaveBeenCalledTimes(2)
+  })
+
+  it('a thrown approve resets busy, shows the error and reloads', async () => {
+    m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('a')])))
+    m(api.approveSkills).mockRejectedValueOnce(new Error('network'))
+    const w = mountPanel(); await flushPromises()
+    await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
+    await w.get('[data-test="skill-approve"]').trigger('click'); await flushPromises()
+    expect(w.get('[data-test="skill-approve"]').attributes('disabled')).toBeUndefined()
+    expect(w.get('[data-test="skills-notice"]').text()).toContain('network')
+    expect(api.getServerSkills).toHaveBeenCalledTimes(2)
+  })
+
+  it('a thrown answer for the previous server changes nothing on the new one', async () => {
+    let failA: (e: unknown) => void = () => {}
+    let failRefresh: (e: unknown) => void = () => {}
+    m(api.getServerSkills).mockImplementation((name: string) =>
+      name === 'a' ? new Promise((_, rej) => { failA = rej }) : Promise.resolve(ok(makeListing([makeSkill('only_b')]))))
+    const w = mountPanel('a')
+    await w.setProps({ serverName: 'b' }); await flushPromises()
+    m(api.refreshServerSkills).mockReturnValueOnce(new Promise((_, rej) => { failRefresh = rej }))
+    await w.get('[data-test="skills-refresh"]').trigger('click'); await flushPromises()
+    failA(new Error('late a')); await flushPromises()
+    expect(w.find('[data-test="skills-error"]').exists()).toBe(false)
+    expect(w.find('[data-test="skills-load-error"]').exists()).toBe(false)
+    expect(w.find('[data-test="skill-row-only_b"]').exists()).toBe(true)
+    // The refresh for b is still in flight: its button stays busy.
+    expect(w.get('[data-test="skills-refresh"]').attributes('disabled')).toBeDefined()
+    failRefresh(new Error('net')); await flushPromises()
+    expect(w.get('[data-test="skills-refresh"]').attributes('disabled')).toBeUndefined()
   })
 })

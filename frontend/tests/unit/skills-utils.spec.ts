@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   skillStateChip, skillFileDiff, lineDiff, skillExpectedHashes, readWholeSkillFile,
-  skillsTabVisible, skillErrorNotice, SKILL_CONTENT_CHANGED,
+  skillsTabVisible, skillErrorNotice, SKILL_CONTENT_CHANGED, LINE_DIFF_CONTEXT, LINE_DIFF_MAX_OPS,
 } from '@/utils/skills'
 
 const file = (path: string, digest: string, size = 10, text = true) => ({ path, size, digest, text })
@@ -53,6 +53,37 @@ describe('lineDiff', () => {
     const r = lineDiff(a, b, 100)
     expect(r.tooLarge).toBe(true)
     expect(r.ops).toEqual([])
+  })
+  // Round-3 finding 6: the output is bounded, not only the LCS middle.
+  it('collapses a huge shared prefix and suffix around a one-line change', () => {
+    const shared = Array.from({ length: 130_000 }, (_, i) => `line ${i}`)
+    const a = [...shared, 'old', ...shared].join('\n')
+    const b = [...shared, 'new', ...shared].join('\n')
+    const r = lineDiff(a, b)
+    expect(r.tooLarge).toBe(false)
+    expect(r.ops.length).toBeLessThan(20)
+    const ops = r.ops.map(o => `${o.op}:${o.text}`)
+    expect(ops).toContain('del:old')
+    expect(ops).toContain('add:new')
+    expect(ops[0]).toBe(`skip:${130_000 - LINE_DIFF_CONTEXT} unchanged lines`)
+    expect(ops[ops.length - 1]).toBe(`skip:${130_000 - LINE_DIFF_CONTEXT} unchanged lines`)
+    expect(ops).toContain(`same:line ${130_000 - 1}`)
+    expect(ops).not.toContain(`same:line ${130_000 - 1 - LINE_DIFF_CONTEXT}`)
+  })
+  it('collapses an unchanged run inside the middle, and keeps a short one', () => {
+    const run = Array.from({ length: 50 }, (_, i) => `m${i}`)
+    const r = lineDiff(['x', ...run, 'y', 'k1', 'k2'].join('\n'), ['X', ...run, 'Y', 'k1', 'k2'].join('\n'))
+    const ops = r.ops.map(o => `${o.op}:${o.text}`)
+    expect(ops).toContain(`skip:${50 - 2 * LINE_DIFF_CONTEXT} unchanged lines`)
+    expect(ops.slice(-2)).toEqual(['same:k1', 'same:k2'])
+  })
+  it('is too large when the changed lines alone pass the op limit', () => {
+    const a = Array.from({ length: 10 }, (_, i) => `a${i}`).join('\n')
+    const b = Array.from({ length: 30_000 }, (_, i) => `b${i}`).join('\n')
+    const r = lineDiff(a, b)
+    expect(r.tooLarge).toBe(true)
+    expect(r.ops).toEqual([])
+    expect(LINE_DIFF_MAX_OPS).toBeLessThan(30_000)
   })
 })
 

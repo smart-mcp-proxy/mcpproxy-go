@@ -149,9 +149,11 @@ page disagree):
   records read back after the approve, block and unblock steps) under
   `tmp/web-smoke-artifacts/skills-sweep/`, so it is uploaded with the
   `web-ui-sweep-playwright-report` artifact. It runs with `--self-test-first`,
-  which first proves (no browser) that an ambient `MCPPROXY_DATA_DIR` /
-  `MCPPROXY_DATA` never reaches the throwaway core and that the results writer
-  redacts the API key and local paths. The step runs even when the
+  which first proves (no browser) that no ambient `MCPPROXY_*` variable
+  (decoys for `MCPPROXY_DATA_DIR` / `MCPPROXY_DATA`, `MCPPROXY_AUDIT_LOG_PATH`,
+  `MCPPROXY_TPA_BUNDLE_PATH`, `MCPPROXY_CERTS_DIR`) reaches the throwaway core,
+  that the results writer redacts the API key and local paths, and that a
+  `DEBUG=1` run never prints the key. The step runs even when the
   standing sweep failed, through `release-gate run-suite --name
   advisory/skills-tab-sweep --advisory`, so its outcome is its own
   non-blocking manifest entry: a red run is recorded as `advisory-fail` and

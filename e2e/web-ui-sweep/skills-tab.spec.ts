@@ -14,8 +14,11 @@
 //      binds the new hash;
 //   5. changing a PENDING skill's bytes while it is open marks the review stale
 //      and keeps its Approve button on screen but disabled;
-//   6. block and unblock;
-//   7. no uncaught page error anywhere.
+//   6. a change refreshed through the REST API (no click in the page) reaches
+//      the open review by the live skills.changed event alone: its stale
+//      banner appears by itself;
+//   7. block and unblock;
+//   8. no uncaught page error anywhere.
 //
 // Normally run by scripts/run-skills-tab-sweep.sh, which starts everything and
 // sets the environment (docs/development/web-ui-verification.md):
@@ -223,6 +226,30 @@ test('a pending skill changed while open is stale, with Approve disabled until r
   await page.locator('[data-test="skill-reopen"]').click()
   await expect(page.locator('[data-test="skill-stale"]')).toHaveCount(0)
   await expect(approve).toBeEnabled()
+})
+
+// Round-3 finding 1: the live skills.changed event (the core's SSE frame,
+// re-dispatched by the system store) reloads the open review. Nothing in the
+// page is clicked after the skill is opened: the change and the refresh happen
+// upstream and through the REST API, and the banner has to appear by itself.
+test('a refresh through the REST API marks the open review stale by the live event alone', async ({ page }) => {
+  await page.goto(url(`/servers/${SERVER}?tab=skills`))
+  await row(page, 'big').click()
+  await expect(page.locator('[data-test="skill-approve"]')).toBeEnabled()
+  await expect(page.locator('[data-test="skill-stale"]')).toHaveCount(0)
+  const listed = page.waitForResponse(r => new URL(r.url()).pathname === `/api/v1/servers/${SERVER}/skills` && r.request().method() === 'GET')
+  const mutated = await fetch(`${FIXTURE}/_fixture/mutate?skill=big&file=SKILL.md`, {
+    method: 'POST', body: '---\nname: big\ndescription: test skill big\n---\n# big\nChanged upstream, refreshed over REST.\n', headers: MUTATE_HEADERS,
+  })
+  expect(mutated.status).toBe(204)
+  const refreshed = await fetch(`${BASE}/api/v1/servers/${SERVER}/skills/refresh`, { method: 'POST', headers: { 'X-API-Key': KEY } })
+  expect(refreshed.status, 'POST /skills/refresh').toBe(200)
+  // The page reloads the listing on its own (the skills.changed event)...
+  expect((await listed).status()).toBe(200)
+  // ...and the open review says it changed, with Approve off.
+  await expect(page.locator('[data-test="skill-stale"]')).toContainText('This skill changed while you were reviewing it')
+  await expect(page.locator('[data-test="skill-approve"]')).toBeDisabled()
+  await shot(page, '05c-live-event-stale', '[data-test="skill-stale"]')
 })
 
 test('block and unblock', async ({ page }) => {

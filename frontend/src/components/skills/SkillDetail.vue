@@ -40,7 +40,7 @@
     <div v-if="viewer" class="space-y-2" data-test="skill-viewer">
       <div class="flex flex-wrap items-center gap-2">
         <code class="text-sm break-all" v-text="viewer.file"></code>
-        <!-- A copy is offered only when the listing names the file in it (an added file has no approved copy, a removed one no current copy). -->
+        <!-- A copy is offered only when the listing names the file in it as a text file (an added file has no approved copy, a removed one no current copy, and a binary copy cannot be read: 415). -->
         <div v-if="hasCopy(viewer.file, 'current') && hasCopy(viewer.file, 'approved')" class="join">
           <button class="btn btn-xs join-item" :class="viewer.copy === 'current' ? 'btn-active' : ''" data-test="skill-copy-current" @click="viewFile(viewer.file, 'current')">Current</button>
           <button class="btn btn-xs join-item" :class="viewer.copy === 'approved' ? 'btn-active' : ''" data-test="skill-copy-approved" @click="viewFile(viewer.file, 'approved')">Approved</button>
@@ -124,7 +124,7 @@ const chipClass = computed(() => `badge-${({ error: 'error', warning: 'warning',
 const canApprove = computed(() => !props.skill.blocked && (props.skill.status === 'pending' || props.skill.status === 'changed'))
 const diffRows = computed<FileDiffRow[] | null>(() => props.skill.approved_files ? skillFileDiff(props.skill.approved_files, props.skill.files) : null)
 const diffBadge = { added: 'badge-success', removed: 'badge-error', changed: 'badge-warning', same: 'badge-ghost' } as const
-const lineClass = { same: '', add: 'bg-success/20', del: 'bg-error/20' } as const
+const lineClass = { same: '', add: 'bg-success/20', del: 'bg-error/20', skip: 'text-base-content/50 italic' } as const
 
 function shortDigest(d: string) { return d.replace(/^sha256:/, '').slice(0, 12) }
 function formatSkillSize(n: number) {
@@ -143,7 +143,11 @@ const lineDiffState = ref<LineDiffState | null>(null)
 // A reload that moved the skill's content, or a different skill, drops every
 // fetched text: it described a copy that is no longer the one on screen.
 let generation = 0
-watch(() => [props.serverName, props.skill.path, props.skill.current_hash, props.skill.approved_hash], () => {
+// Watched as one string: a getter returning a fresh array would fire on every
+// new `skill` object, even when the reload moved nothing (e.g. a skills.changed
+// for another skill, or a block), and drop the pages the reviewer loaded.
+const contentKey = computed(() => JSON.stringify([props.serverName, props.skill.path, props.skill.current_hash, props.skill.approved_hash]))
+watch(contentKey, () => {
   generation++
   viewer.value = null
   lineDiffState.value = null
@@ -155,7 +159,10 @@ async function fetchPart(file: string, copy: SkillCopy, offset: number) {
   return { res, stale: gen !== generation }
 }
 
-function hasCopy(file: string, copy: SkillCopy) { return skillFileDigest(props.skill, file, copy) !== undefined }
+function hasCopy(file: string, copy: SkillCopy) {
+  const list = copy === 'approved' ? props.skill.approved_files : props.skill.files
+  return list?.some(f => f.path === file && f.text === true) ?? false
+}
 
 async function viewFile(file: string, copy: SkillCopy) {
   // reactive() so the identity checks below compare the proxy the template sees.

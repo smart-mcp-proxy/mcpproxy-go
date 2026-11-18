@@ -1700,7 +1700,12 @@ const isTenant = computed(() => useAuthStore().principalKind === 'tenant')
 const skillsTabVisible = ref(false)
 // False while the check for the server on screen is in flight.
 const skillsTabChecked = ref(false)
-let skillsCheckGeneration = 0
+// Every check takes a sequence number. A first check (reset) supersedes every
+// earlier one; a background re-check's answer is applied only when it is newer
+// than the last applied answer, so overlapping re-checks that return in reverse
+// order never let an older answer replace a newer one.
+let skillsCheckSeq = 0
+let skillsCheckFloor = 0 // answers with a sequence <= this are dropped
 // A Skills tab that is not offered (feature off, server without skills, a
 // failed check, a tenant) is never left open: it falls back to Tools, and the
 // activeTab watch below writes ?tab=tools like any other tab change.
@@ -1715,13 +1720,12 @@ function leaveSkillsTabIfNotOffered() {
   else if (route.query.tab === 'skills') void router.replace({ query: { ...route.query, tab: 'tools' } })
 }
 async function checkSkillsTab(reset = true) {
-  // A first check (reset) supersedes every earlier one. A background re-check
-  // (reset=false, after skills.changed) takes the generation only when it has
-  // a successful answer, so a failed one never drops a first check still in
-  // flight and never changes the tab.
-  const gen = reset ? ++skillsCheckGeneration : skillsCheckGeneration
+  // A failed background re-check (reset=false, after skills.changed) never
+  // drops a first check still in flight and never changes the tab.
+  const seq = ++skillsCheckSeq
   const name = props.serverName
   if (reset) {
+    skillsCheckFloor = seq - 1
     skillsTabVisible.value = false
     skillsTabChecked.value = false
   }
@@ -1741,14 +1745,13 @@ async function checkSkillsTab(reset = true) {
   } catch {
     // The tab is optional; no answer means no tab (on a first check).
   }
-  if (gen !== skillsCheckGeneration || name !== props.serverName) return
+  if (seq <= skillsCheckFloor || name !== props.serverName) return
   // A failed background re-check (a 409 server_replaced right after the
   // reviewer's own write, a 500, a network error) leaves the tab as it is: it
   // must not unmount the review that is open.
-  if (!reset) {
-    if (!answered) return
-    ++skillsCheckGeneration
-  }
+  if (!reset && !answered) return
+  // Applied: every answer to an older request is now out of date.
+  skillsCheckFloor = seq
   skillsTabVisible.value = visible
   skillsTabChecked.value = true
   leaveSkillsTabIfNotOffered()
@@ -4181,9 +4184,10 @@ watch(logTail, () => {
 })
 
 // Spec 125: a skills change on this server can turn the tab on or off.
+// The store re-dispatches the core's frame whole ({payload: {server, counts}, timestamp}).
 function handleSkillsChangedEvent(e: Event) {
-  const detail = (e as CustomEvent).detail as { server?: string } | null
-  if (detail?.server === props.serverName) void checkSkillsTab(false)
+  const detail = (e as CustomEvent).detail as { payload?: { server?: string } } | null
+  if (detail?.payload?.server === props.serverName) void checkSkillsTab(false)
 }
 
 // Load data on mount

@@ -532,7 +532,12 @@ jobs:
     name: Web UI sweep (advisory)
     needs: build-candidate
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Two sweeps in one job: run-web-smoke.sh (which had 20 minutes alone) and
+    # the Skills tab sweep with --self-test-first (two throwaway cores for the
+    # self-test, its own npm ci + Chromium install, eight serial scenarios;
+    # about 35 s locally with the browser and builds cached, about 1 min with a
+    # scenario timing out). 35 minutes leaves headroom for a cold runner.
+    timeout-minutes: 35
     continue-on-error: true  # advisory: never blocks the tag (FR-019 pattern)
     steps:
       - name: Checkout
@@ -573,8 +578,9 @@ jobs:
       # fragment upload below carries. Its results file (skills-sweep-results.json)
       # and screenshots land under tmp/web-smoke-artifacts/, which the Playwright
       # report upload below already carries. --self-test-first first proves that
-      # an ambient MCPPROXY_DATA_DIR never reaches the core and that the results
-      # writer redacts the API key.
+      # no ambient MCPPROXY_* (data dir, audit log path, ...) reaches the core,
+      # that the results writer redacts the API key, and that a DEBUG=1 run
+      # never prints it.
       - name: Run Skills tab sweep (spec 125)
         if: ${{ !cancelled() }}
         env:

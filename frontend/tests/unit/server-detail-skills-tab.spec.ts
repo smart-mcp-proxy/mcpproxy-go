@@ -7,7 +7,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/services/api'
-import { makeListing, makeSkill } from './fixtures/skills125'
+import { connectSkillsSSE, makeListing, makeSkill } from './fixtures/skills125'
 
 const ok = <T,>(data: T) => Promise.resolve({ success: true, data })
 
@@ -34,6 +34,8 @@ vi.mock('@/services/api', () => {
   } }
 })
 
+let emitSkillsChanged: (server: string) => void = () => { throw new Error('not connected') }
+
 async function mountServerDetail(path: string, tenant = false) {
   const pinia = createPinia()
   setActivePinia(pinia)
@@ -51,6 +53,8 @@ async function mountServerDetail(path: string, tenant = false) {
   await router.isReady()
   const wrapper = mount(ServerDetail, { props: { serverName: 'alpha' }, global: { plugins: [pinia, router] } })
   await flushPromises(); await flushPromises()
+  // Round-3 finding 1: skills.changed reaches the view through the real store's re-dispatch of the core's frame.
+  emitSkillsChanged = await connectSkillsSSE(api)
   return { wrapper, router }
 }
 
@@ -157,7 +161,7 @@ describe('ServerDetail Skills tab (Spec 125)', () => {
     const { wrapper, router } = await mountServerDetail('/servers/alpha?tab=skills')
     expect(wrapper.find('[data-test="skills-panel"]').exists()).toBe(true)
     ;(api.getServerSkills as any).mockResolvedValue({ success: true, data: makeListing([], { enabled: false }) })
-    window.dispatchEvent(new CustomEvent('mcpproxy:skills-changed', { detail: { server: 'alpha' } }))
+    emitSkillsChanged('alpha')
     await flushPromises(); await flushPromises()
     expect(wrapper.find('[data-test="skills-tab"]').exists()).toBe(false)
     expect(router.currentRoute.value.query.tab).toBe('tools')
@@ -173,7 +177,7 @@ describe('ServerDetail Skills tab (Spec 125)', () => {
       { success: false, error: 'internal error' },
     ]) {
       ;(api.getServerSkills as any).mockResolvedValue(failure)
-      window.dispatchEvent(new CustomEvent('mcpproxy:skills-changed', { detail: { server: 'alpha' } }))
+      emitSkillsChanged('alpha')
       await flushPromises(); await flushPromises()
       expect(wrapper.find('[data-test="skills-tab"]').exists()).toBe(true)
       expect(wrapper.find('[data-test="skills-panel"]').exists()).toBe(true)
@@ -181,7 +185,7 @@ describe('ServerDetail Skills tab (Spec 125)', () => {
     }
     // A thrown request is a failure too.
     ;(api.getServerSkills as any).mockRejectedValue(new Error('network'))
-    window.dispatchEvent(new CustomEvent('mcpproxy:skills-changed', { detail: { server: 'alpha' } }))
+    emitSkillsChanged('alpha')
     await flushPromises(); await flushPromises()
     expect(wrapper.find('[data-test="skills-panel"]').exists()).toBe(true)
     wrapper.unmount()
@@ -206,4 +210,35 @@ describe('ServerDetail Skills tab (Spec 125)', () => {
     expect(wrapper.find('[data-test="skills-tab"]').classes()).toContain('tab-active')
     expect(router.currentRoute.value.query.tab).toBe('skills')
   })
+  // Round-3 finding 3: overlapping background re-checks are ordered by request:
+  // only an answer newer than the last applied one changes the tab.
+  for (const order of ['older answer first', 'newer answer first'] as const) {
+    it(`two overlapping re-checks keep the newer answer (${order})`, async () => {
+      const { wrapper, router } = await mountServerDetail('/servers/alpha?tab=skills')
+      expect(wrapper.find('[data-test="skills-panel"]').exists()).toBe(true)
+      const pending: Array<(v: unknown) => void> = []
+      ;(api.getServerSkills as any).mockImplementation(() => new Promise(r => { pending.push(r) }))
+      emitSkillsChanged('alpha') // older: will say "unsupported"
+      emitSkillsChanged('alpha') // newer: will say "supported"
+      await flushPromises()
+      // Each event reaches ServerDetail's listener first, then SkillsPanel's reload:
+      // requests are [check 1, reload 1, check 2, reload 2].
+      expect(api.getServerSkills).toHaveBeenCalledTimes(1 + 1 + 4)
+      const [older, newer] = [pending[0], pending[2]]
+      const unsupported = { success: true, data: makeListing([], { supported: false }) }
+      const supported = { success: true, data: makeListing([makeSkill('hf')]) }
+      if (order === 'older answer first') { older(unsupported); await flushPromises(); newer(supported) }
+      else { newer(supported); await flushPromises(); older(unsupported) }
+      pending[1](supported); pending[3](supported)
+      await flushPromises(); await flushPromises()
+      // The newer answer ("supported") is the one that stands either way.
+      expect(wrapper.find('[data-test="skills-tab"]').exists()).toBe(true)
+      if (order === 'newer answer first') {
+        // The older answer came after it and was dropped: the open review was never unmounted.
+        expect(wrapper.find('[data-test="skills-panel"]').exists()).toBe(true)
+        expect(router.currentRoute.value.query.tab).toBe('skills')
+      }
+      wrapper.unmount()
+    })
+  }
 })

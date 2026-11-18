@@ -234,6 +234,40 @@ describe('SkillDetail', () => {
     await w.get('[data-test="skill-view-approved-notes"]').trigger('click'); await flushPromises()
     expect(api.getSkillContent).toHaveBeenCalledWith('srv', { skill: 'a', file: 'notes', copy: 'approved', offset: 0 })
     expect(w.get('[data-test="skill-viewer-text"]').text()).toBe('old text')
+    // Round-3 finding 5: the current copy is binary (the content route answers 415), so it is not offered.
+    expect(w.find('[data-test="skill-copy-current"]').exists()).toBe(false)
+    expect(w.get('[data-test="skill-viewer-copy"]').text()).toBe('approved copy')
+  })
+
+  it('does not offer the approved copy when it is binary and the current file is text', async () => {
+    m(api.getSkillContent).mockResolvedValue(ok({ text: 'new text', offset: 0, size: 8, digest: 'sha256:t' }))
+    const w = mountDetail(makeSkill('a', {
+      status: 'changed', approved_hash: 'sk1-old',
+      approved_files: [skillFile('SKILL.md'), skillFile('notes', 'sha256:bin', 8, false)],
+      files: [skillFile('SKILL.md'), skillFile('notes', 'sha256:t', 8, true)],
+    }))
+    expect(w.find('[data-test="skill-view-approved-notes"]').exists()).toBe(false)
+    await w.get('[data-test="skill-view-notes"]').trigger('click'); await flushPromises()
+    expect(w.get('[data-test="skill-viewer-text"]').text()).toBe('new text')
+    expect(w.find('[data-test="skill-copy-approved"]').exists()).toBe(false)
+    expect(w.get('[data-test="skill-viewer-copy"]').text()).toBe('current copy')
+  })
+
+  // Round-3 finding 4: a reload that moved nothing (same server, path and hashes)
+  // keeps the open viewer and the pages loaded into it.
+  it('keeps an open paged viewer across an unchanged reload, and drops it on a real change', async () => {
+    m(api.getSkillContent)
+      .mockResolvedValueOnce(ok({ text: 'part1', offset: 0, size: 10, digest: D, next_offset: 5 }))
+      .mockResolvedValueOnce(ok({ text: 'part2', offset: 5, size: 10, digest: D }))
+    const w = mountDetail(makeSkill('a'))
+    await w.get('[data-test="skill-view-SKILL.md"]').trigger('click'); await flushPromises()
+    await w.get('[data-test="skill-load-more"]').trigger('click'); await flushPromises()
+    expect(w.get('[data-test="skill-viewer-text"]').text()).toBe('part1part2')
+    // The same version again as a new object (e.g. a skills.changed for another skill, or a block).
+    await w.setProps({ skill: makeSkill('a', { blocked: true }) }); await flushPromises()
+    expect(w.get('[data-test="skill-viewer-text"]').text()).toBe('part1part2')
+    await w.setProps({ skill: makeSkill('a', { blocked: true, current_hash: 'sk1-moved' }) }); await flushPromises()
+    expect(w.find('[data-test="skill-viewer"]').exists()).toBe(false)
   })
 
   // Round-2 finding 11: an entry without a scan block (the agent shape) does not throw.

@@ -8,10 +8,11 @@
 # It starts, and on exit stops, only what it started:
 #   * cmd/skillsfixture on a free loopback port;
 #   * a core on a free high loopback port with a scratch data dir (never
-#     ~/.mcpproxy: MCPPROXY_DATA_DIR / MCPPROXY_DATA, which would override the
-#     config's data_dir, are removed from its environment, --data-dir names the
-#     scratch dir, HOME points at a scratch home, and a data dir under
-#     $HOME/.mcpproxy is refused), enable_skills on, a generated throwaway API
+#     ~/.mcpproxy: the core and the fixture start with a clean environment,
+#     env -i with only PATH, a scratch HOME and a scratch TMPDIR, so no
+#     MCPPROXY_* of the operator's reaches them; --data-dir names the scratch
+#     dir, and a data dir under $HOME/.mcpproxy is refused), enable_skills on,
+#     a generated throwaway API
 #     key, and the fixture as a trust_mode: manual streamable-http upstream;
 # then approves the server, runs the spec, and reads the core's own skill
 # records back after the approve, block and unblock steps.
@@ -24,9 +25,14 @@
 
 set -euo pipefail
 
-if [[ "${DEBUG:-}" == "1" ]]; then
-  set -x
-fi
+# No xtrace, not even with DEBUG=1: a traced line would print the throwaway API
+# key (its assignment, the X-API-Key header, the core's environment, the
+# redaction call). DEBUG=1 prints progress lines instead (debug below), none of
+# which carries a secret; --self-test checks a DEBUG=1 run's stderr for the key.
+debug() {
+  if [[ "${DEBUG:-}" == "1" ]]; then echo "debug: $*" >&2; fi
+  return 0
+}
 
 usage() {
   cat <<EOF
@@ -41,12 +47,15 @@ Options:
                       screenshots (the copy committed under specs/; the
                       screenshots stay in --out/screenshots for artifacts)
   --self-test         no browser: prove that an ambient MCPPROXY_DATA_DIR /
-                      MCPPROXY_DATA never reaches the core (it starts one with
-                      both set to decoy dirs and checks the database lands in
-                      the scratch dir only), that a data dir under
-                      \$HOME/.mcpproxy is refused, and that the results writer
+                      MCPPROXY_DATA, MCPPROXY_AUDIT_LOG_ENABLED/PATH,
+                      MCPPROXY_TPA_BUNDLE_PATH and MCPPROXY_CERTS_DIR never
+                      reach the core (it starts one with all of them set to
+                      decoys and checks the database lands in the scratch dir
+                      only and no decoy is touched), that a data dir under
+                      \$HOME/.mcpproxy is refused, that the results writer
                       records the first failed attempt and redacts the API key
-                      and local paths
+                      and local paths, and that a DEBUG=1 run never prints the
+                      API key
   --self-test-first   run the --self-test checks, then the sweep (the release
                       gate does this, so both land in one advisory entry)
   -h, --help          print this message
@@ -205,19 +214,31 @@ write_config() {
 JSON
 }
 
-# Starts the core detached from the operator's data: MCPPROXY_DATA_DIR and the
-# legacy MCPPROXY_DATA override the config's data_dir (internal/config/loader.go),
-# so both are removed from its environment; --data-dir (which wins over the file
-# and the environment) names the scratch dir; HOME is a scratch home, so a
-# default path can never resolve to the operator's ~/.mcpproxy. $1: listen.
+# The only environment the core and the fixture get (env -i): PATH, the scratch
+# HOME and a scratch TMPDIR. Nothing else of the operator's environment is
+# inherited, no MCPPROXY_* at all: MCPPROXY_DATA_DIR / MCPPROXY_DATA would
+# override the config's data_dir, MCPPROXY_AUDIT_LOG_ENABLED/PATH would audit
+# into the operator's file, and more MCPPROXY_* variables name paths or change
+# behaviour (internal/config/loader.go). Every variable the core needs is set
+# explicitly by start_core.
+CORE_TMP="$WORK/tmp"
+mkdir -p "$CORE_TMP"
+clean_env() {
+  env -i PATH="${PATH:-/usr/bin:/bin}" HOME="$CORE_HOME" TMPDIR="$CORE_TMP" "$@"
+}
+
+# Starts the core detached from the operator's data and environment:
+# clean_env above, --data-dir (which wins over the file and the environment)
+# names the scratch dir, and HOME is a scratch home, so a default path can never
+# resolve to the operator's ~/.mcpproxy. $1: listen.
 start_core() {
   local listen="$1"
   if ! data_dir_allowed "$DATA_DIR"; then
     echo "refusing to start: data dir $DATA_DIR is under $OPERATOR_HOME/.mcpproxy" >&2
     exit 1
   fi
-  env -u MCPPROXY_DATA_DIR -u MCPPROXY_DATA \
-    HOME="$CORE_HOME" HEADLESS=1 DO_NOT_TRACK=1 MCPPROXY_TELEMETRY=false MCPPROXY_API_KEY="$API_KEY" \
+  debug "starting the core on $listen (data dir: the scratch dir)"
+  clean_env HEADLESS=1 DO_NOT_TRACK=1 MCPPROXY_TELEMETRY=false MCPPROXY_API_KEY="$API_KEY" \
     "$CORE_BIN" serve --config "$CONFIG_PATH" --data-dir "$DATA_DIR" --listen "$listen" >"$CORE_LOG" 2>&1 &
   CORE_PID=$!
 }
@@ -327,9 +348,11 @@ NODE
 # that follows it (--self-test-first) starts from fresh state.
 st_fail() { echo "self-test FAILED: $*" >&2; exit 1; }
 run_self_test() {
-  local sweep_data_dir="$DATA_DIR" st_port d step st_status results enc_key st_out decoy_new decoy_legacy
+  local sweep_data_dir="$DATA_DIR" st_port d step st_status results enc_key st_out decoy_new decoy_legacy decoy_audit_dir decoy_certs decoy_tpa
   DATA_DIR="$WORK/st-data"
   mkdir -p "$DATA_DIR"
+  # The DEBUG=1 child of step 4 hands its key to the parent (a scratch file of the parent's).
+  if [[ -n "${SWEEP_SELF_TEST_CHILD:-}" ]]; then printf '%s' "$API_KEY" >"$SWEEP_SELF_TEST_CHILD"; fi
 
   # 1. The guard refuses the operator's ~/.mcpproxy and anything inside it.
   [[ -n "$OPERATOR_HOME" ]] || st_fail "HOME is not set"
@@ -341,10 +364,16 @@ run_self_test() {
   # 2. An ambient MCPPROXY_DATA_DIR / MCPPROXY_DATA does not reach the core.
   decoy_new="$WORK/decoy-data-dir"
   decoy_legacy="$WORK/decoy-data-legacy"
-  mkdir -p "$decoy_new" "$decoy_legacy"
+  decoy_audit_dir="$WORK/decoy-audit"
+  decoy_certs="$WORK/decoy-certs"
+  decoy_tpa="$WORK/decoy-tpa/bundle.json"
+  mkdir -p "$decoy_new" "$decoy_legacy" "$decoy_audit_dir" "$decoy_certs"
   st_port=$(free_port)
   write_config "127.0.0.1:${st_port}" ""
-  MCPPROXY_DATA_DIR="$decoy_new" MCPPROXY_DATA="$decoy_legacy" start_core "127.0.0.1:${st_port}"
+  MCPPROXY_DATA_DIR="$decoy_new" MCPPROXY_DATA="$decoy_legacy" \
+  MCPPROXY_AUDIT_LOG_ENABLED=true MCPPROXY_AUDIT_LOG_PATH="$decoy_audit_dir/audit.jsonl" \
+  MCPPROXY_TPA_BUNDLE_PATH="$decoy_tpa" MCPPROXY_CERTS_DIR="$decoy_certs" \
+    start_core "127.0.0.1:${st_port}"
   wait_core "http://127.0.0.1:${st_port}"
   check_core_data_dir
   for d in "$decoy_new" "$decoy_legacy"; do
@@ -356,6 +385,21 @@ run_self_test() {
   wait "$CORE_PID" >/dev/null 2>&1 || true
   CORE_PID=""
   echo "self-test: with MCPPROXY_DATA_DIR and MCPPROXY_DATA set to decoys, the core opened its database in the scratch dir only"
+
+  # 2b. Nothing else of the operator's environment reaches the core either:
+  # MCPPROXY_AUDIT_LOG_ENABLED/PATH would turn auditing on into a file of the
+  # operator's (internal/config/loader.go), and MCPPROXY_TPA_BUNDLE_PATH /
+  # MCPPROXY_CERTS_DIR name more paths. The core of 2. ran with all of them set
+  # to decoys; it must have touched none, and its log must name none.
+  for d in "$decoy_audit_dir" "$decoy_certs"; do
+    if [[ -n "$(ls -A "$d" 2>/dev/null)" ]]; then
+      st_fail "the core wrote into the ambient decoy $d: $(ls -A "$d")"
+    fi
+  done
+  for d in "$decoy_audit_dir" "$decoy_certs" "$decoy_tpa"; do
+    grep -qF "$d" "$CORE_LOG" && st_fail "the core log names the ambient decoy $d"
+  done
+  echo "self-test: with MCPPROXY_AUDIT_LOG_PATH, MCPPROXY_TPA_BUNDLE_PATH and MCPPROXY_CERTS_DIR set to decoys, the core touched none of them"
 
   # 3. The results writer: first failed attempt, redaction, provenance.
   st_out="$WORK/st-out"
@@ -397,6 +441,24 @@ if (JSON.stringify(r.fixture.command) !== JSON.stringify(["skillsfixture", "-add
 if (r.checked_commit !== "0123456789abcdef0123456789abcdef01234567" || r.working_tree_dirty !== true || r.evidence !== "pre-commit" || !/^pre-commit evidence/.test(r.checked)) fail("provenance: " + JSON.stringify([r.checked_commit, r.working_tree_dirty, r.evidence, r.checked]))
 ' "$results"
   echo "self-test: the results writer records the first failed attempt, redacts the key and local paths, and labels a dirty tree pre-commit evidence"
+
+  # 4. DEBUG=1 never prints the key: the whole self-test above (config, core
+  # start with the key, curl with the key header, redaction) runs again as a
+  # child with DEBUG=1, which hands back its own key through a scratch file;
+  # the child's stderr must not contain it. The child skips this step.
+  if [[ -z "${SWEEP_SELF_TEST_CHILD:-}" ]]; then
+    local probe_err="$WORK/debug-probe.stderr" probe_key="$WORK/debug-probe.key" probe_status
+    set +e
+    DEBUG=1 SWEEP_SELF_TEST_CHILD="$probe_key" MCPPROXY_BINARY_PATH="$CORE_BIN" \
+      bash "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")" --self-test >/dev/null 2>"$probe_err"
+    probe_status=$?
+    set -e
+    [[ -s "$probe_key" ]] || st_fail "the DEBUG=1 self-test run did not hand back its key (exit $probe_status)"
+    # Never echo the child's stderr here: it is what is being checked for the key.
+    grep -qF "$(cat "$probe_key")" "$probe_err" && st_fail "a DEBUG=1 run printed its API key to stderr ($(grep -cF "$(cat "$probe_key")" "$probe_err") lines)"
+    [[ $probe_status -eq 0 ]] || st_fail "the DEBUG=1 self-test run failed (exit $probe_status)"
+    echo "self-test: a DEBUG=1 run (the self-test as a child) never printed its API key to stderr"
+  fi
   echo "self-test passed"
   DATA_DIR="$sweep_data_dir"
   OUT_REAL=""
@@ -462,7 +524,8 @@ FIXTURE_PORT=$(free_port)
 FIXTURE_ADDR="127.0.0.1:${FIXTURE_PORT}"
 FIXTURE_URL="http://${FIXTURE_ADDR}"
 FIXTURE_CMD=("$FIXTURE_BIN" -addr "$FIXTURE_ADDR")
-"${FIXTURE_CMD[@]}" >"$FIXTURE_LOG" 2>&1 &
+debug "starting skillsfixture on $FIXTURE_ADDR"
+clean_env "${FIXTURE_CMD[@]}" >"$FIXTURE_LOG" 2>&1 &
 FIXTURE_PID=$!
 for attempt in $(seq 1 30); do
   if curl -s --connect-timeout 1 --max-time 3 -o /dev/null -X POST -H 'Content-Type: application/json' \
@@ -512,6 +575,7 @@ if [[ $ready -ne 1 ]]; then
 fi
 echo "server ${SERVER} approved; three skills listed"
 
+debug "running Playwright"
 # --- Playwright (same locked install as scripts/run-web-smoke.sh) -------------
 SWEEP_DIR="$REPO_ROOT/e2e/web-ui-sweep"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$REPO_ROOT/tmp/playwright-browsers}"
@@ -592,6 +656,7 @@ const about = [
   ['Approve', 'Approve sends the current_hash and incarnation of the version the reviewer opened; the chip turns Approved.', ['04-approved']],
   ['Changed while open, re-open, diff', 'A mutate without the X-Skills-Fixture header is refused (403). The approved skill plain changes upstream while it is open; after Refresh the chip says Changed and the open review says it changed while you were reviewing it (the review shows the approved version, so it offers no Approve). Re-opening shows the file-set diff (SKILL.md changed) and the line diff with the added line; approving binds the new hash.', ['05a-stale', '05-changed-diff']],
   ['Pending skill changed while open', 'The pending skill with-files changes upstream while it is open; after Refresh the review is marked stale and its Approve button stays on screen but disabled, until the new version is re-opened.', ['05b-pending-stale']],
+  ['Live skills.changed', 'With the pending skill big open, its SKILL.md changes upstream and the refresh is made through POST /api/v1/servers/{id}/skills/refresh, not in the page. The core\'s skills.changed SSE frame, re-dispatched by the Web UI, reloads the listing by itself and the open review shows the stale banner with Approve disabled.', ['05c-live-event-stale']],
   ['Block and unblock', 'Block marks the skill Blocked and removes Approve; Unblock returns it to Awaiting review.', ['06-blocked']],
   ['Reload', 'The tab survives a reload through ?tab=skills, and no uncaught page error was thrown in any scenario.', []],
 ]

@@ -37,18 +37,26 @@ export function skillFileDiff(approved: SkillFileInfo[] | undefined, current: Sk
   return rows.sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0))
 }
 
-export interface LineOp { op: 'same' | 'add' | 'del'; text: string }
+/** `skip` stands for a run of unchanged lines that is not shown; its text says how many. */
+export interface LineOp { op: 'same' | 'add' | 'del' | 'skip'; text: string }
 export interface LineDiffResult { tooLarge: boolean; ops: LineOp[] }
 
 /** Largest middle section (lines a x lines b) the LCS table may have. */
 export const LINE_DIFF_MAX_CELLS = 4_000_000
+/** Unchanged lines kept on each side of a change; longer unchanged runs collapse to one `skip`. */
+export const LINE_DIFF_CONTEXT = 3
+/** Most ops a diff may render (after collapsing); past it the result is tooLarge. */
+export const LINE_DIFF_MAX_OPS = 5_000
 
 /**
  * Line diff of two texts. Common head and tail lines are peeled off first; the
- * rest uses an LCS table that is never built past maxCells, in which case the
- * result is tooLarge with no ops.
+ * rest uses an LCS table that is never built past maxCells. The output is
+ * bounded too: every unchanged run that is more than LINE_DIFF_CONTEXT lines longer than
+ * the context it keeps (LINE_DIFF_CONTEXT on each side of a change) collapses to a "N unchanged lines" skip, and
+ * a diff that still has more than maxOps ops is tooLarge with no ops. The
+ * peeled head and tail are never expanded into one op per line.
  */
-export function lineDiff(a: string, b: string, maxCells = LINE_DIFF_MAX_CELLS): LineDiffResult {
+export function lineDiff(a: string, b: string, maxCells = LINE_DIFF_MAX_CELLS, maxOps = LINE_DIFF_MAX_OPS): LineDiffResult {
   const x = a.split('\n'), y = b.split('\n')
   let head = 0
   while (head < x.length && head < y.length && x[head] === y[head]) head++
@@ -56,6 +64,8 @@ export function lineDiff(a: string, b: string, maxCells = LINE_DIFF_MAX_CELLS): 
   while (tail < x.length - head && tail < y.length - head && x[x.length - 1 - tail] === y[y.length - 1 - tail]) tail++
   const mx = x.slice(head, x.length - tail), my = y.slice(head, y.length - tail)
   if ((mx.length + 1) * (my.length + 1) > maxCells) return { tooLarge: true, ops: [] }
+  // Every changed line is one op whatever the collapsing does.
+  if (mx.length + my.length > maxOps) return { tooLarge: true, ops: [] }
 
   const w = my.length + 1
   const t = new Uint32Array((mx.length + 1) * w)
@@ -64,16 +74,35 @@ export function lineDiff(a: string, b: string, maxCells = LINE_DIFF_MAX_CELLS): 
       t[i * w + j] = mx[i] === my[j] ? t[(i + 1) * w + j + 1] + 1 : Math.max(t[(i + 1) * w + j], t[i * w + j + 1])
     }
   }
-  const ops: LineOp[] = x.slice(0, head).map(text => ({ op: 'same', text }))
-  let i = 0, j = 0
-  while (i < mx.length && j < my.length) {
-    if (mx[i] === my[j]) { ops.push({ op: 'same', text: mx[i] }); i++; j++ }
-    else if (t[(i + 1) * w + j] >= t[i * w + j + 1]) ops.push({ op: 'del', text: mx[i++] })
-    else ops.push({ op: 'add', text: my[j++] })
+  const ops: LineOp[] = []
+  // An unchanged run [from, to) of x: shown whole when short, else its edges
+  // next to a change and one skip for the rest.
+  const unchanged = (from: number, to: number, atStart: boolean, atEnd: boolean) => {
+    const n = to - from
+    const keepBefore = atStart ? 0 : LINE_DIFF_CONTEXT
+    const keepAfter = atEnd ? 0 : LINE_DIFF_CONTEXT
+    // A skip stands for more than LINE_DIFF_CONTEXT lines; a shorter run is shown whole.
+    if (n <= keepBefore + keepAfter + LINE_DIFF_CONTEXT) { for (let k = from; k < to; k++) ops.push({ op: 'same', text: x[k] }); return }
+    for (let k = from; k < from + keepBefore; k++) ops.push({ op: 'same', text: x[k] })
+    ops.push({ op: 'skip', text: `${n - keepBefore - keepAfter} unchanged lines` })
+    for (let k = to - keepAfter; k < to; k++) ops.push({ op: 'same', text: x[k] })
   }
+  const changed = mx.length > 0 || my.length > 0
+  // The middle, with its unchanged runs as x indexes for collapsing.
+  let i = 0, j = 0
+  let runStart = -1
+  const flush = (end: number) => { if (runStart >= 0) { unchanged(runStart, end, false, false); runStart = -1 } }
+  unchanged(0, head, true, !changed)
+  while (i < mx.length && j < my.length) {
+    if (mx[i] === my[j]) { if (runStart < 0) runStart = head + i; i++; j++ }
+    else if (t[(i + 1) * w + j] >= t[i * w + j + 1]) { flush(head + i); ops.push({ op: 'del', text: mx[i++] }) }
+    else { flush(head + i); ops.push({ op: 'add', text: my[j++] }) }
+  }
+  flush(head + i)
   while (i < mx.length) ops.push({ op: 'del', text: mx[i++] })
   while (j < my.length) ops.push({ op: 'add', text: my[j++] })
-  for (const text of x.slice(x.length - tail)) ops.push({ op: 'same', text })
+  if (changed) unchanged(x.length - tail, x.length, false, true)
+  if (ops.length > maxOps) return { tooLarge: true, ops: [] }
   return { tooLarge: false, ops }
 }
 

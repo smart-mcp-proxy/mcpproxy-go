@@ -17,3 +17,26 @@ export const makeListing = (skills: SkillEntry[], over: Partial<SkillsListRespon
 })
 
 export const ok = <T,>(data: T) => ({ success: true, data })
+
+/**
+ * Connects the real system store to a fake EventSource and returns a function
+ * that delivers a skills.changed frame exactly as the core writes it
+ * ({"payload": {server, counts}, "timestamp": n}, internal/httpapi/server.go)
+ * through the store's own re-dispatch to `mcpproxy:skills-changed`. Call it with
+ * a Pinia active and the spec's mocked api object (it sets createEventSource).
+ */
+export async function connectSkillsSSE(apiMock: object): Promise<(server: string, counts?: Record<string, number>) => void> {
+  const { vi } = await import('vitest')
+  const { useSystemStore } = await import('@/stores/system')
+  const g = globalThis as any
+  if (!g.EventSource) g.EventSource = { CONNECTING: 0, OPEN: 1, CLOSED: 2 }
+  const listeners: Record<string, (ev: { data: string }) => void> = {}
+  const a = apiMock as Record<string, unknown>
+  a.createEventSource = vi.fn(() => ({
+    onopen: null, onmessage: null, onerror: null, readyState: 1, close: vi.fn(),
+    addEventListener: (type: string, cb: (ev: { data: string }) => void) => { listeners[type] = cb },
+  }))
+  if (typeof a.hasAPIKey !== 'function') a.hasAPIKey = vi.fn(() => true)
+  useSystemStore().connectEventSource()
+  return (server, counts = {}) => listeners['skills.changed']({ data: JSON.stringify({ payload: { server, counts }, timestamp: 1763300000 }) })
+}
