@@ -563,3 +563,22 @@ func TestNetworkRecovery_AMissedConnectionStillRestoresTheBudget(t *testing.T) {
 		assert.True(t, r, "trigger %d: every reconnect connected, so every restore may reset", i)
 	}
 }
+
+// Opus r3 MINOR: a wall clock stepped backwards must not defer recovery by the
+// size of the jump.
+func TestNetworkRecovery_BackwardsClockDoesNotDeferRecovery(t *testing.T) {
+	h := newRecoveryHarness(testRecoveryConfig())
+	target := &fakeRecoveryTarget{addr: "mcp.example.com:443", eligible: true, failReconnect: true}
+
+	h.step(10*time.Second, target)
+	h.step(10*time.Second, target)
+	h.net.set(target.addr, true)
+	h.step(10*time.Second, target) // trigger #1
+	h.net.set(target.addr, false)
+	h.step(10*time.Second, target)
+	h.step(-2*time.Hour, target) // the clock is set back two hours
+	h.net.set(target.addr, true)
+	h.step(10*time.Second, target)
+	resets, _ := target.triggers()
+	assert.Len(t, resets, 2, "the restore after the clock moved back is not deferred")
+}

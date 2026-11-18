@@ -362,7 +362,7 @@ func (r *networkRecovery) tick(ctx context.Context, now time.Time, targets []rec
 		if st.failures >= cfg.SlowAfter {
 			cadence = cfg.SlowInterval
 		}
-		if st.lastProbe.IsZero() || now.Sub(st.lastProbe) >= cadence || st.eventPending != "" || st.restorePending {
+		if since := now.Sub(st.lastProbe); st.lastProbe.IsZero() || since < 0 || since >= cadence || st.eventPending != "" || st.restorePending {
 			due = append(due, pending{target: t, probe: probe, state: st})
 		}
 	}
@@ -423,7 +423,10 @@ func (r *networkRecovery) tick(ctx context.Context, now time.Time, targets []rec
 		}
 		// Spacing runs on the wall clock: hours asleep count, so a budget spent
 		// on dark wakes overnight does not defer the morning's recovery.
-		if !st.lastTrigger.IsZero() && wall.Sub(st.lastTrigger) < cfg.triggerSpacing(st.unproductive) {
+		// A wall clock stepped backwards (NTP, a manual date change) reads as a
+		// negative elapsed time; it counts as elapsed rather than deferring
+		// recovery by the size of the jump.
+		if elapsed := wall.Sub(st.lastTrigger); !st.lastTrigger.IsZero() && elapsed >= 0 && elapsed < cfg.triggerSpacing(st.unproductive) {
 			continue // deferred until the spacing has passed
 		}
 		reason := st.eventPending
