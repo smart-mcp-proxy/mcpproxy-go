@@ -798,3 +798,15 @@ func TestUpstreamEvent_SignInTransitions(t *testing.T) {
 	assert.Equal(t, UpstreamConnectionLost, ev.Kind)
 	assert.Equal(t, string(diagnostics.HTTPConnRefuse), ev.Code)
 }
+
+// Review (Opus, F1 round): a move into Connecting that still carries the
+// previous login error is a retry, not a new login requirement; the
+// re-login that follows a closed requirement must not reopen it.
+func TestUpstreamEvent_ConnectAfterLoginIsNotALoginRequirement(t *testing.T) {
+	for _, from := range []types.ConnectionState{types.StatePendingAuth, types.StateError} {
+		tr := types.Transition{From: from, To: types.StateConnecting, At: evBase,
+			TerminalCode: string(diagnostics.OAuthLoginRequired), Err: errors.New("OAuth authorization required")}
+		_, ok := transitionEvent("srv", "http", tr)
+		assert.False(t, ok, "from %s", from)
+	}
+}

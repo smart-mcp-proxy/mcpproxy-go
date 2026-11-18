@@ -121,7 +121,12 @@ func transitionEvent(server, transport string, t types.Transition) (UpstreamEven
 		ev.Kind = UpstreamConnectionRestored
 		return ev, true
 
-	case t.To == types.StatePendingAuth && t.From != types.StatePendingAuth, (loginCode || t.Login) && t.To != types.StateReady:
+	case t.To == types.StatePendingAuth && t.From != types.StatePendingAuth,
+		loginCode && t.To == types.StateError,
+		// The login classifier marks only a change into the error state or a
+		// logout's disconnect; a retry into Connecting that still carries
+		// the old login error is not a new requirement.
+		t.Login && (t.To == types.StateError || t.To == types.StateDisconnected):
 		ev.Kind = UpstreamLoginRequired
 		if loginCode {
 			ev.Code = code

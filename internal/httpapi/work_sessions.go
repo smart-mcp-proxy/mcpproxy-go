@@ -49,7 +49,7 @@ type workSessionController interface {
 	GetWorkSessionSummary(id string) (*storage.WorkSessionSummary, error)
 	WalkWorkSessionTimeline(id string, servers []string, from, to time.Time, fn func(storage.WorkSessionRowRef) bool) error
 	GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error)
-	OpenUpstreamEventsBefore(servers []string, before time.Time, visible func(owner string) bool) ([]storage.WorkSessionRowRef, error)
+	OpenUpstreamEventsBefore(servers []string, before, notBefore time.Time, visible func(owner string) bool) ([]storage.WorkSessionRowRef, error)
 }
 
 // workSessions returns the controller's work-session storage. A controller
@@ -76,7 +76,7 @@ func (noWorkSessions) WalkWorkSessionTimeline(string, []string, time.Time, time.
 func (noWorkSessions) GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error) {
 	return make([]*storage.ActivityRecord, len(keys)), nil
 }
-func (noWorkSessions) OpenUpstreamEventsBefore([]string, time.Time, func(string) bool) ([]storage.WorkSessionRowRef, error) {
+func (noWorkSessions) OpenUpstreamEventsBefore([]string, time.Time, time.Time, func(string) bool) ([]storage.WorkSessionRowRef, error) {
 	return nil, nil
 }
 
@@ -522,12 +522,17 @@ func (s *Server) handleWorkSessionTimeline(w http.ResponseWriter, r *http.Reques
 	// row while no recovery followed it, under the same FR-025 rule.
 	var failedServers []string
 	for _, server := range eventServers {
-		if p := sum.Servers[server]; p != nil && p.Failures > 0 {
+		// Only a failure that a down server explains: the call could not
+		// reach it, or it waits for a login.
+		if p := sum.Servers[server]; p != nil && p.Failures > 0 &&
+			(p.LastErrorClass == "network" || p.LastErrorClass == "auth") {
 			failedServers = append(failedServers, server)
 		}
 	}
 	if len(failedServers) > 0 {
-		open, err := c.OpenUpstreamEventsBefore(failedServers, session.StartedAt, func(owner string) bool {
+		// processStart: the recovery after a restart is not recorded, so an
+		// event from before this process is no evidence the server was down.
+		open, err := c.OpenUpstreamEventsBefore(failedServers, session.StartedAt, s.eventsSince, func(owner string) bool {
 			return owner == "" || viewer == nil || viewer.UserID == owner
 		})
 		if err != nil {

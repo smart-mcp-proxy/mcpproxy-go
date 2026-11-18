@@ -17,6 +17,7 @@ import (
 // and a scoped caller sees only events of servers in its reach.
 func TestWorkSessionTimeline_OpenEventBeforeTheSession(t *testing.T) {
 	f := newWSFixture(t)
+	f.srv.eventsSince = f.base // the "core" started with the fixture
 	start := f.base.Add(10 * time.Minute)
 	f.row("ws-late", "scoped-ci", f.prefix, 10*time.Minute, func(r *storage.ActivityRecord) {
 		r.Status, r.ErrorClass, r.ErrorMessage = storage.ActivityStatusError, "network", "not connected"
@@ -51,4 +52,34 @@ func TestWorkSessionTimeline_OpenEventBeforeTheSession(t *testing.T) {
 	require.NotEmpty(t, scoped.Rows)
 	assert.True(t, scoped.Rows[0].PrecedesSession)
 	assert.NotContains(t, scopeGet(t, f.srv, "/api/v1/work-sessions/ws-late/timeline", f.token).Body.String(), `"beta"`)
+}
+
+// An event from before this core process started is no evidence: the
+// recovery after a restart is not recorded (review, F2 round).
+func TestWorkSessionTimeline_OpenEventFromBeforeTheCoreIsIgnored(t *testing.T) {
+	f := newWSFixture(t)
+	f.srv.eventsSince = f.base.Add(9*time.Minute + 30*time.Second)
+	f.row("ws-late", "scoped-ci", f.prefix, 10*time.Minute, func(r *storage.ActivityRecord) {
+		r.Status, r.ErrorClass = storage.ActivityStatusError, "network"
+	})
+	f.event("alpha", 9*time.Minute, "")
+	var tl contracts.WorkSessionTimelineResponse
+	wsData(t, scopeGet(t, f.srv, "/api/v1/work-sessions/ws-late/timeline", scopeAdminAPIKey), &tl)
+	require.NotEmpty(t, tl.Rows)
+	assert.Equal(t, contracts.TimelineKindSessionStart, tl.Rows[0].Kind)
+}
+
+// A failure a down server does not explain (the tool itself failed) adds no
+// event from before the session.
+func TestWorkSessionTimeline_ToolErrorAddsNoEarlierEvent(t *testing.T) {
+	f := newWSFixture(t)
+	f.srv.eventsSince = f.base
+	f.row("ws-tool", "scoped-ci", f.prefix, 10*time.Minute, func(r *storage.ActivityRecord) {
+		r.Status, r.ErrorClass = storage.ActivityStatusError, "tool_error"
+	})
+	f.event("alpha", 9*time.Minute, "")
+	var tl contracts.WorkSessionTimelineResponse
+	wsData(t, scopeGet(t, f.srv, "/api/v1/work-sessions/ws-tool/timeline", scopeAdminAPIKey), &tl)
+	require.NotEmpty(t, tl.Rows)
+	assert.Equal(t, contracts.TimelineKindSessionStart, tl.Rows[0].Kind)
 }

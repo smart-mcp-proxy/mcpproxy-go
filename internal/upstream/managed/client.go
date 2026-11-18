@@ -1465,6 +1465,12 @@ func (mc *Client) runListToolsAsLeader(listCtx context.Context, release func() b
 // identity against, so the call was NOT sent. It is returned verbatim (never
 // wrapped with server context) so the dispatch paths can map it onto their
 // own unresolved-identity refusal with errors.Is.
+// ErrClientNotConnected is returned by a call on a client that is not
+// connected. Callers that have no not-connected check of their own (the
+// code_execution sub-call) recognise it to record the call by the server's
+// state rather than as a proxy failure (release QA F1).
+var ErrClientNotConnected = errors.New("client not connected")
+
 var ErrConnectionGenerationChanged = errors.New("connection generation changed since the tool identity was resolved")
 
 // CallTool executes a tool with error handling
@@ -1516,7 +1522,7 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 		return nil, ErrInstanceRetired
 	}
 	if !mc.IsConnected() {
-		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
+		return nil, fmt.Errorf("%w (state: %s)", ErrClientNotConnected, mc.StateManager.GetState().String())
 	}
 	// #1317 round 2: counted from HERE, before admission control, not just
 	// around the transport call below — a call already queued in
@@ -1546,7 +1552,7 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 			return nil, ErrConnectionGenerationChanged
 		}
 	} else if !mc.IsConnected() {
-		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
+		return nil, fmt.Errorf("%w (state: %s)", ErrClientNotConnected, mc.StateManager.GetState().String())
 	}
 
 	// Spec 093 FR-003/FR-005: admission control sits here, above

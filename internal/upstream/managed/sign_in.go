@@ -67,9 +67,16 @@ func isNetworkFailure(err error) bool {
 	if core.IsNetworkError(err) {
 		return true
 	}
-	code := string(diagnostics.Classify(err, diagnostics.ClassifierHints{Transport: "http"}))
-	if strings.HasPrefix(code, "MCPX_HTTP_") || strings.HasPrefix(code, "MCPX_NETWORK_") {
+	// Transport failures only: an HTTP status (401, 403, 429, ...) is an
+	// answer from a server that is reachable.
+	switch code := diagnostics.Classify(err, diagnostics.ClassifierHints{Transport: "http"}); code {
+	case diagnostics.HTTPConnRefuse, diagnostics.HTTPConnReset, diagnostics.HTTPDNSFailed,
+		diagnostics.HTTPTLSFailed, diagnostics.HTTPTimeout, diagnostics.HTTPCanceled:
 		return true
+	default:
+		if strings.HasPrefix(string(code), "MCPX_NETWORK_") {
+			return true
+		}
 	}
 	// The classifier matches typed errors; an error that was flattened to
 	// text on its way here keeps only the words.

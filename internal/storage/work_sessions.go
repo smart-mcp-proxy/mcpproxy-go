@@ -902,13 +902,18 @@ func (m *Manager) WalkWorkSessionTimeline(workSessionID string, servers []string
 const maxOpenEventLookback = 256
 
 // OpenUpstreamEventsBefore returns, for each of the servers, the latest
-// upstream event before the given time that the caller may read (visible is
-// asked with the event's owner, "" for a shared event), unless that event is
-// a recovery: then nothing about the server is still open (release QA F2,
-// SC-005). A session that starts while a server is already down has its
-// cause here rather than inside its span. Only the index and one row per
-// server are read.
-func (m *Manager) OpenUpstreamEventsBefore(servers []string, before time.Time, visible func(owner string) bool) ([]WorkSessionRowRef, error) {
+// connection event before the given time (connection_lost, process_exited,
+// login_required) that the caller may read (visible is asked with the event's
+// owner, "" for a shared event) and that no connection_restored followed
+// (release QA F2, SC-005). A session that starts while a server is already
+// down has its cause here rather than inside its span.
+//
+// A row stands for repeats merged into it, so "followed" compares when the
+// rows last happened (metadata last_at), not their keys. Nothing older than
+// notBefore counts: the recovery after a restart of MCPProxy is not recorded,
+// so a loss from before the current process is no evidence either. Only the
+// index and a few rows per server are read.
+func (m *Manager) OpenUpstreamEventsBefore(servers []string, before, notBefore time.Time, visible func(owner string) bool) ([]WorkSessionRowRef, error) {
 	var out []WorkSessionRowRef
 	err := m.db.db.View(func(tx *bbolt.Tx) error {
 		eb := tx.Bucket([]byte(UpstreamEventsByServerBucket))
@@ -920,45 +925,68 @@ func (m *Manager) OpenUpstreamEventsBefore(servers []string, before time.Time, v
 			if !indexableServerName(server) {
 				continue
 			}
-			prefix := workSessionRowPrefix(server)
-			c := eb.Cursor()
-			k, _ := c.Seek(workSessionRowKey(server, activityKey(before, "")))
-			var v []byte
-			if k == nil {
-				k, v = c.Last()
-			} else {
-				k, v = c.Prev()
-			}
-			for steps := 0; k != nil && bytes.HasPrefix(k, prefix) && steps < maxOpenEventLookback; k, v = c.Prev() {
-				steps++
-				ak := k[len(prefix):]
-				ts := activityKeyTime(ak)
-				if len(ak) < 22 || ts.IsZero() || !ts.Before(before) {
-					continue
-				}
-				owner := string(v)
-				if visible != nil && !visible(owner) {
-					continue
-				}
-				data := acts.Get(ak)
-				if data == nil {
-					break // removed by retention: nothing older is evidence either
-				}
-				rec := &ActivityRecord{}
-				if err := rec.UnmarshalBinary(data); err != nil {
-					break
-				}
-				if kind, _ := rec.Metadata["kind"].(string); kind != "connection_restored" {
-					out = append(out, WorkSessionRowRef{
-						ActivityKey: append([]byte(nil), ak...), Timestamp: ts, Server: server, Event: true, Owner: owner,
-					})
-				}
-				break
+			if ref, ok := openEventOf(eb.Cursor(), acts, server, before, notBefore, visible); ok {
+				out = append(out, ref)
 			}
 		}
 		return nil
 	})
 	return out, err
+}
+
+func openEventOf(c *bbolt.Cursor, acts *bbolt.Bucket, server string, before, notBefore time.Time, visible func(string) bool) (WorkSessionRowRef, bool) {
+	prefix := workSessionRowPrefix(server)
+	k, _ := c.Seek(workSessionRowKey(server, activityKey(before, "")))
+	var v []byte
+	if k == nil {
+		k, v = c.Last()
+	} else {
+		k, v = c.Prev()
+	}
+	var restoredUntil time.Time // the latest a recovery seen so far happened
+	for steps := 0; k != nil && bytes.HasPrefix(k, prefix) && steps < maxOpenEventLookback; k, v = c.Prev() {
+		steps++
+		ak := k[len(prefix):]
+		ts := activityKeyTime(ak)
+		if len(ak) < 22 || ts.IsZero() || !ts.Before(before) {
+			continue
+		}
+		if !notBefore.IsZero() && ts.Before(notBefore) {
+			break
+		}
+		owner := string(v)
+		if visible != nil && !visible(owner) {
+			continue
+		}
+		data := acts.Get(ak)
+		if data == nil {
+			break // removed by retention: nothing older is evidence either
+		}
+		rec := &ActivityRecord{}
+		if err := rec.UnmarshalBinary(data); err != nil {
+			break
+		}
+		lastAt := ts
+		if s, _ := rec.Metadata["last_at"].(string); s != "" {
+			if t, err := time.Parse(time.RFC3339Nano, s); err == nil && t.After(lastAt) {
+				lastAt = t
+			}
+		}
+		switch kind, _ := rec.Metadata["kind"].(string); kind {
+		case "connection_restored":
+			if lastAt.After(restoredUntil) {
+				restoredUntil = lastAt
+			}
+		case "connection_lost", "process_exited", "login_required":
+			if lastAt.After(restoredUntil) {
+				return WorkSessionRowRef{ActivityKey: append([]byte(nil), ak...), Timestamp: ts, Server: server, Event: true, Owner: owner}, true
+			}
+			return WorkSessionRowRef{}, false // a recovery came after it
+		}
+		// Other kinds (a failed token refresh) say nothing about the
+		// connection: keep looking.
+	}
+	return WorkSessionRowRef{}, false
 }
 
 // UpstreamEventRefs returns the upstream event rows of one server whose time

@@ -1075,7 +1075,9 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	// and the managed client's "client not connected" error classifies as a
 	// proxy failure. A server that is not connected failed for its own
 	// reason: it needs a login or it is unreachable, as on the direct path.
-	if err != nil && !client.IsConnected() {
+	// Only the not-connected refusal itself: a retired instance or a moved
+	// generation keeps its own class.
+	if errors.Is(err, managed.ErrClientNotConnected) {
 		if o, ok := callerr.OutcomeFrom(ctx); ok && o.Class == callerr.ClassProxyInternal {
 			callerr.NoteOutcome(ctx, callerr.NotConnectedOutcome(client.NeedsSignIn()))
 		}

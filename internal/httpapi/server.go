@@ -325,7 +325,11 @@ type ServerController interface {
 
 // Server provides HTTP API endpoints with chi router
 type Server struct {
-	controller ServerController
+	// eventsSince is when this core process started (processStart); upstream
+	// events from before it are no evidence about a server's state now
+	// (Spec 124, release QA F2). A field so tests can move it.
+	eventsSince time.Time
+	controller  ServerController
 	// patchAfterParse is a Spec 116 test seam (nil in production): it runs in
 	// PATCH /api/v1/servers/{id} after the body was parsed and validated.
 	patchAfterParse   func(serverName string)
@@ -479,6 +483,7 @@ func NewServer(controller ServerController, logger *zap.SugaredLogger, obs *obse
 	}
 
 	s := &Server{
+		eventsSince:      processStart,
 		controller:       controller,
 		logger:           logger,
 		httpLogger:       httpLogger,
