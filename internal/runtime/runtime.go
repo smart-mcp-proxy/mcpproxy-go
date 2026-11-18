@@ -3398,6 +3398,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			RetryStoppedReason: serverStatus.RetryStoppedReason,
 			RetryCount:         serverStatus.RetryCount,
 		}
+		healthInput.NetworkFailure, healthInput.NetworkGaveUp, healthInput.NextRetryAt = r.NetworkRetryState(serverStatus.Name)
 		if oauthUndecryptable != nil {
 			healthInput.OAuthTokenUndecryptable = oauth.TokenUndecryptableDetail(oauthUndecryptable)
 		}
@@ -3847,7 +3848,61 @@ func (r *Runtime) HealthRefreshState(name string, cfg *config.ServerConfig) *oau
 	if r.refreshManager == nil || !r.StoredOAuthTokenInPlay(name, cfg) {
 		return nil
 	}
-	return r.refreshManager.GetRefreshState(name)
+	info := r.refreshManager.GetRefreshState(name)
+	if info != nil && (info.State == oauth.RefreshStateRetrying || info.State == oauth.RefreshStateFailed) {
+		return info
+	}
+	// GH #1929: refreshes that failed transiently outside the proactive
+	// schedule (a tool call's reactive refresh while offline, a token that was
+	// already expired so nothing was scheduled) still mean "being retried",
+	// not "sign in again".
+	if cfg != nil && cfg.URL != "" {
+		var binding commitview.CredentialBinding
+		if r.upstreamManager != nil {
+			if client, ok := r.upstreamManager.GetClient(name); ok && client != nil {
+				binding = client.CredentialBinding()
+			}
+		}
+		if st, ok := oauth.DefaultRefreshCoordinator().TransientRefreshStatus(oauth.GenerateServerKey(name, cfg.URL), binding); ok {
+			out := &oauth.RefreshStateInfo{State: oauth.RefreshStateRetrying, RetryCount: st.Failures, LastError: st.LastError}
+			if info != nil {
+				out.ExpiresAt = info.ExpiresAt
+			}
+			if !st.RetryAt.IsZero() {
+				at := st.RetryAt
+				out.NextAttempt = &at
+			}
+			return out
+		}
+	}
+	return info
+}
+
+// NetworkRetryState reports whether the named server's current failure is a
+// network failure, whether its client gave up the regular retries, and when
+// its next automatic reconnect is due (GH #1929), so health can present an
+// outage as temporary. nextRetry is nil when unknown.
+func (r *Runtime) NetworkRetryState(name string) (networkFailure, gaveUp bool, nextRetry *time.Time) {
+	if r.upstreamManager == nil {
+		return false, false, nil
+	}
+	client, ok := r.upstreamManager.GetClient(name)
+	if !ok || client == nil {
+		return false, false, nil
+	}
+	info := client.GetConnectionInfo()
+	if info.State != upstreamtypes.StateError || !info.NetworkFailure {
+		return false, false, nil
+	}
+	if info.LastRetryTime.IsZero() {
+		return true, info.GaveUp, nil
+	}
+	wait := upstreamtypes.RetryBackoffDuration(info.RetryCount)
+	if info.GaveUp {
+		wait = upstreamtypes.GaveUpProbeInterval
+	}
+	at := info.LastRetryTime.Add(wait)
+	return true, info.GaveUp, &at
 }
 
 // serverConnectedWithOAuth reports whether the named server's live connection

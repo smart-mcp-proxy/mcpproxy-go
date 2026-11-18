@@ -516,3 +516,114 @@ func TestNetworkRecovery_ExpiredOAuthTokenIsRefreshedOnRecovery(t *testing.T) {
 	assert.True(t, after.ExpiresAt.After(time.Now()))
 	callGetTime(t, c)
 }
+
+// signInOAuthServer adds an OAuth server behind the relay and completes a real
+// sign-in, so the store holds a refresh token. It returns the client and the
+// token's storage key once the server is connected.
+func signInOAuthServer(t *testing.T, f *recoveryFixture, name string) (*managed.Client, string) {
+	t.Helper()
+	serverURL := f.relay.mcpURL(f.srv)
+	require.NoError(t, f.m.AddServerConfig(name, &config.ServerConfig{
+		Name: name, URL: serverURL, Protocol: "http", Enabled: true,
+		OAuth: &config.OAuthConfig{ClientID: f.srv.ClientID, ClientSecret: f.srv.ClientSecret, Scopes: []string{"read"}},
+	}))
+	t.Cleanup(func() {
+		if mgr := oauth.GetGlobalCallbackManager(); mgr != nil {
+			_ = mgr.StopCallbackServer(name)
+		}
+	})
+	c, ok := f.m.GetClient(name)
+	require.True(t, ok)
+	result, err := f.m.StartManualOAuthQuick(name)
+	require.NoError(t, err)
+	completeTestSignIn(t, f.srv, result.AuthURL)
+	key := oauth.GenerateServerKey(name, serverURL)
+	require.Eventually(t, func() bool {
+		rec, err := f.db.GetOAuthToken(key)
+		return err == nil && rec != nil && rec.RefreshToken != ""
+	}, 10*time.Second, 50*time.Millisecond, "the sign-in stores a refresh token")
+	require.Eventually(t, c.IsConnected, 30*time.Second, 50*time.Millisecond, "connected after sign-in")
+	return c, key
+}
+
+// expireToken marks the stored access token expired, as after a night asleep.
+func expireToken(t *testing.T, f *recoveryFixture, key string) string {
+	t.Helper()
+	rec, err := f.db.GetOAuthToken(key)
+	require.NoError(t, err)
+	rec.ExpiresAt = time.Now().Add(-time.Hour)
+	require.NoError(t, f.db.SaveOAuthToken(rec))
+	return rec.AccessToken
+}
+
+func callOK(c *managed.Client) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := c.CallTool(ctx, "get_time", nil)
+	return err == nil && res != nil && !res.IsError
+}
+
+// QA release blocker (run2 cooldown-503): the server stays CONNECTED while its
+// token is expired and the token endpoint answers 5xx, so every refresh fails
+// transiently and the refresh cooldown grows; then the network drops and comes
+// back with the token endpoint healthy. The first tool call used to succeed
+// only 136–166 s later, when the cooldown ran out. It must succeed within 60 s.
+func TestNetworkRecovery_ConnectedServerWithStalledRefreshRecovers(t *testing.T) {
+	cfg := fastRecoveryConfig()
+	f := newRecoveryFixture(t, &cfg)
+	c, key := signInOAuthServer(t, f, "oauth-stalled-refresh")
+	stale := expireToken(t, f, key)
+
+	// The token endpoint answers 5xx: every refresh fails transiently and the
+	// cooldown grows (each proactive attempt adds a failure).
+	f.srv.Server.SetErrorMode(oauthserver.ErrorMode{TokenServerError: true})
+	for i := 0; i < 5; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		require.Error(t, c.RefreshOAuthTokenDirect(ctx), "the token endpoint is failing")
+		cancel()
+	}
+	require.True(t, c.IsConnected(), "the connection itself is still up")
+	require.False(t, callOK(c), "tool calls fail on the expired token")
+	require.True(t, oauth.DefaultRefreshCoordinator().TransientlyFailing(key, c.CredentialBinding()))
+
+	// The network drops, then returns with the token endpoint healthy.
+	f.relay.Down()
+	time.Sleep(4 * cfg.Interval)
+	f.srv.Server.SetErrorMode(oauthserver.ErrorMode{})
+	restored := time.Now()
+	f.relay.Up()
+
+	require.Eventually(t, func() bool { return callOK(c) }, 60*time.Second, 250*time.Millisecond,
+		"a tool call must succeed within 60s of the network returning")
+	d := time.Since(restored)
+	t.Logf("connected server with a stalled refresh: first successful call %s after the network returned", d.Round(time.Millisecond))
+
+	after, err := f.db.GetOAuthToken(key)
+	require.NoError(t, err)
+	assert.NotEqual(t, stale, after.AccessToken, "the token was refreshed")
+	assert.False(t, oauth.DefaultRefreshCoordinator().TransientlyFailing(key, c.CredentialBinding()))
+}
+
+// The same scenario with a revoked grant: the token endpoint answers
+// invalid_grant, which latches. The network returning must not make the
+// watcher retry a rejected credential.
+func TestNetworkRecovery_ConnectedServerWithRevokedGrantIsNotRetried(t *testing.T) {
+	cfg := fastRecoveryConfig()
+	f := newRecoveryFixture(t, &cfg)
+	c, key := signInOAuthServer(t, f, "oauth-revoked-grant")
+	expireToken(t, f, key)
+
+	f.srv.Server.SetErrorMode(oauthserver.ErrorMode{TokenInvalidGrant: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	require.Error(t, c.RefreshOAuthTokenDirect(ctx))
+	cancel()
+	require.False(t, oauth.DefaultRefreshCoordinator().TransientlyFailing(key, c.CredentialBinding()), "a revoked grant is not transient")
+
+	before := f.m.networkRecovery.triggers()
+	f.relay.Down()
+	time.Sleep(4 * cfg.Interval)
+	f.relay.Up()
+	time.Sleep(12 * cfg.Interval)
+	assert.Equal(t, before, f.m.networkRecovery.triggers(), "the watcher leaves a revoked grant alone")
+	assert.False(t, callOK(c), "the rejected credential stays rejected")
+}

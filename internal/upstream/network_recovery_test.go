@@ -42,7 +42,7 @@ func (f *fakeRecoveryTarget) NetworkRecoveryEligible(time.Time) bool {
 	defer f.mu.Unlock()
 	return f.eligible
 }
-func (f *fakeRecoveryTarget) IsConnected() bool {
+func (f *fakeRecoveryTarget) NetworkRecoveryHealthy() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.connected

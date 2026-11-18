@@ -198,6 +198,8 @@
           v-else-if="showDiagnosticPanel"
           :diagnostic="server.diagnostic"
           :server-name="server.name"
+          :reconnecting="server.health?.status === 'connecting'"
+          :reconnecting-detail="server.health?.detail"
           @fixed="handleDiagnosticFixed"
         />
 

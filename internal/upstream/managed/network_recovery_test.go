@@ -252,3 +252,48 @@ func TestNetworkRecoveryProbe_OnlyRemoteServers(t *testing.T) {
 	_, ok = stdio.NetworkRecoveryProbe()
 	assert.False(t, ok, "a stdio server has no network path to probe")
 }
+
+// A CONNECTED server whose OAuth refresh failed transiently qualifies for a
+// refresh-only recovery; a revoked grant, a quarantined or disabled server, or
+// a healthy one does not (QA run2 cooldown-503).
+func TestNetworkRecovery_ConnectedServerWithStalledRefresh(t *testing.T) {
+	failWith := func(mc *Client, err error) {
+		key := oauth.GenerateServerKey(mc.GetConfig().Name, mc.GetConfig().URL)
+		rec := &storage.OAuthTokenRecord{ServerName: key, AccessToken: "expired", RefreshToken: "rt", ExpiresAt: time.Now().Add(-time.Hour)}
+		coord := oauth.DefaultRefreshCoordinator()
+		t.Cleanup(func() { coord.Forget(key, mc.CredentialBinding()) })
+		_, _, _ = coord.Do(context.Background(), oauth.RefreshRequest{Key: key, Binding: mc.CredentialBinding(), ServerName: mc.GetConfig().Name,
+			ObservedRefreshToken: "rt", Trigger: oauth.RefreshTriggerProactive,
+			Load:    func() (*storage.OAuthTokenRecord, error) { cp := *rec; return &cp, nil },
+			Refresh: func(context.Context, *storage.OAuthTokenRecord) (*mcpclient.Token, error) { return nil, err }})
+	}
+	transient := errors.New("token endpoint answered 503")
+	revoked := &oauth.RefreshFailure{Class: oauth.RefreshClassInvalidGrant, Message: "revoked", Err: oauth.ErrRefreshFailed}
+
+	ready := func(mc *Client) { mc.StateManager.TransitionTo(types.StateReady) }
+
+	mc := newNetworkRecoveryClient(t, "https://stalled.example.com/mcp")
+	ready(mc)
+	assert.False(t, mc.NetworkRecoveryEligible(time.Now()), "a healthy connected server has nothing to recover")
+	assert.True(t, mc.NetworkRecoveryHealthy())
+	failWith(mc, transient)
+	assert.True(t, mc.NetworkRecoveryEligible(time.Now()), "connected, refresh failing transiently")
+	assert.False(t, mc.NetworkRecoveryHealthy(), "not healthy while the token cannot be refreshed")
+	require.True(t, mc.BeginNetworkRecovery(true, "test"))
+	assert.Equal(t, types.StateReady, mc.GetConnectionInfo().State, "a refresh recovery leaves the connection alone")
+
+	latched := newNetworkRecoveryClient(t, "https://revoked.example.com/mcp")
+	ready(latched)
+	failWith(latched, revoked)
+	assert.False(t, latched.NetworkRecoveryEligible(time.Now()), "a revoked grant is not retried")
+
+	quarantined := newNetworkRecoveryClient(t, "https://q.example.com/mcp", func(c *config.ServerConfig) { c.Quarantined = true })
+	ready(quarantined)
+	failWith(quarantined, transient)
+	assert.False(t, quarantined.NetworkRecoveryEligible(time.Now()))
+
+	disabled := newNetworkRecoveryClient(t, "https://d.example.com/mcp", func(c *config.ServerConfig) { c.Enabled = false })
+	ready(disabled)
+	failWith(disabled, transient)
+	assert.False(t, disabled.NetworkRecoveryEligible(time.Now()))
+}

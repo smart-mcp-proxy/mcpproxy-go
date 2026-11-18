@@ -105,58 +105,118 @@ func hostPort(u *url.URL) (string, bool) {
 	return net.JoinHostPort(host, port), true
 }
 
-// NetworkRecoveryEligible reports whether a restored network may reconnect
-// this client: it is enabled and not quarantined, and its current failure is a
-// plain network failure (SetNetworkError) — not an auth failure, a pending
-// sign-in, a proven-permanent fault or a user logout — and the upstream's own
-// Retry-After window, if any, has passed. Give-up is NOT a bar: a server that
-// gave up during a long outage is exactly the one waiting 30 minutes for no
-// reason. A quarantined server is refused even when a review had it connect
-// (an inspection exemption): the watcher cannot see whether that is still
-// current, and the supervisor reconnects it while it is.
-func (mc *Client) NetworkRecoveryEligible(now time.Time) bool {
+// networkRecoveryMode is what a restored network can do for a client.
+type networkRecoveryMode int
+
+const (
+	recoveryNone networkRecoveryMode = iota
+	// recoveryReconnect: the client is in Error on a network failure.
+	recoveryReconnect
+	// recoveryRefresh: the client is connected, but its OAuth token refresh
+	// failed transiently (offline, provider 5xx) and the expired token keeps
+	// tool calls failing until the next refresh (QA run2 cooldown-503).
+	recoveryRefresh
+)
+
+// networkRecoveryMode decides which recovery, if any, applies now. The common
+// gates come first: the instance is live, enabled, not quarantined and not
+// logged out. A quarantined server is refused even when a review had it
+// connect (an inspection exemption): the watcher cannot see whether that is
+// still current, and the supervisor reconnects it while it is.
+func (mc *Client) networkRecoveryMode(now time.Time) networkRecoveryMode {
 	if mc == nil || mc.retired.Load() || mc.unregistered.Load() || mc.IsUserLoggedOut() {
-		return false
+		return recoveryNone
 	}
 	cfg := mc.GetConfig()
 	if cfg == nil || !cfg.Enabled || cfg.Quarantined {
-		return false
+		return recoveryNone
 	}
 	info := mc.StateManager.GetConnectionInfo()
-	if info.State != types.StateError || !info.NetworkFailure || info.IsOAuthError || info.Terminal {
-		return false
+	switch info.State {
+	case types.StateError:
+		// A plain network failure only — not an auth failure, a pending
+		// sign-in or a proven-permanent fault — and past any Retry-After
+		// window. Give-up is NOT a bar: a server that gave up during a long
+		// outage is exactly the one waiting 30 minutes for no reason.
+		if !info.NetworkFailure || info.IsOAuthError || info.Terminal {
+			return recoveryNone
+		}
+		if !info.RetryAfter.IsZero() && now.Before(info.RetryAfter) {
+			return recoveryNone
+		}
+		return recoveryReconnect
+	case types.StateReady:
+		if mc.oauthRefreshStalled() {
+			return recoveryRefresh
+		}
 	}
-	if !info.RetryAfter.IsZero() && now.Before(info.RetryAfter) {
-		return false
-	}
-	return true
+	return recoveryNone
 }
 
-// BeginNetworkRecovery admits one reconnect for a client whose network failure
+// oauthRefreshStalled reports whether this server's OAuth token refresh failed
+// transiently and has not succeeded since. A revoked grant (invalid_grant) is
+// latched by the coordinator and never reads as stalled.
+func (mc *Client) oauthRefreshStalled() bool {
+	cfg := mc.GetConfig()
+	if cfg == nil || cfg.URL == "" {
+		return false
+	}
+	return oauth.DefaultRefreshCoordinator().TransientlyFailing(oauth.GenerateServerKey(cfg.Name, cfg.URL), mc.CredentialBinding())
+}
+
+// NetworkRecoveryEligible reports whether a restored network may act on this
+// client: reconnect it (Error on a network failure) or refresh its OAuth token
+// (connected, refresh failing transiently).
+func (mc *Client) NetworkRecoveryEligible(now time.Time) bool {
+	return mc.networkRecoveryMode(now) != recoveryNone
+}
+
+// NetworkRecoveryHealthy reports whether the client is fully working —
+// connected, with no OAuth refresh failing. The watcher restores a server's
+// recovery budget when it sees this.
+func (mc *Client) NetworkRecoveryHealthy() bool {
+	return mc.IsConnected() && !mc.oauthRefreshStalled()
+}
+
+// BeginNetworkRecovery admits one recovery for a client whose network problem
 // is over and reports whether it did; the caller then runs
-// ReconnectAfterNetworkRecovery. resetBackoff restarts the retry ladder — the
-// watcher passes it only when it observed the outage end — atomically with the
+// ReconnectAfterNetworkRecovery.
+//
+// For a client in Error, resetBackoff restarts the retry ladder — the watcher
+// passes it only when it observed the outage end — atomically with the
 // eligibility check (StateManager.ClearNetworkBackoff), so a connect that
-// started or finished meanwhile is never overwritten. Without it the attempt
-// is made on the current ladder and a failure simply advances it.
+// started or finished meanwhile is never overwritten. Without it the attempt is
+// made on the current ladder and a failure simply advances it.
 //
 // Either way the OAuth refresh cooldown of the server's credential is lifted:
 // refreshes that failed while the machine was offline would otherwise make the
-// reconnect wait up to five minutes for a refresh that now succeeds. A revoked
+// recovery wait up to five minutes for a refresh that now succeeds. A revoked
 // grant stays latched.
 func (mc *Client) BeginNetworkRecovery(resetBackoff bool, reason string) bool {
 	now := time.Now()
-	if !mc.NetworkRecoveryEligible(now) || mc.IsConnecting() {
+	mode := mc.networkRecoveryMode(now)
+	switch mode {
+	case recoveryNone:
 		return false
-	}
-	if resetBackoff && !mc.StateManager.ClearNetworkBackoff(now) {
-		return false
+	case recoveryReconnect:
+		if mc.IsConnecting() {
+			return false
+		}
+		if resetBackoff && !mc.StateManager.ClearNetworkBackoff(now) {
+			return false
+		}
 	}
 	cfg := mc.GetConfig()
 	if cfg.URL != "" {
 		oauth.DefaultRefreshCoordinator().ClearTransientCooldown(oauth.GenerateServerKey(cfg.Name, cfg.URL), mc.CredentialBinding())
 	}
 	info := mc.StateManager.GetConnectionInfo()
+	if mode == recoveryRefresh {
+		mc.logger.Info("Network connectivity to upstream is back; retrying the OAuth token refresh now",
+			zap.String("server", cfg.Name),
+			zap.String("reason", reason))
+		return true
+	}
 	mc.logger.Info("Network connectivity to upstream is back; reconnecting now",
 		zap.String("server", cfg.Name),
 		zap.String("reason", reason),
@@ -169,25 +229,39 @@ func (mc *Client) BeginNetworkRecovery(resetBackoff bool, reason string) bool {
 // ConnectSuccessCount reports how many connects of this client reached Ready.
 func (mc *Client) ConnectSuccessCount() uint64 { return mc.connectSuccesses.Load() }
 
-// ReconnectAfterNetworkRecovery runs the reconnect BeginNetworkRecovery
-// admitted. It blocks until the attempt ends. ctx bounds it (the manager's
-// shutdown context), and it honours the health loop's stop channel, so a
-// Disconnect — the server disabled, removed or shut down — that lands first
-// is not undone. It does nothing if the client is no longer eligible.
+// networkRecoveryRefreshTimeout bounds the token refresh a recovery runs.
+const networkRecoveryRefreshTimeout = 30 * time.Second
+
+// ReconnectAfterNetworkRecovery runs the recovery BeginNetworkRecovery
+// admitted and blocks until it ends. ctx bounds it (the manager's shutdown
+// context). A client in Error is reconnected, honouring the health loop's stop
+// channel so a Disconnect that lands first is not undone. A connected client
+// with a stalled refresh gets one proactive refresh through the coordinator
+// (single flight; a revoked grant is answered by the latch without a request);
+// its connection is left alone. It does nothing if the client no longer
+// qualifies.
 func (mc *Client) ReconnectAfterNetworkRecovery(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	// The eligibility re-check and the stop-channel read happen together under
-	// mc.mu, which Disconnect also takes: either the Disconnect already ran (the
-	// state is no longer Error, so nothing is done) or the channel read here is
-	// the one it will close, which stops the reconnect.
+	// The mode re-check and the stop-channel read happen together under
+	// mc.mu, which Disconnect also takes: either the Disconnect already ran
+	// (the state is no longer Error, so nothing is done) or the channel read
+	// here is the one it will close, which stops the reconnect.
 	mc.mu.Lock()
-	eligible := mc.NetworkRecoveryEligible(time.Now())
+	mode := mc.networkRecoveryMode(time.Now())
 	stop := mc.stopMonitoring
 	mc.mu.Unlock()
-	if !eligible {
-		return
+	switch mode {
+	case recoveryReconnect:
+		mc.tryReconnectWithin(ctx, stop)
+	case recoveryRefresh:
+		rctx, cancel := context.WithTimeout(ctx, networkRecoveryRefreshTimeout)
+		defer cancel()
+		if err := mc.RefreshOAuthTokenDirect(rctx); err != nil {
+			mc.logger.Warn("OAuth token refresh after the network came back failed",
+				zap.String("server", mc.GetConfig().Name),
+				zap.Error(err))
+		}
 	}
-	mc.tryReconnectWithin(ctx, stop)
 }

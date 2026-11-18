@@ -101,7 +101,7 @@ func defaultNetworkRecoveryConfig() networkRecoveryConfig {
 type recoveryTarget interface {
 	NetworkRecoveryProbe() (managed.NetworkProbe, bool)
 	NetworkRecoveryEligible(now time.Time) bool
-	IsConnected() bool
+	NetworkRecoveryHealthy() bool
 	ConnectSuccessCount() uint64
 	BeginNetworkRecovery(resetBackoff bool, reason string) bool
 	ReconnectAfterNetworkRecovery(ctx context.Context)
@@ -344,7 +344,7 @@ func (r *networkRecovery) tick(ctx context.Context, now time.Time, targets []rec
 		}
 		// A connection since the last tick — even one that failed again before
 		// this tick — means the reconnects paid off: the budget is restored.
-		if n := t.ConnectSuccessCount(); t.IsConnected() || n != st.successes {
+		if n := t.ConnectSuccessCount(); t.NetworkRecoveryHealthy() || n != st.successes {
 			st.unproductive = 0
 			st.successes = n
 		}

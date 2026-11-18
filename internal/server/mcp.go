@@ -5375,6 +5375,7 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 		// Read through the runtime seam so a stale schedule for a server that
 		// no longer uses OAuth is not reported here either (GH #1172).
 		if p.mainServer != nil && p.mainServer.runtime != nil {
+			healthInput.NetworkFailure, healthInput.NetworkGaveUp, healthInput.NextRetryAt = p.mainServer.runtime.NetworkRetryState(server.Name)
 			if refreshState := p.mainServer.runtime.HealthRefreshState(server.Name, server); refreshState != nil {
 				healthInput.RefreshState = health.RefreshState(refreshState.State)
 				healthInput.RefreshRetryCount = refreshState.RetryCount

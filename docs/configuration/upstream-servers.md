@@ -396,6 +396,18 @@ The watcher reconnects a server at most once every 30 seconds. If three of its r
 
 It leaves alone a server that is disabled or quarantined, is awaiting sign-in, failed on credentials (for example a rejected token, HTTP 401), was stopped as permanently broken, or was told by the upstream to wait (`Retry-After`). A server whose host stays reachable while the server itself keeps failing is left to the normal backoff. Local (stdio) servers are not watched.
 
+**How an outage is shown.** While MCPProxy is still retrying a server that failed on the network, it is shown as temporary, not as a failure:
+
+| Surface | What you see |
+|---|---|
+| `mcpproxy upstream list` | `STATUS` **Connecting**, summary `Reconnecting: <cause>` (for example `Reconnecting: host not found`) in `-o json` |
+| Web UI | the server card reads `Reconnecting: <cause>`; the server page shows an amber **Reconnecting automatically** panel with when the next attempt is due |
+| `mcpproxy doctor` | not listed under connection errors or *Needs attention* |
+
+**Restart** stays available to retry at once. After 20 failed attempts the server is listed as an error again, while it keeps being probed every 30 minutes and reconnected as soon as the network returns.
+
+An OAuth server whose token expired while its refresh was failing temporarily (offline, or the provider answering 5xx) shows **Token refresh pending** with the next refresh attempt, not **Sign in**: the refresh is retried automatically. **Sign in** is offered only when sign-in is really needed: no token yet, no refresh token, or a refresh token the provider rejected (`invalid_grant`).
+
 To turn the watcher off, set `MCPPROXY_NETWORK_RECOVERY=off` in the environment of `mcpproxy serve`.
 
 ### Shutdown

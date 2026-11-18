@@ -1974,6 +1974,7 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 				um.CallStats(serverStatus.Name)
 		}
 
+		healthInput.NetworkFailure, healthInput.NetworkGaveUp, healthInput.NextRetryAt = s.runtime.NetworkRetryState(serverStatus.Name)
 		// T032: Wire refresh state into health calculation (Spec 023).
 		// Read through the runtime seam so a stale schedule for a server that
 		// no longer uses OAuth is not reported here either (GH #1172).
