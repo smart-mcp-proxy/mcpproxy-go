@@ -987,9 +987,11 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 		// lost or restored connection. That is not the outcome of a call and
 		// not traffic to the server, and Usage never counts it, so it stays out
 		// of the call tiles and the top lists (Usage errors = errors + blocked
-		// here, F1). A skill access (Spec 125) stores the outcome of a skill
-		// search, load or read the same way and is not a tool call either.
-		if a.Type == storage.ActivityTypeUpstreamEvent || a.Type == storage.ActivityTypeSkillAccess {
+		// here, F1). The administrator-only skill rows (Spec 125) are not
+		// tool calls either: a skill access stores the outcome of a search,
+		// load or read, and a skill approval change stores its action
+		// ("blocked" when an administrator blocks a skill).
+		if a.Type == storage.ActivityTypeUpstreamEvent || storage.IsAdminOnlyActivityType(a.Type) {
 			otherCount++
 			continue
 		}

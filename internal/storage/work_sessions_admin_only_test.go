@@ -49,4 +49,15 @@ func TestWorkSession_AdminOnlyRowsDoNotJoinASession(t *testing.T) {
 		return b.ForEach(func(_, _ []byte) error { indexed++; return nil })
 	}))
 	assert.Equal(t, 1, indexed, "only the tool call is indexed")
+
+	// The stored row names no session either: retention decides "in a
+	// session" from the row's own work_session_id, and the activity filter
+	// work_session_id= would name a session whose timeline does not have it
+	// (review round 15).
+	rows, _, err := m.ListActivities(ActivityFilter{Types: []string{string(ActivityTypeSkillAccess), string(ActivityTypeSkillQuarantineChange)}, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, rows, 4)
+	for _, r := range rows {
+		assert.Empty(t, r.WorkSessionID, "%s row keeps no work session id", r.Type)
+	}
 }

@@ -67,6 +67,15 @@ func (m *Manager) SaveActivity(record *ActivityRecord) error {
 		record.Timestamp = time.Now().UTC()
 	}
 
+	// An administrator-only row (Spec 125 FR-019a) is not part of any work
+	// session (Spec 124): retention treats a row that names a live session as
+	// that session's, and the work_session_id filter would name a session
+	// whose timeline does not contain it. indexActivityTx skips it as well,
+	// for rows written before this rule.
+	if IsAdminOnlyActivityType(record.Type) {
+		record.WorkSessionID = ""
+	}
+
 	return m.db.db.Update(func(tx *bbolt.Tx) error {
 		bucket, err := tx.CreateBucketIfNotExists([]byte(ActivityRecordsBucket))
 		if err != nil {
