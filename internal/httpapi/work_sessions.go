@@ -49,7 +49,7 @@ type workSessionController interface {
 	GetWorkSessionSummary(id string) (*storage.WorkSessionSummary, error)
 	WalkWorkSessionTimeline(id string, servers []string, from, to time.Time, fn func(storage.WorkSessionRowRef) bool) error
 	GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error)
-	OpenUpstreamEventsBefore(kinds map[string][]string, before, notBefore time.Time, visible func(owner string) bool) ([]storage.WorkSessionRowRef, error)
+	OpenUpstreamEventsBefore(kinds map[string][]string, before, until, notBefore time.Time, visible func(owner string) bool) ([]storage.WorkSessionRowRef, error)
 }
 
 // workSessions returns the controller's work-session storage. A controller
@@ -76,7 +76,7 @@ func (noWorkSessions) WalkWorkSessionTimeline(string, []string, time.Time, time.
 func (noWorkSessions) GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error) {
 	return make([]*storage.ActivityRecord, len(keys)), nil
 }
-func (noWorkSessions) OpenUpstreamEventsBefore(map[string][]string, time.Time, time.Time, func(string) bool) ([]storage.WorkSessionRowRef, error) {
+func (noWorkSessions) OpenUpstreamEventsBefore(map[string][]string, time.Time, time.Time, time.Time, func(string) bool) ([]storage.WorkSessionRowRef, error) {
 	return nil, nil
 }
 
@@ -533,7 +533,7 @@ func (s *Server) handleWorkSessionTimeline(w http.ResponseWriter, r *http.Reques
 	if len(causes) > 0 {
 		// processStart: the recovery after a restart is not recorded, so an
 		// event from before this process is no evidence the server was down.
-		open, err := c.OpenUpstreamEventsBefore(causes, session.StartedAt, s.eventsSince, func(owner string) bool {
+		open, err := c.OpenUpstreamEventsBefore(causes, session.StartedAt, spanEnd, s.eventsSince, func(owner string) bool {
 			return owner == "" || viewer == nil || viewer.UserID == owner
 		})
 		if err != nil {

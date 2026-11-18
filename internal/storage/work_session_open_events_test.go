@@ -34,7 +34,7 @@ func TestOpenUpstreamEventsBefore(t *testing.T) {
 	ev("owned", -4*time.Minute, "connection_lost", "")
 
 	all := func(string) bool { return true }
-	refs, err := m.OpenUpstreamEventsBefore(allKinds("down", "healed", "owned", "never"), wsBase, time.Time{}, all)
+	refs, err := m.OpenUpstreamEventsBefore(allKinds("down", "healed", "owned", "never"), wsBase, time.Time{}, time.Time{}, all)
 	require.NoError(t, err)
 	byServer := map[string]WorkSessionRowRef{}
 	for _, r := range refs {
@@ -47,7 +47,7 @@ func TestOpenUpstreamEventsBefore(t *testing.T) {
 
 	// A caller who may not see bob's event gets the latest one it may see.
 	notBob := func(owner string) bool { return owner == "" }
-	refs, err = m.OpenUpstreamEventsBefore(allKinds("owned"), wsBase, time.Time{}, notBob)
+	refs, err = m.OpenUpstreamEventsBefore(allKinds("owned"), wsBase, time.Time{}, time.Time{}, notBob)
 	require.NoError(t, err)
 	require.Len(t, refs, 1)
 	assert.Equal(t, wsBase.Add(-4*time.Minute), refs[0].Timestamp)
@@ -82,7 +82,7 @@ func TestOpenUpstreamEventsBefore_EvidenceRules(t *testing.T) {
 	// Lost before the core started.
 	put("stale", -2*time.Hour, -2*time.Hour, "connection_lost")
 
-	refs, err := m.OpenUpstreamEventsBefore(allKinds("refresh", "relost", "stale"), wsBase, wsBase.Add(-time.Hour), nil)
+	refs, err := m.OpenUpstreamEventsBefore(allKinds("refresh", "relost", "stale"), wsBase, time.Time{}, wsBase.Add(-time.Hour), nil)
 	require.NoError(t, err)
 	got := map[string]bool{}
 	for _, r := range refs {
@@ -114,7 +114,7 @@ func TestOpenUpstreamEventsBefore_MergedRecoveryClosesANewerLoss(t *testing.T) {
 	put(0, 0, "connection_lost")
 	put(10*time.Second, 65*time.Second, "connection_restored")
 	put(62*time.Second, 62*time.Second, "connection_lost")
-	refs, err := m.OpenUpstreamEventsBefore(allKinds("flap"), wsBase.Add(120*time.Second), time.Time{}, nil)
+	refs, err := m.OpenUpstreamEventsBefore(allKinds("flap"), wsBase.Add(120*time.Second), time.Time{}, time.Time{}, nil)
 	require.NoError(t, err)
 	assert.Empty(t, refs, "the server recovered at t65")
 }
@@ -168,7 +168,7 @@ func TestOpenUpstreamEventsBefore_KindAndMergedAfterStart(t *testing.T) {
 	put("flap", 10*time.Second, 10*time.Second, "connection_lost")
 
 	network := []string{"connection_lost", "process_exited"}
-	refs, err := m.OpenUpstreamEventsBefore(map[string][]string{"tok": network, "flap": network}, wsBase.Add(20*time.Second), time.Time{}, nil)
+	refs, err := m.OpenUpstreamEventsBefore(map[string][]string{"tok": network, "flap": network}, wsBase.Add(20*time.Second), time.Time{}, time.Time{}, nil)
 	require.NoError(t, err)
 	got := map[string]bool{}
 	for _, r := range refs {
@@ -177,9 +177,9 @@ func TestOpenUpstreamEventsBefore_KindAndMergedAfterStart(t *testing.T) {
 	assert.False(t, got["tok"], "a login requirement does not explain a network failure")
 	assert.True(t, got["flap"], "the recovery at t30 came after the session started at t20")
 
-	refs, err = m.OpenUpstreamEventsBefore(map[string][]string{"tok": {"login_required"}}, wsBase.Add(20*time.Second), time.Time{}, nil)
+	refs, err = m.OpenUpstreamEventsBefore(map[string][]string{"tok": {"login_required"}}, wsBase.Add(20*time.Second), time.Time{}, time.Time{}, nil)
 	require.NoError(t, err)
-	assert.Len(t, refs, 1, "it does explain an auth failure")
+	assert.Len(t, refs, 1, "the kind filter is the caller's")
 }
 
 // Review (Opus, F2 round 4): a loss repeated during the session merges into
@@ -202,8 +202,33 @@ func TestOpenUpstreamEventsBefore_LossRepeatedDuringTheSession(t *testing.T) {
 	}
 	put(0, 30*time.Second, "connection_lost")
 	put(10*time.Second, 10*time.Second, "connection_restored")
-	refs, err := m.OpenUpstreamEventsBefore(map[string][]string{"rep": {"connection_lost", "process_exited"}}, wsBase.Add(20*time.Second), time.Time{}, nil)
+	refs, err := m.OpenUpstreamEventsBefore(map[string][]string{"rep": {"connection_lost", "process_exited"}}, wsBase.Add(20*time.Second), time.Time{}, time.Time{}, nil)
 	require.NoError(t, err)
 	require.Len(t, refs, 1, "the loss at t30 is in the row keyed t0")
 	assert.Equal(t, wsBase, refs[0].Timestamp)
+}
+
+// Review (Opus, F2 round 5): a loss repeated after the session ended says
+// nothing about it. Lost t0, restored t10, session t20-t25, lost again t50
+// (merged into the t0 row): nothing was open.
+func TestOpenUpstreamEventsBefore_RepeatAfterTheSessionDoesNotCount(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	put := func(first, last time.Duration, kind string) {
+		status := ActivityStatusError
+		if kind == "connection_restored" {
+			status = ActivityStatusSuccess
+		}
+		require.NoError(t, m.SaveActivity(&ActivityRecord{
+			Type: ActivityTypeUpstreamEvent, Status: status, ServerName: "late", Timestamp: wsBase.Add(first),
+			Source: ActivitySourceInternal, Metadata: map[string]interface{}{
+				"kind": kind, "first_at": wsBase.Add(first).Format(time.RFC3339Nano), "last_at": wsBase.Add(last).Format(time.RFC3339Nano),
+			},
+		}))
+	}
+	put(0, 50*time.Second, "connection_lost")
+	put(10*time.Second, 10*time.Second, "connection_restored")
+	refs, err := m.OpenUpstreamEventsBefore(map[string][]string{"late": {"connection_lost"}}, wsBase.Add(20*time.Second), wsBase.Add(25*time.Second), time.Time{}, nil)
+	require.NoError(t, err)
+	assert.Empty(t, refs)
 }

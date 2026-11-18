@@ -909,19 +909,22 @@ func (m *Manager) WalkWorkSessionTimeline(workSessionID string, servers []string
 // OpenUpstreamEventsBefore steps back over that the caller may not read.
 const maxOpenEventLookback = 256
 
-// OpenUpstreamEventsBefore returns, for each of the servers, the latest
-// connection event before the given time (connection_lost, process_exited,
-// login_required) that the caller may read (visible is asked with the event's
-// owner, "" for a shared event) and that no connection_restored followed
-// (release QA F2, SC-005). A session that starts while a server is already
-// down has its cause here rather than inside its span.
+// OpenUpstreamEventsBefore returns, for each server in kinds, the latest
+// event of the kinds asked for that was recorded before the given time (the
+// timeline asks for connection_lost and process_exited), that the caller may
+// read (visible is asked with the event's owner, "" for a shared event), and
+// that no connection_restored followed before that time (release QA F2,
+// SC-005). A session that starts while a server is already down has its
+// cause here rather than inside its span.
 //
-// A row stands for repeats merged into it, so "followed" compares when the
-// rows last happened (metadata last_at), not their keys. Nothing older than
-// notBefore counts: the recovery after a restart of MCPProxy is not recorded,
-// so a loss from before the current process is no evidence either. Only the
-// index and a few rows per server are read.
-func (m *Manager) OpenUpstreamEventsBefore(kinds map[string][]string, before, notBefore time.Time, visible func(owner string) bool) ([]WorkSessionRowRef, error) {
+// A row stands for repeats merged into it (metadata last_at). A loss counts
+// at its last repeat up to until (the end of the session's span), since a
+// repeat during the session is not shown by the span walk; a recovery
+// counts at its last repeat only before the session started. Nothing older
+// than notBefore counts: the recovery after a restart of MCPProxy is not
+// recorded, so a loss from before the current process is no evidence
+// either. Only the index and a few rows per server are read.
+func (m *Manager) OpenUpstreamEventsBefore(kinds map[string][]string, before, until, notBefore time.Time, visible func(owner string) bool) ([]WorkSessionRowRef, error) {
 	var out []WorkSessionRowRef
 	err := m.db.db.View(func(tx *bbolt.Tx) error {
 		eb := tx.Bucket([]byte(UpstreamEventsByServerBucket))
@@ -942,7 +945,7 @@ func (m *Manager) OpenUpstreamEventsBefore(kinds map[string][]string, before, no
 			for _, k := range kinds[server] {
 				want[k] = true
 			}
-			if ref, ok := openEventOf(eb.Cursor(), acts, server, before, notBefore, want, visible); ok {
+			if ref, ok := openEventOf(eb.Cursor(), acts, server, before, until, notBefore, want, visible); ok {
 				out = append(out, ref)
 			}
 		}
@@ -951,7 +954,7 @@ func (m *Manager) OpenUpstreamEventsBefore(kinds map[string][]string, before, no
 	return out, err
 }
 
-func openEventOf(c *bbolt.Cursor, acts *bbolt.Bucket, server string, before, notBefore time.Time, want map[string]bool, visible func(string) bool) (WorkSessionRowRef, bool) {
+func openEventOf(c *bbolt.Cursor, acts *bbolt.Bucket, server string, before, until, notBefore time.Time, want map[string]bool, visible func(string) bool) (WorkSessionRowRef, bool) {
 	prefix := workSessionRowPrefix(server)
 	k, _ := c.Seek(workSessionRowKey(server, activityKey(before, "")))
 	var v []byte
@@ -1012,7 +1015,8 @@ func openEventOf(c *bbolt.Cursor, acts *bbolt.Bucket, server string, before, not
 			// A loss repeated during the session merged into this row from
 			// before it, and the span walk does not show the row: it is the
 			// cause, so its last occurrence counts.
-			if repeatedAt.After(lastAt) {
+			// A repeat after the session ended says nothing about it.
+			if repeatedAt.After(lastAt) && (until.IsZero() || !repeatedAt.After(until)) {
 				lastAt = repeatedAt
 			}
 			if lastAt.After(latestAt) {
