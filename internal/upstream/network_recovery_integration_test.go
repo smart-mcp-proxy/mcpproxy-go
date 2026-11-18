@@ -645,21 +645,29 @@ func TestNetworkRecovery_StalledRefreshLongOutage(t *testing.T) {
 	}
 
 	f.relay.Down()
-	// A refresh attempted during the outage fails on the network: the
-	// cooldown's error is now network-flavoured and the cooldown is at its cap.
+	// A refresh attempted during the outage fails on the network, as the
+	// RefreshManager's retry does in the real core: the cooldown's error is now
+	// network-flavoured and the cooldown is at its cap. ObservedRefreshToken
+	// must be the stored one, or the coordinator skips the flight as
+	// superseded (review r5).
+	cur, err := f.db.GetOAuthToken(key)
+	require.NoError(t, err)
 	_, _, _ = oauth.DefaultRefreshCoordinator().Do(context.Background(), oauth.RefreshRequest{
 		Key: key, Binding: c.CredentialBinding(), ServerName: "oauth-health-noticed", Trigger: oauth.RefreshTriggerProactive,
-		Load: func() (*storage.OAuthTokenRecord, error) { return f.db.GetOAuthToken(key) },
+		ObservedRefreshToken: cur.RefreshToken,
+		Load:                 func() (*storage.OAuthTokenRecord, error) { return f.db.GetOAuthToken(key) },
 		Refresh: func(context.Context, *storage.OAuthTokenRecord) (*mcpclient.Token, error) {
 			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}
 		},
 	})
-	// The outage outlasts the 5s health interval. Whichever path notices it —
-	// the health check moving the server to Error, or the server staying
-	// connected with its refresh stalled (what QA observed: the ping fails on
-	// the token before reaching the network) — the watcher must keep it.
-	time.Sleep(12 * time.Second)
-	t.Logf("state during the outage: %s (network failure %v)", c.GetConnectionInfo().State, c.GetConnectionInfo().NetworkFailure)
+	// The outage outlasts the 5s health interval: the next health ping gets
+	// the network-flavoured token error and moves the server to Error. The
+	// network comes back right then — the timing in which a plain SetError
+	// used to drop the server from the watcher together with the outage it
+	// had already observed (review r4/r5), leaving it to wait out the cooldown.
+	require.Eventually(t, func() bool { return c.GetConnectionInfo().State == types.StateError },
+		30*time.Second, 20*time.Millisecond, "the health check notices the outage: %+v", c.GetConnectionInfo())
+	assert.True(t, c.GetConnectionInfo().NetworkFailure, "the health check records it as a network failure")
 
 	f.srv.Server.SetErrorMode(oauthserver.ErrorMode{})
 	restored := time.Now()
