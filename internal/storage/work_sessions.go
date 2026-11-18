@@ -88,14 +88,11 @@ type WorkSessionPartition struct {
 	LastErrorCode  string `json:"last_error_code,omitempty"`
 	LastTool       string `json:"last_tool,omitempty"`
 	LastReason     string `json:"last_reason,omitempty"`
-	// NetworkFailure and AuthFailure: some failure on this server in the
-	// session was of class network (the server could not be reached) or auth
-	// (it waited for a login or refused the credentials). They let the
-	// timeline show the cause from before the session, of the kind that
-	// explains such a failure, whatever the session's last failure on the
-	// server was (release QA F2).
+	// NetworkFailure: some call to this server in the session failed because
+	// the server could not be reached (class network), whatever the session's
+	// last failure on it was. It lets the timeline show the lost connection
+	// from before the session (release QA F2).
 	NetworkFailure bool `json:"network_failure,omitempty"`
-	AuthFailure    bool `json:"auth_failure,omitempty"`
 	// LastFailureBlock says whether the last failure was a policy block, so a
 	// list that excludes blocks can tell.
 	LastFailureBlock bool `json:"last_failure_block,omitempty"`
@@ -575,11 +572,8 @@ func (s *WorkSessionSummary) applyRow(r *ActivityRecord, role AttemptRole) {
 		p.Blocks++
 		p.StoredBlocks++
 	}
-	switch failureClass(r, role) {
-	case "network":
+	if failureClass(r, role) == "network" {
 		p.NetworkFailure = true
-	case "auth":
-		p.AuthFailure = true
 	}
 	if p.FirstFailureAt.IsZero() || ts.Before(p.FirstFailureAt) {
 		p.FirstFailureAt = ts
@@ -997,21 +991,30 @@ func openEventOf(c *bbolt.Cursor, acts *bbolt.Bucket, server string, before, not
 		if err := rec.UnmarshalBinary(data); err != nil {
 			break
 		}
-		// A repeat merged into the row after the session started is not
-		// known to have happened before it: judge such a row by its first
-		// occurrence only.
 		lastAt := ts
+		var repeatedAt time.Time
 		if s, _ := rec.Metadata["last_at"].(string); s != "" {
-			if t, err := time.Parse(time.RFC3339Nano, s); err == nil && t.After(lastAt) && t.Before(before) {
-				lastAt = t
+			if t, err := time.Parse(time.RFC3339Nano, s); err == nil && t.After(lastAt) {
+				repeatedAt = t
 			}
 		}
 		switch kind, _ := rec.Metadata["kind"].(string); {
 		case kind == "connection_restored":
+			// A recovery repeated after the session started is not known to
+			// have been before it: it closes nothing from before the start.
+			if repeatedAt.Before(before) && repeatedAt.After(lastAt) {
+				lastAt = repeatedAt
+			}
 			if lastAt.After(restoredUntil) {
 				restoredUntil = lastAt
 			}
 		case want[kind]:
+			// A loss repeated during the session merged into this row from
+			// before it, and the span walk does not show the row: it is the
+			// cause, so its last occurrence counts.
+			if repeatedAt.After(lastAt) {
+				lastAt = repeatedAt
+			}
 			if lastAt.After(latestAt) {
 				latestAt = lastAt
 				latest = WorkSessionRowRef{ActivityKey: append([]byte(nil), ak...), Timestamp: ts, Server: server, Event: true, Owner: owner}

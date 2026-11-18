@@ -83,3 +83,23 @@ func TestWorkSessionTimeline_ToolErrorAddsNoEarlierEvent(t *testing.T) {
 	require.NotEmpty(t, tl.Rows)
 	assert.Equal(t, contracts.TimelineKindSessionStart, tl.Rows[0].Kind)
 }
+
+// An auth failure adds no event from before the session: its own row says
+// the server needs a login, and a token save, which ends a login
+// requirement, leaves no row to tell (review, F2 round 4).
+func TestWorkSessionTimeline_AuthFailureAddsNoEarlierEvent(t *testing.T) {
+	f := newWSFixture(t)
+	f.srv.eventsSince = f.base
+	f.row("ws-auth", "scoped-ci", f.prefix, 10*time.Minute, func(r *storage.ActivityRecord) {
+		r.Status, r.ErrorClass = storage.ActivityStatusError, "auth"
+	})
+	require.NoError(t, f.store.SaveActivity(&storage.ActivityRecord{
+		Type: storage.ActivityTypeUpstreamEvent, Status: storage.ActivityStatusError, ServerName: "alpha",
+		Timestamp: f.base.Add(9 * time.Minute), Source: storage.ActivitySourceInternal,
+		Metadata: map[string]interface{}{"kind": "login_required"},
+	}))
+	var tl contracts.WorkSessionTimelineResponse
+	wsData(t, scopeGet(t, f.srv, "/api/v1/work-sessions/ws-auth/timeline", scopeAdminAPIKey), &tl)
+	require.NotEmpty(t, tl.Rows)
+	assert.Equal(t, contracts.TimelineKindSessionStart, tl.Rows[0].Kind)
+}

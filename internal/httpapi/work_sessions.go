@@ -520,25 +520,14 @@ func (s *Server) handleWorkSessionTimeline(w http.ResponseWriter, r *http.Reques
 	// down when the session started has its cause before the span. The latest
 	// event of each such server before the start is placed ahead of the start
 	// row while no recovery followed it, under the same FR-025 rule.
-	// The event kind must explain the failure: a call that could not reach
-	// the server is explained by a lost connection or an exited process, a
-	// call that waited for a login by a login requirement (which the refresh
-	// manager can raise while the connection stays up).
+	// Only a call that could not reach the server is explained this way,
+	// by a lost connection or an exited process. A call that waited for a
+	// login says so on its own row, and a token save, which ends a login
+	// requirement, leaves no row to judge an earlier one by.
 	causes := map[string][]string{}
 	for _, server := range eventServers {
-		p := sum.Servers[server]
-		if p == nil {
-			continue
-		}
-		var kinds []string
-		if p.NetworkFailure {
-			kinds = append(kinds, "connection_lost", "process_exited")
-		}
-		if p.AuthFailure {
-			kinds = append(kinds, "login_required")
-		}
-		if len(kinds) > 0 {
-			causes[server] = kinds
+		if p := sum.Servers[server]; p != nil && p.NetworkFailure {
+			causes[server] = []string{"connection_lost", "process_exited"}
 		}
 	}
 	if len(causes) > 0 {

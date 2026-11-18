@@ -130,12 +130,10 @@ func TestWorkSessionPartition_MarksAnUnreachableFailure(t *testing.T) {
 	u, err := m.GetWorkSessionSummary("ws-u")
 	require.NoError(t, err)
 	assert.True(t, u.Servers["github"].NetworkFailure)
-	assert.False(t, u.Servers["github"].AuthFailure)
 	assert.Equal(t, "tool_error", u.Servers["github"].LastErrorClass)
 	tt, err := m.GetWorkSessionSummary("ws-t")
 	require.NoError(t, err)
 	assert.False(t, tt.Servers["github"].NetworkFailure)
-	assert.False(t, tt.Servers["github"].AuthFailure)
 }
 
 func allKinds(servers ...string) map[string][]string {
@@ -182,4 +180,30 @@ func TestOpenUpstreamEventsBefore_KindAndMergedAfterStart(t *testing.T) {
 	refs, err = m.OpenUpstreamEventsBefore(map[string][]string{"tok": {"login_required"}}, wsBase.Add(20*time.Second), time.Time{}, nil)
 	require.NoError(t, err)
 	assert.Len(t, refs, 1, "it does explain an auth failure")
+}
+
+// Review (Opus, F2 round 4): a loss repeated during the session merges into
+// its row from before the session; that row is still the cause. Lost t0,
+// restored t10, session starts t20, lost again t30 (merged into the t0 row).
+func TestOpenUpstreamEventsBefore_LossRepeatedDuringTheSession(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	put := func(first, last time.Duration, kind string) {
+		status := ActivityStatusError
+		if kind == "connection_restored" {
+			status = ActivityStatusSuccess
+		}
+		require.NoError(t, m.SaveActivity(&ActivityRecord{
+			Type: ActivityTypeUpstreamEvent, Status: status, ServerName: "rep", Timestamp: wsBase.Add(first),
+			Source: ActivitySourceInternal, Metadata: map[string]interface{}{
+				"kind": kind, "first_at": wsBase.Add(first).Format(time.RFC3339Nano), "last_at": wsBase.Add(last).Format(time.RFC3339Nano),
+			},
+		}))
+	}
+	put(0, 30*time.Second, "connection_lost")
+	put(10*time.Second, 10*time.Second, "connection_restored")
+	refs, err := m.OpenUpstreamEventsBefore(map[string][]string{"rep": {"connection_lost", "process_exited"}}, wsBase.Add(20*time.Second), time.Time{}, nil)
+	require.NoError(t, err)
+	require.Len(t, refs, 1, "the loss at t30 is in the row keyed t0")
+	assert.Equal(t, wsBase, refs[0].Timestamp)
 }
