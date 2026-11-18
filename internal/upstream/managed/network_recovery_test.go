@@ -297,3 +297,33 @@ func TestNetworkRecovery_ConnectedServerWithStalledRefresh(t *testing.T) {
 	failWith(disabled, transient)
 	assert.False(t, disabled.NetworkRecoveryEligible(time.Now()))
 }
+
+// Review r4: a live connection that fails on the network (ping, call, list)
+// is recorded as a network failure, so the watcher keeps following it.
+func TestSetErrorIfCurrentConnection_FlagsNetworkFailures(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"typed dial error", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}, true},
+		{"flattened in a token error", errors.New("transport error: token refresh in cooldown (retry after …): dial tcp 10.0.0.1:443: connect: connection refused"), true},
+		{"dns", errors.New("dial tcp: lookup mcp.example.com: no such host"), true},
+		{"server error", errors.New("unexpected status 500"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := newNetworkRecoveryClient(t, "https://mcp.example.com/mcp")
+			mc.StateManager.TransitionTo(types.StateReady)
+			require.True(t, mc.setErrorIfCurrentConnection(tc.err, mc.connectionEpoch.Load()))
+			assert.Equal(t, tc.want, mc.GetConnectionInfo().NetworkFailure)
+		})
+	}
+
+	stdioCfg := &config.ServerConfig{Name: "local", Command: "npx", Args: []string{"x"}, Protocol: "stdio", Enabled: true}
+	stdio, err := NewClient(stdioCfg.Name, stdioCfg, zap.NewNop(), nil, &config.Config{}, nil, nil)
+	require.NoError(t, err)
+	stdio.StateManager.TransitionTo(types.StateReady)
+	require.True(t, stdio.setErrorIfCurrentConnection(errors.New("connection refused"), stdio.connectionEpoch.Load()))
+	assert.False(t, stdio.GetConnectionInfo().NetworkFailure, "a stdio server has no network path")
+}

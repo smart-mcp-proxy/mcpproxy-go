@@ -349,10 +349,15 @@ func (r *networkRecovery) tick(ctx context.Context, now time.Time, targets []rec
 			st.successes = n
 		}
 		if !t.NetworkRecoveryEligible(now) {
-			// Connected, connecting, or failed for another reason: forget the
-			// probe history, keep lastTrigger so the spacing survives a
-			// reconnect that fails again.
-			st.failures, st.lastProbe, st.restorePending, st.eventPending = 0, time.Time{}, false, ""
+			// Not actionable right now. A healthy server ends the outage
+			// episode: forget the probe history (lastTrigger stays, so the
+			// spacing survives a reconnect that fails again). An unhealthy one
+			// — mid-reconnect, or briefly in a state the watcher does not act
+			// on — keeps it frozen, so an outage or restore already observed
+			// is not lost when it becomes actionable again (review r4).
+			if t.NetworkRecoveryHealthy() {
+				st.failures, st.lastProbe, st.restorePending, st.eventPending = 0, time.Time{}, false, ""
+			}
 			continue
 		}
 		if event != "" {

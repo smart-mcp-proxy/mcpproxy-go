@@ -80,3 +80,16 @@ func TestCalculateHealth_GenuineSignInKeepsTheSignInAction(t *testing.T) {
 		assert.Equal(t, StatusSignInRequired, got.Status, name)
 	}
 }
+
+// Review r4: a wrong host keeps "needs config" (Edit URL), not "connecting".
+func TestCalculateHealth_EditURLKeepsNeedsConfig(t *testing.T) {
+	input := HealthCalculatorInput{
+		Name: "typo", Enabled: true, State: "Error", HasEndpointURL: true,
+		LastError:      "dial tcp: lookup mcp.exmaple.com: no such host",
+		NetworkFailure: true,
+	}
+	got := CalculateHealth(input, nil)
+	assert.Equal(t, ActionEditURL, got.Action)
+	assert.NotEqual(t, StatusConnecting, got.Status)
+	assert.Equal(t, LevelDegraded, got.Level, "still amber: the network may come back")
+}

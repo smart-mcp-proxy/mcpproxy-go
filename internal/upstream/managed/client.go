@@ -1722,8 +1722,41 @@ func (mc *Client) setErrorIfCurrentConnection(err error, epoch int64) bool {
 	if mc.retired.Load() || !mc.IsConnected() || mc.connectionEpoch.Load() != epoch {
 		return false
 	}
-	mc.StateManager.SetError(err)
+	if mc.isRemoteNetworkFailure(err) {
+		// GH #1929 (review r4): a live connection that failed on the network
+		// (ping, call, list) is a network failure like a failed connect, so
+		// the connectivity watcher keeps watching it instead of dropping the
+		// outage it had observed.
+		mc.StateManager.SetNetworkError(err)
+	} else {
+		mc.StateManager.SetError(err)
+	}
 	return true
+}
+
+// isRemoteNetworkFailure reports whether err, seen on a remote (HTTP/SSE)
+// server, is a network failure: a typed one (core.IsNetworkError), or the
+// text of a hard network fault that reached us flattened into a string (for
+// example inside an OAuth token error the transport wrapped). Stdio servers
+// have no network path, so their failures never qualify.
+func (mc *Client) isRemoteNetworkFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	cfg := mc.GetConfig()
+	if cfg == nil || cfg.URL == "" || cfg.Command != "" {
+		return false
+	}
+	if core.IsNetworkError(err) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, p := range []string{"connection refused", "no such host", "network is unreachable", "no route to host", "connection reset", "econnrefused"} {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // recordCallToolOAuthSignal inspects a failed tools/call error and, when it is an

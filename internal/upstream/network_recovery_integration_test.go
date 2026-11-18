@@ -627,3 +627,48 @@ func TestNetworkRecovery_ConnectedServerWithRevokedGrantIsNotRetried(t *testing.
 	assert.Equal(t, before, f.m.networkRecovery.triggers(), "the watcher leaves a revoked grant alone")
 	assert.False(t, callOK(c), "the rejected credential stays rejected")
 }
+
+// Review r4: the same blocker, but the outage outlasts the health interval and
+// a refresh failed on the network during it (a network-flavoured cooldown at
+// its cap). The server must still recover within 60 s of the restore.
+func TestNetworkRecovery_StalledRefreshLongOutage(t *testing.T) {
+	cfg := fastRecoveryConfig()
+	f := newRecoveryFixture(t, &cfg) // health check every 5s
+	c, key := signInOAuthServer(t, f, "oauth-health-noticed")
+	stale := expireToken(t, f, key)
+
+	f.srv.Server.SetErrorMode(oauthserver.ErrorMode{TokenServerError: true})
+	for i := 0; i < 5; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		require.Error(t, c.RefreshOAuthTokenDirect(ctx))
+		cancel()
+	}
+
+	f.relay.Down()
+	// A refresh attempted during the outage fails on the network: the
+	// cooldown's error is now network-flavoured and the cooldown is at its cap.
+	_, _, _ = oauth.DefaultRefreshCoordinator().Do(context.Background(), oauth.RefreshRequest{
+		Key: key, Binding: c.CredentialBinding(), ServerName: "oauth-health-noticed", Trigger: oauth.RefreshTriggerProactive,
+		Load: func() (*storage.OAuthTokenRecord, error) { return f.db.GetOAuthToken(key) },
+		Refresh: func(context.Context, *storage.OAuthTokenRecord) (*mcpclient.Token, error) {
+			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}
+		},
+	})
+	// The outage outlasts the 5s health interval. Whichever path notices it —
+	// the health check moving the server to Error, or the server staying
+	// connected with its refresh stalled (what QA observed: the ping fails on
+	// the token before reaching the network) — the watcher must keep it.
+	time.Sleep(12 * time.Second)
+	t.Logf("state during the outage: %s (network failure %v)", c.GetConnectionInfo().State, c.GetConnectionInfo().NetworkFailure)
+
+	f.srv.Server.SetErrorMode(oauthserver.ErrorMode{})
+	restored := time.Now()
+	f.relay.Up()
+	require.Eventually(t, func() bool { return callOK(c) }, 60*time.Second, 250*time.Millisecond,
+		"a tool call must succeed within 60s of the network returning")
+	t.Logf("long outage with a stalled refresh: first successful call %s after the network returned", time.Since(restored).Round(time.Millisecond))
+
+	after, err := f.db.GetOAuthToken(key)
+	require.NoError(t, err)
+	assert.NotEqual(t, stale, after.AccessToken, "the token was refreshed")
+}

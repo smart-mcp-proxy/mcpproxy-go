@@ -424,7 +424,7 @@ func calculateHealthBase(input HealthCalculatorInput, cfg *HealthCalculatorConfi
 			level, summary, detail = networkFailureState(summary, input)
 		}
 		statusVal, usable, actions := connectionErrorStatus(action)
-		if input.NetworkFailure && !input.NetworkGaveUp && !oauthActionApplies(input) {
+		if input.NetworkFailure && !input.NetworkGaveUp && action == ActionRestart && !oauthActionApplies(input) {
 			// Still retrying on its own: "Connecting" (CLI STATUS, tray, Web
 			// UI), not an attention item. After give-up it stays "error".
 			statusVal = StatusConnecting

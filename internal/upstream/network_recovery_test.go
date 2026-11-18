@@ -582,3 +582,43 @@ func TestNetworkRecovery_BackwardsClockDoesNotDeferRecovery(t *testing.T) {
 	resets, _ := target.triggers()
 	assert.Len(t, resets, 2, "the restore after the clock moved back is not deferred")
 }
+
+// Review r4: a server that drops out of eligibility mid-outage (its health
+// check recorded a plain error, or a reconnect is in progress) keeps the
+// outage the watcher observed, and the restore fires once it is actionable.
+func TestNetworkRecovery_OutageHistorySurvivesABriefIneligibility(t *testing.T) {
+	h := newRecoveryHarness(testRecoveryConfig())
+	target := &fakeRecoveryTarget{addr: "mcp.example.com:443", eligible: true, failReconnect: true}
+
+	h.step(10*time.Second, target)
+	h.step(10*time.Second, target) // two failed probes: an outage
+	target.mu.Lock()
+	target.eligible = false // e.g. state changed to a plain Error / Connecting
+	target.mu.Unlock()
+	h.net.set(target.addr, true)
+	h.step(10*time.Second, target)
+	target.mu.Lock()
+	target.eligible = true // a reconnect failed on the network again
+	target.mu.Unlock()
+	h.step(10*time.Second, target)
+	resets, reasons := target.triggers()
+	require.Equal(t, []bool{true}, resets, "the observed outage is not lost")
+	assert.Equal(t, []string{reasonNetworkRestored}, reasons)
+}
+
+// A healthy server ends the episode: its history is cleared.
+func TestNetworkRecovery_HealthyServerClearsTheHistory(t *testing.T) {
+	h := newRecoveryHarness(testRecoveryConfig())
+	target := &fakeRecoveryTarget{addr: "mcp.example.com:443", eligible: true, failReconnect: true}
+	h.step(10*time.Second, target)
+	h.step(10*time.Second, target)
+	target.mu.Lock()
+	target.eligible, target.connected = false, true
+	target.mu.Unlock()
+	h.step(10*time.Second, target)
+	target.fail()
+	h.net.set(target.addr, true)
+	h.step(10*time.Second, target)
+	resets, _ := target.triggers()
+	assert.Empty(t, resets, "an outage that ended with the server healthy is not replayed")
+}
