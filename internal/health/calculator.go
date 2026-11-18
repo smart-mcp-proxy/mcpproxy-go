@@ -829,6 +829,8 @@ func formatErrorSummary(lastError string) string {
 		// Specific patterns first
 		{"no such host", "Host not found"},
 		{"connection refused", "Connection refused"},
+		{"actively refused", "Connection refused"},
+		{"forcibly closed by the remote host", "Connection reset"},
 		{"connection reset", "Connection reset"},
 		{"timeout", "Connection timeout"},
 		{"EOF", "Connection closed"},
@@ -980,6 +982,9 @@ func isOAuthRelatedError(err string) bool {
 		"i/o timeout",
 		"context deadline exceeded",
 		"no route to host",
+		// Windows wordings (GH #1929 CI)
+		"actively refused",
+		"forcibly closed by the remote host",
 	}
 	for _, pattern := range connectionPatterns {
 		if stringutil.ContainsIgnoreCase(err, pattern) {

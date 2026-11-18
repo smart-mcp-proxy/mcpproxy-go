@@ -93,3 +93,16 @@ func TestCalculateHealth_EditURLKeepsNeedsConfig(t *testing.T) {
 	assert.NotEqual(t, StatusConnecting, got.Status)
 	assert.Equal(t, LevelDegraded, got.Level, "still amber: the network may come back")
 }
+
+// GH #1929 (CI): the Windows wording of a refused dial reads as a refused
+// connection, not as an OAuth problem.
+func TestCalculateHealth_WindowsRefusedDial(t *testing.T) {
+	input := HealthCalculatorInput{
+		Name: "w", Enabled: true, State: "Error", HasEndpointURL: true, OAuthRequired: true,
+		LastError:      `MCP initialize failed during OAuth strategy: dial tcp 127.0.0.1:64438: connectex: No connection could be made because the target machine actively refused it.`,
+		NetworkFailure: true,
+	}
+	got := CalculateHealth(input, nil)
+	assert.Equal(t, "Reconnecting: connection refused", got.Summary)
+	assert.NotEqual(t, ActionLogin, got.Action)
+}

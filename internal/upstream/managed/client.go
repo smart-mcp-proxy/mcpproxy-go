@@ -1751,7 +1751,8 @@ func (mc *Client) isRemoteNetworkFailure(err error) bool {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
-	for _, p := range []string{"connection refused", "no such host", "network is unreachable", "no route to host", "connection reset", "econnrefused"} {
+	for _, p := range []string{"connection refused", "no such host", "network is unreachable", "no route to host", "connection reset", "econnrefused",
+		"actively refused", "forcibly closed by the remote host", "aborted by the software in your host machine"} {
 		if strings.Contains(msg, p) {
 			return true
 		}
@@ -2461,7 +2462,11 @@ func isTransientHealthCheckError(err error) bool {
 		strings.Contains(msg, "no route to host"),
 		strings.Contains(msg, "connection reset"),
 		strings.Contains(msg, "broken pipe"),
-		strings.Contains(msg, "econnrefused"):
+		strings.Contains(msg, "econnrefused"),
+		// Windows wordings of the same hard failures (GH #1929 CI).
+		strings.Contains(msg, "actively refused"),
+		strings.Contains(msg, "forcibly closed by the remote host"),
+		strings.Contains(msg, "aborted by the software in your host machine"):
 		return false
 	}
 	// Soft failures: short-window misses we want to tolerate.
@@ -2890,6 +2895,11 @@ func (mc *Client) isConnectionError(err error) bool {
 		"Failed to reconnect SSE stream",
 		"Maximum reconnection attempts",
 		"connect ECONNREFUSED",
+		// Windows socket wordings (GH #1929 CI): a refused dial, and a
+		// connection the peer or the local stack dropped.
+		"actively refused",
+		"forcibly closed by the remote host",
+		"aborted by the software in your host machine",
 	}
 
 	for _, connErr := range connectionErrors {
