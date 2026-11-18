@@ -41,8 +41,8 @@ func (c *wsController) WalkWorkSessionTimeline(id string, servers []string, from
 func (c *wsController) GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error) {
 	return c.store.GetActivitiesByKeys(keys)
 }
-func (c *wsController) OpenUpstreamEventsBefore(servers []string, before, notBefore time.Time, visible func(string) bool) ([]storage.WorkSessionRowRef, error) {
-	return c.store.OpenUpstreamEventsBefore(servers, before, notBefore, visible)
+func (c *wsController) OpenUpstreamEventsBefore(kinds map[string][]string, before, notBefore time.Time, visible func(string) bool) ([]storage.WorkSessionRowRef, error) {
+	return c.store.OpenUpstreamEventsBefore(kinds, before, notBefore, visible)
 }
 
 const (

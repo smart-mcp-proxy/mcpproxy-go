@@ -88,11 +88,14 @@ type WorkSessionPartition struct {
 	LastErrorCode  string `json:"last_error_code,omitempty"`
 	LastTool       string `json:"last_tool,omitempty"`
 	LastReason     string `json:"last_reason,omitempty"`
-	// UnavailableFailure: some failure on this server in the session was a
-	// call it could not take (class network or auth). It lets the timeline
-	// show the cause from before the session even when the session's last
-	// failure on the server was another kind (release QA F2).
-	UnavailableFailure bool `json:"unavailable_failure,omitempty"`
+	// NetworkFailure and AuthFailure: some failure on this server in the
+	// session was of class network (the server could not be reached) or auth
+	// (it waited for a login or refused the credentials). They let the
+	// timeline show the cause from before the session, of the kind that
+	// explains such a failure, whatever the session's last failure on the
+	// server was (release QA F2).
+	NetworkFailure bool `json:"network_failure,omitempty"`
+	AuthFailure    bool `json:"auth_failure,omitempty"`
 	// LastFailureBlock says whether the last failure was a policy block, so a
 	// list that excludes blocks can tell.
 	LastFailureBlock bool `json:"last_failure_block,omitempty"`
@@ -572,8 +575,11 @@ func (s *WorkSessionSummary) applyRow(r *ActivityRecord, role AttemptRole) {
 		p.Blocks++
 		p.StoredBlocks++
 	}
-	if c := failureClass(r, role); c == "network" || c == "auth" {
-		p.UnavailableFailure = true
+	switch failureClass(r, role) {
+	case "network":
+		p.NetworkFailure = true
+	case "auth":
+		p.AuthFailure = true
 	}
 	if p.FirstFailureAt.IsZero() || ts.Before(p.FirstFailureAt) {
 		p.FirstFailureAt = ts
@@ -921,7 +927,7 @@ const maxOpenEventLookback = 256
 // notBefore counts: the recovery after a restart of MCPProxy is not recorded,
 // so a loss from before the current process is no evidence either. Only the
 // index and a few rows per server are read.
-func (m *Manager) OpenUpstreamEventsBefore(servers []string, before, notBefore time.Time, visible func(owner string) bool) ([]WorkSessionRowRef, error) {
+func (m *Manager) OpenUpstreamEventsBefore(kinds map[string][]string, before, notBefore time.Time, visible func(owner string) bool) ([]WorkSessionRowRef, error) {
 	var out []WorkSessionRowRef
 	err := m.db.db.View(func(tx *bbolt.Tx) error {
 		eb := tx.Bucket([]byte(UpstreamEventsByServerBucket))
@@ -929,11 +935,20 @@ func (m *Manager) OpenUpstreamEventsBefore(servers []string, before, notBefore t
 		if eb == nil || acts == nil {
 			return nil
 		}
-		for _, server := range servers {
-			if !indexableServerName(server) {
+		names := make([]string, 0, len(kinds))
+		for server := range kinds {
+			names = append(names, server)
+		}
+		sort.Strings(names)
+		for _, server := range names {
+			if !indexableServerName(server) || len(kinds[server]) == 0 {
 				continue
 			}
-			if ref, ok := openEventOf(eb.Cursor(), acts, server, before, notBefore, visible); ok {
+			want := make(map[string]bool, len(kinds[server]))
+			for _, k := range kinds[server] {
+				want[k] = true
+			}
+			if ref, ok := openEventOf(eb.Cursor(), acts, server, before, notBefore, want, visible); ok {
 				out = append(out, ref)
 			}
 		}
@@ -942,7 +957,7 @@ func (m *Manager) OpenUpstreamEventsBefore(servers []string, before, notBefore t
 	return out, err
 }
 
-func openEventOf(c *bbolt.Cursor, acts *bbolt.Bucket, server string, before, notBefore time.Time, visible func(string) bool) (WorkSessionRowRef, bool) {
+func openEventOf(c *bbolt.Cursor, acts *bbolt.Bucket, server string, before, notBefore time.Time, want map[string]bool, visible func(string) bool) (WorkSessionRowRef, bool) {
 	prefix := workSessionRowPrefix(server)
 	k, _ := c.Seek(workSessionRowKey(server, activityKey(before, "")))
 	var v []byte
@@ -982,18 +997,21 @@ func openEventOf(c *bbolt.Cursor, acts *bbolt.Bucket, server string, before, not
 		if err := rec.UnmarshalBinary(data); err != nil {
 			break
 		}
+		// A repeat merged into the row after the session started is not
+		// known to have happened before it: judge such a row by its first
+		// occurrence only.
 		lastAt := ts
 		if s, _ := rec.Metadata["last_at"].(string); s != "" {
-			if t, err := time.Parse(time.RFC3339Nano, s); err == nil && t.After(lastAt) {
+			if t, err := time.Parse(time.RFC3339Nano, s); err == nil && t.After(lastAt) && t.Before(before) {
 				lastAt = t
 			}
 		}
-		switch kind, _ := rec.Metadata["kind"].(string); kind {
-		case "connection_restored":
+		switch kind, _ := rec.Metadata["kind"].(string); {
+		case kind == "connection_restored":
 			if lastAt.After(restoredUntil) {
 				restoredUntil = lastAt
 			}
-		case "connection_lost", "process_exited", "login_required":
+		case want[kind]:
 			if lastAt.After(latestAt) {
 				latestAt = lastAt
 				latest = WorkSessionRowRef{ActivityKey: append([]byte(nil), ak...), Timestamp: ts, Server: server, Event: true, Owner: owner}

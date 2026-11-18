@@ -34,7 +34,7 @@ func TestOpenUpstreamEventsBefore(t *testing.T) {
 	ev("owned", -4*time.Minute, "connection_lost", "")
 
 	all := func(string) bool { return true }
-	refs, err := m.OpenUpstreamEventsBefore([]string{"down", "healed", "owned", "never"}, wsBase, time.Time{}, all)
+	refs, err := m.OpenUpstreamEventsBefore(allKinds("down", "healed", "owned", "never"), wsBase, time.Time{}, all)
 	require.NoError(t, err)
 	byServer := map[string]WorkSessionRowRef{}
 	for _, r := range refs {
@@ -47,7 +47,7 @@ func TestOpenUpstreamEventsBefore(t *testing.T) {
 
 	// A caller who may not see bob's event gets the latest one it may see.
 	notBob := func(owner string) bool { return owner == "" }
-	refs, err = m.OpenUpstreamEventsBefore([]string{"owned"}, wsBase, time.Time{}, notBob)
+	refs, err = m.OpenUpstreamEventsBefore(allKinds("owned"), wsBase, time.Time{}, notBob)
 	require.NoError(t, err)
 	require.Len(t, refs, 1)
 	assert.Equal(t, wsBase.Add(-4*time.Minute), refs[0].Timestamp)
@@ -82,7 +82,7 @@ func TestOpenUpstreamEventsBefore_EvidenceRules(t *testing.T) {
 	// Lost before the core started.
 	put("stale", -2*time.Hour, -2*time.Hour, "connection_lost")
 
-	refs, err := m.OpenUpstreamEventsBefore([]string{"refresh", "relost", "stale"}, wsBase, wsBase.Add(-time.Hour), nil)
+	refs, err := m.OpenUpstreamEventsBefore(allKinds("refresh", "relost", "stale"), wsBase, wsBase.Add(-time.Hour), nil)
 	require.NoError(t, err)
 	got := map[string]bool{}
 	for _, r := range refs {
@@ -114,7 +114,7 @@ func TestOpenUpstreamEventsBefore_MergedRecoveryClosesANewerLoss(t *testing.T) {
 	put(0, 0, "connection_lost")
 	put(10*time.Second, 65*time.Second, "connection_restored")
 	put(62*time.Second, 62*time.Second, "connection_lost")
-	refs, err := m.OpenUpstreamEventsBefore([]string{"flap"}, wsBase.Add(120*time.Second), time.Time{}, nil)
+	refs, err := m.OpenUpstreamEventsBefore(allKinds("flap"), wsBase.Add(120*time.Second), time.Time{}, nil)
 	require.NoError(t, err)
 	assert.Empty(t, refs, "the server recovered at t65")
 }
@@ -129,9 +129,57 @@ func TestWorkSessionPartition_MarksAnUnreachableFailure(t *testing.T) {
 	require.NoError(t, m.SaveActivity(wsRow("ws-t", 0, func(r *ActivityRecord) { r.Status, r.ErrorClass = ActivityStatusError, "tool_error" })))
 	u, err := m.GetWorkSessionSummary("ws-u")
 	require.NoError(t, err)
-	assert.True(t, u.Servers["github"].UnavailableFailure)
+	assert.True(t, u.Servers["github"].NetworkFailure)
+	assert.False(t, u.Servers["github"].AuthFailure)
 	assert.Equal(t, "tool_error", u.Servers["github"].LastErrorClass)
 	tt, err := m.GetWorkSessionSummary("ws-t")
 	require.NoError(t, err)
-	assert.False(t, tt.Servers["github"].UnavailableFailure)
+	assert.False(t, tt.Servers["github"].NetworkFailure)
+	assert.False(t, tt.Servers["github"].AuthFailure)
+}
+
+func allKinds(servers ...string) map[string][]string {
+	out := map[string][]string{}
+	for _, s := range servers {
+		out[s] = []string{"connection_lost", "process_exited", "login_required"}
+	}
+	return out
+}
+
+// Review (Opus, F2 round 3): the kind asked for must explain the failure —
+// a login requirement raised while the connection stayed up is no cause of
+// a network failure; and a recovery merged into an older row after the
+// session started does not close a loss from before it.
+func TestOpenUpstreamEventsBefore_KindAndMergedAfterStart(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	put := func(server string, first, last time.Duration, kind string) {
+		status := ActivityStatusError
+		if kind == "connection_restored" {
+			status = ActivityStatusSuccess
+		}
+		require.NoError(t, m.SaveActivity(&ActivityRecord{
+			Type: ActivityTypeUpstreamEvent, Status: status, ServerName: server, Timestamp: wsBase.Add(first),
+			Source: ActivitySourceInternal, Metadata: map[string]interface{}{
+				"kind": kind, "first_at": wsBase.Add(first).Format(time.RFC3339Nano), "last_at": wsBase.Add(last).Format(time.RFC3339Nano),
+			},
+		}))
+	}
+	put("tok", -time.Minute, -time.Minute, "login_required") // the refresh manager gave up; still connected
+	put("flap", 0, 30*time.Second, "connection_restored")    // the t30 recovery merged into the t0 row
+	put("flap", 10*time.Second, 10*time.Second, "connection_lost")
+
+	network := []string{"connection_lost", "process_exited"}
+	refs, err := m.OpenUpstreamEventsBefore(map[string][]string{"tok": network, "flap": network}, wsBase.Add(20*time.Second), time.Time{}, nil)
+	require.NoError(t, err)
+	got := map[string]bool{}
+	for _, r := range refs {
+		got[r.Server] = true
+	}
+	assert.False(t, got["tok"], "a login requirement does not explain a network failure")
+	assert.True(t, got["flap"], "the recovery at t30 came after the session started at t20")
+
+	refs, err = m.OpenUpstreamEventsBefore(map[string][]string{"tok": {"login_required"}}, wsBase.Add(20*time.Second), time.Time{}, nil)
+	require.NoError(t, err)
+	assert.Len(t, refs, 1, "it does explain an auth failure")
 }

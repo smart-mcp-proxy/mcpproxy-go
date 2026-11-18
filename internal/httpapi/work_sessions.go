@@ -49,7 +49,7 @@ type workSessionController interface {
 	GetWorkSessionSummary(id string) (*storage.WorkSessionSummary, error)
 	WalkWorkSessionTimeline(id string, servers []string, from, to time.Time, fn func(storage.WorkSessionRowRef) bool) error
 	GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error)
-	OpenUpstreamEventsBefore(servers []string, before, notBefore time.Time, visible func(owner string) bool) ([]storage.WorkSessionRowRef, error)
+	OpenUpstreamEventsBefore(kinds map[string][]string, before, notBefore time.Time, visible func(owner string) bool) ([]storage.WorkSessionRowRef, error)
 }
 
 // workSessions returns the controller's work-session storage. A controller
@@ -76,7 +76,7 @@ func (noWorkSessions) WalkWorkSessionTimeline(string, []string, time.Time, time.
 func (noWorkSessions) GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error) {
 	return make([]*storage.ActivityRecord, len(keys)), nil
 }
-func (noWorkSessions) OpenUpstreamEventsBefore([]string, time.Time, time.Time, func(string) bool) ([]storage.WorkSessionRowRef, error) {
+func (noWorkSessions) OpenUpstreamEventsBefore(map[string][]string, time.Time, time.Time, func(string) bool) ([]storage.WorkSessionRowRef, error) {
 	return nil, nil
 }
 
@@ -520,18 +520,31 @@ func (s *Server) handleWorkSessionTimeline(w http.ResponseWriter, r *http.Reques
 	// down when the session started has its cause before the span. The latest
 	// event of each such server before the start is placed ahead of the start
 	// row while no recovery followed it, under the same FR-025 rule.
-	var failedServers []string
+	// The event kind must explain the failure: a call that could not reach
+	// the server is explained by a lost connection or an exited process, a
+	// call that waited for a login by a login requirement (which the refresh
+	// manager can raise while the connection stays up).
+	causes := map[string][]string{}
 	for _, server := range eventServers {
-		// Only a failure that a down server explains: the call could not
-		// reach it, or it waits for a login.
-		if p := sum.Servers[server]; p != nil && p.UnavailableFailure {
-			failedServers = append(failedServers, server)
+		p := sum.Servers[server]
+		if p == nil {
+			continue
+		}
+		var kinds []string
+		if p.NetworkFailure {
+			kinds = append(kinds, "connection_lost", "process_exited")
+		}
+		if p.AuthFailure {
+			kinds = append(kinds, "login_required")
+		}
+		if len(kinds) > 0 {
+			causes[server] = kinds
 		}
 	}
-	if len(failedServers) > 0 {
+	if len(causes) > 0 {
 		// processStart: the recovery after a restart is not recorded, so an
 		// event from before this process is no evidence the server was down.
-		open, err := c.OpenUpstreamEventsBefore(failedServers, session.StartedAt, s.eventsSince, func(owner string) bool {
+		open, err := c.OpenUpstreamEventsBefore(causes, session.StartedAt, s.eventsSince, func(owner string) bool {
 			return owner == "" || viewer == nil || viewer.UserID == owner
 		})
 		if err != nil {
