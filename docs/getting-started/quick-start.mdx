@@ -170,6 +170,15 @@ claude mcp list
 </TabItem>
 </Tabs>
 
+:::tip Let MCPProxy write the entry
+`mcpproxy connect claude-code` (also `cursor`, `codex`, `claude-desktop`,
+`vscode`, `copilot`, `gemini`, `opencode`, `windsurf`; `mcpproxy connect --list`
+shows them all) adds the entry for you, backs up the client's config first, and
+prints the next step. It writes a per-client credential
+(`mcp_cli_…`) instead of your admin API key; see
+[Connect Clients](/features/connect-clients).
+:::
+
 :::tip Multiple Clients
 You can connect multiple AI clients to the same MCPProxy instance simultaneously. All clients share the same upstream servers and configuration.
 :::
@@ -193,21 +202,44 @@ Your AI agent will use the `upstream_servers` tool to add the server to your MCP
 - **Enable/disable servers:** *"Disable the filesystem server"*
 - **List available tools:** *"What tools are available from context7?"*
 
+:::note Clients connected with `mcpproxy connect` cannot add servers
+This works for a client that reaches MCPProxy without a key, like the
+`claude mcp add` command above, or with the instance API key. A client
+registered by `mcpproxy connect` or the Web UI's Connect wizard uses a
+per-client credential, and credentials cannot add, change or remove
+servers: `upstream_servers` is not listed for them, and the agent gets
+`tool 'upstream_servers' not found`. Add the server from the CLI or the
+Web UI instead (below).
+:::
+
 :::tip Chat-Based Management
 You can manage your entire MCPProxy setup through natural conversation with your AI agent - no need to switch between different interfaces!
 :::
 
+### Via the CLI
+
+```bash
+mcpproxy upstream add context7 https://mcp.context7.com/mcp
+```
+
+The command prints the review steps that follow (`review show`,
+`security report`, `review approve`). A local command works the same way after
+`--`, for example `mcpproxy upstream add time -- uvx mcp-server-time`.
+
 ### Via Web UI
 
-1. Open the Web UI (see [step 2](#2-open-the-web-ui)) and click **Add Server** in
-   the top bar. The dialog is titled **Add New Server**.
-2. Under **Server Type**, pick **HTTP/HTTPS (Remote)**. The **URL** field only
-   appears once you do - the default, **stdio (Local Command)**, asks for a
-   command instead.
-3. **Server Name**: `context7` - **URL**: `https://mcp.context7.com/mcp`
-4. Leave **Trust Mode** on **Manual**: *"At add time the server is quarantined
-   until you approve it — the secure default."*
-5. Click **Add Server**.
+1. Open the Web UI (see [step 2](#2-open-the-web-ui)), click **+** in the top
+   bar and choose **Server**. The **Add Server** page opens on its **Catalog**
+   tab; **Paste** takes a URL or command, **Import** an existing client config.
+2. Open the **Manual** tab and, under **Server Type**, pick **HTTP/HTTPS
+   (Remote)**. The **URL** field only appears once you do - the default,
+   **stdio (Local Command)**, asks for a command instead.
+3. **Name**: `context7` - **URL**: `https://mcp.context7.com/mcp`
+4. Leave **Trust mode** unset. **Scan** is marked *current default*: the server
+   is quarantined and scanned on add, and an unset trust mode keeps it
+   quarantined until you approve it. **Manual** additionally holds every later
+   tool change for your review.
+5. Click **Add to MCPProxy**. You land on the server's page.
 
 ### Via Configuration File
 
@@ -242,7 +274,7 @@ A server you add by editing this file for the first time is **held for review** 
 However you added it, the server is now **quarantined** - its tools are withheld
 from your AI agent until you approve them. This is the point of MCPProxy's
 security model, and nothing works until you pass this gate. The transcripts below
-follow the Web UI path, so they show only `context7`; if you took the
+follow the Web UI or CLI path, so they show only `context7`; if you took the
 configuration-file route, `filesystem` is listed alongside it and needs the same
 approval.
 
@@ -251,21 +283,38 @@ mcpproxy upstream list
 ```
 
 ```
-   NAME      PROTOCOL  TOOLS  STATUS                  ACTION
-🔒  context7  http      0      Quarantined for review  Approve in Web UI
+   NAME      PROTOCOL         TOOLS  STATUS        ACTION
+🔒  context7  streamable-http  0      Needs review  review show context7
 ```
 
-Note the `0` tools: they exist, but are not exposed yet.
+Note the `0` tools: they exist, but are not exposed yet. The `ACTION` column
+names the next command.
 
 ### Review before approving
 
 Open the server's page in the Web UI. It shows the badge **Quarantined for
-review**, an **Awaiting manual review** banner, and the buttons **View report**
-and **Approve**. The **Security** tab holds the offline scan that ran on add -
-for `context7` it reports `Risk Score 0/100`, "2 tool definitions exported for
-analysis", and **No findings**.
+review**, an **Awaiting manual review** banner with the scan summary (`clean`,
+`Risk score 0/100`), and the buttons **View report** and **Review & approve**.
+**Review & approve** opens the **Review** tab: the scan line, the tools by tier,
+and each tool's definition with an **Allow this tool** checkbox. Only read-only
+tools with a clean scan start checked.
 
-The same report from the CLI (abbreviated - the real output also carries a
+From the CLI, `mcpproxy review show context7` lists the captured tools and the
+scan verdict:
+
+```
+Server: context7
+Readiness: quarantined (approval is separate from connection and discovery)
+Scan: clean · risk 0/100 · covers all 2 tools
+TOOL                TIER  APPROVAL  SCAN   DESCRIPTION
+query-docs          read  approved  clean  Retrieves and queries up-to-date documentation and code examples from Context7 for any programming library or framework.
+resolve-library-id  read  approved  clean  Resolves a package/product name to a Context7-compatible library ID and returns matching libraries.
+```
+
+The tools already read `approved` because the clean scan pre-approved them;
+they stay hidden until the server itself is approved.
+
+The full report (abbreviated - the real output also carries a
 `Scan ID`, a `Scanned` timestamp, a per-scanner `Scanner timing` block, and the
 `Path` the tool definitions were exported to):
 
@@ -280,7 +329,7 @@ Scanners:    1 run, 0 failed of 1
 
 Scan Context
   Source:           tool_definitions_only
-  Protocol:         http
+  Protocol:         streamable-http
   Docker isolation: false
   Tools analyzed:   2
 
@@ -293,28 +342,30 @@ Scan Context
 
 ### Approve
 
-Click **Approve** on the server page - it applies immediately, with no
-confirmation dialog - or from the CLI:
+On the **Review** tab, click **Approve server (2 of 2 tools)** - it applies
+immediately, with no confirmation dialog - or from the CLI:
 
 ```bash
-mcpproxy security approve context7
+mcpproxy review approve context7 --yes
 ```
 
 ```
-Server "context7" approved.
+Allowing 2 of 2 tools; blocking none
+Approved server context7: 2 tools approved, 0 blocked, 0 still pending, 0 changed
 ```
 
-The header flips to `Connected (2 tools)` and **Admin state** to **Enabled**.
-The Tools tab does not refill on its own: use **Actions** → **Refresh**, or
-reload the page, to see it go from `Tools (0)` to `Tools (2)`.
+`mcpproxy security approve context7` is an alias.
+
+The header flips to `Connected (2 tools)`, **Admin state** to **Enabled**, and
+the tab to `Tools (2)`. The Review tab confirms *"context7 is approved"*.
 
 ```bash
 mcpproxy upstream list
 ```
 
 ```
-   NAME      PROTOCOL  TOOLS  STATUS               ACTION
-✅  context7  http      2      Connected (2 tools)  -
+   NAME      PROTOCOL         TOOLS  STATUS  ACTION
+✅  context7  streamable-http  2      Online  -
 ```
 
 :::info Undo any of this
