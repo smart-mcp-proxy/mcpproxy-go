@@ -35,7 +35,7 @@ func TestFirstServerHint(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := firstServerHint(fakeLookPath(c.present...))
+			got := firstServerHint(fakeLookPath(c.present...), true)
 			for _, w := range c.want {
 				if !strings.Contains(got, w) {
 					t.Errorf("hint missing %q:\n%s", w, got)
@@ -47,6 +47,59 @@ func TestFirstServerHint(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Without a running daemon, 'catalog add' and 'review' cannot work yet, so
+// the hint starts with 'mcpproxy serve'.
+func TestFirstServerHint_NoDaemonStartsWithServe(t *testing.T) {
+	got := firstServerHint(fakeLookPath("uvx"), false)
+	serve := strings.Index(got, "mcpproxy serve")
+	add := strings.Index(got, "mcpproxy catalog add reference/time")
+	if serve < 0 || add < 0 || serve > add {
+		t.Errorf("no-daemon hint must name 'mcpproxy serve' before the catalog add:\n%s", got)
+	}
+	if strings.Contains(firstServerHint(fakeLookPath("uvx"), true), "mcpproxy serve") {
+		t.Errorf("with a daemon running the hint must not tell the user to start one")
+	}
+}
+
+// A scoped caller (an agent token) sees only the servers it may see; an
+// empty list is not an empty install, and catalog add is not its operation.
+func TestOutputServers_ScopedCallerGetsNoFirstServerHint(t *testing.T) {
+	setOutputGlobals(t, "table", false)
+	old := upstreamListSource
+	upstreamListSource = listOriginDaemonScoped
+	t.Cleanup(func() { upstreamListSource = old })
+	out := captureOutput(func() {
+		if err := outputServers([]map[string]interface{}{}); err != nil {
+			t.Fatalf("outputServers: %v", err)
+		}
+	})
+	if strings.Contains(out, "No upstream servers yet") {
+		t.Errorf("a scoped caller must not get the empty-install hint, got:\n%s", out)
+	}
+
+	upstreamListSource = listOriginConfig
+	out = captureOutput(func() {
+		if err := outputServers([]map[string]interface{}{}); err != nil {
+			t.Fatalf("outputServers: %v", err)
+		}
+	})
+	if !strings.Contains(out, "mcpproxy serve") {
+		t.Errorf("config-file mode (no daemon) must tell the user to start the core, got:\n%s", out)
+	}
+}
+
+func TestAgentTokenInEnv(t *testing.T) {
+	t.Setenv("MCPPROXY_API_KEY_FILE", "")
+	t.Setenv("MCPPROXY_API_KEY", "mcp_agt_abcdef")
+	if !agentTokenInEnv() {
+		t.Errorf("an mcp_agt_ key in MCPPROXY_API_KEY is an agent token")
+	}
+	t.Setenv("MCPPROXY_API_KEY", "plain-admin-key")
+	if agentTokenInEnv() {
+		t.Errorf("an admin key is not an agent token")
 	}
 }
 

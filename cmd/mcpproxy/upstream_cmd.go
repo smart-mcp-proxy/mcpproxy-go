@@ -468,6 +468,10 @@ func runUpstreamListClientMode(ctx context.Context, client *cliclient.Client, _ 
 			WithRecoveryCommand("mcpproxy serve"), output.ErrCodeConnectionFailed)
 	}
 
+	upstreamListSource = listOriginDaemonAdmin
+	if agentTokenInEnv() {
+		upstreamListSource = listOriginDaemonScoped
+	}
 	return outputServers(servers)
 }
 
@@ -557,6 +561,7 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 		}
 	}
 
+	upstreamListSource = listOriginConfig
 	return outputServers(servers)
 }
 
@@ -565,7 +570,8 @@ func outputServers(servers []map[string]interface{}) error {
 	// table, in table output only. A --profile list holds only that profile's
 	// servers, so an empty one says nothing about the install. (A --status
 	// filter is applied below, after this check.)
-	noServersConfigured := len(servers) == 0 && upstreamListProfile == ""
+	noServersConfigured := len(servers) == 0 && upstreamListProfile == "" &&
+		upstreamListSource != listOriginDaemonScoped
 
 	// FR-015: --status <value> is repeatable, and a comma-separated value is
 	// equivalent to repeating the flag; several values select the UNION of
@@ -608,7 +614,7 @@ func outputServers(servers []map[string]interface{}) error {
 	}
 	fmt.Print(result)
 	if noServersConfigured {
-		fmt.Print(firstServerHint(exec.LookPath))
+		fmt.Print(firstServerHint(exec.LookPath, upstreamListSource != listOriginConfig))
 	}
 	return nil
 }
@@ -2804,9 +2810,12 @@ func viewOr(view map[string]interface{}, key, fallback string) string {
 // whose launcher this machine has. The catalog door applies quarantine, trust
 // mode and the admission scan exactly as for any catalog add; the hint itself
 // adds, runs and approves nothing. lookPath is exec.LookPath in production.
-func firstServerHint(lookPath func(string) (string, error)) string {
+func firstServerHint(lookPath func(string) (string, error), daemonRunning bool) string {
 	var b strings.Builder
 	b.WriteString("\nNo upstream servers yet. Next steps:\n")
+	if !daemonRunning {
+		b.WriteString("  mcpproxy serve                                      # start the core first (catalog add and review need it)\n")
+	}
 	has := func(name string) bool { _, err := lookPath(name); return err == nil }
 	switch {
 	case has("uvx"):
@@ -2820,4 +2829,32 @@ func firstServerHint(lookPath func(string) (string, error)) string {
 	b.WriteString("  mcpproxy catalog search <query>                     # browse the catalog\n")
 	b.WriteString("New servers are quarantined and scanned; inspect one with 'mcpproxy review show <name>' and admit it with 'mcpproxy review approve <name> --yes'.\n")
 	return b.String()
+}
+
+// upstreamListOrigin says where `upstream list` got its servers, which
+// decides whether an empty list means an empty install (first-server hint).
+type upstreamListOrigin int
+
+const (
+	// listOriginDaemonAdmin: the daemon, as an administrator (socket or the
+	// instance API key). An empty list is an empty install.
+	listOriginDaemonAdmin upstreamListOrigin = iota
+	// listOriginConfig: no daemon; the config file. An empty list is an empty
+	// install, but the core must be started before catalog add / review.
+	listOriginConfig
+	// listOriginDaemonScoped: the daemon, as an agent token. The list holds
+	// only the servers the token may see, so an empty one says nothing about
+	// the install, and adding servers is not the token's operation.
+	listOriginDaemonScoped
+)
+
+// upstreamListSource is set by the two list paths before outputServers.
+var upstreamListSource = listOriginDaemonAdmin
+
+// agentTokenInEnv reports whether the REST key the CLI will send is an agent
+// token. Only MCPPROXY_API_KEY(_FILE) can carry one: the config's api_key is
+// the instance admin key, and socket connections are administrator.
+func agentTokenInEnv() bool {
+	envKey, err := config.ResolveEnvAPIKey()
+	return err == nil && envKey.Set && strings.HasPrefix(envKey.Key, "mcp_agt_")
 }
