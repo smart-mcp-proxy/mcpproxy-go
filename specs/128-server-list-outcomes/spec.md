@@ -43,12 +43,21 @@ Out of scope:
 
 ## Definitions
 
-- **Reach**: the servers a caller may see on this request. This is the existing `serverInScope` predicate
-  (agent-token `AllowedServers` incl. the Spec 118 pin bound, AND the active profile's servers), narrowed
-  further on the single-server surface to that one server.
-- **Unavailable server**: a server in reach that is enabled or quarantined in config but whose tools are
-  not currently searchable or listable. A server that is ready and indexed is never unavailable, even
-  when some of its tools are held.
+- **Reach**: the servers a caller may see on this request, as **that surface already resolves them**.
+  Surfaces resolve the profile differently today. `retrieve_tools` resolves at dispatch time, including
+  a session `set_profile`. The direct `tools/list` and single-server admission deliberately skip
+  session selection. The single-server surface is confined to its one server. The outcome collector
+  MUST NOT resolve a profile itself: each surface passes in the effective scope it already computed,
+  combined with the existing `serverInScope` auth check (agent-token `AllowedServers` incl. the Spec 118
+  pin bound).
+- **Unavailable server**: a server in reach whose final display `Status`, from the shared health
+  computation, is anything other than `ready`. Servers disabled by an administrator are therefore
+  included. When several faults combine (e.g. quarantined and also waiting for a sign-in), the
+  calculator's final `Status` is authoritative, and this spec adds no precedence of its own. In
+  addition, a server whose `Status` is `ready` but whose first tool discovery and indexing for the
+  current connection has not completed is reported as `connecting`. That uses an explicit
+  discovery-readiness fact (see FR-011a), never an inference from the tool count. A ready, indexed
+  server is never unavailable, whether it has zero tools or all of its tools are held.
 - **Server outcome**: one entry describing one unavailable server: its name, one status from a fixed
   vocabulary, and one fixed sentence for the agent.
 
@@ -128,9 +137,10 @@ entry and that the `tools` array is unchanged.
 
 ### User Story 4: describe_tool explains why a known id is missing (Priority: P3)
 
-An agent holding a remembered id `jira:create_issue` calls `describe_tool` while jira is disconnected.
-Instead of "tool not found", the answer says that the server is unavailable with status `error` and gives
-the same fixed sentence.
+An agent holding a remembered id `jira:create_issue` calls `describe_tool` on the default surface while
+jira is disconnected. Instead of "tool not found", the answer says that the server is unavailable, with
+status `error` and the same fixed sentence. The answer describes the **server only**. It is identical
+for every tool name on that server, so it never confirms or denies that a given tool exists.
 
 **Why this priority**: agents increasingly cache ids across sessions. This is less frequent than search,
 and lower risk.
@@ -140,17 +150,21 @@ and lower risk.
 1. **Given** jira in reach and disconnected, **When** the agent describes `jira:create_issue`, **Then**
    the error carries status `error` and the outcome sentence.
 2. **Given** jira outside reach, **When** the agent describes `jira:create_issue`, **Then** the answer is
-   the existing uniform not-found answer (anti-disclosure preserved, incl. the direct surface's single
-   answer for unknown, withheld and invisible ids).
+   the existing uniform not-found answer.
+3. **Given** jira unavailable, **When** the agent describes `jira:create_issue` and `jira:no_such_tool`,
+   **Then** both answers are byte-identical.
+4. **Given** the direct surface, **When** the agent describes any id, **Then** the existing single
+   answer for unknown, withheld and invisible ids is unchanged. FR-009 does not apply there.
 
 ### Edge Cases
 
-- **A server is ready but still indexing** (first discovery not finished): status `connecting`.
-- **A quarantined server** (admin_state quarantined) in reach: status `needs_review`. This is the same
-  vocabulary the operator sees. The sentence tells the agent the user must review the server.
-- **An admin-disabled server** in reach: status `disabled`, sentence "This server is turned off in
-  MCPProxy." It is listed because a disabled server is the second most common reason a user's tool is
-  "missing".
+- **A server is ready but still indexing** (first discovery not finished for the current connection):
+  `connecting`, from the discovery-readiness fact. A ready server whose discovery finished with zero
+  tools is not listed.
+- **A quarantined server** in reach: whatever final `Status` the calculator returns. That is usually
+  `needs_review`, but `sign_in_required`, `needs_config` or `error` when those faults dominate.
+- **An admin-disabled server** in reach: `disabled`, with the sentence "This server is turned off in
+  MCPProxy." Disabled plus quarantined gives whatever the calculator returns.
 - **A missing secret or config error**: `needs_secret` / `needs_config`.
 - **A flapping server** that changes state between the search and the response: the outcome reflects the
   state read once per request. Two calls may disagree, and that is acceptable.
@@ -176,9 +190,13 @@ and lower risk.
 - **FR-003**: Entries MUST be derived from the same health computation the operator surfaces use, read
   once per request. They MUST NOT contain upstream-supplied text, URLs, error strings, token or account
   details, or a fix action the agent could invoke.
-- **FR-004**: Only servers that pass the caller's reach predicate MAY appear. No count, total or other
-  value MAY depend on servers outside reach. This MUST hold for agent tokens (incl. pinned and stale-pin
-  tokens), profile-bound clients, URL profiles, anonymous callers and the single-server surface.
+- **FR-004**: Only servers in the caller's reach, as the surface itself resolved it (Definitions), MAY
+  appear. No count, total or other value MAY depend on servers outside it. Each surface MUST pass its
+  own effective scope to the collector, preserving list-time versus dispatch-time profile resolution
+  and single-server confinement. This MUST hold for agent tokens (incl. pinned and stale-pin tokens),
+  profile-bound clients, URL profiles, session-selected profiles, anonymous callers and the
+  single-server surface. Tests MUST include a session whose `set_profile` choice differs from its
+  binding or URL profile, on both `retrieve_tools` and the direct `tools/list`.
 - **FR-005**: The array MUST hold at most 20 entries, ordered by action priority then name. When more
   unavailable servers are in reach, `unavailable_servers_more` MUST give the number not listed.
 - **FR-006**: When `retrieve_tools` returns zero tools and `unavailable_servers` is present,
@@ -189,13 +207,22 @@ and lower risk.
   on the first page only, with the same reach and cap rules. The `tools` array MUST be unchanged.
 - **FR-008**: The default `retrieve_tools`-mode surface's `tools/list` (built-in tools only) MUST NOT
   carry outcomes.
-- **FR-009**: `describe_tool` for an id whose server is in reach and unavailable MUST return the status
-  and message instead of the generic not-found remediation. For an id whose server is outside reach, it
-  MUST return the existing answer unchanged.
+- **FR-009**: On the default surface (canonical `server:tool` ids) and the single-server surface (bare
+  ids, confined to that server), `describe_tool` MUST return the server's status and message, instead of
+  the not-found remediation, for an id that would otherwise be "not found" and whose owning server
+  resolves unambiguously, through the existing collision-aware resolution, to an in-reach unavailable
+  server. The answer MUST be identical for every tool name on that server. The existing visibility and
+  tool-policy gates run first and keep their answers. The direct surface's describe answers MUST be
+  unchanged. `check: true` behaviour MUST be unchanged. For an id whose server is outside reach, or does
+  not resolve unambiguously, the existing answer MUST be returned unchanged.
 - **FR-010**: The status vocabulary and message table MUST be one contract shared with the operator
   display vocabulary. A test MUST fail if a new display status is added without a message.
 - **FR-011**: Building the outcome list MUST NOT trigger a connection attempt, discovery, token refresh,
   storage write or activity row. It is a read of already-computed state.
+- **FR-011a**: The runtime MUST expose a per-server discovery-readiness fact: whether the first tool
+  discovery and index update for the current connection epoch has completed. Outcomes MUST use it for the
+  `connecting` overlay. Tests MUST separate empty-ready (discovery done, zero tools, not listed),
+  all-held (not listed), discovery-pending (`connecting`) and indexing-pending (`connecting`).
 - **FR-012**: The feature MUST be on by default. It MAY be turned off with one global setting
   (`agent_server_outcomes: false`, env `MCPPROXY_AGENT_SERVER_OUTCOMES=false`), which restores the
   pre-feature responses exactly.
@@ -229,9 +256,8 @@ and lower risk.
   agents. If it grows, FR-010's test forces a message for the new value.
 - Agents read top-level keys of `retrieve_tools` JSON, as they already do for `notice` and
   `hidden_by_profile`. Clients that drop unknown `_meta` keys lose nothing.
-- mcp-go v1.0.0's `ListToolsResult` exposes a settable result `_meta` reachable from an after-list hook.
-  The plan must confirm this. If it does not, FR-007 falls back to a pinned-extension approach decided in
-  the plan.
+- mcp-go v1.0.0's `ListToolsResult` carries a writable result `_meta` that an after-list hook can set
+  (confirmed by the review against `mcp/tools.go`, `mcp/types.go` and `server/hooks.go`).
 - A disabled server is worth naming to an agent in reach. An operator who disagrees can drop the server
   from the profile, which removes it from reach.
 
