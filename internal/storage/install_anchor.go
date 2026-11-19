@@ -3,8 +3,6 @@ package storage
 import (
 	stderrors "errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"time"
 
 	"go.etcd.io/bbolt"
@@ -28,24 +26,12 @@ const (
 // never escapes the View.
 var errStoreHasRecords = stderrors.New("store has records")
 
-// fileIsAbsentOrEmpty reports whether path does not exist or is 0 bytes long.
-// Any other stat failure returns false, which only means "not known to be
-// empty from the file alone": NewBoltDB then lets the record walk
-// (storeHasRecords) decide.
-func fileIsAbsentOrEmpty(path string) bool {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return stderrors.Is(err, fs.ErrNotExist)
-	}
-	return fi.Size() == 0
-}
-
 // storeHasRecords reports whether the opened database holds at least one
 // record (a key) in any bucket, nested buckets included. Buckets that exist but
 // are empty — for example created by a standalone CLI command run before the
 // first serve — are not data, and neither is the meta schema-version key that
 // every open writes into a new store (initBuckets). A read failure counts as
-// "has records", for the same fail-closed reason as fileIsAbsentOrEmpty.
+// "has records" (fail closed: an unreadable store is never a new install).
 func storeHasRecords(db *bbolt.DB) bool {
 	err := db.View(func(tx *bbolt.Tx) error {
 		return tx.ForEach(func(name []byte, b *bbolt.Bucket) error {

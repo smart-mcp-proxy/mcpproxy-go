@@ -262,3 +262,41 @@ func TestInstallAnchor_CorruptValueIsNotRewritten(t *testing.T) {
 		return nil
 	}))
 }
+
+// A store populated by another process while this one waits for the lock is
+// not a new install: emptiness is decided from the locked database, never
+// from a stat taken before bbolt.Open (review finding, Spec 126 FR-033).
+func TestNewBoltDB_StorePopulatedBeforeLockIsNotEmpty(t *testing.T) {
+	dir := t.TempDir()
+	testHookBeforeOpen = func(dbPath string) {
+		other, err := bbolt.Open(dbPath, 0600, nil)
+		if err != nil {
+			t.Fatalf("other process open: %v", err)
+		}
+		if err := other.Update(func(tx *bbolt.Tx) error {
+			b, err := tx.CreateBucketIfNotExists([]byte("upstreams"))
+			if err != nil {
+				return err
+			}
+			return b.Put([]byte("github"), []byte(`{"name":"github"}`))
+		}); err != nil {
+			t.Fatalf("other process write: %v", err)
+		}
+		if err := other.Close(); err != nil {
+			t.Fatalf("other process close: %v", err)
+		}
+	}
+	t.Cleanup(func() { testHookBeforeOpen = nil })
+
+	db, err := NewBoltDB(dir, zap.NewNop().Sugar())
+	if err != nil {
+		t.Fatalf("NewBoltDB: %v", err)
+	}
+	defer db.Close()
+	if db.WasEmptyAtOpen() {
+		t.Fatal("a store populated before the lock was taken must not read as empty")
+	}
+	if _, wrote, err := db.EnsureInstallAnchor(time.Now()); err != nil || wrote {
+		t.Fatalf("EnsureInstallAnchor on an existing store: wrote=%v err=%v, want no anchor", wrote, err)
+	}
+}
