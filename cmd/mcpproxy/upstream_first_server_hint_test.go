@@ -61,23 +61,24 @@ func TestOutputServers_EmptyListPrintsFirstServerHint(t *testing.T) {
 		t.Errorf("empty list must print the first-server hint, got:\n%s", out)
 	}
 
-	// A --status filter that matches nothing is not an empty install.
-	old := upstreamListStatus
-	upstreamListStatus = []string{"error"}
-	t.Cleanup(func() { upstreamListStatus = old })
+	// A --profile list is only that profile's servers: an empty one is not
+	// an empty install.
+	oldProfile := upstreamListProfile
+	upstreamListProfile = "work"
+	t.Cleanup(func() { upstreamListProfile = oldProfile })
 	out = captureOutput(func() {
-		if err := outputServers([]map[string]interface{}{{"name": "a", "status": "ready"}}); err != nil {
+		if err := outputServers([]map[string]interface{}{}); err != nil {
 			t.Fatalf("outputServers: %v", err)
 		}
 	})
 	if strings.Contains(out, "No upstream servers yet") {
-		t.Errorf("a filtered-empty list must not print the first-server hint, got:\n%s", out)
+		t.Errorf("an empty --profile list must not print the first-server hint, got:\n%s", out)
 	}
+	upstreamListProfile = oldProfile
 
 	// Structured output stays pure data.
 	setOutputGlobals(t, "json", false)
 	out = captureOutput(func() {
-		upstreamListStatus = nil
 		if err := outputServers([]map[string]interface{}{}); err != nil {
 			t.Fatalf("outputServers: %v", err)
 		}

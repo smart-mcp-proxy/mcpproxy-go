@@ -561,9 +561,11 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 }
 
 func outputServers(servers []map[string]interface{}) error {
-	// An install with no servers at all (not a --status filter that matched
-	// nothing) gets a next step after the empty table, in table output only.
-	noServersConfigured := len(servers) == 0 && len(upstreamListStatus) == 0
+	// An install with no servers at all gets a next step after the empty
+	// table, in table output only. A --profile list holds only that profile's
+	// servers, so an empty one says nothing about the install. (A --status
+	// filter is applied below, after this check.)
+	noServersConfigured := len(servers) == 0 && upstreamListProfile == ""
 
 	// FR-015: --status <value> is repeatable, and a comma-separated value is
 	// equivalent to repeating the flag; several values select the UNION of
