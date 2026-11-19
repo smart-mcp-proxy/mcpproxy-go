@@ -35,8 +35,11 @@ import (
 // behind a handler that counts requests and Authorization headers.
 //
 // The endpoint lives under a path unique to this fixture. A request is counted
-// when its path carries that token (with or without credentials), or when it
-// carries this fixture's own credential on any path. The port is shared with whoever
+// when its path carries that token (with or without credentials), when it
+// carries this fixture's own credential on any path, or when it is for an
+// origin-level OAuth path (/.well-known/*, /authorize, /token, /register),
+// which an OAuth attempt may reach without the token or a credential; those
+// are counted whoever sent them, so the fixture fails closed. The port is shared with whoever
 // held it before: `go test ./...` runs packages in parallel, and other
 // packages' test clients keep reconnecting to their own closed fixtures'
 // ports (POST / initialize, GET / listen stream, DELETE / close). When the OS
@@ -96,7 +99,7 @@ func newCountingUpstream(t *testing.T, kind string) *countingUpstream {
 		up.url = base + "/" + up.token + "/mcp"
 	}
 	up.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.Contains(r.URL.Path, up.token) && r.Header.Get("Authorization") != fixtureBearer(up.url) {
+		if !strings.Contains(r.URL.Path, up.token) && r.Header.Get("Authorization") != fixtureBearer(up.url) && !originOAuthPath(r.URL.Path) {
 			up.strayMu.Lock()
 			up.stray = append(up.stray, r.Method+" "+r.URL.Path)
 			up.strayMu.Unlock()
@@ -145,6 +148,20 @@ func (u *countingUpstream) strays() []string {
 	u.strayMu.Lock()
 	defer u.strayMu.Unlock()
 	return append([]string(nil), u.stray...)
+}
+
+// originOAuthPath reports an origin-level path an OAuth attempt may request
+// without the endpoint's path or a credential: RFC 8414 / RFC 9728 well-known
+// documents and the default endpoints mcp-go falls back to without metadata.
+func originOAuthPath(path string) bool {
+	if strings.HasPrefix(path, "/.well-known/") {
+		return true
+	}
+	switch path {
+	case "/authorize", "/token", "/register":
+		return true
+	}
+	return false
 }
 
 // fixtureBearer is the static credential httpServerConfig gives an instance

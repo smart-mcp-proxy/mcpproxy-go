@@ -197,9 +197,10 @@ func sendStrayTraffic(t *testing.T, base string) {
 }
 
 // The fixture's controls: a request to the real endpoint is counted with or
-// without credentials, and this fixture's own credential is counted on any
-// path, so a misrouted credential is still caught. A stranger's request to
-// another path, with or without its own credential, is kept apart.
+// without credentials, this fixture's own credential is counted on any path
+// (a misrouted credential is still caught), and origin-level OAuth paths are
+// counted whoever sends them. A stranger's request to another path, with or
+// without its own credential, is kept apart.
 func TestCountingUpstream_CountsItsEndpointAndItsCredentialAnywhere(t *testing.T) {
 	for _, kind := range []string{"http", "sse"} {
 		t.Run(kind, func(t *testing.T) {
@@ -226,10 +227,17 @@ func TestCountingUpstream_CountsItsEndpointAndItsCredentialAnywhere(t *testing.T
 			assert.Equal(t, int64(2), req, "this fixture's credential on another path is counted")
 			assert.Equal(t, int64(1), auth)
 
+			do(http.MethodGet, up.srv.URL+"/.well-known/oauth-authorization-server", "") // origin-level OAuth discovery
+			do(http.MethodGet, up.srv.URL+"/.well-known/oauth-protected-resource", "")
+			do(http.MethodPost, up.srv.URL+"/token", "") // mcp-go's default endpoint without metadata
+			req, auth = up.counts()
+			assert.Equal(t, int64(5), req, "origin-level OAuth paths are counted whoever sends them (fail closed)")
+			assert.Equal(t, int64(1), auth)
+
 			do(http.MethodGet, up.srv.URL+"/", "Bearer someone-else") // a stranger with its own credential
 			do(http.MethodPost, up.srv.URL+"/mcp", "")                // a stranger's endpoint path
 			req, auth = up.counts()
-			assert.Equal(t, int64(2), req, "strangers on the port are not counted")
+			assert.Equal(t, int64(5), req, "strangers on the port are not counted")
 			assert.Equal(t, int64(1), auth)
 			assert.Equal(t, []string{"GET /", "POST /mcp"}, up.strays())
 		})
