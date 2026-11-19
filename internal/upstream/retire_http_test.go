@@ -2,6 +2,9 @@ package upstream
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -133,4 +136,102 @@ func TestRetire_HTTPDialInsideSection_ClosedNoRequest(t *testing.T) {
 	req, auth := up.counts()
 	assert.Zero(t, req)
 	assert.Zero(t, auth)
+}
+
+// Cross-process isolation: `go test ./...` runs packages in parallel, and other
+// packages' test clients keep reconnecting to the ports of their own closed
+// fixtures (POST / initialize, GET / listen stream, DELETE / close, none with
+// credentials). When the OS hands one of those ports to this fixture, that
+// traffic arrives here (CI job 135134947938: 3 requests, 0 Authorization). It
+// is not traffic to the old endpoint. The fixture counts only requests to its
+// own endpoint, so the zero-request invariant stays exact while strangers on
+// the same port are recorded apart.
+func TestRetire_HTTPDialParked_StrayTrafficOnThePortIsNotTheOldEndpoint(t *testing.T) {
+	for _, kind := range []string{"http", "sse"} {
+		t.Run(kind, func(t *testing.T) {
+			up := newCountingUpstream(t, kind)
+			m := newGenTestManager(t)
+			cfg := httpServerConfig("acme", up.url, kind)
+			m.AdvanceGenerations([]GenerationChange{present(cfg.Name, 1, cfg)})
+			require.NoError(t, m.AddServerConfigAt(cfg.Name, cfg, 1))
+			inst := registered(t, m, cfg.Name)
+
+			parked, release := parkFirstAdmit(inst)
+			defer release()
+			errc := connectAsync(inst)
+			<-parked
+
+			competingCommit(t, m, "remove", cfg)
+			require.True(t, inst.Retired())
+			reqBefore, authBefore := up.counts()
+
+			// A stranger on the same port, as another package's test client.
+			sendStrayTraffic(t, up.srv.URL)
+
+			release()
+			require.Error(t, waitErr(t, errc))
+			time.Sleep(100 * time.Millisecond)
+			req, auth := up.counts()
+			assert.Equal(t, reqBefore, req, "stray traffic on the port is not a request to the old endpoint")
+			assert.Equal(t, authBefore, auth)
+			assert.Zero(t, auth)
+			assert.Len(t, up.strays(), 3, "the fixture saw the stray requests and kept them apart")
+		})
+	}
+}
+
+func sendStrayTraffic(t *testing.T, base string) {
+	t.Helper()
+	for _, method := range []string{http.MethodPost, http.MethodGet, http.MethodDelete} {
+		var body io.Reader
+		if method == http.MethodPost {
+			body = strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"mcpproxy-go","version":"1.0.0"},"capabilities":{}}}`)
+		}
+		req, err := http.NewRequest(method, base+"/", body)
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+	}
+}
+
+// The fixture's controls: a request to the real endpoint is counted with or
+// without credentials, and this fixture's own credential is counted on any
+// path, so a misrouted credential is still caught. A stranger's request to
+// another path, with or without its own credential, is kept apart.
+func TestCountingUpstream_CountsItsEndpointAndItsCredentialAnywhere(t *testing.T) {
+	for _, kind := range []string{"http", "sse"} {
+		t.Run(kind, func(t *testing.T) {
+			up := newCountingUpstream(t, kind)
+			do := func(method, url, auth string) {
+				t.Helper()
+				req, err := http.NewRequest(method, url, nil)
+				require.NoError(t, err)
+				if auth != "" {
+					req.Header.Set("Authorization", auth)
+				}
+				resp, err := http.DefaultClient.Do(req)
+				require.NoError(t, err)
+				_ = resp.Body.Close()
+			}
+
+			do(http.MethodDelete, up.url, "") // the endpoint, no credentials
+			req, auth := up.counts()
+			assert.Equal(t, int64(1), req, "a request to the endpoint without credentials is counted")
+			assert.Zero(t, auth)
+
+			do(http.MethodGet, up.srv.URL+"/elsewhere", fixtureBearer(up.url)) // own credential, wrong path
+			req, auth = up.counts()
+			assert.Equal(t, int64(2), req, "this fixture's credential on another path is counted")
+			assert.Equal(t, int64(1), auth)
+
+			do(http.MethodGet, up.srv.URL+"/", "Bearer someone-else") // a stranger with its own credential
+			do(http.MethodPost, up.srv.URL+"/mcp", "")                // a stranger's endpoint path
+			req, auth = up.counts()
+			assert.Equal(t, int64(2), req, "strangers on the port are not counted")
+			assert.Equal(t, int64(1), auth)
+			assert.Equal(t, []string{"GET /", "POST /mcp"}, up.strays())
+		})
+	}
 }

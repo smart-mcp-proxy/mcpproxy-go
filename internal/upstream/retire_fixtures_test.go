@@ -3,6 +3,7 @@ package upstream
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -32,11 +33,27 @@ import (
 
 // countingUpstream is an in-process MCP server (streamable HTTP or SSE)
 // behind a handler that counts requests and Authorization headers.
+//
+// The endpoint lives under a path unique to this fixture. A request is counted
+// when its path carries that token (with or without credentials), or when it
+// carries this fixture's own credential on any path. The port is shared with whoever
+// held it before: `go test ./...` runs packages in parallel, and other
+// packages' test clients keep reconnecting to their own closed fixtures'
+// ports (POST / initialize, GET / listen stream, DELETE / close). When the OS
+// hands such a port to this fixture, that traffic is a stranger's, not a
+// request to this endpoint (CI job 135134947938). It is answered 404 and kept
+// in strays. Anything an instance sends to this endpoint, in any auth
+// strategy, starts with a request to its URL (or a path-suffixed well-known
+// document for it), and a credential sent to the wrong path is still caught by
+// its fixture-specific value, so the zero-request invariants stay exact.
 type countingUpstream struct {
 	srv      *httptest.Server
 	url      string
+	token    string
 	requests atomic.Int64
 	auth     atomic.Int64
+	strayMu  sync.Mutex
+	stray    []string
 	// holdCall, when set, blocks the `slow` tool until it is closed.
 	holdCall chan struct{}
 	inCall   chan struct{}
@@ -64,19 +81,28 @@ func newCountingUpstream(t *testing.T, kind string) *countingUpstream {
 		return mcp.NewToolResultText("slow done"), nil
 	})
 
+	// Every field and the handler are in place before Start: a stray request
+	// may arrive the moment the port is listening.
 	up.srv = httptest.NewUnstartedServer(nil)
-	up.srv.Start()
-	base := up.srv.URL
+	base := "http://" + up.srv.Listener.Addr().String()
+	up.token = "fx-" + rand.Text()
 	var inner http.Handler
 	switch kind {
 	case "sse":
-		inner = server.NewSSEServer(mcpSrv, server.WithBaseURL(base))
-		up.url = base + "/sse"
+		inner = server.NewSSEServer(mcpSrv, server.WithBaseURL(base), server.WithStaticBasePath("/"+up.token))
+		up.url = base + "/" + up.token + "/sse"
 	default:
 		inner = server.NewStreamableHTTPServer(mcpSrv)
-		up.url = base + "/mcp"
+		up.url = base + "/" + up.token + "/mcp"
 	}
 	up.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, up.token) && r.Header.Get("Authorization") != fixtureBearer(up.url) {
+			up.strayMu.Lock()
+			up.stray = append(up.stray, r.Method+" "+r.URL.Path)
+			up.strayMu.Unlock()
+			http.NotFound(w, r)
+			return
+		}
 		up.requests.Add(1)
 		if r.Header.Get("Authorization") != "" {
 			up.auth.Add(1)
@@ -92,6 +118,7 @@ func newCountingUpstream(t *testing.T, kind string) *countingUpstream {
 		}
 		inner.ServeHTTP(w, r)
 	})
+	up.srv.Start()
 	t.Cleanup(func() {
 		up.release()
 		up.srv.CloseClientConnections()
@@ -112,6 +139,26 @@ func (u *countingUpstream) counts() (requests, auth int64) {
 	return u.requests.Load(), u.auth.Load()
 }
 
+// strays lists the requests that reached this port for some other endpoint
+// ("METHOD path"); they are not counted.
+func (u *countingUpstream) strays() []string {
+	u.strayMu.Lock()
+	defer u.strayMu.Unlock()
+	return append([]string(nil), u.stray...)
+}
+
+// fixtureBearer is the static credential httpServerConfig gives an instance
+// of the fixture at url: unique to that fixture, so the fixture can tell its
+// own instance's credential from a stranger's on any path.
+func fixtureBearer(url string) string {
+	for _, seg := range strings.Split(url, "/") {
+		if strings.HasPrefix(seg, "fx-") {
+			return "Bearer qa-secret-" + seg
+		}
+	}
+	return "Bearer qa-secret"
+}
+
 func httpServerConfig(name, url, kind string) *config.ServerConfig {
 	proto := "streamable-http"
 	if kind == "sse" {
@@ -122,7 +169,7 @@ func httpServerConfig(name, url, kind string) *config.ServerConfig {
 		URL:      url,
 		Protocol: proto,
 		Enabled:  true,
-		Headers:  map[string]string{"Authorization": "Bearer qa-secret"},
+		Headers:  map[string]string{"Authorization": fixtureBearer(url)},
 	}
 }
 
