@@ -234,9 +234,9 @@ func TestCountingUpstream_CountsItsEndpointAndItsCredentialAnywhere(t *testing.T
 				{"default authorize endpoint", http.MethodGet, up.srv.URL + "/authorize", "", true, false},
 				{"default token endpoint", http.MethodPost, up.srv.URL + "/token", "", true, false},
 				{"default register endpoint", http.MethodPost, up.srv.URL + "/register", "", true, false},
-				{"stranger, root", http.MethodGet, up.srv.URL + "/?" + mark, "", false, false},
-				{"stranger with its own credential", http.MethodGet, up.srv.URL + "/?" + mark, "Bearer someone-else", false, false},
-				{"stranger, its own endpoint path", http.MethodPost, up.srv.URL + "/mcp?" + mark, "", false, false},
+				{"stranger, root", http.MethodGet, up.srv.URL + "/?" + mark + "-root", "", false, false},
+				{"stranger with its own credential", http.MethodGet, up.srv.URL + "/?" + mark + "-cred", "Bearer someone-else", false, false},
+				{"stranger, its own endpoint path", http.MethodPost, up.srv.URL + "/mcp?" + mark + "-mcp", "", false, false},
 			}
 			for _, tc := range cases {
 				req0, auth0 := up.counts()
@@ -259,7 +259,8 @@ func TestCountingUpstream_CountsItsEndpointAndItsCredentialAnywhere(t *testing.T
 				assert.Equal(t, wantReq, req1-req0, "%s: request counted", tc.name)
 				assert.Equal(t, wantAuth, auth1-auth0, "%s: Authorization counted", tc.name)
 			}
-			assert.Subset(t, up.strays(), []string{"GET /?" + mark, "POST /mcp?" + mark}, "strangers are kept apart")
+			assert.Subset(t, up.strays(), []string{"GET /?" + mark + "-root", "GET /?" + mark + "-cred", "POST /mcp?" + mark + "-mcp"},
+				"each stranger is recorded apart")
 		})
 	}
 }

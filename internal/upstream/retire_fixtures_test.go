@@ -45,10 +45,9 @@ import (
 // The port is shared with whoever held it before: `go test ./...` runs
 // packages in parallel, and other packages' test clients keep reconnecting to
 // their own closed fixtures' ports (POST / initialize, GET / listen stream,
-// DELETE / close). When the OS
-// hands such a port to this fixture, that traffic is a stranger's, not a
-// request to this endpoint (CI job 135134947938). It is answered 404 and kept
-// in strays. Anything an instance sends to this endpoint, in any auth
+// DELETE / close). When the OS hands such a port to this fixture, that
+// traffic is a stranger's, not a request to this endpoint (CI job
+// 135134947938). It is answered 404 and kept in strays. Anything an instance sends to this endpoint, in any auth
 // strategy, starts with a request to its URL (or a path-suffixed well-known
 // document for it), and a credential sent to the wrong path is still caught by
 // its fixture-specific value, so the zero-request invariants stay exact.
