@@ -65,6 +65,12 @@ type ConnectionInfo struct {
 	OAuthRetryCount  int             `json:"oauth_retry_count"`
 	IsOAuthError     bool            `json:"is_oauth_error"`
 	GaveUp           bool            `json:"gave_up"` // True when max retries exceeded
+	// NetworkFailure reports that the current StateError was recorded by
+	// SetNetworkError: the last connect attempt failed before any upstream
+	// answered (DNS, dial, timeout). The connectivity watcher reconnects only
+	// such servers when the network comes back (GH #1929). Reported by
+	// GetConnectionInfo; state-change callback snapshots leave it false.
+	NetworkFailure bool `json:"network_failure,omitempty"`
 	// RetryAfter is the instant before which the upstream asked us not to come
 	// back, captured from a `Retry-After` header on a rate-limited response
 	// (#1040). Zero when the upstream gave no hint. It acts as a floor under the
@@ -240,6 +246,9 @@ type StateManager struct {
 	// SetError, ClearTerminal, Reset and a successful connection.
 	terminal     bool
 	terminalCode string
+	// networkFailure marks the current StateError as a network failure
+	// (SetNetworkError). Every other state write clears it.
+	networkFailure bool
 	// pendingAuthProbe is ConnectionInfo.PendingAuthProbe; overwritten by
 	// every SetPendingAuth/SetPendingAuthProbe park.
 	pendingAuthProbe bool
@@ -290,6 +299,7 @@ func (sm *StateManager) GetConnectionInfo() ConnectionInfo {
 	defer sm.mu.RUnlock()
 
 	return ConnectionInfo{
+		NetworkFailure:   sm.networkFailure && sm.currentState == StateError,
 		State:            sm.currentState,
 		LastError:        sm.lastError,
 		RetryCount:       sm.retryCount,
@@ -310,6 +320,7 @@ func (sm *StateManager) GetConnectionInfo() ConnectionInfo {
 // TransitionTo transitions to a new state
 func (sm *StateManager) TransitionTo(newState ConnectionState) {
 	sm.mu.Lock()
+	sm.networkFailure = false
 	oldState := sm.currentState
 
 	// Validate transition
@@ -361,12 +372,46 @@ func (sm *StateManager) TransitionTo(newState ConnectionState) {
 
 // SetError sets an error and transitions to error state
 func (sm *StateManager) SetError(err error) {
+	sm.setError(err, false)
+}
+
+// ClearNetworkBackoff restarts the retry ladder of a server whose current
+// failure is still a network failure, and reports whether it did. The check
+// and the clear happen under one lock, so a connect that started (Connecting),
+// finished (Ready) or failed differently (OAuth, permanent, Retry-After) since
+// the caller looked is never overwritten. The state stays StateError; the
+// reconnect that follows moves it. Used by the connectivity watcher when the
+// network demonstrably came back (GH #1929).
+func (sm *StateManager) ClearNetworkBackoff(now time.Time) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.currentState != StateError || !sm.networkFailure || sm.terminal || sm.isOAuthError || sm.userLoggedOut {
+		return false
+	}
+	if !sm.retryAfter.IsZero() && now.Before(sm.retryAfter) {
+		return false
+	}
+	sm.retryCount = 0
+	sm.lastRetryTime = time.Time{}
+	return true
+}
+
+// SetNetworkError is SetError for a connect attempt that failed before any
+// upstream answered — DNS, dial, connection refused, timeout (GH #1929). It
+// advances the backoff exactly like SetError; it only marks the failure so the
+// connectivity watcher may reconnect the server once the network is back.
+func (sm *StateManager) SetNetworkError(err error) {
+	sm.setError(err, true)
+}
+
+func (sm *StateManager) setError(err error, network bool) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	oldState := sm.currentState
 	sm.currentState = StateError
 	sm.lastError = err
+	sm.networkFailure = network
 	sm.retryCount++
 	sm.lastRetryTime = time.Now()
 	// An unclassified (or differently classified) failure is NOT evidence of
@@ -417,6 +462,7 @@ func (sm *StateManager) SetError(err error) {
 // process's own stderr. Plain SetError deliberately clears the park.
 func (sm *StateManager) SetTerminalError(err error, code string) {
 	sm.mu.Lock()
+	sm.networkFailure = false
 
 	oldState := sm.currentState
 	sm.currentState = StateError
@@ -492,6 +538,7 @@ func (sm *StateManager) SetPendingAuth(err error) {
 // ShouldAutoReconnect retry the server periodically.
 func (sm *StateManager) SetPendingAuthProbe(err error, probe bool) {
 	sm.mu.Lock()
+	sm.networkFailure = false
 
 	oldState := sm.currentState
 	sm.currentState = StatePendingAuth
@@ -673,6 +720,7 @@ func (sm *StateManager) ValidateTransition(from, to ConnectionState) error {
 func (sm *StateManager) Reset() {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	sm.networkFailure = false
 
 	oldState := sm.currentState
 	sm.currentState = StateDisconnected
@@ -721,6 +769,7 @@ func (sm *StateManager) Reset() {
 func (sm *StateManager) ResetForReconnect() {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	sm.networkFailure = false
 
 	oldState := sm.currentState
 	sm.currentState = StateDisconnected
@@ -755,6 +804,7 @@ func (sm *StateManager) ResetForReconnect() {
 // SetOAuthError sets an OAuth-specific error with longer backoff periods
 func (sm *StateManager) SetOAuthError(err error) {
 	sm.mu.Lock()
+	sm.networkFailure = false
 
 	oldState := sm.currentState
 	sm.currentState = StateError

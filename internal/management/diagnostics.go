@@ -43,6 +43,19 @@ func extractHealthFromMap(srvRaw map[string]interface{}) (action, detail string)
 	return "", ""
 }
 
+// healthStatusFromMap returns health.status ("ready", "connecting", "error", …).
+func healthStatusFromMap(srvRaw map[string]interface{}) string {
+	switch h := srvRaw["health"].(type) {
+	case *contracts.HealthStatus:
+		if h != nil {
+			return h.Status
+		}
+	case map[string]interface{}:
+		return getStringFromMap(h, "status")
+	}
+	return ""
+}
+
 // oauthSignInState reports whether a server needs the user to sign in, and
 // which OAuthRequirement.State that is ("unauthenticated" for a first-time
 // login, "expired" for a session that expired or was revoked).
@@ -176,6 +189,13 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 
 		// Aggregate based on Health.Action
 		switch {
+		case healthAction == health.ActionRestart && !needsSignIn && healthStatusFromMap(srvRaw) == health.StatusConnecting:
+			// GH #1929: a network outage the client is still retrying on its
+			// own (health status "connecting", amber "Reconnecting: …") is not
+			// a connection error to report — like the attention list, doctor
+			// leaves it out. It becomes one again once retries give up. Only
+			// this bucket is skipped; the rest of the loop still runs.
+
 		case healthAction == health.ActionRestart && !needsSignIn:
 			errorTime := time.Now()
 			if errorTimeStr := getStringFromMap(srvRaw, "error_time"); errorTimeStr != "" {

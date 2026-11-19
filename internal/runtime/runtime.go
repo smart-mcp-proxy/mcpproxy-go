@@ -1503,25 +1503,21 @@ func (r *Runtime) NotifySecretsChanged(ctx context.Context, operation, secretNam
 		return fmt.Errorf("config not available")
 	}
 
-	// Find all servers that reference this secret in their env vars or args
+	// Find all servers that reference this secret, in any field that is
+	// resolved when the connection is created: env, args, working dir, and
+	// for remote servers the URL, headers and OAuth settings (release QA F9:
+	// a header reference was never restarted).
 	secretRef := fmt.Sprintf("${keyring:%s}", secretName)
 	var affectedServers []string
 
 	for _, server := range cfg.Servers {
-		// Check environment variables
-		for _, value := range server.Env {
-			if strings.Contains(value, secretRef) {
-				affectedServers = append(affectedServers, server.Name)
-				break
-			}
+		// A restart enables a disabled server (RestartServerCtx), and a
+		// secret change is no reason to undo the operator's disable.
+		if !server.Enabled {
+			continue
 		}
-
-		// Check arguments
-		for _, arg := range server.Args {
-			if strings.Contains(arg, secretRef) {
-				affectedServers = append(affectedServers, server.Name)
-				break
-			}
+		if serverReferencesSecret(server, secretRef) {
+			affectedServers = append(affectedServers, server.Name)
 		}
 	}
 
@@ -3407,6 +3403,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			RetryStoppedReason: serverStatus.RetryStoppedReason,
 			RetryCount:         serverStatus.RetryCount,
 		}
+		healthInput.NetworkFailure, healthInput.NetworkGaveUp, healthInput.NextRetryAt = r.NetworkRetryState(serverStatus.Name)
 		if oauthUndecryptable != nil {
 			healthInput.OAuthTokenUndecryptable = oauth.TokenUndecryptableDetail(oauthUndecryptable)
 		}
@@ -3856,7 +3853,61 @@ func (r *Runtime) HealthRefreshState(name string, cfg *config.ServerConfig) *oau
 	if r.refreshManager == nil || !r.StoredOAuthTokenInPlay(name, cfg) {
 		return nil
 	}
-	return r.refreshManager.GetRefreshState(name)
+	info := r.refreshManager.GetRefreshState(name)
+	if info != nil && (info.State == oauth.RefreshStateRetrying || info.State == oauth.RefreshStateFailed) {
+		return info
+	}
+	// GH #1929: refreshes that failed transiently outside the proactive
+	// schedule (a tool call's reactive refresh while offline, a token that was
+	// already expired so nothing was scheduled) still mean "being retried",
+	// not "sign in again".
+	if cfg != nil && cfg.URL != "" {
+		var binding commitview.CredentialBinding
+		if r.upstreamManager != nil {
+			if client, ok := r.upstreamManager.GetClient(name); ok && client != nil {
+				binding = client.CredentialBinding()
+			}
+		}
+		if st, ok := oauth.DefaultRefreshCoordinator().TransientRefreshStatus(oauth.GenerateServerKey(name, cfg.URL), binding); ok {
+			out := &oauth.RefreshStateInfo{State: oauth.RefreshStateRetrying, RetryCount: st.Failures, LastError: st.LastError}
+			if info != nil {
+				out.ExpiresAt = info.ExpiresAt
+			}
+			if !st.RetryAt.IsZero() {
+				at := st.RetryAt
+				out.NextAttempt = &at
+			}
+			return out
+		}
+	}
+	return info
+}
+
+// NetworkRetryState reports whether the named server's current failure is a
+// network failure, whether its client gave up the regular retries, and when
+// its next automatic reconnect is due (GH #1929), so health can present an
+// outage as temporary. nextRetry is nil when unknown.
+func (r *Runtime) NetworkRetryState(name string) (networkFailure, gaveUp bool, nextRetry *time.Time) {
+	if r.upstreamManager == nil {
+		return false, false, nil
+	}
+	client, ok := r.upstreamManager.GetClient(name)
+	if !ok || client == nil {
+		return false, false, nil
+	}
+	info := client.GetConnectionInfo()
+	if info.State != upstreamtypes.StateError || !info.NetworkFailure {
+		return false, false, nil
+	}
+	if info.LastRetryTime.IsZero() {
+		return true, info.GaveUp, nil
+	}
+	wait := upstreamtypes.RetryBackoffDuration(info.RetryCount)
+	if info.GaveUp {
+		wait = upstreamtypes.GaveUpProbeInterval
+	}
+	at := info.LastRetryTime.Add(wait)
+	return true, info.GaveUp, &at
 }
 
 // serverConnectedWithOAuth reports whether the named server's live connection
@@ -5048,4 +5099,41 @@ func (r *Runtime) callTimeOAuthRequired(name string) bool {
 // FR-031), so the row is probed (for that outcome only).
 func shouldProbeStoredOAuthRow(url string, haveStorage, tokenInPlay, callTimeOAuthRequired bool) bool {
 	return url != "" && haveStorage && (tokenInPlay || callTimeOAuthRequired)
+}
+
+// serverReferencesSecret reports whether any field of server that is expanded
+// when its connection is created contains ref (e.g. "${keyring:name}").
+func serverReferencesSecret(server *config.ServerConfig, ref string) bool {
+	if server == nil {
+		return false
+	}
+	has := func(v string) bool { return strings.Contains(v, ref) }
+	anyOf := func(vs []string) bool {
+		for _, v := range vs {
+			if has(v) {
+				return true
+			}
+		}
+		return false
+	}
+	values := func(m map[string]string) bool {
+		for _, v := range m {
+			if has(v) {
+				return true
+			}
+		}
+		return false
+	}
+	if has(server.URL) || has(server.Command) || has(server.WorkingDir) ||
+		anyOf(server.Args) || values(server.Env) || values(server.Headers) {
+		return true
+	}
+	if o := server.OAuth; o != nil {
+		if has(o.ClientID) || has(o.ClientSecret) || has(o.RedirectURI) || has(o.CallbackBaseURL) ||
+			has(o.AuthorizationEndpoint) || has(o.TokenEndpoint) || has(o.RegistrationEndpoint) ||
+			has(o.AuthServerMetadataURL) || anyOf(o.Scopes) || values(o.ExtraParams) {
+			return true
+		}
+	}
+	return false
 }

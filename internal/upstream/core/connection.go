@@ -245,6 +245,11 @@ func (c *Client) Connect(ctx context.Context) error {
 	if c.Gate().Retired() {
 		return fmt.Errorf("connect refused: %w", dialgate.ErrRetired)
 	}
+	// Release QA F9: a header, URL or OAuth setting whose secret reference
+	// could not be resolved is never sent; refuse before any transport.
+	if err := c.UnresolvedSecrets(); err != nil {
+		return err
+	}
 
 	// Reset connection state for fresh connection attempt
 	if c.connected {

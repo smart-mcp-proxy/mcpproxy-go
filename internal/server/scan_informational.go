@@ -651,6 +651,22 @@ func (s *Server) registerToolChangeRescan() {
 	s.runtime.AddToolDefinitionsChangedObserver(s.scheduleInformationalRescan)
 }
 
+// registerTokenSavedDirectRebuild republishes the direct and single-server
+// surfaces when an upstream OAuth token is saved while a connected server
+// could not list its tools (GH #1929 release QA). It covers every refresh path,
+// including the network watcher's direct refresh, which emits no
+// oauth.token_refreshed, and it outlives the capped rebuild retries.
+func (s *Server) registerTokenSavedDirectRebuild() {
+	if s.runtime == nil {
+		return
+	}
+	s.runtime.AddTokenSavedObserver(func(string) {
+		if p := s.mcpProxy; p != nil {
+			p.RetryPendingDirectRebuild()
+		}
+	})
+}
+
 // autoRescanEnabled resolves security.auto_baseline_scan AND
 // security.auto_rescan_on_change (each with its env override) against the live
 // config, and requires a scanner service.

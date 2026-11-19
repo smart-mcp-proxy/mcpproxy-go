@@ -115,10 +115,21 @@ type refreshKeyState struct {
 	latchErr error
 
 	// Transient cooldown for reactive callers (FR-004).
-	cooldownGen       string
-	cooldownUntil     time.Time
-	cooldownErr       error
+	cooldownGen   string
+	cooldownUntil time.Time
+	cooldownErr   error
+	// transientPending: the last flight failed transiently and none has
+	// succeeded since. Unlike the cooldown it survives ClearTransientCooldown,
+	// so the connectivity watcher still knows the credential needs a refresh.
+	transientPending  bool
 	transientFailures int
+	// savesInProgress counts token responses being written for this key
+	// (BeginTokenSaveFor). A successful token response settles the
+	// transient state, but the write commits before NoteTokenSavedFor runs
+	// and other goroutines can already use the new token; while a save is
+	// in progress the credential is not reported as transiently failing
+	// (GH #1929 Windows CI: a slow bbolt fsync held that window open).
+	savesInProgress int
 
 	// dcrCleared is set when the DCR registration was cleared after
 	// invalid_client and no successful token response has been seen since
@@ -328,6 +339,84 @@ func (c *RefreshCoordinator) ForgetServer(serverKey string) {
 		}
 	}
 	c.mu.Unlock()
+}
+
+// ClearTransientCooldown lifts the transient-failure cooldown of one
+// credential binding of serverKey and restarts its backoff, reporting whether
+// one was set. The upstream manager's connectivity watcher calls it when the
+// network demonstrably came back (GH #1929): refreshes that failed while the
+// machine was offline must not make the reconnect wait up to five minutes for
+// a refresh that would now succeed. The terminal latch (a revoked grant) is
+// left alone, so a rejected credential is still not retried.
+func (c *RefreshCoordinator) ClearTransientCooldown(serverKey string, b commitview.CredentialBinding) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.keys[flightKey{serverKey, b}]
+	if st == nil || (st.cooldownUntil.IsZero() && st.transientFailures == 0) {
+		return false
+	}
+	st.cooldownGen, st.cooldownUntil, st.cooldownErr = "", time.Time{}, nil
+	st.transientFailures = 0
+	return true
+}
+
+// TransientlyFailing reports whether the last refresh of one credential
+// binding of serverKey failed transiently (network, timeout, 5xx) and none has
+// succeeded since, with no terminal latch (a revoked grant). The connectivity
+// watcher uses it to find a CONNECTED server whose expired token cannot be
+// refreshed only because the network or the provider was briefly unavailable
+// (GH #1929).
+func (c *RefreshCoordinator) TransientlyFailing(serverKey string, b commitview.CredentialBinding) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.keys[flightKey{serverKey, b}]
+	return st != nil && st.transientPending && st.savesInProgress == 0 && st.latchErr == nil
+}
+
+// BeginTokenSaveFor marks that a successful token response for one credential
+// binding of key is being persisted; the returned function ends it and must be
+// called once the save finished (after NoteTokenSavedFor on success). Until
+// then TransientlyFailing and TransientRefreshStatus report no transient
+// failure, so no reader that already sees the new token is told the refresh
+// is still failing. A save that fails or is discarded leaves the earlier
+// transient state in place once it ends.
+func (c *RefreshCoordinator) BeginTokenSaveFor(key string, b commitview.CredentialBinding) (end func()) {
+	c.mu.Lock()
+	st := c.stateLocked(flightKey{key, b})
+	st.savesInProgress++
+	c.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.mu.Lock()
+			st.savesInProgress--
+			c.mu.Unlock()
+		})
+	}
+}
+
+// TransientRefreshInfo describes a refresh that is failing transiently.
+type TransientRefreshInfo struct {
+	Failures  int       // transient failures in a row (0 after ClearTransientCooldown)
+	RetryAt   time.Time // end of the reactive cooldown; zero when none
+	LastError string
+}
+
+// TransientRefreshStatus is TransientlyFailing with the details health
+// reporting shows: a connected server whose expired token is being refreshed
+// again is "Token refresh pending", not "sign in" (GH #1929).
+func (c *RefreshCoordinator) TransientRefreshStatus(serverKey string, b commitview.CredentialBinding) (TransientRefreshInfo, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.keys[flightKey{serverKey, b}]
+	if st == nil || !st.transientPending || st.savesInProgress > 0 || st.latchErr != nil {
+		return TransientRefreshInfo{}, false
+	}
+	info := TransientRefreshInfo{Failures: st.transientFailures, RetryAt: st.cooldownUntil}
+	if st.cooldownErr != nil {
+		info.LastError = LogSafeErrorText(st.cooldownErr)
+	}
+	return info, true
 }
 
 // Do runs at most one refresh flight per key. A caller arriving while a flight
@@ -605,6 +694,7 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 
 	c.mu.Lock()
 	st.transientFailures++
+	st.transientPending = true
 	st.cooldownGen = gen
 	st.cooldownUntil = c.now().Add(refreshBackoff(st.transientFailures - 1))
 	st.cooldownErr = refreshErr
@@ -743,6 +833,7 @@ func (c *RefreshCoordinator) resetLocked(st *refreshKeyState) {
 	st.latchGen, st.latchErr = "", nil
 	st.cooldownGen, st.cooldownUntil, st.cooldownErr = "", time.Time{}, nil
 	st.transientFailures = 0
+	st.transientPending = false
 	st.dcrCleared = false
 	st.clearedClientID = ""
 }

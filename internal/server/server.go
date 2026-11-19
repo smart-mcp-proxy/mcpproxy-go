@@ -435,6 +435,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// start below, so no removal can commit without forgetting its scan state.
 	server.forgetInformationalScansOnPurge()
 	server.registerToolChangeRescan()
+	server.registerTokenSavedDirectRebuild()
 	// Spec 101 US3 (B17, B19, B21): the refresher nudge, the refresh-cycle
 	// telemetry and the post-activation re-protection sweep. Registered here,
 	// at construction, so no activation can slip in before the observer; the
@@ -909,6 +910,14 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 			s.warmProfileIndex()
 		}
 		switch evt.Type {
+		case runtime.EventTypeOAuthTokenRefreshed:
+			// A server that could not list its tools because its token refresh
+			// was failing can list again now; republish the direct and
+			// single-server surfaces at once instead of on the retry timer
+			// (GH #1929 release QA).
+			if s.mcpProxy != nil {
+				s.mcpProxy.RetryPendingDirectRebuild()
+			}
 		case runtime.EventTypeServersChanged:
 			s.logger.Debug("servers changed, refreshing routing mode tools",
 				zap.String("event_type", string(evt.Type)))
@@ -1976,6 +1985,7 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 				um.CallStats(serverStatus.Name)
 		}
 
+		healthInput.NetworkFailure, healthInput.NetworkGaveUp, healthInput.NextRetryAt = s.runtime.NetworkRetryState(serverStatus.Name)
 		// T032: Wire refresh state into health calculation (Spec 023).
 		// Read through the runtime seam so a stale schedule for a server that
 		// no longer uses OAuth is not reported here either (GH #1172).
