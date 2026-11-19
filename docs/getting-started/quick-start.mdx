@@ -207,8 +207,9 @@ This works for a client that reaches MCPProxy without a key, like the
 `claude mcp add` command above, or with the instance API key. A client
 registered by `mcpproxy connect` or the Web UI's Connect wizard uses a
 per-client credential, and credentials cannot add, change or remove
-servers: `upstream_servers` is not listed for them, and the agent gets
-`tool 'upstream_servers' not found`. Add the server from the CLI or the
+servers. By default `upstream_servers` is not listed for them at all, and the
+agent gets `tool 'upstream_servers' not found`; under a profile that sets
+`management_tools: true` it is listed, but only for `list` and `tail_log`. Add the server from the CLI or the
 Web UI instead (below).
 :::
 
@@ -274,7 +275,9 @@ A server you add by editing this file for the first time is **held for review** 
 However you added it, the server is now **quarantined** - its tools are withheld
 from your AI agent until you approve them. This is the point of MCPProxy's
 security model, and nothing works until you pass this gate. The transcripts below
-follow the Web UI or CLI path, so they show only `context7`; if you took the
+follow the CLI path (`upstream add`), so they show only `context7` with
+protocol `streamable-http`; a Web UI add stores the protocol as `http`, and
+`upstream list` and the report then show `http`. If you took the
 configuration-file route, `filesystem` is listed alongside it and needs the same
 approval.
 
