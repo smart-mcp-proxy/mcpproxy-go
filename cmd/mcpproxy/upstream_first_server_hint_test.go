@@ -1,9 +1,16 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 func fakeLookPath(present ...string) func(string) (string, error) {
@@ -91,15 +98,53 @@ func TestOutputServers_ScopedCallerGetsNoFirstServerHint(t *testing.T) {
 	}
 }
 
-func TestAgentTokenInEnv(t *testing.T) {
-	t.Setenv("MCPPROXY_API_KEY_FILE", "")
-	t.Setenv("MCPPROXY_API_KEY", "mcp_agt_abcdef")
-	if !agentTokenInEnv() {
-		t.Errorf("an mcp_agt_ key in MCPPROXY_API_KEY is an agent token")
+// The list paths themselves set the origin: config-file mode (no daemon)
+// tells the user to start the core; client mode decides from the key the
+// client actually sends (no key = socket = administrator; an mcp_agt_ key =
+// a scoped agent token, which gets no hint).
+func TestUpstreamListPaths_SetTheHintOrigin(t *testing.T) {
+	setOutputGlobals(t, "table", false)
+	old := upstreamListSource
+	t.Cleanup(func() { upstreamListSource = old })
+
+	out := captureOutput(func() {
+		if err := runUpstreamListFromConfig(&config.Config{}); err != nil {
+			t.Fatalf("runUpstreamListFromConfig: %v", err)
+		}
+	})
+	if !strings.Contains(out, "No upstream servers yet") || !strings.Contains(out, "mcpproxy serve") {
+		t.Errorf("config-file mode with no servers must print the hint with 'mcpproxy serve', got:\n%s", out)
 	}
-	t.Setenv("MCPPROXY_API_KEY", "plain-admin-key")
-	if agentTokenInEnv() {
-		t.Errorf("an admin key is not an agent token")
+
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"success":true,"data":{"servers":[]}}`)
+	}))
+	t.Cleanup(daemon.Close)
+
+	for _, c := range []struct {
+		name, key string
+		hint      bool
+	}{
+		{"socket or no key: administrator", "", true},
+		{"instance admin key", "plain-admin-key", true},
+		{"agent token", "mcp_agt_0123456789abcdef", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			upstreamListSource = listOriginConfig // must be reset by the path
+			client := cliclient.NewClientWithAPIKey(daemon.URL, c.key, nil)
+			out := captureOutput(func() {
+				if err := runUpstreamListClientMode(context.Background(), client, c.key, nil); err != nil {
+					t.Fatalf("runUpstreamListClientMode: %v", err)
+				}
+			})
+			if got := strings.Contains(out, "No upstream servers yet"); got != c.hint {
+				t.Errorf("hint printed = %v, want %v:\n%s", got, c.hint, out)
+			}
+			if strings.Contains(out, "mcpproxy serve") {
+				t.Errorf("with a daemon answering, the hint must not say to start one:\n%s", out)
+			}
+		})
 	}
 }
 

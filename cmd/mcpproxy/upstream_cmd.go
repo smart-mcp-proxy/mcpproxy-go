@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -429,10 +430,13 @@ func runUpstreamList(_ *cobra.Command, _ []string) error {
 		return outputError(err, output.ErrCodeOperationFailed)
 	}
 
-	// Check if daemon is running (socket first, then TCP fallback)
-	if client, ok := newDaemonClient(globalConfig, logger.Sugar()); ok {
+	// Check if daemon is running (socket first, then TCP fallback). The key
+	// the client will send decides whether the list is the whole install:
+	// none (the socket) or the admin key is, an agent token's is not.
+	if endpoint, apiKey, ok := daemonEndpoint(globalConfig); ok {
 		logger.Info("Detected running daemon, using client mode")
-		return runUpstreamListClientMode(ctx, client, logger)
+		client := cliclient.NewClientWithAPIKey(endpoint, apiKey, logger.Sugar())
+		return runUpstreamListClientMode(ctx, client, apiKey, logger)
 	}
 	if upstreamListProfile != "" {
 		return outputError(output.NewStructuredError(output.ErrCodeConnectionFailed,
@@ -459,7 +463,7 @@ func upstreamListQuery() url.Values {
 	return q
 }
 
-func runUpstreamListClientMode(ctx context.Context, client *cliclient.Client, _ *zap.Logger) error {
+func runUpstreamListClientMode(ctx context.Context, client *cliclient.Client, apiKey string, _ *zap.Logger) error {
 	// Call GET /api/v1/servers
 	servers, err := client.GetServersWithQuery(ctx, upstreamListQuery())
 	if err != nil {
@@ -469,7 +473,7 @@ func runUpstreamListClientMode(ctx context.Context, client *cliclient.Client, _ 
 	}
 
 	upstreamListSource = listOriginDaemonAdmin
-	if agentTokenInEnv() {
+	if strings.HasPrefix(apiKey, auth.TokenPrefixStr) {
 		upstreamListSource = listOriginDaemonScoped
 	}
 	return outputServers(servers)
@@ -2850,11 +2854,3 @@ const (
 
 // upstreamListSource is set by the two list paths before outputServers.
 var upstreamListSource = listOriginDaemonAdmin
-
-// agentTokenInEnv reports whether the REST key the CLI will send is an agent
-// token. Only MCPPROXY_API_KEY(_FILE) can carry one: the config's api_key is
-// the instance admin key, and socket connections are administrator.
-func agentTokenInEnv() bool {
-	envKey, err := config.ResolveEnvAPIKey()
-	return err == nil && envKey.Set && strings.HasPrefix(envKey.Key, "mcp_agt_")
-}
