@@ -197,6 +197,11 @@ and lower risk.
   profile-bound clients, URL profiles, session-selected profiles, anonymous callers and the
   single-server surface. Tests MUST include a session whose `set_profile` choice differs from its
   binding or URL profile, on both `retrieve_tools` and the direct `tools/list`.
+- **FR-004a**: When `retrieve_tools` is called with its `server` selector, outcome reach is the selected
+  server alone, if it is configured and in the caller's reach, whether or not the search produced a hit
+  for it. An unknown or out-of-reach selection produces no outcomes. Tests MUST cover a selected ready
+  server with another server unavailable (no outcomes), a selected unavailable server with no indexed
+  tools (one outcome), and unknown and out-of-reach selections (none).
 - **FR-005**: The array MUST hold at most 20 entries, ordered by action priority then name. When more
   unavailable servers are in reach, `unavailable_servers_more` MUST give the number not listed.
 - **FR-006**: When `retrieve_tools` returns zero tools and `unavailable_servers` is present,
@@ -218,8 +223,11 @@ and lower risk.
   ids, confined to that server), `describe_tool` MUST return the server's status and message, instead of
   the not-found remediation, for an id that would otherwise be "not found" and whose owning server
   resolves unambiguously, through the existing collision-aware resolution, to an in-reach unavailable
-  server. The answer MUST be identical for every tool name on that server that is not policy-denied. The
-  existing visibility and tool-policy gates run first and keep their answers. Tool policy MUST be
+  server. The answer MUST be identical for every tool name on that server that is not policy-denied.
+  Scope and tool-policy gates run first and keep their answers. After them, for an unavailable server,
+  the server outcome is authoritative and is returned **before** any index-dependent visibility gate
+  (quarantine, pending or changed approval). On this path those gates' existing answers are deliberately
+  not preserved, so an indexed held or quarantined tool and an unindexed name get the same answer. Tool policy MUST be
   evaluated for every syntactically valid, in-scope candidate id **before** any index-dependent fallback,
   so a policy-denied id gets the existing not-found answer whether or not it is indexed. A regression
   test MUST describe the same denied id with and without its index document while the server is
