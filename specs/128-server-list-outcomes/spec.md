@@ -127,7 +127,8 @@ entry and that the `tools` array is unchanged.
 **Acceptance Scenarios**:
 
 1. **Given** the single-server surface `/mcp/s/jira` with jira waiting for sign-in, **When** the client
-   lists tools, **Then** `_meta` carries one outcome for jira and `tools` is empty.
+   lists tools, **Then** `_meta` carries one outcome for jira, `tools` holds no upstream tools, and the
+   `tools` array is byte-identical to the pre-feature listing (the built-in `describe_tool` stays).
 2. **Given** all servers in reach are ready, **When** the client lists tools, **Then** the
    `app.mcpproxy/unavailable_servers` key is absent.
 3. **Given** a paginated `tools/list`, **When** the client walks the pages, **Then** the outcomes appear
