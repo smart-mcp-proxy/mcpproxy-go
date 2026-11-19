@@ -214,8 +214,9 @@ with the same validation on every surface.
   profile" when the budget runs out. Rules are deduplicated before evaluation: identical rules (same
   tool pattern, argument, kind, values and `when_absent`) count once, and messages keep the first
   index. Each distinct argument path is resolved once and fully, without short-circuiting, and its cost
-  is counted once however many rules share it. A rule set that is a superset of another therefore never
-  visits fewer nodes, so it cannot exhaust its budget where the other does not. Tests cover large
+  is counted once however many rules share it. Adding rules never reduces the charged work. A rule set
+  can therefore not exhaust its budget while a superset of it completes. Additional *distinct* paths may
+  legitimately exhaust the shared budget, but duplicating an existing rule never adds cost. Tests cover large
   terminal strings, deep containers and wide arrays, not only large arrays.
 - **Profile binding guard**: the anonymous-vs-bound bypass guard (Spec 108, `profiles.md` "The binding
   guard") must see argument rules. Otherwise a bound profile that differs from the anonymous profile only
@@ -281,18 +282,24 @@ with the same validation on every surface.
   rules whose argument the tool's schema does not declare as a diagnostic ("not declared by the schema;
   still enforced"), never as inert.
 - **FR-016**: The profile binding guard (write-time and standing runtime) MUST treat argument rules as
-  part of containment. A bound profile is bypassable when, for a tool the anonymous profile (or any
-  profile reachable from it through `switchable_to`) admits, the bound profile carries an argument rule
-  that the anonymous or reachable profile does not carry verbatim for the same tool pattern and argument.
+  part of containment. Check every profile reachable anonymously (the anonymous profile and those
+  reachable from it through `switchable_to`) and every tool it admits. The binding is contained only if
+  at least one **bound-reachable** policy (the bound profile or one reachable from it through
+  `switchable_to`) admits that tool and has a deduplicated set of applicable argument rules that are
+  all present verbatim in the anonymous-reachable policy. Otherwise the binding is bypassable.
   Containment MUST be checked on the deduplicated rule sets that FR-014 evaluates, so budget accounting
-  is identical on both sides. When containment cannot be established, the guard MUST fail closed. Tests
+  is identical on both sides. A regression MUST cover a bound profile that denies a tool, can switch to a
+  profile admitting it only under a path prefix, and an anonymous profile admitting it unrestricted. When containment cannot be established, the guard MUST fail closed. Tests
   MUST cover: a rule added only to the bound profile; a rule removed only from the anonymous profile; a
   file reload followed by credential omission; and a bound profile that duplicates a shared rule many
   times, where all value checks pass. The last case must not be bypassable, and it must not refuse on
   budget alone.
 - **FR-017**: Profile responses to scoped callers (REST, MCP `profiles` tool, effective-tools) MUST
-  project argument rules through the same server-visibility filter as `tools.allow/deny`. A rule whose
-  tool pattern names a server outside the caller's visibility MUST be omitted with its values. A
+  project argument rules by server visibility. A rule MUST be exposed, with its values, only if its tool
+  pattern's server segment matches at least one server visible to the caller. A wildcard server segment
+  (e.g. `private-pay*`) that matches only hidden servers MUST be omitted. Unlike today's `allow/deny`
+  projection, a `*` in the server segment does not by itself keep a rule visible. Regressions cover a
+  private-only wildcard and a wildcard matching both visible and hidden servers. A
   regression test MUST use a profile spanning two servers and a caller authorized for one.
 - **FR-012**: `tools.arguments` MUST be part of the profile policy fingerprint, the legacy-profile
   detection and the rollout-gate field list, so an edit is detected and a legacy profile stays legacy
