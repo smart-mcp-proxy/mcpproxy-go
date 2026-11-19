@@ -10,7 +10,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 // TestUpstreamToolCallerIsConcurrencySafe (Spec 096): call_tools() dispatches
@@ -29,7 +28,7 @@ func TestUpstreamToolCallerIsConcurrencySafe(t *testing.T) {
 	logger := zap.NewNop()
 	// No clients are registered, so every call takes the "server not found"
 	// branch: it exercises the recording path without needing a live upstream.
-	upstreamManager := upstream.NewManager(logger, &config.Config{}, nil, nil, nil)
+	upstreamManager := newTestUpstreamManager(t, logger, &config.Config{}, nil, nil, nil)
 
 	caller := &upstreamToolCaller{
 		upstreamManager: upstreamManager,

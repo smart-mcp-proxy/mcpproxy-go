@@ -3990,6 +3990,10 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// forwardContentResult truncates/caches it, so the read_cache store never
 	// holds an unredacted secret and a blocked response is never cached. A
 	// non-nil result means the call was blocked.
+	// Issue #1932: tool_response_limit bounds structuredContent too. An oversize
+	// structured result becomes a text block here, before sanitisation, so it
+	// is redacted, scanned, truncated and cached like any other text block.
+	structuredWithheld := withholdOversizeStructured(result, p.currentTruncator().Limit(), p.logger, toolName)
 	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, requestID, contentTrust, result); blockResult != nil {
 		// The upstream ran, so the started record is closed: history and the
 		// tool_call completion carry the block message, never the response.
@@ -4012,7 +4016,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	}
 
 	// Spec 069 A1: measure raw sizes before truncation.
-	activityResponseBytes := rawByteSize(result)
+	activityResponseBytes := rawByteSize(upstreamSizeView(result, structuredWithheld))
 	activityRequestBytes := rawByteSize(activityArgs)
 
 	// Spec 084: adaptive TOON encoding of result text blocks. Positioned AFTER
@@ -4034,7 +4038,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
 	// policy_decision. No-op when disabled / no schema / error result.
-	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, forwarded, fwdOut); blockResult != nil {
+	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, outputValidationView(forwarded, structuredWithheld), fwdOut); blockResult != nil {
 		return blockResult, nil
 	}
 
@@ -4495,6 +4499,10 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// forwardContentResult truncates/caches it, so the read_cache store never
 	// holds an unredacted secret and a blocked response is never cached. A
 	// non-nil result means the call was blocked.
+	// Issue #1932: tool_response_limit bounds structuredContent too. An oversize
+	// structured result becomes a text block here, before sanitisation, so it
+	// is redacted, scanned, truncated and cached like any other text block.
+	structuredWithheld := withholdOversizeStructured(result, p.currentTruncator().Limit(), p.logger, toolName)
 	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, requestID, contentTrust, result); blockResult != nil {
 		// The upstream ran: close the started record (see handleCallToolVariant).
 		blockMsg := p.recordOutputBlocked(ctx, toolCallRecord, callInc, blockResult)
@@ -4510,7 +4518,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	}
 
 	// Spec 069 A1: measure raw sizes before truncation.
-	legacyResponseBytes := rawByteSize(result)
+	legacyResponseBytes := rawByteSize(upstreamSizeView(result, structuredWithheld))
 	legacyRequestBytes := rawByteSize(activityArgs)
 
 	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheStoreAsForwarded(producer, fwdOut, serverName), p.logger, toolName, args)
@@ -4518,7 +4526,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
 	// policy_decision. No-op when disabled / no schema / error result.
-	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, forwarded, fwdOut); blockResult != nil {
+	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, outputValidationView(forwarded, structuredWithheld), fwdOut); blockResult != nil {
 		return blockResult, nil
 	}
 

@@ -169,6 +169,10 @@ func startCountingUpstream(t *testing.T, proxy *MCPProxyServer, rt *runtime.Runt
 	// Close, not Shutdown: the proxy may still hold this upstream's
 	// standalone GET stream (GH #1910), and Shutdown waits for it.
 	t.Cleanup(func() { _ = httpSrv.Close() })
+	// Runs before the close above: the proxy's client leaves while the stub
+	// still listens instead of redialing its closed port until the manager
+	// shuts down.
+	stopUpstreamBeforeFixtureClose(t, proxy.upstreamManager, server)
 	up.URL = fmt.Sprintf("http://%s", ln.Addr().String())
 
 	serverCfg := &config.ServerConfig{Name: server, URL: up.URL, Protocol: "streamable-http", Enabled: true}

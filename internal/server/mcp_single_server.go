@@ -146,6 +146,7 @@ func (p *MCPProxyServer) renderSingleServerTools(name string, cat *directCatalog
 			// original entry's identity; only the handler gets the copy.
 			bare := *entry
 			bare.DisplayName = entry.ToolName
+			bare.OutputSchemaListed = len(mcpTool.RawOutputSchema) > 0
 			tools = append(tools, mcpserver.ServerTool{
 				Tool:    mcpTool,
 				Handler: p.makeDirectModeHandler(&bare),

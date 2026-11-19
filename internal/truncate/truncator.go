@@ -30,8 +30,12 @@ func NewTruncator(limit int) *Truncator {
 	return &Truncator{limit: limit}
 }
 
-// Limit returns the character limit this truncator applies.
+// Limit returns the character limit this truncator applies. A nil truncator
+// applies none (0).
 func (t *Truncator) Limit() int {
+	if t == nil {
+		return 0
+	}
 	return t.limit
 }
 
