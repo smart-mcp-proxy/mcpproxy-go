@@ -373,8 +373,13 @@ admin can delete one user's value or all values for a slot.
 - **FR-019a**: A pending `oauth_connect` consent flow MUST be bound, when `/connect` is initiated, to the
   record generation and broker-config fingerprint. Disconnect, a newer connect initiation and a config
   change MUST invalidate older pending flows. A callback MUST persist only if its original fence still
-  matches. Tests MUST cover a disconnect before the callback begins, and two consent flows completed in
-  reverse order.
+  matches. The authenticated callback user MUST equal the pending flow's initiating user **before** the
+  code is exchanged or anything is persisted. This applies to denial callbacks too. A mismatch consumes
+  the state, performs no token request and stores nothing. (Today's callback authenticates the caller
+  but does not compare it with the initiator, `credential_handlers.go:324`. With injection, that would
+  let one user link a victim's upstream account to their own MCPProxy account.) Tests MUST cover a
+  disconnect before the callback begins, two consent flows completed in reverse order, and Alice's flow
+  completed while authenticated as Bob: no token exchange and no stored credential.
 - **FR-020**: An `oauth_connect` server with `inject: true` MUST inject the user's stored access token
   and refresh it under FR-019. Without `inject`, behaviour MUST be unchanged, and existing connect
   records MUST remain readable.
