@@ -24,6 +24,32 @@ import (
 // socketE2EMutex ensures socket E2E tests run sequentially to avoid shutdown race conditions
 var socketE2EMutex sync.Mutex
 
+// socketE2EServerStopTimeout bounds how long a socket E2E test waits for
+// Server.Start to return after its server was shut down.
+const socketE2EServerStopTimeout = 45 * time.Second
+
+// stopSocketE2EServer shuts down a server a socket E2E test started with
+// srv.Start(ctx) in a goroutine that sends Start's result on done. Defer it
+// right after starting the server, AFTER the socketE2EMutex unlock defer, so
+// it runs first: the server (its runtime, upstream manager and that manager's
+// network-recovery watcher) is gone before the next socket test takes the
+// mutex and before the package leak guard in leak_guard_main_test.go looks.
+//
+// Shutdown runs before cancel: Start's own context watcher then finds the
+// server already shut down and returns without a second shutdown.
+func stopSocketE2EServer(t *testing.T, srv *Server, cancel context.CancelFunc, done <-chan error) {
+	t.Helper()
+	if err := srv.Shutdown(); err != nil {
+		t.Logf("socket E2E server shutdown: %v", err)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(socketE2EServerStopTimeout):
+		t.Errorf("socket E2E server did not stop within %s", socketE2EServerStopTimeout)
+	}
+}
+
 // TestEndToEnd_TrayToCore_UnixSocket tests the complete flow:
 // 1. Core server creates Unix socket listener
 // 2. Simulated tray client connects via socket
@@ -74,16 +100,13 @@ func TestE2E_TrayToCore_UnixSocket(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, srv)
 
-	// Start server in background
+	// Start server in background; stopped before the socket mutex is released.
 	ctx, cancel := context.WithCancel(context.Background())
-	// Note: Not using defer cancel() to avoid race condition panic during shutdown
-	_ = cancel
-
-	serverReady := make(chan error, 1)
+	serverDone := make(chan error, 1)
 	go func() {
-		err := srv.Start(ctx)
-		serverReady <- err
+		serverDone <- srv.Start(ctx)
 	}()
+	defer stopSocketE2EServer(t, srv, cancel, serverDone)
 
 	// Wait for server to be ready
 	require.Eventually(t, func() bool {
@@ -214,13 +237,8 @@ func TestE2E_TrayToCore_UnixSocket(t *testing.T) {
 		assert.Contains(t, line, "SSE connection established")
 	})
 
-	// Cleanup
-	// Note: Server shutdown is handled by avoiding cancel() call above
-	// The test framework will clean up when the test exits.
-	_ = serverReady
-
 	// Socket file will be cleaned up when tmpDir is removed by test framework or system cleanup
-	t.Log("Test completed successfully - server shutdown handled by test framework")
+	t.Log("Test completed successfully")
 }
 
 // TestEndToEnd_DualListener_Concurrent tests concurrent requests over both TCP and socket
@@ -262,12 +280,11 @@ func TestE2E_DualListener_Concurrent(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	// Note: Not using defer cancel() to avoid race condition panic during shutdown
-	_ = cancel
-
+	serverDone := make(chan error, 1)
 	go func() {
-		_ = srv.Start(ctx)
+		serverDone <- srv.Start(ctx)
 	}()
+	defer stopSocketE2EServer(t, srv, cancel, serverDone)
 
 	require.Eventually(t, func() bool {
 		return srv.IsReady()
@@ -390,12 +407,11 @@ func TestE2E_SocketPermissions(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	// Note: Not using defer cancel() to avoid race condition panic during shutdown
-	_ = cancel
-
+	serverDone := make(chan error, 1)
 	go func() {
-		_ = srv.Start(ctx)
+		serverDone <- srv.Start(ctx)
 	}()
+	defer stopSocketE2EServer(t, srv, cancel, serverDone)
 
 	require.Eventually(t, func() bool {
 		return srv.IsReady()
