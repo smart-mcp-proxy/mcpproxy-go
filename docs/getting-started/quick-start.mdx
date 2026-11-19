@@ -276,8 +276,10 @@ However you added it, the server is now **quarantined** - its tools are withheld
 from your AI agent until you approve them. This is the point of MCPProxy's
 security model, and nothing works until you pass this gate. The transcripts below
 follow the CLI path (`upstream add`), so they show only `context7` with
-protocol `streamable-http`; a Web UI add stores the protocol as `http`, and
-`upstream list` and the report then show `http`. If you took the
+protocol `streamable-http`. The other routes in step 4 (the Web UI, the
+configuration file, and an agent asked for HTTP as in the prompt above) store
+the protocol as `http`, so `upstream list` and the report show `http` there.
+If you took the
 configuration-file route, `filesystem` is listed alongside it and needs the same
 approval.
 
