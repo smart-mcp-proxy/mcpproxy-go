@@ -62,7 +62,7 @@ Key guarantees:
   server serializes the response through its normal transport encoder.
 - **Validation sees the upstream's result**: when `tool_response_limit`
   withholds an oversize `structuredContent` from the agent (see
-  [Configuration](../configuration.md)), validation still judges the value the
+  [Configuration](../configuration/config-file.md)), validation still judges the value the
   upstream returned, so strict mode with `missing_structured_content=block`
   does not refuse a large response. On the direct surface a tool listed with
   an `outputSchema` always keeps its `structuredContent`.
