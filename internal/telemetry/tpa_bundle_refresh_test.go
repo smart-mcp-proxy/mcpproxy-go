@@ -16,11 +16,11 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
-// TestSchemaVersionIs16 pins the Spec 087 / Spec 101 US3 bump: the five refresh
-// counters ride schema 16.
-func TestSchemaVersionIs16(t *testing.T) {
-	if SchemaVersion != 16 {
-		t.Fatalf("SchemaVersion = %d, want 16 (v16 TPA bundle refresh counters)", SchemaVersion)
+// TestSchemaVersionIs17 pins the current schema (Spec 126 PR-A). The five refresh
+// counters of the Spec 087 / Spec 101 US3 bump rode schema 16 first.
+func TestSchemaVersionIs17(t *testing.T) {
+	if SchemaVersion != 17 {
+		t.Fatalf("SchemaVersion = %d, want 17 (v17 completion counters; the v16 TPA refresh counters ride every later version)", SchemaVersion)
 	}
 }
 
@@ -170,7 +170,7 @@ func TestTPABundleRefreshCounters_AloneEmitTPAScanner(t *testing.T) {
 	}
 	js := string(data)
 	for _, want := range []string{
-		`"schema_version":16`,
+		`"schema_version":17`,
 		`"tpa_scanner":{`,
 		`"bundle_refresh_cycles":4`,
 		`"bundle_refresh_activations":1`,

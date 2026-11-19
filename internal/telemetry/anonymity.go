@@ -106,6 +106,11 @@ type anonymityScanEnvelope struct {
 	// → non-negative counts. Same not-a-pointer reasoning as TPAScanner.
 	Preflight json.RawMessage `json:"preflight"`
 
+	// Spec 126 (schema v17) closed objects: the completion window and the
+	// day_two block. Same not-a-pointer reasoning as TPAScanner.
+	UpstreamOutcomes json.RawMessage `json:"upstream_outcomes"`
+	DayTwo           json.RawMessage `json:"day_two"`
+
 	// Schema v9 structural check: the trust-tier histogram must be keyed
 	// exclusively by the fixed auto|scan|manual enum with non-negative integer
 	// counts — a producer-side regression that let a server name in as a map
@@ -461,6 +466,144 @@ func scanTrustModeDistribution(raw json.RawMessage) *AnonymityViolation {
 	return nil
 }
 
+// dayTwoFieldViolation builds the violation for a schema-v17 closed object
+// (upstream_outcomes, day_two) that broke its shape. field is always one of
+// the fixed key names below, never a key or value read from the payload.
+func dayTwoFieldViolation(field, reason string) *AnonymityViolation {
+	return &AnonymityViolation{
+		Rule:    "day_two_field_invalid",
+		Pattern: field,
+		Reason:  fmt.Sprintf("schema-17 field %s %s", field, reason),
+	}
+}
+
+// v17BucketEnum is the bucketUpstream vocabulary.
+var v17BucketEnum = []string{"0", "1-10", "11-100", "101-1000", "1000+"}
+
+// upstreamOutcomesSchema / dayTwoSchema are the closed key sets and enums of
+// the two schema-v17 objects (specs/126-day-two-activation/contracts/
+// telemetry-day-two.schema.json, schema-17 part). Keys of later schema
+// versions are added here with the PR that produces them.
+var (
+	upstreamOutcomesSchema = map[string][]string{
+		"succeeded":             v17BucketEnum,
+		"unusable":              v17BucketEnum,
+		"succeeded_non_starter": v17BucketEnum,
+		"coverage":              {OutcomeCoverageFull, OutcomeCoveragePartial},
+		"window_age":            {InstallAgeD0to6, InstallAgeD7to13, InstallAgeD14Plus},
+	}
+	upstreamOutcomesRequired = []string{"succeeded", "unusable", "succeeded_non_starter", "coverage"}
+
+	dayTwoSchema = map[string][]string{
+		"install_origin":     {InstallOriginFresh, InstallOriginExisting},
+		"install_age":        {InstallAgeD0to6, InstallAgeD7to13, InstallAgeD14Plus},
+		"success_scope_ever": {SuccessScopeNone.String(), SuccessScopeStarterOnly.String(), SuccessScopeNonStarter.String()},
+	}
+	dayTwoRequired = []string{"install_origin", "success_scope_ever"}
+)
+
+// scanClosedEnumObject asserts raw is a JSON object whose keys all belong to
+// schema, whose required keys are present, and whose values are bare JSON
+// strings from the key's closed enum. A number, boolean, null, nested object,
+// list, timestamp or any free-text string is rejected. The violation never
+// echoes a key or value from the payload: field names come from schema.
+func scanClosedEnumObject(raw json.RawMessage, object string, schema map[string][]string, required []string) (map[string]string, *AnonymityViolation) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return nil, dayTwoFieldViolation(object, "must be an object")
+	}
+	for key := range obj {
+		if _, ok := schema[key]; !ok {
+			return nil, dayTwoFieldViolation(object, "carries a key outside the closed key set")
+		}
+	}
+	for _, key := range required {
+		if _, ok := obj[key]; !ok {
+			return nil, dayTwoFieldViolation(object+"."+key, "is required")
+		}
+	}
+	values := make(map[string]string, len(obj))
+	for key, enum := range schema {
+		v, ok := obj[key]
+		if !ok {
+			continue
+		}
+		field := object + "." + key
+		trimmed := bytes.TrimSpace(v)
+		if len(trimmed) == 0 || trimmed[0] != '"' {
+			return nil, dayTwoFieldViolation(field, "must be a string from its closed enum")
+		}
+		var str string
+		if err := json.Unmarshal(trimmed, &str); err != nil {
+			return nil, dayTwoFieldViolation(field, "must be a string from its closed enum")
+		}
+		inEnum := false
+		for _, e := range enum {
+			if str == e {
+				inEnum = true
+				break
+			}
+		}
+		if !inEnum {
+			return nil, dayTwoFieldViolation(field, "must be a value of its closed enum")
+		}
+		values[key] = str
+	}
+	return values, nil
+}
+
+// scanUpstreamOutcomes asserts the schema-v17 upstream_outcomes object (if
+// present) is the closed completion window: three bucket labels and a
+// coverage flag, nothing else. Modelled on scanTrustModeDistribution.
+func scanUpstreamOutcomes(raw json.RawMessage) *AnonymityViolation {
+	if len(raw) == 0 {
+		return nil
+	}
+	_, v := scanClosedEnumObject(raw, "upstream_outcomes", upstreamOutcomesSchema, upstreamOutcomesRequired)
+	return v
+}
+
+// scanDayTwo asserts the schema-v17 day_two object (if present) carries only
+// its closed enums, and that install_age is present exactly when
+// install_origin is "fresh".
+func scanDayTwo(raw json.RawMessage) *AnonymityViolation {
+	if len(raw) == 0 {
+		return nil
+	}
+	values, v := scanClosedEnumObject(raw, "day_two", dayTwoSchema, dayTwoRequired)
+	if v != nil {
+		return v
+	}
+	_, hasAge := values["install_age"]
+	if fresh := values["install_origin"] == InstallOriginFresh; fresh != hasAge {
+		return dayTwoFieldViolation("day_two.install_age", "must be present exactly when install_origin is fresh")
+	}
+	return nil
+}
+
+// scanWindowAgeOrigin enforces the one cross-object rule of schema 17:
+// upstream_outcomes.window_age is sent only for a fresh install, so it must be
+// absent whenever day_two.install_origin is "existing" (the receiver rejects
+// that combination). Both objects have already passed their own scans.
+func scanWindowAgeOrigin(rawOutcomes, rawDayTwo json.RawMessage) *AnonymityViolation {
+	if len(rawOutcomes) == 0 || len(rawDayTwo) == 0 {
+		return nil
+	}
+	var outcomes struct {
+		WindowAge *string `json:"window_age"`
+	}
+	var dayTwo struct {
+		InstallOrigin string `json:"install_origin"`
+	}
+	if json.Unmarshal(rawOutcomes, &outcomes) != nil || json.Unmarshal(rawDayTwo, &dayTwo) != nil {
+		return dayTwoFieldViolation("upstream_outcomes.window_age", "could not be checked against day_two")
+	}
+	if outcomes.WindowAge != nil && dayTwo.InstallOrigin == InstallOriginExisting {
+		return dayTwoFieldViolation("upstream_outcomes.window_age", "must be absent when install_origin is existing")
+	}
+	return nil
+}
+
 // diagFieldViolation builds the violation for a diagnostics counter field that
 // broke its documented shape (cataloged code keys, non-negative counts).
 func diagFieldViolation(field, reason string) *AnonymityViolation {
@@ -742,6 +885,18 @@ func ScanForPII(payloadJSON []byte) error {
 	// Rule 8: trust_mode_distribution (schema v9) must be fixed-enum trust-tier
 	// keys → non-negative integer counts.
 	if v := scanTrustModeDistribution(env.TrustModeDistribution); v != nil {
+		return v
+	}
+
+	// Rule 9: schema-v17 upstream_outcomes and day_two (Spec 126 FR-029) are
+	// closed objects of closed string enums.
+	if v := scanUpstreamOutcomes(env.UpstreamOutcomes); v != nil {
+		return v
+	}
+	if v := scanDayTwo(env.DayTwo); v != nil {
+		return v
+	}
+	if v := scanWindowAgeOrigin(env.UpstreamOutcomes, env.DayTwo); v != nil {
 		return v
 	}
 

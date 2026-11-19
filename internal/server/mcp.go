@@ -3769,6 +3769,8 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	dispatchCtx = p.withReviewDirtyRecheck(dispatchCtx, serverName)
 	result, err := p.dispatchOnEpoch(dispatchCtx, certified, toolName, args)
 	p.noteUpstreamDispatched(dispatchCtx) // one attempt per request that reached the transport
+	outcome := p.beginUpstreamOutcome(dispatchCtx, serverName, callInc)
+	defer outcome.record() // Spec 126 FR-035: one outcome on every exit below
 	callerr.Observe(ctx, result, err)
 	fwdOut := fwdSink.Outbound()
 	duration := time.Since(startTime)
@@ -4093,6 +4095,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// policy gates (sanitisation, output validation) above.
 	if activityStatus == "success" {
 		p.recordRealToolCallSuccess()
+		outcome.markUsable(forwarded, nil)
 	}
 
 	return forwarded, nil
