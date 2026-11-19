@@ -46,9 +46,12 @@ client-forwarding deny list is not relaxed.
 3. **One credential source per call.** A server in user-credential mode carries no operator credential
    on user calls. The operator's discovery identity lives in a separate `discovery_headers` block, which
    is never sent on a user call (FR-004).
-4. **Discovery stays operator-identity.** Connect, `tools/list`, health checks and background refresh have
-   no user. They use `discovery_headers` (or nothing). The tool index is shared. Per-user tool lists are
-   out of scope.
+4. **Discovery stays operator-identity, and only background operations use it.** Background operations
+   have no user and use `discovery_headers` (or nothing): `initialize`, `tools/list`, `prompts/list`,
+   `resources/list`, `ping`, health checks and refresh. The tool index is shared, and per-user tool lists
+   are out of scope. A user-triggered request other than `tools/call` (`prompts/get`, `resources/read`,
+   `completion/complete`) on a user-credential server is refused for user callers in this phase. It
+   would otherwise run with the operator's identity on caller-controlled arguments.
 5. **Token exchange is opt-in per server and stores only what it reads.** RFC 8693 / Entra OBO uses a
    *delegation grant*: the IdP access token from one login session, held encrypted, valid no longer than
    that session and that token, and purged when either ends. There is no refresh token and no offline
@@ -87,8 +90,9 @@ Out of scope:
 
 - **User**: a server-edition principal with a `UserID`. On `/mcp` this is an agent token owned by the
   user (Spec 107 FR-003: sessions and user JWTs never authenticate `/mcp`).
-- **User-credential mode**: a server that has at least one slot reference, an exchange mode, or
-  `oauth_connect` with `inject: true`.
+- **User-credential mode**: a server with exactly one of three credential sources: slot references, an
+  exchange mode (`token_exchange` / `entra_obo`), or `oauth_connect` with `inject: true`. The three are
+  mutually exclusive on one server.
 - **Slot**: a named per-server placeholder (`[a-z0-9_]{1,32}`) declared by its use in `${user:<slot>}`.
 - **Credential record**: one encrypted record per (user ID, server key, kind, name). The kind is `slot`
   (name = slot), `connect`, `exchanged`, or `grant` (name = session ID). Each record carries a
@@ -97,7 +101,10 @@ Out of scope:
   key stays name + URL, so re-pointing a server orphans old records instead of leaking them to a new URL.
 - **Delegation grant**: the IdP access token captured at one login session. It is valid while that
   session is live *and* the token has not expired. A user has at most one live grant: a new login
-  replaces the previous grant, and the previous session stops carrying one.
+  replaces the previous grant, and the previous session stops carrying one. The token's expiry comes
+  only from a positive `expires_in` in the IdP token response. When that field is omitted, zero or
+  negative, the login still succeeds but creates **no grant**, so exchange fails closed with
+  `MCPX_USER_REAUTH_REQUIRED`. An unknown lifetime is never treated as unbounded or session-long.
 - **Effective expiry** of an exchanged token: the minimum of its own expiry, its grant's token expiry and
   its grant's session expiry. An exchanged token without a stated expiry is treated as expiring 5
   minutes after issue.
@@ -250,17 +257,34 @@ admin can delete one user's value or all values for a slot.
   request from the calling user's record.
 - **FR-002**: Validation MUST reject a `${user:…}` reference in any field other than `headers` values,
   on a stdio or SSE upstream, on a server with `session_bound_identity: true`, or with more than 8
-  slots. It MUST reject a user-credential server that also configures its own upstream `oauth` block,
-  a static credential-bearing header in `headers`, or a `headers` entry and a `discovery_headers` entry
-  that disagree on whether a header carries a credential.
+  slots. For a user-credential server it MUST reject each of the following:
+  - more than one credential source (slots, exchange, injected connect);
+  - its own upstream `oauth` block;
+  - a static credential-bearing header in `headers`;
+  - a `headers` entry and a `discovery_headers` entry that disagree on whether a header carries a
+    credential;
+  - a URL with userinfo or any query string;
+  - a URL that is not `https`, except a loopback host under an explicit test flag. This is re-checked
+    before every dispatch.
+- **FR-002a**: A slot MAY appear only in the value of a credential header. These are `Authorization`,
+  `X-Api-Key`, `Api-Key`, `X-Auth-Token`, `X-Litellm-Api-Key`, or another `X-` header that is not on the
+  Spec 112 deny list (exact names and the `mcp-`, `x-mcpproxy-`, `x-forwarded-`, `proxy-`, `content-`,
+  `sec-`, `if-` prefixes) and not hop-by-hop. Names compare case-insensitively. Transport-managed
+  headers (`Mcp-Session-Id`, `Mcp-Protocol-Version`, `Content-Type`, `Accept`, framing and routing
+  headers) MUST be rejected at validation and again at runtime.
 - **FR-003**: The personal build MUST preserve `auth_broker` blocks and `${user:…}` references opaquely,
   report such servers `needs_config`, and never send an unresolved placeholder upstream.
 - **FR-004**: For a user call on a user-credential server, outbound headers MUST be built by one
-  algorithm. Start from `headers` with every slot resolved from the caller's record, or inject the
-  exchanged or connected token as `Authorization`. Add client-forwarded headers per Spec 112, whose deny
-  list is unchanged. Never add `discovery_headers` or any operator credential. If any slot cannot be
-  resolved, or any credential step fails, the call MUST be refused before dispatch. A header MUST never
-  be sent with an empty or placeholder value.
+  algorithm. Start from `headers`. Then, depending on the server's single credential source, either
+  resolve every slot from the caller's records, or inject the exchanged or connected token as
+  `Authorization`. Add client-forwarded headers per Spec 112, whose deny list is unchanged. Never add
+  `discovery_headers` or any operator credential. If any slot cannot be resolved, or any credential step
+  fails, the call MUST be refused before dispatch. A header MUST never be sent with an empty or
+  placeholder value.
+- **FR-004a**: On a user-credential server, user callers MUST be refused `prompts/get`,
+  `resources/read` and `completion/complete` with a fixed error naming the phase limitation. Operator
+  callers follow `when_no_user`. Discovery credentials MUST be used only for the background operations
+  listed in The Decision.
 - **FR-005**: The raw-config compatibility layer (`removed_keys.go`) MUST stop treating `token_exchange`
   and `entra_obo` as retired: load normalisation and every write door (PATCH, apply, REST, MCP) MUST keep
   them. Tests MUST pin that boot, reload, PATCH and apply preserve an exchange block and never degrade a
@@ -280,8 +304,10 @@ admin can delete one user's value or all values for a slot.
   results, error texts, `read_cache` payloads, logs, activity rows and audit lines. Activity and audit
   MUST record `credential_source` and the slot name, never a value.
 - **FR-009**: `read_cache` entries produced under a user credential MUST be bound to the credential
-  owner's user ID, the record generation and the broker-config fingerprint, in addition to today's
-  principal and forwarding facts. Redemption MUST be refused for any other user, for administrator
+  owner's user ID, the identity and generation of **every** contributing record (each slot used, or the
+  exchanged or connect record), and the broker-config fingerprint, in addition to today's principal and
+  forwarding facts. Replacing any one contributing slot MUST invalidate the entry, and a two-slot test
+  MUST replace each slot independently. Redemption MUST be refused for any other user, for administrator
   readers, for recursive child pages under another identity, and after deletion, replacement, expiry or
   broker-config change.
 - **FR-010**: A user-attributable authentication failure (401/403 from the upstream on a user call, or a
@@ -316,19 +342,35 @@ admin can delete one user's value or all values for a slot.
   purge the grant and its exchanged tokens at logout of that session, session expiry, grant replacement
   by a newer login, or user deactivation. It MUST NOT request offline access or store an IdP refresh
   token. `store_idp_tokens` stays a no-op.
-- **FR-017**: `entra_obo` MUST require that the server-edition login also requests an access token whose
-  audience is mcpproxy's own Entra application (a configured `obo_scope`, e.g. `api://<client-id>/.default`).
-  Validation MUST reject `entra_obo` when the login provider is not Microsoft or `obo_scope` is unset.
-  Today's Graph-only `User.Read` login is not a valid OBO assertion.
+- **FR-017**: `entra_obo` MUST require that the server-edition login requests the OIDC scopes plus
+  **only** mcpproxy's own resource scope (a configured `obo_scope`, e.g. `api://<client-id>/.default`).
+  Graph scopes are removed for that deployment, because Entra issues an access token for one resource per
+  request. User identity MUST then come from the verified ID token's claims (`email`, falling back to
+  `preferred_username`/`upn`), never from Graph `/me` with the OBO assertion. When none of those claims
+  is present, login MUST fail with a fixed error. Validation MUST reject `entra_obo` when the login
+  provider is not Microsoft or `obo_scope` is unset. Tests MUST assert the actual authorization request's
+  scopes, login completion without Graph, and a fixture AS that rejects an assertion with the wrong
+  audience.
 - **FR-018**: Before every dispatch and every cache redemption, an exchanged token MUST be checked
   against its effective expiry and its grant's validity, independently of physical cleanup. It MUST be
   reused only until its effective expiry minus 60 s.
 - **FR-019**: Every exchange and refresh MUST be single-flight per (user, server) and MUST publish and
   persist its result only if the record generation and broker-config fingerprint are unchanged since it
   started. Otherwise the result MUST be discarded, and waiters MUST receive the current state.
+- **FR-019a**: A pending `oauth_connect` consent flow MUST be bound, when `/connect` is initiated, to the
+  record generation and broker-config fingerprint. Disconnect, a newer connect initiation and a config
+  change MUST invalidate older pending flows. A callback MUST persist only if its original fence still
+  matches. Tests MUST cover a disconnect before the callback begins, and two consent flows completed in
+  reverse order.
 - **FR-020**: An `oauth_connect` server with `inject: true` MUST inject the user's stored access token
   and refresh it under FR-019. Without `inject`, behaviour MUST be unchanged, and existing connect
   records MUST remain readable.
+- **FR-020a**: Only Bearer access tokens may be injected. RFC 8693 requests MUST send
+  `requested_token_type=urn:ietf:params:oauth:token-type:access_token`, and MUST require
+  `issued_token_type` to equal it and `token_type` to be `Bearer` (case-insensitive). OBO, refresh and
+  connect results MUST have `token_type` `Bearer`. Any other result MUST be refused with
+  `MCPX_USER_CREDENTIAL_REFUSED` and never injected. Negative fixtures cover ID tokens, refresh tokens
+  and `DPoP`/`N_A` token types.
 - **FR-021**: Token-endpoint failures MUST be reported to the agent by fixed error class
   (`MCPX_USER_REAUTH_REQUIRED`, `MCPX_USER_CREDENTIAL_REFUSED`), never with the AS response body.
 
