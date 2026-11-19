@@ -15,7 +15,7 @@ import (
 // this fix only the doubled ref "reference/reference/time" resolved, so the
 // first-run catalog door failed with "server not found in registry".
 func TestFindServerByID_AcceptsSourcePrefixedReferenceID(t *testing.T) {
-	registryList = []RegistryEntry{{ID: "reference", Name: "Reference", Protocol: protocolReference}}
+	withTestRegistries(t, []RegistryEntry{{ID: "reference", Name: "Reference", Protocol: protocolReference}})
 
 	for _, id := range []string{"time", "reference/time"} {
 		got, err := FindServerByID(context.Background(), "reference", id, nil)
