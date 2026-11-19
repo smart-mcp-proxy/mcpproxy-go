@@ -76,14 +76,12 @@ func TestE2E_TrayToCore_UnixSocket(t *testing.T) {
 
 	// Start server in background
 	ctx, cancel := context.WithCancel(context.Background())
-	// Note: Not using defer cancel() to avoid race condition panic during shutdown
-	_ = cancel
-
 	serverReady := make(chan error, 1)
 	go func() {
 		err := srv.Start(ctx)
 		serverReady <- err
 	}()
+	t.Cleanup(func() { stopSocketE2EServer(t, srv, cancel, serverReady) })
 
 	// Wait for server to be ready
 	require.Eventually(t, func() bool {
@@ -214,13 +212,25 @@ func TestE2E_TrayToCore_UnixSocket(t *testing.T) {
 		assert.Contains(t, line, "SSE connection established")
 	})
 
-	// Cleanup
-	// Note: Server shutdown is handled by avoiding cancel() call above
-	// The test framework will clean up when the test exits.
-	_ = serverReady
-
 	// Socket file will be cleaned up when tmpDir is removed by test framework or system cleanup
-	t.Log("Test completed successfully - server shutdown handled by test framework")
+}
+
+// stopSocketE2EServer stops a server these tests started with Start: it
+// cancels Start's context, waits for Start to return, then runs the full
+// Shutdown, which closes the runtime and its upstream manager. Left running,
+// the server keeps its manager's network-recovery watcher alive for the rest
+// of the package run (the TestMain leak guard fails on it).
+func stopSocketE2EServer(t *testing.T, srv *Server, cancel context.CancelFunc, started <-chan error) {
+	t.Helper()
+	cancel()
+	select {
+	case <-started:
+	case <-time.After(30 * time.Second):
+		t.Errorf("server Start did not return within 30s of its context being cancelled")
+	}
+	if err := srv.Shutdown(); err != nil {
+		t.Errorf("server shutdown: %v", err)
+	}
 }
 
 // TestEndToEnd_DualListener_Concurrent tests concurrent requests over both TCP and socket
@@ -262,12 +272,11 @@ func TestE2E_DualListener_Concurrent(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	// Note: Not using defer cancel() to avoid race condition panic during shutdown
-	_ = cancel
-
+	started := make(chan error, 1)
 	go func() {
-		_ = srv.Start(ctx)
+		started <- srv.Start(ctx)
 	}()
+	t.Cleanup(func() { stopSocketE2EServer(t, srv, cancel, started) })
 
 	require.Eventually(t, func() bool {
 		return srv.IsReady()
@@ -390,12 +399,11 @@ func TestE2E_SocketPermissions(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	// Note: Not using defer cancel() to avoid race condition panic during shutdown
-	_ = cancel
-
+	started := make(chan error, 1)
 	go func() {
-		_ = srv.Start(ctx)
+		started <- srv.Start(ctx)
 	}()
+	t.Cleanup(func() { stopSocketE2EServer(t, srv, cancel, started) })
 
 	require.Eventually(t, func() bool {
 		return srv.IsReady()
