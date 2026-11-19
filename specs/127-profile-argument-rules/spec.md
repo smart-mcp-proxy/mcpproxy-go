@@ -245,10 +245,14 @@ with the same validation on every surface.
   empty segment; a `path_prefix` entry that does not start with `/` or contains a backslash or control
   character; more than 64 rules per profile. It MUST warn (and save) when the tool pattern names a server
   outside `servers`.
-- **FR-003**: Argument rules MUST be evaluated only for a call the existing tool decision admits, after
-  that decision and before token-permission, intent, quarantine, approval and Spec 085 schema
-  validation. They MUST NOT change discovery, listing, `retrieve_tools` ranking or the tool-level
-  decision.
+- **FR-003**: Argument rules MUST be evaluated only for a call the existing tool decision admits,
+  immediately after that decision. They therefore run after the early request checks that already
+  precede it on `call_tool_*` (argument parsing, intent extraction and variant validation), and before
+  token-permission, the annotation-dependent intent check, quarantine, approval and Spec 085 schema
+  validation. The existing early-error precedence is kept. The FR-005 parity assertions apply to
+  otherwise-valid requests. A test MUST combine an invalid intent with an argument-rule violation and
+  pin that the intent error wins on `call_tool_*`. They MUST NOT change discovery, listing,
+  `retrieve_tools` ranking or the tool-level decision.
 - **FR-004**: A call MUST be refused when any matching rule refuses it, per the kind semantics, path
   resolution table, comparable-value rule and path dialect in Definitions. A type mismatch MUST be
   refused. Rules MUST be enforced against the concrete arguments regardless of the tool's schema, and a
@@ -341,8 +345,9 @@ with the same validation on every surface.
   view's "inert" marker catches typos.
 - A string prefix rule is useful even though the upstream may resolve symlinks. The docs state that it
   confines what the agent asks for, not what the upstream does.
-- The existing call-time gate order (profile → token → intent → quarantine → approval → schema →
-  connection) stays, and argument rules slot in right after the profile decision.
+- The existing call-time gate order stays: early parsing and intent extraction, then profile, token,
+  annotation-dependent intent check, quarantine, approval, schema and connection. Argument rules slot in
+  right after the profile decision.
 
 ## Open Questions for the Plan
 
