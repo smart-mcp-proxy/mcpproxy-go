@@ -52,18 +52,37 @@ Out of scope:
 ## Definitions
 
 - **Argument path**: a top-level argument name, or a dotted path into nested objects (`options.force`),
-  at most 8 segments. When the value at a path is an array, the rule applies to every element.
+  at most 8 segments. Resolution follows one evaluation table, pinned as a shared fixture
+  (`argument_rule_cases.json`) that every door is tested against:
+  - A missing key or an explicit `null` at any **intermediate** segment means the argument is **absent**.
+  - An array at an intermediate segment is traversed element by element. The rule applies to every
+    element that resolves, and a nested array is traversed the same way.
+  - A scalar (string, number, boolean) at an intermediate segment, where an object is expected, is a
+    **type mismatch**, and the call is refused.
+  - At the terminal segment, an array means "every element". An empty array resolves to no values.
+  - An explicit `null` at the terminal segment is **present** with value `null`.
+- **Comparable values**: rules compare scalars only (string, number, boolean, `null`). Configured
+  values must be scalars. An incoming terminal value that is an object, or an array element that is an
+  object or array, is a type mismatch, and the call is refused.
 - **Rule kinds** (exactly one per rule):
   - `deny_values`: refuse the call when the value equals any listed value.
   - `allow_values`: refuse the call when the value is present and not one of the listed values.
   - `path_prefix`: refuse the call when the value is present and, after path cleaning, does not lie
     under one of the listed prefixes.
-  - `forbid`: refuse the call when the argument is present at all.
-- **When absent**: `admit` (default) or `refuse`. It decides the outcome when the argument is missing, so
+  - `forbid`: refuse the call when the path resolves to anything present, including `null` or an
+    empty array. Presence is tested before any value is inspected.
+- **When absent**: `admit` (default) or `refuse`. It decides the outcome when the argument is absent, so
   the upstream's default applies. `forbid` ignores it.
-- **Path cleaning**: lexical clean of `.` and `..` segments with `/` as the separator (and `\` folded to
-  `/`). A value that still contains a `..` segment after cleaning, or that is not absolute when every
-  prefix is absolute, is refused. A `~` is not expanded and does not match an absolute prefix.
+- **Path dialect (v1)**: POSIX absolute paths only. Every `path_prefix` entry must start with `/`. A
+  value is refused before any comparison when it contains a backslash, a NUL or other control character,
+  or is longer than 4 KiB, or is not absolute. A `~` is not expanded, so `~/x` is not absolute and is
+  refused. Refusing backslashes, instead of folding them, matters because the proxy forwards the
+  original string: on a POSIX upstream, `/safe\..\safe/x` is a directory named `safe\..\safe` at the
+  root, not a path under `/safe`.
+- **Path cleaning**: lexical clean of `.`, `..` and repeated `/` on the original value. A value whose
+  cleaned form escapes the root (leading `..`), or does not lie under a prefix on whole segments, is
+  refused. Because POSIX resolves `..` lexically the same way when no symlinks are involved, the cleaned
+  form and the dispatched original name the same location. Symlinks remain the stated residual risk.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -103,9 +122,12 @@ Writes under the project directory succeed. `/Users/me/.ssh/authorized_keys`,
 **Why this priority**: filesystem MCP servers are among the most installed, and directory confinement is
 the safeguard users ask for most often.
 
-**Independent Test**: a table of 12 path values (normal, `..` escape, `~`, relative, a lookalike prefix
-such as `/Users/me/repos/app-evil/`, a trailing-slash variant, a backslash variant), each with its
-expected outcome.
+**Independent Test**: a table of at least 14 path values, each with its expected outcome. The cases
+cover a normal path, a `..` escape, `~`, a relative path, a lookalike prefix such as
+`/Users/me/repos/app-evil/`, a trailing-slash variant, `//` runs, `/safe\..\safe/x`, a NUL, and a
+4 KiB+1 value. The fixture server records the **original dispatched string**. The test asserts that
+every admitted string names a location under the prefix when resolved on a POSIX filesystem without
+symlinks.
 
 **Acceptance Scenarios**:
 
@@ -139,8 +161,9 @@ cheaper. It is P2 because enforcement alone is already safe.
 
 In the Web UI profile editor (and `mcpproxy profile try`, `POST /api/v1/profiles/try`), the operator
 picks a tool, types sample arguments and sees "admitted" or "refused by argument rule 2 (`path` not under
-`/Users/me/repos/app/`)". The explainer (`mcpproxy access explain`) accepts the same optional sample
-arguments.
+`/Users/me/repos/app/`)". The explainer accepts the same optional sample arguments through a new
+body-bearing `POST /api/v1/access/explain`. The existing `GET` is unchanged and never takes sample
+arguments, so samples never travel in a URL.
 
 **Acceptance Scenarios**:
 
@@ -163,21 +186,33 @@ with the same validation on every surface.
   naming an out-of-profile server). It never admits the tool.
 - **Several rules match one call**: all are evaluated, and the first refusing rule in list order is
   reported. Order never changes the outcome, only the message.
-- **Tool patterns with `*`**: allowed (`github:*` with `argument: force`). A rule whose argument the
-  tool's schema does not declare is inert for that tool and is listed as such in the effective-tools
-  view.
-- **Value comparison**: JSON equality on the decoded value (`true` ≠ `"true"`, `1` = `1.0`). Strings
+- **Tool patterns with `*`**: allowed (`github:*` with `argument: force`). A rule is enforced against
+  the concrete arguments of every matching call, whatever the tool's schema declares. A schema can
+  accept undeclared properties (`additionalProperties`, `patternProperties`, `$ref`, composition), may be
+  missing, or may not compile. So "the schema does not declare this argument" is only a diagnostic in the
+  effective-tools view, never a reason to skip a rule. `when_absent: refuse` applies with or without a
+  schema.
+- **Value comparison**: JSON equality on decoded scalars (`true` ≠ `"true"`, `1` = `1.0`). Strings
   compare exactly (case-sensitive).
-- **Large or deep arguments**: evaluation reads at most the named path. The total work per call is bounded
-  by rules × path depth × array elements, capped at 10,000 element checks. Beyond the cap the call is
-  refused as "argument too large to check under this profile".
+- **Large or deep arguments**: evaluation has one cumulative budget per call: at most 10,000 visited
+  nodes (path segments, array elements and terminal values, across all rules) and at most 1 MiB of string
+  bytes examined (comparisons and path cleaning). The call is refused as "argument too large to check
+  under this profile" when the budget runs out. Tests cover large terminal strings, deep containers and
+  wide arrays, not only large arrays.
+- **Profile binding guard**: the anonymous-vs-bound bypass guard (Spec 108, `profiles.md` "The binding
+  guard") must see argument rules. Otherwise a bound profile that differs from the anonymous profile only
+  by an argument rule would compare as equivalent, and a client could drop its credential to escape the
+  rule.
 - **Secret-shaped values**: refusal messages, activity rows, audit lines and the explainer name the
   argument and the rule, never the value sent. The value appears only where the existing redacted
   activity-args copy already records it.
 - **Hot reload**: a profile edit takes effect on the next call, with the same reload semantics as Spec 108.
-- **Legacy and downgrade**: a profile without `tools.arguments` behaves exactly as today. An older binary
-  reading a profile with the field ignores it (the field is preserved opaquely) and logs a warning that
-  argument rules are not enforced.
+- **Legacy and downgrade**: a profile without `tools.arguments` behaves exactly as today. Binaries
+  released before this feature decode profiles into typed fields. They silently ignore
+  `tools.arguments`, do not enforce it, and drop it when they save the config. That cannot be fixed
+  retroactively, so the release notes and `docs/features/profiles.md` say so plainly. The feature release
+  also makes the profile loader keep unknown profile fields on save (FR-015), so later additions do not
+  repeat this.
 
 ## Requirements *(mandatory)*
 
@@ -188,16 +223,18 @@ with the same validation on every surface.
   one of `deny_values`, `allow_values`, `path_prefix`, `forbid`, plus an optional `when_absent` (`admit`
   default, `refuse`).
 - **FR-002**: Validation MUST reject: zero or several kinds; an empty value list; more than 32 values;
-  a value larger than 1 KiB; an argument path over 8 segments or with an empty segment; a relative
-  `path_prefix` entry; more than 64 rules per profile. It MUST warn (and save) when the tool pattern names
-  a server outside `servers`.
+  a value larger than 1 KiB; a non-scalar configured value; an argument path over 8 segments or with an
+  empty segment; a `path_prefix` entry that does not start with `/` or contains a backslash or control
+  character; more than 64 rules per profile. It MUST warn (and save) when the tool pattern names a server
+  outside `servers`.
 - **FR-003**: Argument rules MUST be evaluated only for a call the existing tool decision admits, after
   that decision and before token-permission, intent, quarantine, approval and Spec 085 schema
   validation. They MUST NOT change discovery, listing, `retrieve_tools` ranking or the tool-level
   decision.
-- **FR-004**: A call MUST be refused when any matching rule refuses it, per the kind semantics in
-  Definitions. A value whose JSON type cannot be compared by the rule (e.g. an object under
-  `path_prefix`) MUST be refused.
+- **FR-004**: A call MUST be refused when any matching rule refuses it, per the kind semantics, path
+  resolution table, comparable-value rule and path dialect in Definitions. A type mismatch MUST be
+  refused. Rules MUST be enforced against the concrete arguments regardless of the tool's schema, and a
+  missing, uncompilable or permissive schema MUST NOT disable a rule.
 - **FR-005**: The same evaluation MUST run on every dispatching door: `call_tool_*`, the direct surface,
   the single-server surface, `code_execution` nested calls and REST replay. A parity test MUST drive one
   refusing call through each door and observe the same reason, message and zero upstream calls.
@@ -213,9 +250,25 @@ with the same validation on every surface.
   applies under the caller's profile, with each rule rendered in one fixed sentence. Tools with no
   applicable rule MUST be unchanged.
 - **FR-010**: Try it (REST, CLI, Web UI) and the access explainer MUST accept optional sample arguments
-  and report the argument-rule outcome with the refusing rule's index and kind.
-- **FR-011**: The effective-tools view MUST list, per tool, the argument rules that apply and mark rules
-  whose argument the tool's schema does not declare as inert.
+  and report the argument-rule outcome with the refusing rule's index and kind. Sample arguments MUST
+  travel only in a request body: `POST /api/v1/profiles/try`, and a new `POST /api/v1/access/explain`,
+  with the existing `GET` unchanged and taking no samples. Sample arguments MUST be excluded from URLs and
+  from ordinary request logging. An omitted `arguments` field ("tool-level only") MUST be distinguished
+  from an explicit `{}` ("call with no arguments").
+- **FR-011**: The effective-tools view MUST list, per tool, the argument rules that apply. It MUST flag
+  rules whose argument the tool's schema does not declare as a diagnostic ("not declared by the schema;
+  still enforced"), never as inert.
+- **FR-016**: The profile binding guard (write-time and standing runtime) MUST treat argument rules as
+  part of containment. A bound profile is bypassable when, for a tool the anonymous profile (or any
+  profile reachable from it through `switchable_to`) admits, the bound profile carries an argument rule
+  that the anonymous or reachable profile does not carry verbatim for the same tool pattern and argument.
+  When containment cannot be established, the guard MUST fail closed. Tests MUST cover a rule added only
+  to the bound profile, a rule removed only from the anonymous profile, and a file reload followed by
+  credential omission.
+- **FR-017**: Profile responses to scoped callers (REST, MCP `profiles` tool, effective-tools) MUST
+  project argument rules through the same server-visibility filter as `tools.allow/deny`. A rule whose
+  tool pattern names a server outside the caller's visibility MUST be omitted with its values. A
+  regression test MUST use a profile spanning two servers and a caller authorized for one.
 - **FR-012**: `tools.arguments` MUST be part of the profile policy fingerprint, the legacy-profile
   detection and the rollout-gate field list, so an edit is detected and a legacy profile stays legacy
   only without it.
@@ -223,10 +276,12 @@ with the same validation on every surface.
   (`--argument-rule` repeated, JSON form), the MCP `profiles` tool and the Web UI editor. The parity
   matrix MUST gain the field on its profile-policy rows. The macOS app MUST display the rule count
   read-only.
-- **FR-014**: Evaluation per call MUST be bounded (FR-002 limits and the 10,000 element-check cap). It
-  MUST NOT allocate in proportion to the size of unrelated arguments.
-- **FR-015**: A binary that does not know the field MUST preserve it on save, and a binary that does
-  know it MUST NOT silently drop an invalid rule: an invalid rule fails the save on every surface.
+- **FR-014**: Evaluation per call MUST be bounded by the cumulative budget in Edge Cases (10,000 visited
+  nodes, 1 MiB of examined string bytes), refusing on exhaustion. It MUST NOT allocate in proportion to
+  the size of unrelated arguments.
+- **FR-015**: An invalid rule MUST fail the save on every surface, never be silently dropped. From this
+  release on, the profile loader MUST keep unknown profile fields on save. The docs MUST state that older
+  binaries ignore and drop `tools.arguments`, so a downgrade removes enforcement.
 
 ### Key Entities
 
@@ -244,8 +299,11 @@ with the same validation on every surface.
   surface.
 - **SC-002**: Zero refused calls reach the upstream across the five dispatching doors (counting fixture
   shows 0 calls for every refused case in the parity test).
-- **SC-003**: The path-prefix table (at least 12 cases including `..` escape, lookalike prefix, `~`,
-  relative, backslash and type mismatch) passes with no false admits.
+- **SC-003**: The path-prefix table (at least 14 cases including a `..` escape, a lookalike prefix, `~`,
+  a relative path, a backslash, a NUL, an oversized value and a type mismatch) passes with no false admits.
+  The check runs against the original dispatched string.
+- **SC-007**: The binding guard reports bypassable for every profile pair in the FR-016 matrix where the
+  bound profile carries an argument rule the anonymous profile lacks.
 - **SC-004**: Profiles without argument rules show no behaviour change: the existing profile contract
   fixtures, goldens and qapilot scenarios pass unmodified.
 - **SC-005**: Argument evaluation adds under 1% to p95 call overhead on the 3,000-tool perf rig with 64
