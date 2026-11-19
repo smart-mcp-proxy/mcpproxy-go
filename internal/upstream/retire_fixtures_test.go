@@ -39,10 +39,13 @@ import (
 // carries this fixture's own credential on any path, or when it is for an
 // origin-level OAuth path (/.well-known/*, /authorize, /token, /register),
 // which an OAuth attempt may reach without the token or a credential; those
-// are counted whoever sent them, so the fixture fails closed. The port is shared with whoever
-// held it before: `go test ./...` runs packages in parallel, and other
-// packages' test clients keep reconnecting to their own closed fixtures'
-// ports (POST / initialize, GET / listen stream, DELETE / close). When the OS
+// are counted whoever sent them, so the fixture fails closed. If this fixture
+// ever advertises OAuth metadata, originOAuthPath must grow with it.
+//
+// The port is shared with whoever held it before: `go test ./...` runs
+// packages in parallel, and other packages' test clients keep reconnecting to
+// their own closed fixtures' ports (POST / initialize, GET / listen stream,
+// DELETE / close). When the OS
 // hands such a port to this fixture, that traffic is a stranger's, not a
 // request to this endpoint (CI job 135134947938). It is answered 404 and kept
 // in strays. Anything an instance sends to this endpoint, in any auth
@@ -101,7 +104,7 @@ func newCountingUpstream(t *testing.T, kind string) *countingUpstream {
 	up.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.Contains(r.URL.Path, up.token) && r.Header.Get("Authorization") != fixtureBearer(up.url) && !originOAuthPath(r.URL.Path) {
 			up.strayMu.Lock()
-			up.stray = append(up.stray, r.Method+" "+r.URL.Path)
+			up.stray = append(up.stray, r.Method+" "+r.URL.RequestURI())
 			up.strayMu.Unlock()
 			http.NotFound(w, r)
 			return
@@ -143,7 +146,7 @@ func (u *countingUpstream) counts() (requests, auth int64) {
 }
 
 // strays lists the requests that reached this port for some other endpoint
-// ("METHOD path"); they are not counted.
+// ("METHOD request-uri"); they are not counted.
 func (u *countingUpstream) strays() []string {
 	u.strayMu.Lock()
 	defer u.strayMu.Unlock()

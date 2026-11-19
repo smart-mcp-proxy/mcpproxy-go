@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"crypto/rand"
 	"io"
 	"net/http"
 	"strings"
@@ -166,7 +167,8 @@ func TestRetire_HTTPDialParked_StrayTrafficOnThePortIsNotTheOldEndpoint(t *testi
 			reqBefore, authBefore := up.counts()
 
 			// A stranger on the same port, as another package's test client.
-			sendStrayTraffic(t, up.srv.URL)
+			// A real one may add more strays; only these are asserted.
+			injected := sendStrayTraffic(t, up.srv.URL)
 
 			release()
 			require.Error(t, waitErr(t, errc))
@@ -175,71 +177,89 @@ func TestRetire_HTTPDialParked_StrayTrafficOnThePortIsNotTheOldEndpoint(t *testi
 			assert.Equal(t, reqBefore, req, "stray traffic on the port is not a request to the old endpoint")
 			assert.Equal(t, authBefore, auth)
 			assert.Zero(t, auth)
-			assert.Len(t, up.strays(), 3, "the fixture saw the stray requests and kept them apart")
+			assert.Subset(t, up.strays(), injected, "the fixture saw the stray requests and kept them apart")
 		})
 	}
 }
 
-func sendStrayTraffic(t *testing.T, base string) {
+// sendStrayTraffic sends what other packages' reconnecting test clients send
+// to a reused port (POST / initialize, GET / listen stream, DELETE / close, no
+// credentials), each marked with a unique query so the caller can find it
+// among any real strays. It returns the strays() entries to expect.
+func sendStrayTraffic(t *testing.T, base string) []string {
 	t.Helper()
+	mark := "qa-stray=" + rand.Text()
+	var want []string
 	for _, method := range []string{http.MethodPost, http.MethodGet, http.MethodDelete} {
 		var body io.Reader
 		if method == http.MethodPost {
 			body = strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"mcpproxy-go","version":"1.0.0"},"capabilities":{}}}`)
 		}
-		req, err := http.NewRequest(method, base+"/", body)
+		req, err := http.NewRequest(method, base+"/?"+mark, body)
 		require.NoError(t, err)
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
 		_ = resp.Body.Close()
+		want = append(want, method+" /?"+mark)
 	}
+	return want
 }
 
-// The fixture's controls: a request to the real endpoint is counted with or
-// without credentials, this fixture's own credential is counted on any path
-// (a misrouted credential is still caught), and origin-level OAuth paths are
-// counted whoever sends them. A stranger's request to another path, with or
-// without its own credential, is kept apart.
+// The fixture's controls, one request at a time with its own counter delta:
+// a request to the real endpoint is counted with or without credentials, this
+// fixture's own credential is counted on any path (a misrouted credential is
+// still caught), and origin-level OAuth paths are counted whoever sends them.
+// A stranger's request to another path, with or without its own credential,
+// is kept apart.
 func TestCountingUpstream_CountsItsEndpointAndItsCredentialAnywhere(t *testing.T) {
 	for _, kind := range []string{"http", "sse"} {
 		t.Run(kind, func(t *testing.T) {
 			up := newCountingUpstream(t, kind)
-			do := func(method, url, auth string) {
-				t.Helper()
-				req, err := http.NewRequest(method, url, nil)
+			own := fixtureBearer(up.url)
+			require.Equal(t, own, httpServerConfig("acme", up.url, kind).Headers["Authorization"],
+				"the instance carries the credential the fixture recognises")
+			require.NotEqual(t, own, fixtureBearer(newCountingUpstream(t, kind).url), "credentials are unique per fixture")
+			mark := "qa-control=" + rand.Text()
+			cases := []struct {
+				name, method, url, auth string
+				counted, withAuth       bool
+			}{
+				{"endpoint, no credentials", http.MethodDelete, up.url, "", true, false},
+				{"endpoint, own credential", http.MethodDelete, up.url, own, true, true},
+				{"own credential, another path", http.MethodGet, up.srv.URL + "/elsewhere", own, true, true},
+				{"own credential, stranger's path", http.MethodPost, up.srv.URL + "/mcp", own, true, true},
+				{"well-known authorization server", http.MethodGet, up.srv.URL + "/.well-known/oauth-authorization-server", "", true, false},
+				{"well-known protected resource", http.MethodGet, up.srv.URL + "/.well-known/oauth-protected-resource", "", true, false},
+				{"default authorize endpoint", http.MethodGet, up.srv.URL + "/authorize", "", true, false},
+				{"default token endpoint", http.MethodPost, up.srv.URL + "/token", "", true, false},
+				{"default register endpoint", http.MethodPost, up.srv.URL + "/register", "", true, false},
+				{"stranger, root", http.MethodGet, up.srv.URL + "/?" + mark, "", false, false},
+				{"stranger with its own credential", http.MethodGet, up.srv.URL + "/?" + mark, "Bearer someone-else", false, false},
+				{"stranger, its own endpoint path", http.MethodPost, up.srv.URL + "/mcp?" + mark, "", false, false},
+			}
+			for _, tc := range cases {
+				req0, auth0 := up.counts()
+				req, err := http.NewRequest(tc.method, tc.url, nil)
 				require.NoError(t, err)
-				if auth != "" {
-					req.Header.Set("Authorization", auth)
+				if tc.auth != "" {
+					req.Header.Set("Authorization", tc.auth)
 				}
 				resp, err := http.DefaultClient.Do(req)
 				require.NoError(t, err)
 				_ = resp.Body.Close()
+				req1, auth1 := up.counts()
+				wantReq, wantAuth := int64(0), int64(0)
+				if tc.counted {
+					wantReq = 1
+				}
+				if tc.withAuth {
+					wantAuth = 1
+				}
+				assert.Equal(t, wantReq, req1-req0, "%s: request counted", tc.name)
+				assert.Equal(t, wantAuth, auth1-auth0, "%s: Authorization counted", tc.name)
 			}
-
-			do(http.MethodDelete, up.url, "") // the endpoint, no credentials
-			req, auth := up.counts()
-			assert.Equal(t, int64(1), req, "a request to the endpoint without credentials is counted")
-			assert.Zero(t, auth)
-
-			do(http.MethodGet, up.srv.URL+"/elsewhere", fixtureBearer(up.url)) // own credential, wrong path
-			req, auth = up.counts()
-			assert.Equal(t, int64(2), req, "this fixture's credential on another path is counted")
-			assert.Equal(t, int64(1), auth)
-
-			do(http.MethodGet, up.srv.URL+"/.well-known/oauth-authorization-server", "") // origin-level OAuth discovery
-			do(http.MethodGet, up.srv.URL+"/.well-known/oauth-protected-resource", "")
-			do(http.MethodPost, up.srv.URL+"/token", "") // mcp-go's default endpoint without metadata
-			req, auth = up.counts()
-			assert.Equal(t, int64(5), req, "origin-level OAuth paths are counted whoever sends them (fail closed)")
-			assert.Equal(t, int64(1), auth)
-
-			do(http.MethodGet, up.srv.URL+"/", "Bearer someone-else") // a stranger with its own credential
-			do(http.MethodPost, up.srv.URL+"/mcp", "")                // a stranger's endpoint path
-			req, auth = up.counts()
-			assert.Equal(t, int64(5), req, "strangers on the port are not counted")
-			assert.Equal(t, int64(1), auth)
-			assert.Equal(t, []string{"GET /", "POST /mcp"}, up.strays())
+			assert.Subset(t, up.strays(), []string{"GET /?" + mark, "POST /mcp?" + mark}, "strangers are kept apart")
 		})
 	}
 }
