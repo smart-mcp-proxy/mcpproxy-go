@@ -282,9 +282,12 @@ admin can delete one user's value or all values for a slot.
   fails, the call MUST be refused before dispatch. A header MUST never be sent with an empty or
   placeholder value.
 - **FR-004a**: On a user-credential server, user callers MUST be refused `prompts/get`,
-  `resources/read` and `completion/complete` with a fixed error naming the phase limitation. Operator
-  callers follow `when_no_user`. Discovery credentials MUST be used only for the background operations
-  listed in The Decision.
+  `resources/read` and `completion/complete` with a fixed error naming the phase limitation.
+  Discovery credentials MUST be used only for the background operations listed in The Decision, with one
+  explicit exception. An authenticated operator caller (API key or socket, no user) on a server with
+  `when_no_user: discovery` uses `discovery_headers` for `tools/call` and for these three methods,
+  attributed as `discovery`. With `when_no_user: refuse` (the default), the operator is refused for all
+  four. Tests pin both settings for `tools/call` and each named method.
 - **FR-005**: The raw-config compatibility layer (`removed_keys.go`) MUST stop treating `token_exchange`
   and `entra_obo` as retired: load normalisation and every write door (PATCH, apply, REST, MCP) MUST keep
   them. Tests MUST pin that boot, reload, PATCH and apply preserve an exchange block and never degrade a
@@ -299,7 +302,11 @@ admin can delete one user's value or all values for a slot.
 - **FR-007**: User credentials MUST travel in a trusted context distinct from the Spec 112 client-header
   snapshot. The non-`tools/call` body gate, the cross-origin redirect filter and every scrub sink MUST
   cover both contexts, and they MUST work with `forward_client_headers` off and with no inbound header
-  snapshot.
+  snapshot. The gate MUST tell a message positively identified as something other than `tools/call`
+  apart from a request it cannot inspect (body over the inspection limit, a read failure, a batch). It
+  strips trusted credentials from the former. It MUST refuse to dispatch the latter whenever it carries
+  a trusted user credential, so a user call never goes out anonymously or under another identity.
+  Fixtures cover oversized bodies and body-read failures.
 - **FR-008**: The raw stored value and the rendered header value MUST be redacted from client-visible
   results, error texts, `read_cache` payloads, logs, activity rows and audit lines. Activity and audit
   MUST record `credential_source` and the slot name, never a value.
@@ -347,7 +354,13 @@ admin can delete one user's value or all values for a slot.
   Graph scopes are removed for that deployment, because Entra issues an access token for one resource per
   request. User identity MUST then come from the verified ID token's claims (`email`, falling back to
   `preferred_username`/`upn`), never from Graph `/me` with the OBO assertion. When none of those claims
-  is present, login MUST fail with a fixed error. Validation MUST reject `entra_obo` when the login
+  is present, login MUST fail with a fixed error. The Microsoft provider subject MUST stay stable across
+  the switch. An existing account bound to Graph's `id` MUST be matched through the ID token's `oid`
+  claim, which is the same Entra object id. An account bound to the ID token's `sub` keeps matching on
+  `sub`. The matched user keeps its user ID, role and credential ownership. A login whose claims match
+  neither stored subject follows the existing administrator-armed rebinding path, never an automatic
+  rebind. Tests MUST enable OBO with an existing Graph-bound administrator and an existing `sub`-bound
+  user, and assert that both log in unchanged. Validation MUST reject `entra_obo` when the login
   provider is not Microsoft or `obo_scope` is unset. Tests MUST assert the actual authorization request's
   scopes, login completion without Graph, and a fixture AS that rejects an assertion with the wrong
   audience.
