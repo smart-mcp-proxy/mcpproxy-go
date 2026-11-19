@@ -284,12 +284,17 @@ with the same validation on every surface.
 - **FR-016**: The profile binding guard (write-time and standing runtime) MUST treat argument rules as
   part of containment. Check every profile reachable anonymously (the anonymous profile and those
   reachable from it through `switchable_to`) and every tool it admits. The binding is contained only if
-  at least one **bound-reachable** policy (the bound profile or one reachable from it through
-  `switchable_to`) admits that tool and has a deduplicated set of applicable argument rules that are
+  at least one **bound-reachable** policy admits that tool. Bound-reachable follows the credential's
+  actual switching permission: only the bound profile for locked client credentials and pinned agent
+  tokens, and the bound profile plus its permitted `switchable_to` targets for switchable credentials.
+  That policy must also have a deduplicated set of applicable argument rules that are
   all present verbatim in the anonymous-reachable policy. Otherwise the binding is bypassable.
   Containment MUST be checked on the deduplicated rule sets that FR-014 evaluates, so budget accounting
   is identical on both sides. A regression MUST cover a bound profile that denies a tool, can switch to a
-  profile admitting it only under a path prefix, and an anonymous profile admitting it unrestricted. When containment cannot be established, the guard MUST fail closed. Tests
+  profile admitting it only under a path prefix, and an anonymous profile admitting it unrestricted. A
+  second regression MUST cover a **locked** credential bound to P (restricting the tool to a prefix)
+  whose `switchable_to` names an unrestricted Q. It must be rejected at write time and caught by the
+  standing runtime guard, because the locked caller cannot reach Q. When containment cannot be established, the guard MUST fail closed. Tests
   MUST cover: a rule added only to the bound profile; a rule removed only from the anonymous profile; a
   file reload followed by credential omission; and a bound profile that duplicates a shared rule many
   times, where all value checks pass. The last case must not be bypassable, and it must not refuse on
