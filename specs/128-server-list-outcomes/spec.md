@@ -207,12 +207,23 @@ and lower risk.
   on the first page only, with the same reach and cap rules. The `tools` array MUST be unchanged.
 - **FR-008**: The default `retrieve_tools`-mode surface's `tools/list` (built-in tools only) MUST NOT
   carry outcomes.
+- **FR-008a**: The **delivered** `retrieve_tools` response must keep the outcomes under
+  `tool_response_limit` truncation. The outcomes and the FR-006 sentence take precedence over tool
+  entries. When the limit forces truncation, tools are dropped first, and the outcomes and the sentence
+  survive whenever the budget can hold them. When it cannot, entries are dropped from the end, and
+  `unavailable_servers_more` counts them. The FR-006 sentence is kept whenever any entry survives. Tests
+  MUST inspect the actual delivered response, with zero, one and many tools under a restrictive limit, in
+  the same way the existing filter-diagnostics survival check does.
 - **FR-009**: On the default surface (canonical `server:tool` ids) and the single-server surface (bare
   ids, confined to that server), `describe_tool` MUST return the server's status and message, instead of
   the not-found remediation, for an id that would otherwise be "not found" and whose owning server
   resolves unambiguously, through the existing collision-aware resolution, to an in-reach unavailable
-  server. The answer MUST be identical for every tool name on that server. The existing visibility and
-  tool-policy gates run first and keep their answers. The direct surface's describe answers MUST be
+  server. The answer MUST be identical for every tool name on that server that is not policy-denied. The
+  existing visibility and tool-policy gates run first and keep their answers. Tool policy MUST be
+  evaluated for every syntactically valid, in-scope candidate id **before** any index-dependent fallback,
+  so a policy-denied id gets the existing not-found answer whether or not it is indexed. A regression
+  test MUST describe the same denied id with and without its index document while the server is
+  unavailable, and compare the two answers byte for byte. The direct surface's describe answers MUST be
   unchanged. `check: true` behaviour MUST be unchanged. For an id whose server is outside reach, or does
   not resolve unambiguously, the existing answer MUST be returned unchanged.
 - **FR-010**: The status vocabulary and message table MUST be one contract shared with the operator
