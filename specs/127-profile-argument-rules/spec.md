@@ -54,13 +54,21 @@ Out of scope:
 - **Argument path**: a top-level argument name, or a dotted path into nested objects (`options.force`),
   at most 8 segments. Resolution follows one evaluation table, pinned as a shared fixture
   (`argument_rule_cases.json`) that every door is tested against:
-  - A missing key or an explicit `null` at any **intermediate** segment means the argument is **absent**.
-  - An array at an intermediate segment is traversed element by element. The rule applies to every
-    element that resolves, and a nested array is traversed the same way.
+  - Resolution produces a set of **branches**, one per path through intermediate arrays. Each branch
+    ends **absent** or **present** with a value, and a rule is decided branch by branch. A call is
+    refused when any branch refuses.
+  - A missing key or an explicit `null` at an intermediate segment ends that branch **absent**. The rule's
+    `when_absent` applies to that branch independently, so `{"ops":[{"readonly":true},{}]}` with
+    `when_absent: refuse` on `ops.readonly` is refused.
+  - An array at an intermediate segment forks one branch per element, and nested arrays fork again. An
+    **empty intermediate array** yields a single absent branch.
   - A scalar (string, number, boolean) at an intermediate segment, where an object is expected, is a
     **type mismatch**, and the call is refused.
-  - At the terminal segment, an array means "every element". An empty array resolves to no values.
+  - At the terminal segment, an array means "every element". A **terminal empty array** is present with
+    no values: value kinds admit it, and `forbid` refuses it.
   - An explicit `null` at the terminal segment is **present** with value `null`.
+  - The shared fixture pins mixed present, missing and null branches, nested empty arrays, and terminal
+    versus intermediate empty arrays.
 - **Comparable values**: rules compare scalars only (string, number, boolean, `null`). Configured
   values must be scalars. An incoming terminal value that is an object, or an array element that is an
   object or array, is a type mismatch, and the call is refused.
@@ -192,13 +200,23 @@ with the same validation on every surface.
   missing, or may not compile. So "the schema does not declare this argument" is only a diagnostic in the
   effective-tools view, never a reason to skip a rule. `when_absent: refuse` applies with or without a
   schema.
-- **Value comparison**: JSON equality on decoded scalars (`true` ≠ `"true"`, `1` = `1.0`). Strings
-  compare exactly (case-sensitive).
-- **Large or deep arguments**: evaluation has one cumulative budget per call: at most 10,000 visited
-  nodes (path segments, array elements and terminal values, across all rules) and at most 1 MiB of string
-  bytes examined (comparisons and path cleaning). The call is refused as "argument too large to check
-  under this profile" when the budget runs out. Tests cover large terminal strings, deep containers and
-  wide arrays, not only large arrays.
+- **Value comparison**: scalars compare by type and value (`true` ≠ `"true"`). Strings compare exactly
+  (case-sensitive). Numbers compare **mathematically and losslessly**, so `1` = `1.0` = `1e0` and `-0` =
+  `0`. Every door decodes argument numbers without rounding: `args_json`, the direct surface,
+  `code_execution` exports (integer or float), REST replay, and Try it / explainer samples. A configured
+  numeric value must be an integer within ±2^53 or a decimal with at most 32 significant digits,
+  otherwise the save is rejected. An incoming number that cannot be represented exactly by the
+  comparison (e.g. beyond those bounds) is refused under `allow_values` and refused under
+  `deny_values`. A parity fixture covers integer and float representations, negative zero, adjacent
+  integers around 2^53, long decimals and exponent spellings.
+- **Large or deep arguments**: evaluation has one budget per call, at most 10,000 visited nodes and at most
+  1 MiB of examined string bytes. The call is refused as "argument too large to check under this
+  profile" when the budget runs out. Rules are deduplicated before evaluation: identical rules (same
+  tool pattern, argument, kind, values and `when_absent`) count once, and messages keep the first
+  index. Each distinct argument path is resolved once and fully, without short-circuiting, and its cost
+  is counted once however many rules share it. A rule set that is a superset of another therefore never
+  visits fewer nodes, so it cannot exhaust its budget where the other does not. Tests cover large
+  terminal strings, deep containers and wide arrays, not only large arrays.
 - **Profile binding guard**: the anonymous-vs-bound bypass guard (Spec 108, `profiles.md` "The binding
   guard") must see argument rules. Otherwise a bound profile that differs from the anonymous profile only
   by an argument rule would compare as equivalent, and a client could drop its credential to escape the
@@ -210,9 +228,9 @@ with the same validation on every surface.
 - **Legacy and downgrade**: a profile without `tools.arguments` behaves exactly as today. Binaries
   released before this feature decode profiles into typed fields. They silently ignore
   `tools.arguments`, do not enforce it, and drop it when they save the config. That cannot be fixed
-  retroactively, so the release notes and `docs/features/profiles.md` say so plainly. The feature release
-  also makes the profile loader keep unknown profile fields on save (FR-015), so later additions do not
-  repeat this.
+  retroactively, so the release notes and `docs/features/profiles.md` say so plainly. Making future
+  profile fields survive older binaries is out of scope here. It needs its own design, so that keeping
+  unknown fields on load never weakens the strict unknown-key rejection on policy writes.
 
 ## Requirements *(mandatory)*
 
@@ -262,9 +280,12 @@ with the same validation on every surface.
   part of containment. A bound profile is bypassable when, for a tool the anonymous profile (or any
   profile reachable from it through `switchable_to`) admits, the bound profile carries an argument rule
   that the anonymous or reachable profile does not carry verbatim for the same tool pattern and argument.
-  When containment cannot be established, the guard MUST fail closed. Tests MUST cover a rule added only
-  to the bound profile, a rule removed only from the anonymous profile, and a file reload followed by
-  credential omission.
+  Containment MUST be checked on the deduplicated rule sets that FR-014 evaluates, so budget accounting
+  is identical on both sides. When containment cannot be established, the guard MUST fail closed. Tests
+  MUST cover: a rule added only to the bound profile; a rule removed only from the anonymous profile; a
+  file reload followed by credential omission; and a bound profile that duplicates a shared rule many
+  times, where all value checks pass. The last case must not be bypassable, and it must not refuse on
+  budget alone.
 - **FR-017**: Profile responses to scoped callers (REST, MCP `profiles` tool, effective-tools) MUST
   project argument rules through the same server-visibility filter as `tools.allow/deny`. A rule whose
   tool pattern names a server outside the caller's visibility MUST be omitted with its values. A
@@ -276,12 +297,13 @@ with the same validation on every surface.
   (`--argument-rule` repeated, JSON form), the MCP `profiles` tool and the Web UI editor. The parity
   matrix MUST gain the field on its profile-policy rows. The macOS app MUST display the rule count
   read-only.
-- **FR-014**: Evaluation per call MUST be bounded by the cumulative budget in Edge Cases (10,000 visited
-  nodes, 1 MiB of examined string bytes), refusing on exhaustion. It MUST NOT allocate in proportion to
-  the size of unrelated arguments.
-- **FR-015**: An invalid rule MUST fail the save on every surface, never be silently dropped. From this
-  release on, the profile loader MUST keep unknown profile fields on save. The docs MUST state that older
-  binaries ignore and drop `tools.arguments`, so a downgrade removes enforcement.
+- **FR-014**: Evaluation per call MUST be bounded by the budget in Edge Cases (10,000 visited nodes, 1 MiB
+  of examined string bytes), with deduplicated rules and each distinct argument path costed once,
+  refusing on exhaustion. It MUST NOT allocate in proportion to the size of unrelated arguments.
+- **FR-015**: An invalid rule MUST fail the save on every surface, never be silently dropped. Policy writes
+  (REST, MCP `profiles` tool, CLI) MUST keep rejecting unknown keys, including misspelled keys inside a
+  rule (e.g. `tools.argum ents` or `deny_value`). The docs MUST state that older binaries ignore and drop
+  `tools.arguments`, so a downgrade removes enforcement.
 
 ### Key Entities
 
