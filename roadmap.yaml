@@ -1013,3 +1013,143 @@ epics:
     pr: ["#1619", "#1631", "#1634"]
     depends_on: [review-bound-approvals]
     note: "Shipped 2026-10-13..10-16: internal/qapilot model, S01-S26 scenarios, check ledger + mutation set run by quarantine-pilot.yml; #1634 fixed an approval-hash collision the pilot found. Docs: docs/development/quarantine-approval-pilot.md."
+  - id: auto-rescan-on-change
+    title: "Spec 118 automatic rescan after a tool-definition change (clean verdict recorded as hold evidence)"
+    status: done
+    priority: P1
+    spec: specs/118-auto-rescan-on-change
+    pr: "#1689"
+    depends_on: [review-bound-approvals]
+    note: "Shipped 2026-10-20. Switch security.auto_rescan_on_change (default on) AND auto_baseline_scan. No tasks.md (spec-only folder)."
+  - id: pin-visibility-boundary
+    title: "Spec 118 profile pin as the visibility boundary for agent tokens on every REST/SSE read door"
+    status: done
+    priority: P0
+    spec: specs/118-pin-visibility-boundary
+    pr: ["#1684", "#1688", "#1821"]
+    depends_on: [profiles-v3]
+    note: "Shipped 2026-10-19..11-03: #1684 GET /servers held to the pin, #1688 spec, #1821 pin intersected into the shared enumeration predicate (AuthContext.BoundToPinReach). Shares number 118 with auto-rescan-on-change."
+  - id: scan-default-trust
+    title: "Spec 119 scan is the default trust mode; a clean-scanned contract change auto-approves"
+    status: done
+    priority: P0
+    spec: specs/119-scan-default-trust
+    pr: "#1740"
+    depends_on: [auto-rescan-on-change]
+    note: "Shipped 2026-10-25. Manual trust mode still holds every change."
+  - id: scan-structural-gate
+    title: "Spec 120 structural change gate in front of the scan-mode approval"
+    status: done
+    priority: P0
+    spec: specs/120-scan-structural-gate
+    pr: "#1781"
+    depends_on: [scan-default-trust]
+    note: "Shipped 2026-10-26. Hint changes, schema widening, output-schema changes and hash-equal dispatch-tier moves hold whatever the verdict."
+  - id: install-surfaces
+    title: "Spec 121 install surfaces: registry packages, winget/scoop, agent install prompt, install-channel telemetry (E7)"
+    status: in_review
+    priority: P2
+    pr: "#1711"
+    depends_on: []
+    note: "PR #1711 open since 2026-10-25; its specs/121-install-surfaces folder lives on the PR branch only (no spec: link until it merges)."
+  - id: scanner-skillspector-checks
+    title: "Spec 122 SkillSpector-informed checks for the built-in tool scanner"
+    status: done
+    priority: P1
+    spec: specs/122-scanner-skillspector-checks
+    pr: "#1818"
+    depends_on: []
+    note: "Shipped 2026-11-02: refusal.directive, padding.hidden, exfil.composite, payload.reconstructed, direct-prohibition cap. Review-gate corpus detect_review_corpus_v1.json."
+  - id: oauth-token-encryption
+    title: "Spec 123 encrypt upstream OAuth tokens at rest (opt-in key, doctor section, auth tokens commands)"
+    status: done
+    priority: P1
+    spec: specs/123-oauth-token-encryption
+    pr: ["#1886", "#1887", "#1888", "#1891"]
+    depends_on: []
+    note: "Shipped 2026-11-12 (spec, storage-location doc fix, PR-2 sealing, PR-3 operator surfaces). tasks.md boxes (0/56) are unticked but the work merged; a spec-gardener pass should sync them."
+  - id: session-failure-timeline
+    title: "Spec 124 work sessions and the failure timeline"
+    status: in_progress
+    priority: P1
+    spec: specs/124-session-failure-timeline
+    depends_on: []
+    note: "PR-1 shipped 2026-11-19; PR-2 CLI and PR-3 Web UI remain. tasks.md boxes (0/74) are not yet synced."
+    tasks:
+      - id: session-failure-timeline-record
+        title: "PR-1: record and keep (work sessions, attempt roles, upstream_event rows, session-aware retention, REST doors)"
+        status: done
+        priority: P1
+        pr: "#1918"
+        depends_on: []
+      - id: session-failure-timeline-cli
+        title: "PR-2: CLI commands for work sessions and the timeline (cliclient methods, docs/cli/activity-commands.md)"
+        status: todo
+        priority: P1
+        depends_on: []
+      - id: session-failure-timeline-web
+        title: "PR-3: Web UI session panel and timeline (unit tests, Playwright sweep, docs/web-ui/)"
+        status: todo
+        priority: P2
+        depends_on: [session-failure-timeline-cli]
+  - id: skills-over-mcp
+    title: "Spec 125 Skills over MCP: catalog, approval gate, read-only agent tools"
+    status: in_progress
+    priority: P1
+    spec: specs/125-skills-over-mcp
+    depends_on: [scan-structural-gate]
+    note: "Spec and PR-1..3 shipped 2026-11-17..11-18; PR-4 Web UI and the rest of T031 remain."
+    tasks:
+      - id: skills-over-mcp-spec
+        title: "Spec 125 Skills over MCP"
+        status: done
+        priority: P1
+        pr: "#1919"
+        depends_on: []
+      - id: skills-over-mcp-catalog
+        title: "PR-1: administrator-only skills catalog (skills/list, skills/get, bbolt buckets, REST + CLI)"
+        status: done
+        priority: P1
+        pr: "#1921"
+        depends_on: [skills-over-mcp-spec]
+      - id: skills-over-mcp-gate
+        title: "PR-2: hold, scan, approve and block upstream skills"
+        status: done
+        priority: P1
+        pr: "#1923"
+        depends_on: [skills-over-mcp-catalog]
+      - id: skills-over-mcp-agent-tools
+        title: "PR-3: retrieve_skills / load_skill / read_skill_file for agents"
+        status: done
+        priority: P1
+        pr: "#1928"
+        depends_on: [skills-over-mcp-gate]
+      - id: skills-over-mcp-web
+        title: "PR-4: Web UI for reviewing and browsing skills (+ remainder of T031)"
+        status: todo
+        priority: P1
+        depends_on: [skills-over-mcp-agent-tools]
+  - id: profile-argument-rules
+    title: "Spec 127 argument rules in profiles (deny a value, narrow values, path prefix, forbid)"
+    status: in_review
+    priority: P1
+    spec: specs/127-profile-argument-rules
+    pr: "#1943"
+    depends_on: [profiles-v3]
+    note: "Spec-only PR. Idea 1 of the 2026-11-19 LiteLLM MCP Gateway comparison (LiteLLM allowed_params)."
+  - id: server-list-outcomes
+    title: "Spec 128 server outcomes on retrieve_tools and tools/list (unavailable servers in reach, fixed vocabulary)"
+    status: in_review
+    priority: P1
+    spec: specs/128-server-list-outcomes
+    pr: "#1944"
+    depends_on: [pin-visibility-boundary]
+    note: "Spec-only PR. Idea 3 of the 2026-11-19 LiteLLM MCP Gateway comparison."
+  - id: per-user-upstream-credentials
+    title: "Spec 129 per-user upstream credentials (server edition): user slots, RFC 8693 / Entra OBO, injected oauth_connect"
+    status: in_review
+    priority: P1
+    spec: specs/129-per-user-upstream-credentials
+    pr: "#1945"
+    depends_on: [sso]
+    note: "Spec-only PR. Idea 5 of the 2026-11-19 LiteLLM MCP Gateway comparison; the Spec 107 FR-034 Phase 2 trigger (Gcore central-proxy request). Builds on the Spec 112 per-request header seam."
