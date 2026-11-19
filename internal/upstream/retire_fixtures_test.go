@@ -255,6 +255,20 @@ func connectAsync(inst *managed.Client) <-chan error {
 	return errc
 }
 
+// waitHook waits for a parked operation to reach its hook. A Connect that
+// fails before the hook ends the wait with its error instead of hanging the
+// suite, and so does a hook that is never reached.
+func waitHook(t *testing.T, hook <-chan struct{}, errc <-chan error) {
+	t.Helper()
+	select {
+	case <-hook:
+	case err := <-errc:
+		t.Fatalf("the operation ended before reaching its hook: %v", err)
+	case <-time.After(20 * time.Second):
+		t.Fatal("timed out waiting for the operation to reach its hook")
+	}
+}
+
 func waitErr(t *testing.T, errc <-chan error) error {
 	t.Helper()
 	select {

@@ -55,7 +55,7 @@ func TestRetire_HTTPDialParked_OldEndpointReceivesNothing(t *testing.T) {
 				parked, release := parkFirstAdmit(inst)
 				defer release()
 				errc := connectAsync(inst)
-				<-parked
+				waitHook(t, parked, errc)
 
 				competingCommit(t, m, op, cfg)
 				require.True(t, inst.Retired(), "the commit retired the instance before it returned")
@@ -118,7 +118,7 @@ func TestRetire_HTTPDialInsideSection_ClosedNoRequest(t *testing.T) {
 		}
 	}})
 	errc := connectAsync(inst)
-	<-inSection
+	waitHook(t, inSection, errc)
 
 	committed := make(chan struct{})
 	go func() {
@@ -160,7 +160,7 @@ func TestRetire_HTTPDialParked_StrayTrafficOnThePortIsNotTheOldEndpoint(t *testi
 			parked, release := parkFirstAdmit(inst)
 			defer release()
 			errc := connectAsync(inst)
-			<-parked
+			waitHook(t, parked, errc)
 
 			competingCommit(t, m, "remove", cfg)
 			require.True(t, inst.Retired())
