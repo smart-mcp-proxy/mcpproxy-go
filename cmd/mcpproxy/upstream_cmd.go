@@ -561,6 +561,10 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 }
 
 func outputServers(servers []map[string]interface{}) error {
+	// An install with no servers at all (not a --status filter that matched
+	// nothing) gets a next step after the empty table, in table output only.
+	noServersConfigured := len(servers) == 0 && len(upstreamListStatus) == 0
+
 	// FR-015: --status <value> is repeatable, and a comma-separated value is
 	// equivalent to repeating the flag; several values select the UNION of
 	// their statuses. Applies to every output format (table, json, yaml).
@@ -601,6 +605,9 @@ func outputServers(servers []map[string]interface{}) error {
 		return fmt.Errorf("failed to format table: %w", err)
 	}
 	fmt.Print(result)
+	if noServersConfigured {
+		fmt.Print(firstServerHint(exec.LookPath))
+	}
 	return nil
 }
 
@@ -2786,4 +2793,29 @@ func viewOr(view map[string]interface{}, key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// firstServerHint is the empty-state next step for `mcpproxy upstream list`
+// on an install with no servers (Spec 126 US2, CLI surface). It suggests one
+// credential-free reference server through the catalog door, in the Spec 126
+// FR-002 starter order (time, then sequentialthinking), choosing the first
+// whose launcher this machine has. The catalog door applies quarantine, trust
+// mode and the admission scan exactly as for any catalog add; the hint itself
+// adds, runs and approves nothing. lookPath is exec.LookPath in production.
+func firstServerHint(lookPath func(string) (string, error)) string {
+	var b strings.Builder
+	b.WriteString("\nNo upstream servers yet. Next steps:\n")
+	has := func(name string) bool { _, err := lookPath(name); return err == nil }
+	switch {
+	case has("uvx"):
+		b.WriteString("  mcpproxy catalog add reference/time                 # reference server, no credentials (runs: uvx mcp-server-time)\n")
+	case has("npx"):
+		b.WriteString("  mcpproxy catalog add reference/sequentialthinking   # reference server, no credentials (runs: npx -y @modelcontextprotocol/server-sequential-thinking)\n")
+	default:
+		b.WriteString("  (local reference servers need uv (uvx) or Node.js (npx); neither is on PATH)\n")
+	}
+	b.WriteString("  mcpproxy upstream add <name> <url>                  # any remote MCP server\n")
+	b.WriteString("  mcpproxy catalog search <query>                     # browse the catalog\n")
+	b.WriteString("New servers are quarantined and scanned; inspect one with 'mcpproxy review show <name>' and admit it with 'mcpproxy review approve <name> --yes'.\n")
+	return b.String()
 }

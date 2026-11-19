@@ -56,7 +56,7 @@ Typical flow:
   mcpproxy registry list                       # see available registries
   mcpproxy registry search weather -r pulse    # find a server
   mcpproxy registry add pulse weather-mcp       # add it (quarantined)
-  mcpproxy upstream approve weather-mcp          # approve once you trust it
+  mcpproxy review approve weather-mcp --yes      # approve once you trust it
 
 Add your own registry source (any official modelcontextprotocol/registry v0.1 endpoint):
   mcpproxy registry add-source https://registry.example.com   # tagged "custom"
@@ -168,7 +168,7 @@ add through it follow the global quarantine default like any other server, so
 with quarantine enabled (the default) they land quarantined for review:
   mcpproxy registry search <query> -r <id>
   mcpproxy registry add <id> <serverId>
-  mcpproxy upstream approve <name>`,
+  mcpproxy review approve <name> --yes`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			sourceURL := args[0]
@@ -424,7 +424,7 @@ func newRegistryAddCmd() *cobra.Command {
 		Long: `Add a server discovered in a registry as an upstream server.
 
 The server is added quarantined by default; approve it once you trust it:
-  mcpproxy upstream approve <name>
+  mcpproxy review approve <name> --yes
 
 The daemon re-derives the runnable config (command/args/url) from the registry
 entry — you only supply optional overrides. If the server declares required
@@ -487,7 +487,9 @@ inputs, supply them with --env KEY=VALUE.`,
 func registryAddMessage(name string, quarantined bool) string {
 	msg := fmt.Sprintf("✅ Added %s to MCPProxy", name)
 	if quarantined {
-		msg += fmt.Sprintf(" (quarantined for review — approve with: mcpproxy upstream approve %s)", name)
+		// Name the step that admits the server. `upstream approve` only
+		// approves pending tools and leaves a quarantined server quarantined.
+		msg += fmt.Sprintf(" (quarantined for review — inspect with: mcpproxy review show %s, then approve with: mcpproxy review approve %s --yes)", name, name)
 	}
 	return msg
 }
