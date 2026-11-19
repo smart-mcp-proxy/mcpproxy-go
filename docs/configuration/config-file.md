@@ -116,7 +116,7 @@ the read timeout — see its row). Valid range: `1s`–`24h`, or `0s`.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `tools_limit` | integer | `15` | Maximum tools to return in a single request |
-| `tool_response_limit` | integer | `20000` | Maximum characters in tool response |
+| `tool_response_limit` | integer | `20000` | Maximum characters in tool response (0 = unlimited). Also bounds `structuredContent`: when its JSON is longer than the limit it is withheld and delivered as a text block (sanitised, then truncated with a `read_cache` handle), or left out when a text block already carries the same JSON. On the direct surface a tool listed with an `outputSchema` keeps its `structuredContent` |
 | `instructions` | string | _(built-in)_ | Custom text for the MCP `initialize` response, sent verbatim to every client. Do not put server names or secrets in it. A per-caller access block is always appended; see [Agent Instructions](/features/agent-instructions). |
 | `advertise_upstream_servers` | boolean | `true` | Name the caller's reachable upstream servers in the initialize instructions and the `retrieve_tools` description, filtered to its profile and agent-token scope. Set `false` to keep server names out of client context. Hot-reloadable. See [Agent Instructions](/features/agent-instructions). |
 
