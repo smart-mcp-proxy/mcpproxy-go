@@ -347,6 +347,11 @@ func (p *MCPProxyServer) renderDirectTools(cat *directCatalog) []mcpserver.Serve
 		// the filter runs (see directToolStamp's doc comment). The terminal
 		// stripDirectToolStampFilter removes it before any response reaches a
 		// client.
+		// Issue #1932: what the listing published decides whether the handler
+		// may withhold an oversize structured result (deferred entries and
+		// invalid schemas publish none).
+		entry.OutputSchemaListed = len(mcpTool.RawOutputSchema) > 0
+
 		mcpTool = stampDirectTool(mcpTool, entry)
 
 		serverTools = append(serverTools, mcpserver.ServerTool{
@@ -882,6 +887,14 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// do. Direct mode previously skipped this, so output_sanitisation never
 		// applied to /mcp/all. Applied to the RAW result before the activity
 		// classification and truncation below; a non-nil result means blocked.
+		// Issue #1932: tool_response_limit bounds structuredContent too, before
+		// sanitisation (see withholdOversizeStructured) — except for a tool whose
+		// listing carries an outputSchema: MCP clients require such a tool to
+		// return structured content.
+		var withheld withheldStructured
+		if !entry.OutputSchemaListed {
+			withheld = withholdOversizeStructured(result, p.config.ToolResponseLimit, p.logger, toolName)
+		}
 		if blockResult := p.applyOutputSanitisation(ctx, serverName, toolName, requestID, directContentTrust, result); blockResult != nil {
 			// The upstream ran, so the started record is closed with the block
 			// message, never the response (direct mode keeps no history).
@@ -974,7 +987,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// Emit completion activity (success, or error when the upstream itself
 		// reported one — issue #935).
 		// Spec 069 A1: pre-truncation sizes; result was measured before the truncation loop above.
-		routingResponseBytes := rawByteSize(result)
+		routingResponseBytes := rawByteSize(upstreamSizeView(result, withheld))
 		routingRequestBytes := rawByteSize(enrichedArgs)
 		p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", activityStatus, activityErrMsg, durationMs, enrichedArgs, scrubForRecord(responseText, fwdOut), truncated, toolVariant, nil, directContentTrust, "", routingRequestBytes, routingResponseBytes, "", nil, "")
 
