@@ -94,6 +94,11 @@ type RefreshSchedule struct {
 	// (schedules loaded from storage at startup, unbound stores). A reactive
 	// flight's terminal outcome applies only to a schedule of its binding.
 	Binding commitview.CredentialBinding
+	// lastNotifySeq is the number of the latest notification sent for this
+	// server's schedule: the save that installed it, or its failure.
+	lastNotifySeq uint64
+	// lastNotifyAt is when that notification was accepted.
+	lastNotifyAt time.Time
 }
 
 // RefreshTokenStore defines storage operations needed by RefreshManager.
@@ -123,6 +128,27 @@ type RefreshEventEmitter interface {
 	EmitOAuthRefreshFailed(serverName string, errorMsg string)
 }
 
+// RefreshOrderEmitter is an optional extension of RefreshEventEmitter
+// (Spec 124 D5). The manager numbers, per server and under its lock, every
+// schedule it installs for a saved token and every failure it accepts for a
+// schedule. The two notifications are delivered after the lock is released
+// and can therefore arrive in either order; the number says which the manager
+// decided first, including a save and the later failure of that same
+// schedule. A consumer that tracks "this server needs a new login" ignores a
+// lower number in both directions.
+type RefreshOrderEmitter interface {
+	// EmitOAuthTokenSavedNumbered: a new token was saved and scheduled.
+	EmitOAuthTokenSavedNumbered(serverName string, seq uint64, at time.Time)
+	// EmitOAuthLoginRequiredNumbered: the refresh schedule was given up, so
+	// the server needs a new login even if its connection is still up.
+	//
+	// prev is the number of the notification this server had before this
+	// one (zero when unknown) and prevAt the time it was accepted. A
+	// receiver that has not applied prev yet knows a notification of this
+	// server is still on its way, and since when.
+	EmitOAuthLoginRequiredNumbered(serverName string, seq, prev uint64, prevAt, at time.Time)
+}
+
 // RefreshMetricsRecorder defines metrics recording methods for OAuth refresh operations.
 // This interface decouples RefreshManager from the concrete MetricsManager.
 type RefreshMetricsRecorder interface {
@@ -147,13 +173,16 @@ type RefreshManager struct {
 	eventEmitter    RefreshEventEmitter
 	metricsRecorder RefreshMetricsRecorder
 	schedules       map[string]*RefreshSchedule
-	threshold       float64
-	maxRetries      int
-	mu              sync.RWMutex
-	logger          *zap.Logger
-	ctx             context.Context
-	cancel          context.CancelFunc
-	started         bool
+	// notifySeq numbers schedule installs and accepted failures
+	// (RefreshOrderEmitter). Guarded by mu.
+	notifySeq  uint64
+	threshold  float64
+	maxRetries int
+	mu         sync.RWMutex
+	logger     *zap.Logger
+	ctx        context.Context
+	cancel     context.CancelFunc
+	started    bool
 }
 
 // NewRefreshManager creates a new RefreshManager instance.
@@ -455,11 +484,22 @@ func (m *RefreshManager) OnTokenSaved(serverName string, expiresAt time.Time) {
 // PR2b): the new schedule carries the binding, so a terminal outcome of
 // another binding's flight never fails it (Sol r1 on #1621).
 func (m *RefreshManager) OnTokenSavedFor(serverName string, expiresAt time.Time, binding commitview.CredentialBinding) {
+	// The notification is sent after the lock is released: an emitter may
+	// read the manager back (GetSchedule, GetRefreshState).
+	if seq, at, ordered := m.installScheduleForSavedToken(serverName, expiresAt, binding); ordered != nil {
+		ordered.EmitOAuthTokenSavedNumbered(serverName, seq, at)
+	}
+}
+
+// installScheduleForSavedToken does the work of OnTokenSavedFor under the
+// lock. It returns the notification number of the save and the emitter to
+// tell, or a nil emitter when there is nothing to send.
+func (m *RefreshManager) installScheduleForSavedToken(serverName string, expiresAt time.Time, binding commitview.CredentialBinding) (uint64, time.Time, RefreshOrderEmitter) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if !m.started {
-		return
+		return 0, time.Time{}, nil
 	}
 
 	// A late notification from a superseded binding (Sol r3 on #1621): a
@@ -474,7 +514,7 @@ func (m *RefreshManager) OnTokenSavedFor(serverName string, expiresAt time.Time,
 			zap.String("server", serverName),
 			zap.String("save_binding", binding.String()),
 			zap.String("schedule_binding", existing.Binding.String()))
-		return
+		return 0, time.Time{}, nil
 	}
 
 	// Cancel existing schedule if any
@@ -483,7 +523,60 @@ func (m *RefreshManager) OnTokenSavedFor(serverName string, expiresAt time.Time,
 	}
 
 	// Schedule refresh for new token
+	replaced := m.schedules[serverName]
 	m.scheduleRefreshLocked(serverName, expiresAt, binding)
+	if m.schedules[serverName] == replaced {
+		// Nothing was scheduled for the new token (no expiry, or too close
+		// to it). The server still gets a record, and it is the record of
+		// the grant just saved: its expiry and binding, no timer, no failure
+		// state. A new identity means a failure of the replaced grant that
+		// is still in flight is no longer "current" and is not reported
+		// after this save (Spec 124 D5); having a record at all means a
+		// later terminal failure of the new grant is matched and reported,
+		// also when this is the server's first save.
+		m.schedules[serverName] = &RefreshSchedule{
+			ServerName:   serverName,
+			ExpiresAt:    expiresAt,
+			MaxBackoff:   MaxRetryBackoff,
+			RefreshState: RefreshStateIdle,
+			Binding:      binding,
+		}
+	}
+
+	// Spec 124 D5: number the save under the lock, so it is ordered against
+	// any failure the manager accepts for this server.
+	seq := m.nextNotifySeqLocked()
+	// The time the save was accepted, under the lock: its notification can
+	// be delivered late, and what happened meanwhile must not be undone.
+	now := time.Now()
+	if cur := m.schedules[serverName]; cur != nil {
+		cur.lastNotifySeq, cur.lastNotifyAt = seq, now
+	}
+	ordered, _ := m.eventEmitter.(RefreshOrderEmitter)
+	return seq, now, ordered
+}
+
+// nextNotifySeqLocked returns the next notification number. One counter
+// serves every server: the numbers of one server still rise in the order the
+// manager accepted its saves and failures, and nothing is kept per server
+// name after its schedule is gone. Caller holds m.mu.
+func (m *RefreshManager) nextNotifySeqLocked() uint64 {
+	m.notifySeq++
+	return m.notifySeq
+}
+
+// failScheduleAndNotify fails the schedule if it is still current and, when it
+// was, tells the subscribers. The failure takes its notification number under
+// the same lock that accepted it.
+func (m *RefreshManager) failScheduleAndNotify(serverName string, expected *RefreshSchedule, lastError string, stopTimer bool, cause error) {
+	seq, prev, prevAt, at, ok := m.failScheduleIfCurrentSeq(serverName, expected, lastError, stopTimer)
+	if !ok || m.eventEmitter == nil {
+		return
+	}
+	m.eventEmitter.EmitOAuthRefreshFailed(serverName, cause.Error())
+	if ordered, isOrdered := m.eventEmitter.(RefreshOrderEmitter); isOrdered {
+		ordered.EmitOAuthLoginRequiredNumbered(serverName, seq, prev, prevAt, at)
+	}
 }
 
 // bindingOlder reports whether a is a credential binding committed before b.
@@ -759,10 +852,13 @@ func (m *RefreshManager) handleRefreshFailureFor(serverName string, err error, m
 		m.mu.Unlock()
 		return
 	}
-	// A terminal failure is reported once: the coordinator hook (reactive
-	// flight) and a proactive attempt answered by the coordinator's latch
-	// carry the same outcome.
-	if cls.IsTerminal() && schedule.RefreshState == RefreshStateFailed {
+	// A schedule that was given up is failed once: the coordinator hook
+	// (reactive flight) and a proactive attempt answered by the coordinator's
+	// latch carry the same terminal outcome, and a transient failure of an
+	// attempt that was still running when the schedule was given up must not
+	// put it back to retrying or overwrite the error that says what to do.
+	// Only a new token save starts over.
+	if schedule.RefreshState == RefreshStateFailed {
 		m.mu.Unlock()
 		return
 	}
@@ -801,9 +897,7 @@ func (m *RefreshManager) handleRefreshFailureFor(serverName string, err error, m
 			zap.String("error_type", errorType),
 			zap.Error(err))
 
-		if m.failScheduleIfCurrent(serverName, schedule, lastError, true) && m.eventEmitter != nil {
-			m.eventEmitter.EmitOAuthRefreshFailed(serverName, err.Error())
-		}
+		m.failScheduleAndNotify(serverName, schedule, lastError, true, err)
 		return
 	}
 
@@ -814,9 +908,7 @@ func (m *RefreshManager) handleRefreshFailureFor(serverName string, err error, m
 			zap.Int("max_retries", m.maxRetries),
 			zap.Int("retry_count", retryCount))
 
-		if m.failScheduleIfCurrent(serverName, schedule, "Max retries exceeded - re-authentication required", false) && m.eventEmitter != nil {
-			m.eventEmitter.EmitOAuthRefreshFailed(serverName, err.Error())
-		}
+		m.failScheduleAndNotify(serverName, schedule, "Max retries exceeded - re-authentication required", false, err)
 		return
 	}
 
@@ -834,9 +926,7 @@ func (m *RefreshManager) handleRefreshFailureFor(serverName string, err error, m
 				zap.Duration("expired_for", timeSinceExpiry),
 				zap.Int("retries", retryCount))
 
-			if m.failScheduleIfCurrent(serverName, schedule, "", false) && m.eventEmitter != nil {
-				m.eventEmitter.EmitOAuthRefreshFailed(serverName, err.Error())
-			}
+			m.failScheduleAndNotify(serverName, schedule, "", false, err)
 			return
 		}
 	}
@@ -846,17 +936,25 @@ func (m *RefreshManager) handleRefreshFailureFor(serverName string, err error, m
 	m.rescheduleAfterDelayFor(serverName, backoff, schedule)
 }
 
-// failScheduleIfCurrent marks the schedule failed only while it is still the
+// failScheduleIfCurrentSeq marks the schedule failed only while it is still the
 // one the failure was recorded against. A login whose OnTokenSaved replaced
 // the schedule after handleRefreshFailure released m.mu supersedes the
 // failure (Spec 113 FR-006a): the new grant's schedule keeps running and no
 // stale failure event is emitted. lastError "" keeps the current LastError.
-func (m *RefreshManager) failScheduleIfCurrent(serverName string, expected *RefreshSchedule, lastError string, stopTimer bool) bool {
+// It returns the notification number taken for the accepted failure and the
+// time it was accepted, both under the lock.
+func (m *RefreshManager) failScheduleIfCurrentSeq(serverName string, expected *RefreshSchedule, lastError string, stopTimer bool) (seq, prev uint64, prevAt, at time.Time, ok bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	schedule := m.schedules[serverName]
 	if schedule == nil || schedule != expected {
-		return false
+		return 0, 0, time.Time{}, time.Time{}, false
+	}
+	if schedule.RefreshState == RefreshStateFailed {
+		// Already given up, and its one notification is out. A second
+		// number for the same failure would look to the receiver like a
+		// failure of a new grant.
+		return 0, 0, time.Time{}, time.Time{}, false
 	}
 	schedule.RefreshState = RefreshStateFailed
 	if lastError != "" {
@@ -865,7 +963,10 @@ func (m *RefreshManager) failScheduleIfCurrent(serverName string, expected *Refr
 	if stopTimer && schedule.Timer != nil {
 		schedule.Timer.Stop()
 	}
-	return true
+	prev, prevAt = schedule.lastNotifySeq, schedule.lastNotifyAt
+	seq, at = m.nextNotifySeqLocked(), time.Now()
+	schedule.lastNotifySeq, schedule.lastNotifyAt = seq, at
+	return seq, prev, prevAt, at, true
 }
 
 // onRefreshOutcome is the RefreshCoordinator completion hook. Proactive
@@ -997,6 +1098,12 @@ func (m *RefreshManager) rescheduleAfterDelayFor(serverName string, delay time.D
 
 	schedule, ok := m.schedules[serverName]
 	if !ok || (expected != nil && schedule != expected) {
+		return
+	}
+	// A transient failure can reach its reschedule after a terminal outcome
+	// gave the schedule up (failScheduleAndNotify). A failed schedule stays
+	// failed until a token save replaces it: no new timer, no next attempt.
+	if schedule.RefreshState == RefreshStateFailed {
 		return
 	}
 

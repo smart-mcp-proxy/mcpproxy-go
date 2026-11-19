@@ -625,8 +625,9 @@ var undiffedHotConfigFields = []string{
 // restartGatedConfigFields are bound once at startup; see pinRestartGated.
 // OAuthTokenEncryptionKey (Spec 123 FR-023) is resolved once when config.db
 // is opened; adopting a new key mid-process would split oauth_tokens between
-// two keys.
-var restartGatedConfigFields = []string{"TrayEndpoint", "EnableSocket", "DebugSearch", "Tokenizer", "EnablePrompts", "Instructions", "OAuthTokenEncryptionKey"}
+// two keys. SessionRetentionDays (Spec 124) sets the work-session window once
+// in Runtime.New (ActivityService.SetSessionWindow).
+var restartGatedConfigFields = []string{"TrayEndpoint", "EnableSocket", "DebugSearch", "Tokenizer", "EnablePrompts", "Instructions", "OAuthTokenEncryptionKey", "SessionRetentionDays"}
 
 func configFieldValue(cfg *config.Config, goName string) interface{} {
 	return reflect.ValueOf(cfg).Elem().FieldByName(goName).Interface()

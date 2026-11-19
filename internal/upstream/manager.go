@@ -205,6 +205,13 @@ type Manager struct {
 	// Tool discovery callback for notifications/tools/list_changed handling
 	toolDiscoveryCallback func(ctx context.Context, serverName string) error
 
+	// transitionObserver receives every state change of every server's
+	// current instance, in the order it happened (Spec 124 D5).
+	transitionObserver ServerTransitionObserver
+	// transitionLoginClassifier says whether a change into the error state is
+	// a login requirement; handed to every state manager with the observer.
+	transitionLoginClassifier func(serverName, transport string, t types.Transition) bool
+
 	// Prompts-changed callback for notifications/prompts/list_changed handling (F13)
 	promptsChangedCallback func(serverName string)
 
@@ -523,6 +530,74 @@ func (m *Manager) SetToolDiscoveryCallback(callback func(ctx context.Context, se
 	}
 	m.logger.Debug("Tool discovery callback set on manager",
 		zap.Int("existing_clients", len(m.clients)))
+}
+
+// ServerTransitionObserver receives one state change of one upstream server.
+// Calls for the same server arrive one at a time, in the order the changes
+// happened; calls for different servers may be concurrent.
+//
+// transport is the server's configured transport ("stdio", "http", ...). For
+// a stdio server a lost connection is its process going away, which the error
+// text alone does not say once the connection was established.
+type ServerTransitionObserver func(serverName, transport string, t types.Transition)
+
+// SetTransitionObserver installs the observer on every existing client and on
+// every client created later. The runtime uses it to record connection loss
+// and recovery in the activity log with the time they actually happened.
+//
+// isLogin says whether a change into the error state means a login is
+// required; the state managers use it so that folding a full queue never
+// hides such a change uncounted. It may be nil.
+func (m *Manager) SetTransitionObserver(observer ServerTransitionObserver, isLogin func(serverName, transport string, t types.Transition) bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.transitionObserver = observer
+	m.transitionLoginClassifier = isLogin
+	for _, client := range m.clients {
+		if client != nil {
+			cfg := client.GetConfig()
+			m.wireTransitionObserverLocked(client, cfg.Name, serverTransport(cfg))
+		}
+	}
+}
+
+// wireTransitionObserverLocked connects one client's state manager to the
+// manager's observer. Caller holds m.mu.
+func (m *Manager) wireTransitionObserverLocked(client *managed.Client, serverName, transport string) {
+	observer := m.transitionObserver
+	if observer == nil {
+		client.StateManager.SetTransitionObserver(nil)
+		client.StateManager.SetTransitionLoginClassifier(nil)
+		return
+	}
+	if isLogin := m.transitionLoginClassifier; isLogin != nil {
+		client.StateManager.SetTransitionLoginClassifier(func(t types.Transition) bool {
+			return isLogin(serverName, transport, t)
+		})
+	}
+	client.StateManager.SetTransitionObserver(func(t types.Transition) {
+		// A superseded instance's transitions (the Disconnect of an instance
+		// a commit replaced) are not events of the server that now runs
+		// under the same name.
+		if client.Unregistered() {
+			return
+		}
+		observer(serverName, transport, t)
+	})
+}
+
+// serverTransport names a server's transport for the transition observer.
+func serverTransport(cfg *config.ServerConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	if cfg.Protocol != "" && cfg.Protocol != "auto" {
+		return cfg.Protocol
+	}
+	if cfg.Command != "" {
+		return "stdio"
+	}
+	return "http"
 }
 
 // SetPromptsChangedCallback sets the callback for triggering aggregated-prompt

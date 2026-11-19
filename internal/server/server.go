@@ -606,6 +606,8 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 	// Harmless on every endpoint but /mcp/all, whose filters are the only
 	// consumers.
 	next = directRequestKindMiddleware(next)
+	// Spec 124 FR-003: the run name header, for MCP over HTTP.
+	next = runNameMiddleware(next)
 	// Spec 058 US3 (R1): drop a modern client's separately posted
 	// notifications/cancelled before mcp-go can match it against another
 	// client's in-flight request — every modern request shares session id "".
@@ -4855,6 +4857,40 @@ func (s *Server) ListActivities(filter storage.ActivityFilter) ([]*storage.Activ
 // GetActivity returns a single activity record by ID.
 func (s *Server) GetActivity(id string) (*storage.ActivityRecord, error) {
 	return s.runtime.GetActivity(id)
+}
+
+// Work-session reads (Spec 124).
+
+// ListWorkSessionSummaries returns every work-session summary.
+func (s *Server) ListWorkSessionSummaries() ([]*storage.WorkSessionSummary, error) {
+	return s.runtime.ListWorkSessionSummaries()
+}
+
+// GetWorkSessionSummary returns one work-session summary, or nil.
+func (s *Server) GetWorkSessionSummary(id string) (*storage.WorkSessionSummary, error) {
+	return s.runtime.GetWorkSessionSummary(id)
+}
+
+// WorkSessionRowRefs returns a work session's index entries in time order.
+func (s *Server) WorkSessionRowRefs(id string) ([]storage.WorkSessionRowRef, error) {
+	return s.runtime.WorkSessionRowRefs(id)
+}
+
+// WalkWorkSessionTimeline visits a work session's index entries merged with
+// the upstream events of the given servers, in time order.
+func (s *Server) WalkWorkSessionTimeline(id string, servers []string, from, to time.Time, fn func(storage.WorkSessionRowRef) bool) error {
+	return s.runtime.WalkWorkSessionTimeline(id, servers, from, to, fn)
+}
+
+// OpenUpstreamEventsBefore returns the latest unresolved upstream event of
+// each server before a time (release QA F2).
+func (s *Server) OpenUpstreamEventsBefore(kinds map[string][]string, before, until, notBefore time.Time, visible func(owner string) bool) ([]storage.WorkSessionRowRef, error) {
+	return s.runtime.OpenUpstreamEventsBefore(kinds, before, until, notBefore, visible)
+}
+
+// GetActivitiesByKeys loads activity rows by key.
+func (s *Server) GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error) {
+	return s.runtime.GetActivitiesByKeys(keys)
 }
 
 // StreamActivities returns a channel that yields activity records matching the filter.

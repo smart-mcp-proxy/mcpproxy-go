@@ -40,6 +40,7 @@ export const ACTIVITY_TYPE_LABELS: Record<string, string> = {
   'credential_broker': 'Credential Broker', // Spec 074, server edition only
   'prompt_get': 'Prompt Fetch',
   'profile_change': 'Profile Change', // Spec 108: client binding / credential change
+  'upstream_event': 'Upstream Event', // Spec 124: connection lost/restored, process exited, OAuth refresh failed, login required
   'skill_quarantine_change': 'Skill Approval Change', // Spec 125: a skill's approval state (administrator-only)
   'skill_access': 'Skill Access' // Spec 125: an agent searched, loaded or read a skill
 }
@@ -98,6 +99,7 @@ const typeIcons: Record<string, string> = {
   'credential_broker': '🔑',
   'prompt_get': '💬',
   'profile_change': '🪪',
+  'upstream_event': '🔌',
   'skill_quarantine_change': '📚',
   'skill_access': '📖'
 }

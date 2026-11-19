@@ -394,6 +394,9 @@ func TestAllocsMismatch_CatchesFleetProportionalWork(t *testing.T) {
 // predicate is pinned at zero allocations the same way in
 // TestProfileIndex_SelectableAllocatesNothing.
 func TestProfileMiddleware_RefusalWorkIndependentOfFleet(t *testing.T) {
+	if runInFreshProcess(t) {
+		return
+	}
 	fleets := profileGateFleets()
 	next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		t.Errorf("%s must not reach the MCP handler", r.URL.Path)

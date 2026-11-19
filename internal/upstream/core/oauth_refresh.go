@@ -95,6 +95,15 @@ func (c *Client) oauthRefreshOnce(handler *transport.OAuthHandler) oauth.Refresh
 			// an empty client_id.
 			// Persists through the handler's token store, whose SaveToken
 			// compare-and-swaps against the flight generation in ctx.
+			// The endpoint is looked up first (the handler caches it), so
+			// that a refresh that could not even find where to send its
+			// request is not recorded as a failed token request (Spec 124
+			// D5).
+			if metadata, metaErr := handler.GetServerMetadata(ctx); metaErr != nil {
+				return nil, oauth.MarkRefreshNotSent(fmt.Errorf("failed to get server metadata for %s: %w", c.config.Name, metaErr))
+			} else if metadata == nil || metadata.TokenEndpoint == "" {
+				return nil, oauth.MarkRefreshNotSent(fmt.Errorf("token endpoint not found in server metadata for %s", c.config.Name))
+			}
 			tok, err := handler.RefreshToken(ctx, rec.RefreshToken)
 			// mcp-go embeds the provider's error_description or raw body
 			// in the error text; scrub it before it reaches logs/events.
@@ -119,10 +128,12 @@ func (c *Client) refreshWithStoredCredentials(ctx context.Context, handler *tran
 
 	metadata, err := handler.GetServerMetadata(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get server metadata for %s: %w", c.config.Name, err)
+		// No token request was sent: the activity log must not show this as
+		// a failed refresh request (Spec 124 D5).
+		return nil, oauth.MarkRefreshNotSent(fmt.Errorf("failed to get server metadata for %s: %w", c.config.Name, err))
 	}
 	if metadata.TokenEndpoint == "" {
-		return nil, fmt.Errorf("token endpoint not found in server metadata for %s", c.config.Name)
+		return nil, oauth.MarkRefreshNotSent(fmt.Errorf("token endpoint not found in server metadata for %s", c.config.Name))
 	}
 
 	newToken, err := c.refreshTokenWithStoredCredentials(ctx, metadata.TokenEndpoint, rec)

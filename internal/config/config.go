@@ -539,7 +539,10 @@ type Config struct {
 
 	// Activity logging settings (RFC-003)
 	ActivityRetentionDays int `json:"activity_retention_days,omitempty" mapstructure:"activity-retention-days"` // Max age before pruning (default: 90)
-	ActivityMaxRecords    int `json:"activity_max_records,omitempty" mapstructure:"activity-max-records"`       // Max records before pruning (default: 100000)
+	ActivityMaxRecords    int `json:"activity_max_records,omitempty" mapstructure:"activity-max-records"`       // Max records before pruning (default: 400000)
+	// SessionRetentionDays is how long a work session is listed and kept whole
+	// in the activity log (Spec 124, default 7). Read at start.
+	SessionRetentionDays int `json:"session_retention_days,omitempty" mapstructure:"session-retention-days"`
 	// ActivityMaxSizeMB caps the total activity-log size in MB before the
 	// oldest records are pruned. Omit the key for the 256MB default; set it to
 	// 0 to disable the size cap.
@@ -1952,7 +1955,8 @@ func DefaultConfig() *Config {
 
 		// Activity logging defaults (RFC-003)
 		ActivityRetentionDays:   90,     // 90 days retention
-		ActivityMaxRecords:      100000, // 100K records max
+		ActivityMaxRecords:      400000, // 400K records max (Spec 124)
+		SessionRetentionDays:    7,      // work sessions kept whole for a week
 		ActivityMaxResponseSize: 65536,  // 64KB response truncation
 
 		ToolCallMaxResponseSize:     65536, // 64KB per stored tool-call response

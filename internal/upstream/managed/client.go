@@ -1472,6 +1472,12 @@ func (mc *Client) runListToolsAsLeader(listCtx context.Context, release func() b
 	return tools, nil
 }
 
+// ErrClientNotConnected is returned by a call on a client that is not
+// connected. Callers that have no not-connected check of their own (the
+// code_execution sub-call) recognise it to record the call by the server's
+// state rather than as a proxy failure (release QA F1).
+var ErrClientNotConnected = errors.New("client not connected")
+
 // ErrConnectionGenerationChanged is CallToolOnEpoch's refusal: the client's
 // connection generation is no longer the one the caller certified the tool
 // identity against, so the call was NOT sent. It is returned verbatim (never
@@ -1528,7 +1534,7 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 		return nil, ErrInstanceRetired
 	}
 	if !mc.IsConnected() {
-		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
+		return nil, fmt.Errorf("%w (state: %s)", ErrClientNotConnected, mc.StateManager.GetState().String())
 	}
 	// #1317 round 2: counted from HERE, before admission control, not just
 	// around the transport call below — a call already queued in
@@ -1558,7 +1564,7 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 			return nil, ErrConnectionGenerationChanged
 		}
 	} else if !mc.IsConnected() {
-		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
+		return nil, fmt.Errorf("%w (state: %s)", ErrClientNotConnected, mc.StateManager.GetState().String())
 	}
 
 	// Spec 093 FR-003/FR-005: admission control sits here, above

@@ -27,9 +27,9 @@ func seedRuntimeActivities(t *testing.T, store *storage.Manager, prefix string, 
 	}
 }
 
-// The size cap runs inside the existing retention cleanup and removes oldest
-// records until the log is within budget, leaving the age/count caps intact.
-func TestActivityRetention_SizeCapRemovesOldest(t *testing.T) {
+// The size cap runs inside the retention cleanup and brings the log within
+// budget, oldest first, leaving the age/count caps intact.
+func TestActivityRetention_SizeCapStripsOldestBodiesFirst(t *testing.T) {
 	store, cleanup := setupTestStorage(t)
 	defer cleanup()
 	svc := NewActivityService(store, zap.NewNop())
@@ -44,9 +44,15 @@ func TestActivityRetention_SizeCapRemovesOldest(t *testing.T) {
 	newest, err := store.GetActivity("rt-09")
 	require.NoError(t, err)
 	assert.NotNil(t, newest, "newest record must survive the size cap")
+	// Spec 124 FR-032: over the size cap, the bodies of the oldest rows go
+	// first and the rows themselves are kept, so the time, result and order
+	// of a call survive. The oldest row is still there, without its body.
 	oldest, err := store.GetActivity("rt-00")
 	require.NoError(t, err)
-	assert.Nil(t, oldest, "oldest record should be pruned by the size cap")
+	require.NotNil(t, oldest, "the oldest record is kept; only its body is removed")
+	assert.True(t, oldest.BodiesRemoved)
+	assert.Empty(t, oldest.Response)
+	assert.Equal(t, "success", oldest.Status)
 
 	// Log is now within budget: a direct size prune deletes nothing more.
 	again, err := store.PruneActivitiesToSize(30 * 1024)

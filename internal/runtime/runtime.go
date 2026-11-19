@@ -241,9 +241,16 @@ type Runtime struct {
 	// counter matters — is exactly when that happens.
 	rejectionMetric atomic.Pointer[RejectionMetricSink]
 
+	// requestSessionFacts resolves the work session, owning user and run name
+	// of a request from its context (Spec 124). Installed by the server, which
+	// owns the request-level resolution; used by rows the runtime writes
+	// itself.
+	requestSessionFacts atomic.Pointer[RequestSessionFacts]
+
 	// workSessions derives a unit of USER WORK from the churn of transport
 	// sessions underneath it (Spec 082).
-	workSessions *WorkSessionTracker
+	workSessions     *WorkSessionTracker
+	workSessionsOnce sync.Once
 
 	// Spec 047: coalesces servers.changed bursts and embeds the server list +
 	// stats payload so SSE subscribers can update without a follow-up
@@ -656,6 +663,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		// value (>= 0 is applied; -1 would mean "unchanged").
 		maxSizeBytes := int64(cfg.EffectiveActivityMaxSizeMB()) * 1024 * 1024
 		activityService.SetRetentionConfig(maxAge, cfg.EffectiveActivityMaxRecords(), checkInterval, maxSizeBytes)
+		activityService.SetSessionWindow(time.Duration(cfg.EffectiveSessionRetentionDays()) * 24 * time.Hour)
 		logger.Info("Activity retention config applied",
 			zap.Int("max_response_size", cfg.ActivityMaxResponseSize),
 			zap.Int("retention_days", cfg.EffectiveActivityRetentionDays()),
@@ -773,6 +781,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// in the MCP dispatch layer) so code_execution and activity replay are
 	// covered by construction.
 	rt.installRejectionObserver()
+	rt.installUpstreamEventObserver()
 
 	return rt, nil
 }
@@ -4412,19 +4421,112 @@ func (r *Runtime) SetWorkSessionResolver(resolver SessionWorkSessionResolver) {
 // ResolveWorkSession derives the work session for an identity, opening a new one
 // when it has been idle past the window. Called once per connection.
 func (r *Runtime) ResolveWorkSession(id WorkSessionIdentity) string {
-	if r.workSessions == nil {
-		r.workSessions = NewWorkSessionTracker(DefaultWorkSessionIdleWindow)
+	return r.workSessionTracker().Resolve(id)
+}
+
+// ResolveWorkSessionEffective is ResolveWorkSession that also returns the
+// identity the session was filed under (see WorkSessionTracker.ResolveEffective).
+func (r *Runtime) ResolveWorkSessionEffective(id WorkSessionIdentity) (string, WorkSessionIdentity) {
+	return r.workSessionTracker().ResolveEffective(id)
+}
+
+// EffectiveWorkSessionIdentity returns the identity a work session would be
+// filed under, without resolving it (see WorkSessionTracker.EffectiveIdentity).
+func (r *Runtime) EffectiveWorkSessionIdentity(id WorkSessionIdentity) WorkSessionIdentity {
+	return r.workSessionTracker().EffectiveIdentity(id)
+}
+
+// workSessionTracker returns the one tracker of this runtime. Spec 124: work
+// sessions are resolved per request, from any request goroutine, so the lazy
+// creation must be safe for concurrent first use.
+func (r *Runtime) workSessionTracker() *WorkSessionTracker {
+	r.workSessionsOnce.Do(func() {
+		if r.workSessions == nil {
+			r.workSessions = NewWorkSessionTracker(DefaultWorkSessionIdleWindow)
+		}
+	})
+	return r.workSessions
+}
+
+// ActivityRetentionState implements management.ActivityRetentionOperations
+// (Spec 124 FR-035).
+func (r *Runtime) ActivityRetentionState() (*storage.RetentionShortfall, time.Duration, error) {
+	if r.activityService == nil {
+		return nil, DefaultSessionWindow, nil
 	}
-	return r.workSessions.Resolve(id)
+	return r.activityService.RetentionShortfall()
+}
+
+// Work-session reads (Spec 124). Thin pass-throughs to storage.
+
+// ListWorkSessionSummaries returns every work-session summary.
+func (r *Runtime) ListWorkSessionSummaries() ([]*storage.WorkSessionSummary, error) {
+	return r.storageManager.ListWorkSessionSummaries()
+}
+
+// GetWorkSessionSummary returns one summary, or nil.
+func (r *Runtime) GetWorkSessionSummary(id string) (*storage.WorkSessionSummary, error) {
+	return r.storageManager.GetWorkSessionSummary(id)
+}
+
+// WorkSessionRowRefs returns a session's index entries in time order.
+func (r *Runtime) WorkSessionRowRefs(id string) ([]storage.WorkSessionRowRef, error) {
+	return r.storageManager.WorkSessionRowRefs(id)
+}
+
+// WalkWorkSessionTimeline visits a work session's index entries merged with
+// the upstream events of the given servers, in time order.
+func (r *Runtime) WalkWorkSessionTimeline(id string, servers []string, from, to time.Time, fn func(storage.WorkSessionRowRef) bool) error {
+	return r.storageManager.WalkWorkSessionTimeline(id, servers, from, to, fn)
+}
+
+// OpenUpstreamEventsBefore returns the latest unresolved upstream event of
+// each server before a time (release QA F2).
+func (r *Runtime) OpenUpstreamEventsBefore(kinds map[string][]string, before, until, notBefore time.Time, visible func(owner string) bool) ([]storage.WorkSessionRowRef, error) {
+	return r.storageManager.OpenUpstreamEventsBefore(kinds, before, until, notBefore, visible)
+}
+
+// GetActivitiesByKeys loads activity rows by key.
+func (r *Runtime) GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error) {
+	return r.storageManager.GetActivitiesByKeys(keys)
+}
+
+// RequestSessionFacts returns the attribution of the request in ctx: its
+// credential, client, profile, work session, owning user and run name. A row
+// the runtime writes itself must carry the same attribution as the rows the
+// dispatch writes for that request, or it would look like another caller's
+// row inside the session.
+type RequestSessionFacts func(ctx context.Context) ActivityAttribution
+
+// SetRequestSessionFacts installs the request-level session resolver.
+func (r *Runtime) SetRequestSessionFacts(f RequestSessionFacts) {
+	if f == nil {
+		r.requestSessionFacts.Store(nil)
+		return
+	}
+	r.requestSessionFacts.Store(&f)
+}
+
+// TouchWorkSession moves the idle clock of a work session that a connection
+// reuses without resolving it again (Spec 124 FR-019).
+func (r *Runtime) TouchWorkSession(workSessionID string, id WorkSessionIdentity) {
+	r.workSessionTracker().Touch(workSessionID, id)
+}
+
+// AdoptWorkSession files an identity under an existing work session.
+func (r *Runtime) AdoptWorkSession(workSessionID string, id WorkSessionIdentity) {
+	r.workSessionTracker().Adopt(workSessionID, id)
+}
+
+// TouchWorkSessionID refreshes the idle clock of a work session by its id.
+func (r *Runtime) TouchWorkSessionID(workSessionID string) {
+	r.workSessionTracker().TouchID(workSessionID)
 }
 
 // ReapWorkSessions drops work sessions idle past maxIdle, so a long-lived daemon
 // does not accumulate one map entry per identity forever.
 func (r *Runtime) ReapWorkSessions(maxIdle time.Duration) int {
-	if r.workSessions == nil {
-		return 0
-	}
-	return r.workSessions.Reap(maxIdle)
+	return r.workSessionTracker().Reap(maxIdle)
 }
 
 // RecordRealToolCallForActivation marks the first-ever real (upstream) tool

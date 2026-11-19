@@ -50,11 +50,23 @@ func (r *Runtime) installRejectionObserver() {
 		if rej.Scope == limiter.ScopeToken {
 			attr = ActivityAttribution{TokenName: rej.Token.Name, TokenPrefix: rej.Token.Prefix, ClientID: rej.Token.ClientID}
 		}
+		// Spec 124: a shed is a failed attempt of its work session like any
+		// other. This row is written here, below the dispatch layer, so the
+		// session facts come from the request context through the resolver
+		// the server installed.
+		if facts := r.requestSessionFacts.Load(); facts != nil {
+			full := (*facts)(ctx)
+			if rej.Scope == limiter.ScopeToken {
+				// The limiter names the token it throttled; that wins.
+				full.TokenName, full.TokenPrefix, full.ClientID = attr.TokenName, attr.TokenPrefix, attr.ClientID
+			}
+			attr = full
+		}
 		r.EmitActivityToolCallRejectedAttributed(
 			rej.Server,
 			rej.Tool,
 			activitySourceFromContext(ctx),
-			reqcontext.GetRequestID(ctx),
+			attemptRequestID(ctx),
 			string(rej.Reason),
 			string(rej.Scope),
 			rej.Message,
@@ -64,6 +76,18 @@ func (r *Runtime) installRejectionObserver() {
 			attr,
 		)
 	})
+}
+
+// attemptRequestID is the id of the tool-call attempt being admitted: the one
+// its dispatch path minted and stamps on the attempt's other rows. The
+// transport request id is the fallback for a caller that minted none; several
+// attempts of one HTTP request share it, so it is not used when an attempt id
+// exists (Spec 124 D2).
+func attemptRequestID(ctx context.Context) string {
+	if id := reqcontext.AttemptID(ctx); id != "" {
+		return id
+	}
+	return reqcontext.GetRequestID(ctx)
 }
 
 // ConcurrencyStats reports the live occupancy of the global aggregate limiter
