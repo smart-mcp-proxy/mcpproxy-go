@@ -185,13 +185,22 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 
 	// A caller confined by anonymous_profile carries the administrator-shaped
 	// anonymous context, but discovery and dispatch resolve it through
-	// ResolveProfileV3: the admitted selection, else the anonymous base. Report
-	// that same set — on a clear the base profile's servers (nothing when it
-	// no longer exists), never every configured server.
+	// ResolveProfileV3: an admitted URL profile, else the admitted selection,
+	// else the anonymous base. Report that same set — on a clear the base
+	// profile's servers (nothing when it no longer exists), never every
+	// configured server. slug is used directly, never re-read from the session
+	// store (see resolveEffectiveProfileForJustSetSlug).
 	if anonymousProfileConfined {
-		effective := slug
-		if effective == "" {
-			effective = cfg.AnonymousProfile
+		base := cfg.AnonymousProfile
+		if profiles.position(base) < 0 {
+			// Dangling base: deny-all, no URL or selection is admitted.
+			return setProfileResult(slug, nil)
+		}
+		effective := base
+		if urlScope := profile.ProfileScopeFromContext(ctx); urlScope != nil && admittedBySwitchableTo(profiles.PolicyFor(base), base, urlScope.Name) {
+			effective = urlScope.Name
+		} else if slug != "" {
+			effective = slug
 		}
 		return setProfileResult(slug, profiles.EffectiveServersFor(effective, []string{"*"}))
 	}

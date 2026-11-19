@@ -76,6 +76,47 @@ func TestHandleSetProfile_ConfinedAnonymousClearReportsEffectiveScope(t *testing
 		})
 	}
 
+	// On /mcp/p/<slug> the admitted URL profile governs dispatch, whatever is
+	// stored, so it governs the reported servers too.
+	t.Run("admitted URL profile governs the reported servers", func(t *testing.T) {
+		proxy, _ := newProfilesV3FixtureWithConfig(t, func(cfg *config.Config) {
+			cfg.AnonymousProfile = "work-readonly"
+		})
+		idx := proxy.profileIndexFor(proxy.currentConfig())
+		urlCtx := func(slug, sid string) context.Context {
+			return sessionCtx(profile.WithProfileScope(anonCtx(), profileScopeFromIndex(idx, slug)), sid)
+		}
+		enforced := func(ctx context.Context) []string {
+			res := proxy.ResolveProfileV3(ctx, proxy.profileIndexCurrent(ctx))
+			require.NotNil(t, res.Scope)
+			var out []string
+			for _, s := range []string{"github", "notion", "filesystem"} {
+				if res.Scope.Allows(s) {
+					out = append(out, s)
+				}
+			}
+			return out
+		}
+
+		wide := urlCtx("work-full", "anon-url-wide")
+		got := call(t, proxy, wide, "")
+		require.Equal(t, []string{"github", "notion", "filesystem"}, got.Servers)
+		require.Equal(t, enforced(wide), got.Servers)
+
+		narrow := urlCtx("work-readonly", "anon-url-narrow")
+		got = call(t, proxy, narrow, "work-full")
+		require.Equal(t, "work-full", got.ActiveProfile)
+		require.Equal(t, []string{"github", "notion"}, got.Servers)
+		require.Equal(t, enforced(narrow), got.Servers)
+
+		// A URL profile the anonymous base does not admit is ignored, as
+		// ResolveProfileV3 ignores it.
+		outside := urlCtx("legacy", "anon-url-outside")
+		got = call(t, proxy, outside, "")
+		require.Equal(t, []string{"github", "notion"}, got.Servers)
+		require.Equal(t, enforced(outside), got.Servers)
+	})
+
 	t.Run("unset anonymous_profile keeps every server", func(t *testing.T) {
 		proxy, _ := newProfilesV3Fixture(t)
 		got := call(t, proxy, sessionCtx(anonCtx(), "anon-unconfined"), "")
