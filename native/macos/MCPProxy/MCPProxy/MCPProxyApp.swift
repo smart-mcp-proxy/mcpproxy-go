@@ -1212,6 +1212,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     rowMenu.addItem(details)
 
                     item.submenu = rowMenu
+                } else if attentionItem.kind == ReviewQueuePresentation.skillReviewKind && attentionItem.fix.verb == "review" {
+                    item.action = #selector(showSkillReviewFromMenu(_:))
+                    item.target = self
+                    item.representedObject = attentionItem.fix.target
                 } else if attentionItem.subject.type == "server" {
                     // Nothing to run — quarantine review, a missing secret, a
                     // configuration problem. Review opens its own sheet;
@@ -2114,6 +2118,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 NSWorkspace.shared.open(url)
             }
         }
+    }
+
+    @objc private func showSkillReviewFromMenu(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        NotificationCenter.default.post(name: .openWebUIPath, object: path)
     }
 
     /// Opens one Web UI route (`note.object`, e.g. `/servers/hf?tab=skills`)

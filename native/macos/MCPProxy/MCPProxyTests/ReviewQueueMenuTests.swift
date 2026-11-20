@@ -14,6 +14,11 @@ final class ReviewQueueMenuTests: XCTestCase {
         XCTAssertTrue(servers.contains("SidebarItem.review.rawValue"))
         XCTAssertTrue(servers.contains(".showReview"))
         XCTAssertTrue(tray.contains("#selector(showReviewFromMenu(_:))"))
+        let skillRoute = try XCTUnwrap(tray.range(of: "else if attentionItem.kind == "))
+        let serverRoute = try XCTUnwrap(tray.range(of: "else if attentionItem.subject.type == \"server\"", range: skillRoute.upperBound..<tray.endIndex))
+        let skillBranch = tray[skillRoute.lowerBound..<serverRoute.lowerBound]
+        XCTAssertTrue(skillBranch.contains("#selector(showSkillReviewFromMenu(_:))"))
+        XCTAssertTrue(skillBranch.contains("item.representedObject = attentionItem.fix.target"))
         XCTAssertTrue(tray.contains("Review Queue…"))
         XCTAssertTrue(tray.contains("appState.reviewQueueCount"), "tray count must be the review queue count, not attention")
         XCTAssertTrue(state.contains("reviewQueueCount"))
