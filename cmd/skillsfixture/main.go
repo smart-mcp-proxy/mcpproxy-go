@@ -51,7 +51,10 @@ func run(addr string) error {
 	}
 	f := skillstest.NewDetached()
 	Seed(f)
-	fmt.Fprintf(os.Stdout, "skillsfixture listening on http://%s/mcp\n", ln.Addr())
+	if _, err := fmt.Fprintf(os.Stdout, "skillsfixture listening on http://%s/mcp\n", ln.Addr()); err != nil {
+		_ = ln.Close()
+		return fmt.Errorf("announce fixture address: %w", err)
+	}
 	return http.Serve(ln, Handler(f, allowedHosts(addr, ln.Addr())...))
 }
 

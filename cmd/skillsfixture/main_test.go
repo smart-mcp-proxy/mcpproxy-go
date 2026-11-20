@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/skills/skillstest"
 )
 
@@ -19,7 +21,7 @@ func rpc(t *testing.T, url, method, uri string) map[string]any {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { assert.NoError(t, resp.Body.Close()) }()
 	var out map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
@@ -55,7 +57,7 @@ func mutate(t *testing.T, base, query, body string, header map[string]string) in
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	assert.NoError(t, resp.Body.Close())
 	return resp.StatusCode
 }
 
@@ -139,7 +141,7 @@ func TestRefusesAForeignHost(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			resp.Body.Close()
+			assert.NoError(t, resp.Body.Close())
 			if resp.StatusCode != http.StatusMisdirectedRequest {
 				t.Errorf("Host %q %s: status %d, want 421", host, path, resp.StatusCode)
 			}
