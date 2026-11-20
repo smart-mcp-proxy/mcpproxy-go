@@ -15,6 +15,20 @@ import (
 // review is held skills (its tools are settled and it is not quarantined).
 const ReviewKindSkillReview = "skill_review"
 
+// heldSkillCount counts the records owed a review (pending or changed, not
+// blocked, listed), whatever the configuration. The caller decides whether
+// the server's skills are read.
+func heldSkillCount(recs []*storage.SkillApprovalRecord) int {
+	n := 0
+	for _, rec := range recs {
+		if rec != nil && !rec.Blocked && rec.Listed &&
+			(rec.Status == storage.SkillStatusPending || rec.Status == storage.SkillStatusChanged) {
+			n++
+		}
+	}
+	return n
+}
+
 // heldSkills counts the skills of a server that are owed a review: status
 // pending or changed, not blocked, listed, on a server whose skills are read
 // (the feature on, the server enabled, not quarantined and not excluded; plan

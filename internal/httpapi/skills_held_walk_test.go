@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
@@ -386,4 +388,74 @@ func TestSSE_AttentionCountChangeWithStableIDsReachesOnlyAdministrators(t *testi
 	}
 	assert.Equal(t, 1, count(<-adminDone), "the administrator learns the count moved")
 	assert.Zero(t, count(<-agentDone), "a scoped subscriber's suppression is by its own ids only")
+}
+
+// Review round 3, finding 1: an administrator narrows a token's reach while
+// its SSE stream is open (re-pin, profile edit). Nothing is published for
+// that, so the subscriber's suppression state still describes the old reach.
+// The next attention event, here a content-only held-skill change on a server
+// it can no longer see, must not reach it just because its newly narrowed ids
+// differ from that stale state.
+func TestSSE_ReachChangeMidStreamDoesNotLetAnInvisibleContentChangeThrough(t *testing.T) {
+	item := func(kind, server, summary string) contracts.AttentionItem {
+		return contracts.AttentionItem{ID: kind + ":server:" + server + ":pending", Kind: kind,
+			Subject: contracts.AttentionSubject{Type: "server", ID: server, Name: server}, Summary: summary}
+	}
+	before := []contracts.AttentionItem{
+		item(internalRuntime.AttentionKindToolReview, "alpha", "alpha: 1 new tool(s), needs review"),
+		item(internalRuntime.AttentionKindToolReview, "beta", "beta: 1 new tool(s), needs review"),
+		item(internalRuntime.AttentionKindSkillReview, "beta", "beta: 3 new skill(s), needs review"),
+	}
+	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: scopeFixtureServers(), withManagement: true,
+		attentionItemsOverride: before}
+
+	tmpDir := t.TempDir()
+	_, err := auth.GetOrCreateHMACKey(tmpDir)
+	require.NoError(t, err)
+	rawToken, err := auth.GenerateToken()
+	require.NoError(t, err)
+	var mu sync.Mutex
+	reach := []string{"alpha", "beta"}
+	store := &testTokenStore{validateFunc: func(token string, _ []byte) (*auth.AgentToken, error) {
+		if token != rawToken {
+			return nil, fmt.Errorf("token not found")
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return &auth.AgentToken{Name: "scoped-ci", TokenPrefix: auth.TokenPrefix(rawToken),
+			AllowedServers: append([]string(nil), reach...), Permissions: []string{auth.PermRead},
+			ExpiresAt: time.Now().Add(24 * time.Hour), CreatedAt: time.Now()}, nil
+	}}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	srv.SetTokenStore(store, tmpDir)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	body, closeBody := sseSubscribe(t, ts.URL, rawToken)
+	defer closeBody()
+	baseline := readSSEUntil(t, body, "attention.changed", time.Now().Add(5*time.Second))
+	require.ElementsMatch(t, []interface{}{before[0].ID, before[1].ID}, baseline.Data["payload"].(map[string]interface{})["ids"])
+	require.Eventually(t, func() bool { return ctrl.subscriberCount() == 1 }, 5*time.Second, 20*time.Millisecond)
+
+	// The administrator narrows the token to alpha. No event is published.
+	mu.Lock()
+	reach = []string{"alpha"}
+	mu.Unlock()
+
+	// One of beta's held skills is approved: same ids, new content.
+	after := append([]contracts.AttentionItem(nil), before...)
+	after[2].Summary = "beta: 2 new skill(s), needs review"
+	ctrl.publishToAll(internalRuntime.Event{Type: internalRuntime.EventTypeAttentionChanged, Timestamp: time.Now(),
+		Payload: map[string]any{"count": len(after), "items": internalRuntime.AttentionEventItems(after),
+			internalRuntime.AttentionFingerprintKey: internalRuntime.AttentionFingerprint(after)}})
+	ctrl.publishToAll(internalRuntime.Event{Type: internalRuntime.EventTypeReviewChanged, Timestamp: time.Now(),
+		Payload: map[string]any{"server": "alpha"}})
+
+	frames := readSSEFramesUntil(t, body, time.Now().Add(10*time.Second), func(f sseEvent) bool {
+		return f.Name == string(internalRuntime.EventTypeReviewChanged)
+	})
+	for _, f := range frames {
+		assert.NotEqual(t, string(internalRuntime.EventTypeAttentionChanged), f.Name,
+			"a content change on a server outside the new reach must not produce a frame")
+	}
 }

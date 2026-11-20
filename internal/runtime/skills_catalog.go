@@ -210,13 +210,15 @@ func (s *skillsCatalogState) close() {
 	s.closeIndex()
 }
 
-func (s *skillsCatalogState) setStatus(serverName string, mut func(*SkillsServerStatus)) {
+func (s *skillsCatalogState) setStatus(serverName string, mut func(*SkillsServerStatus)) (supportChanged bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.init()
 	st := s.status[serverName]
+	wasSupported := st.Supported
 	mut(&st)
 	s.status[serverName] = st
+	return st.Supported != wasSupported
 }
 
 // SkillsStatus returns the in-memory status of the server's last refresh.
@@ -374,7 +376,9 @@ func (r *Runtime) refreshServerSkills(ctx context.Context, serverName string) er
 		return nil
 	}
 	if !um.ServerSupportsSkills(serverName) {
-		r.skills.setStatus(serverName, func(s *SkillsServerStatus) { s.Supported = false })
+		if r.skills.setStatus(serverName, func(s *SkillsServerStatus) { s.Supported = false }) {
+			r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": serverName}))
+		}
 		return nil
 	}
 
@@ -394,11 +398,13 @@ func (r *Runtime) refreshServerSkills(ctx context.Context, serverName string) er
 	}
 	if err != nil && !errors.Is(err, errSkillsCaptureStale) && !errors.Is(err, errSkillsSwitchedOff) &&
 		!errors.Is(err, commitview.ErrServerReplaced) && !errors.Is(err, ErrServerNotFound) {
-		r.skills.setStatus(serverName, func(s *SkillsServerStatus) {
+		if r.skills.setStatus(serverName, func(s *SkillsServerStatus) {
 			s.Supported = true
 			s.LastRefresh = time.Now()
 			s.Error = err.Error()
-		})
+		}) {
+			r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": serverName}))
+		}
 	}
 	return err
 }
@@ -641,7 +647,7 @@ func (r *Runtime) runSkillsRefresh(ctx, scanCtx context.Context, serverName stri
 		return err
 	}
 
-	r.skills.setStatus(serverName, func(s *SkillsServerStatus) {
+	supportChanged := r.skills.setStatus(serverName, func(s *SkillsServerStatus) {
 		s.Supported = true
 		s.LastRefresh = time.Now()
 		s.Error = ""
@@ -666,6 +672,8 @@ func (r *Runtime) runSkillsRefresh(ctx, scanCtx context.Context, serverName stri
 	}
 	if changed {
 		r.publishSkillsChanged(serverName, counts)
+	} else if supportChanged {
+		r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": serverName, "counts": counts}))
 	}
 	return nil
 }
@@ -1262,14 +1270,24 @@ func (r *Runtime) triggerSkillsRefreshAll() {
 	}
 }
 
-// Notify each affected Skills tab when exposure changes. Only servers with held
-// skills affect the review queue, which receives one notification per commit.
+// announceSkillsExposureChanges notifies each affected Skills tab when exposure
+// changes, and the review queue once per commit when held skills appear or
+// disappear. Only a server that has skill records or supports skills is
+// announced (any other has no Skills tab content and no held skill), and the coalesced
+// skills-marked review.changed goes out before the per-server skills.changed.
+// The commit calls it last, after its own events (review round 3): a large
+// fleet must not fill a subscriber's buffer ahead of them.
 func (r *Runtime) announceSkillsExposureChanges(oldCfg, newCfg *config.Config) {
 	if oldCfg == nil || newCfg == nil || r.storageManager == nil {
 		return
 	}
+	type announcement struct {
+		name   string
+		counts map[string]int
+	}
 	seen := map[string]bool{}
-	var names, reviewNames []string
+	var tabs []announcement
+	var reviewNames []string
 	for _, cfg := range []*config.Config{oldCfg, newCfg} {
 		for _, sc := range cfg.Servers {
 			if sc == nil || seen[sc.Name] {
@@ -1281,36 +1299,30 @@ func (r *Runtime) announceSkillsExposureChanges(oldCfg, newCfg *config.Config) {
 			// The admin tab can display retained records even on an ineligible server.
 			oldIncluded := oldSc != nil && (oldSc.ExposeSkills == nil || *oldSc.ExposeSkills)
 			newIncluded := newSc != nil && (newSc.ExposeSkills == nil || *newSc.ExposeSkills)
-			if wasRead != isRead || oldCfg.EnableSkills != newCfg.EnableSkills || oldIncluded != newIncluded || (oldSc == nil) != (newSc == nil) {
-				names = append(names, sc.Name)
-			}
-			if wasRead == isRead {
+			if wasRead == isRead && oldCfg.EnableSkills == newCfg.EnableSkills && oldIncluded == newIncluded && (oldSc == nil) == (newSc == nil) {
 				continue
 			}
-			readCfg, readSc := newCfg, newSc
-			if wasRead {
-				readCfg, readSc = oldCfg, oldSc
+			recs, err := r.ListSkillRecords(sc.Name)
+			if err != nil || (len(recs) == 0 && !r.SkillsStatus(sc.Name).Supported) {
+				continue
 			}
-			if pending, changed, _, err := r.heldSkills(readCfg, readSc); err == nil && pending+changed > 0 {
+			tabs = append(tabs, announcement{name: sc.Name, counts: r.skillCounts(sc.Name, recs)})
+			if wasRead != isRead && heldSkillCount(recs) > 0 {
 				reviewNames = append(reviewNames, sc.Name)
 			}
 		}
 	}
-	if len(names) == 0 {
+	if len(tabs) == 0 {
 		return
 	}
-	sort.Strings(names)
 	r.skills.bumpIndexGeneration()
-	for _, name := range names {
-		var counts map[string]int
-		if recs, err := r.ListSkillRecords(name); err == nil {
-			counts = r.skillCounts(name, recs)
-		}
-		r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": name, "counts": counts}))
-	}
 	if len(reviewNames) > 0 {
 		sort.Strings(reviewNames)
 		r.publishEvent(newEvent(EventTypeReviewChanged, map[string]any{"servers": reviewNames, ReviewChangedSkillsKey: true}))
+	}
+	sort.Slice(tabs, func(i, j int) bool { return tabs[i].name < tabs[j].name })
+	for _, a := range tabs {
+		r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": a.name, "counts": a.counts}))
 	}
 }
 
@@ -1325,7 +1337,6 @@ func (r *Runtime) onSkillsConfigChanged(oldCfg, newCfg *config.Config) {
 	// switch, a server's expose_skills, enabled, quarantine, add or remove):
 	// the search index is rebuilt at its next use (spec 125 D12).
 	r.skills.bumpIndexGeneration()
-	r.announceSkillsExposureChanges(oldCfg, newCfg)
 	if newCfg == nil || !newCfg.EnableSkills {
 		return
 	}

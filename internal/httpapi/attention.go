@@ -72,6 +72,13 @@ func renderAttentionChangedForCaller(ctx context.Context, payload map[string]int
 	return map[string]interface{}{"count": len(ids), "ids": ids}
 }
 
+// attentionEventIDsFor narrows a runtime attention event's items to the ids
+// ctx's caller may see, by the same rule as renderAttentionChangedForCaller.
+func attentionEventIDsFor(ctx context.Context, items []internalRuntime.AttentionEventItem) []string {
+	ids, _ := renderAttentionChangedForCaller(ctx, map[string]interface{}{"items": items})["ids"].([]string)
+	return ids
+}
+
 func attentionIDSet(ids []string) map[string]struct{} {
 	out := make(map[string]struct{}, len(ids))
 	for _, id := range ids {

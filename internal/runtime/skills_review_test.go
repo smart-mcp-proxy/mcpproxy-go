@@ -437,6 +437,8 @@ func TestSkillsExposureChangeWithNothingHeldRefreshesTabsOnly(t *testing.T) {
 	rt.skills.noAutoTrigger.Store(true)
 	saveHeldSkill(t, rt, "srv-0", "ok", storage.SkillStatusApproved)
 	saveHeldSkill(t, rt, "srv-1", "blocked", storage.SkillStatusPending, func(r *storage.SkillApprovalRecord) { r.Blocked = true })
+	// A server can announce Skills before it has any catalog records.
+	rt.skills.setStatus("srv-2", func(status *SkillsServerStatus) { status.Supported = true })
 	ch := rt.SubscribeEvents()
 	defer rt.UnsubscribeEvents(ch)
 	for _, enable := range []bool{true, false} {
@@ -445,13 +447,73 @@ func TestSkillsExposureChangeWithNothingHeldRefreshesTabsOnly(t *testing.T) {
 		})
 		require.NoError(t, err)
 		skills, reviews := skillsAnnouncements(t, ch, 500*time.Millisecond)
-		var wantSkills []string
-		for _, server := range servers {
-			wantSkills = append(wantSkills, server.Name)
-		}
-		assert.ElementsMatch(t, wantSkills, skills)
+		// The tab is offered when the server supports Skills or has retained records.
+		assert.ElementsMatch(t, []string{"srv-0", "srv-1", "srv-2"}, skills)
 		assert.Emptyf(t, reviews, "enable_skills=%v: skills-marked review.changed", enable)
 	}
+}
+
+// Review round 3, finding 2: flipping enable_skills on a large fleet must not
+// flood the bus (a subscriber buffer holds 256 events; publishEvent drops when
+// it is full). Servers without skill records announce nothing, a server with
+// records gets one skills.changed, and the commit's own config.saved and the
+// coalesced skills-marked review.changed still reach the subscriber, ahead of
+// the per-server announcements.
+func TestSkillsExposureChangeOnALargeFleetDoesNotStarveTheCommitEvents(t *testing.T) {
+	var servers []*config.ServerConfig
+	for i := 0; i < 300; i++ {
+		servers = append(servers, explicitServer(&config.ServerConfig{
+			Name: fmt.Sprintf("srv-%03d", i), URL: "http://127.0.0.1:9/mcp", Protocol: "http", Enabled: true,
+		}))
+	}
+	rt, _ := newSpec116Runtime(t, nil, servers...)
+	rt.skills.noAutoTrigger.Store(true)
+	saveHeldSkill(t, rt, "srv-007", "held", storage.SkillStatusPending)
+	saveHeldSkill(t, rt, "srv-123", "ok", storage.SkillStatusApproved)
+	ch := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(ch)
+	_, err := rt.Commit("test", func(tx *CommitTx) error {
+		return tx.MutateGlobal(func(c *config.Config) error { c.EnableSkills = true; return nil })
+	})
+	require.NoError(t, err)
+
+	var order []string
+	var skills []string
+	deadline := time.After(2 * time.Second)
+collect:
+	for {
+		select {
+		case evt := <-ch:
+			switch evt.Type {
+			case EventTypeSkillsChanged:
+				name, _ := evt.Payload["server"].(string)
+				skills = append(skills, name)
+				order = append(order, "skills")
+			case EventTypeReviewChanged:
+				if marked, _ := evt.Payload[ReviewChangedSkillsKey].(bool); marked {
+					assert.Equal(t, []string{"srv-007"}, evt.Payload["servers"])
+					order = append(order, "review")
+				}
+			case EventTypeConfigSaved:
+				order = append(order, "saved")
+			}
+		case <-deadline:
+			break collect
+		}
+	}
+	assert.ElementsMatch(t, []string{"srv-007", "srv-123"}, skills)
+	require.Contains(t, order, "saved", "the commit's config.saved is published")
+	require.Contains(t, order, "review", "the coalesced review.changed is published")
+	first := func(kind string) int {
+		for i, k := range order {
+			if k == kind {
+				return i
+			}
+		}
+		return -1
+	}
+	assert.Less(t, first("saved"), first("skills"), "the commit's own events come first")
+	assert.Less(t, first("review"), first("skills"), "the coalesced review.changed comes before the per-server announcements")
 }
 
 func TestSkillsExposureBadgeChangesOnDisabledServer(t *testing.T) {
