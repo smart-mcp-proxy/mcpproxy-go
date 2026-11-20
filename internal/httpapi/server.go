@@ -4624,9 +4624,6 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warnw("Closing SSE stream after caller revalidation failed", "error", err)
 		return
 	}
-	// Send the same scoped snapshot used for duplicate suppression. An update
-	// queued during setup may already be reflected in this snapshot.
-	lastAttentionIDs = attentionIDSetFor(callerCtx, s.controller.Attention())
 	initialLiveStats := filterUpstreamStatsServers(callerCtx, s.controller.GetUpstreamStats())
 	initialStatus := map[string]interface{}{
 		"running":        s.controller.IsRunning(),
@@ -4645,11 +4642,19 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logger.Debug("Initial SSE status event sent successfully")
 
-	initialIDs := make([]string, 0, len(lastAttentionIDs))
-	for id := range lastAttentionIDs {
-		initialIDs = append(initialIDs, id)
+	callerCtx, err = refreshCallerContext()
+	if err != nil {
+		s.logger.Warnw("Closing SSE stream before initial attention snapshot", "error", err)
+		return
 	}
-	sort.Strings(initialIDs)
+	// Send the same scoped snapshot used for duplicate suppression. An update
+	// queued during setup may already be reflected in this snapshot.
+	visibleAttention := filterAttentionItems(callerCtx, s.controller.Attention())
+	initialIDs := make([]string, 0, len(visibleAttention))
+	for _, item := range visibleAttention {
+		initialIDs = append(initialIDs, item.ID)
+	}
+	lastAttentionIDs = attentionIDSet(initialIDs)
 	initialAttention := map[string]interface{}{
 		"payload":   map[string]interface{}{"count": len(initialIDs), "ids": initialIDs},
 		"timestamp": time.Now().Unix(),
@@ -4741,10 +4746,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 			// coalesced change is meaningful to show).
 			if evt.Type == internalRuntime.EventTypeAttentionChanged {
 				ids, _ := rendered["ids"].([]string)
-				current := make(map[string]struct{}, len(ids))
-				for _, id := range ids {
-					current[id] = struct{}{}
-				}
+				current := attentionIDSet(ids)
 				if lastAttentionIDs != nil && attentionIDSetsEqual(lastAttentionIDs, current) {
 					continue
 				}

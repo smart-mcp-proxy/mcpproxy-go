@@ -72,14 +72,10 @@ func renderAttentionChangedForCaller(ctx context.Context, payload map[string]int
 	return map[string]interface{}{"count": len(ids), "ids": ids}
 }
 
-// attentionIDSetFor is the id set of the attention list as ctx's caller sees
-// it (the same narrowing GET /attention and the attention.changed frame
-// apply). handleSSEEvents seeds its per-connection suppression with it.
-func attentionIDSetFor(ctx context.Context, items []contracts.AttentionItem) map[string]struct{} {
-	visible := filterAttentionItems(ctx, items)
-	out := make(map[string]struct{}, len(visible))
-	for _, it := range visible {
-		out[it.ID] = struct{}{}
+func attentionIDSet(ids []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		out[id] = struct{}{}
 	}
 	return out
 }
