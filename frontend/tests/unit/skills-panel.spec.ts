@@ -193,6 +193,40 @@ describe('SkillsPanel', () => {
     expect(w.get('[data-test="skills-notice"]').text()).toMatch(/nothing was refreshed/)
   })
 
+  // Round-7 finding 1: refresh and the writes share one notice order, taken
+  // when each action starts; a late refresh failure never replaces a newer notice.
+  it('a late refresh failure never overwrites the notice of a newer block, and still resets and reloads', async () => {
+    m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('a')])))
+    m(api.blockSkills).mockResolvedValue(ok({ changed: 1 }))
+    let failRefresh: (v: unknown) => void = () => {}
+    m(api.refreshServerSkills).mockReturnValueOnce(new Promise(r => { failRefresh = r }))
+    const w = mountPanel(); await flushPromises()
+    await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
+    await w.get('[data-test="skills-refresh"]').trigger('click'); await flushPromises()
+    await w.get('[data-test="skill-block"]').trigger('click'); await flushPromises()
+    expect(w.get('[data-test="skills-notice"] span').text()).toBe('Blocked.')
+    const loads = m(api.getServerSkills).mock.calls.length
+    failRefresh({ success: false, error: 'server srv reconnected during the refresh', errorCode: 'refresh_superseded' }); await flushPromises()
+    expect(w.get('[data-test="skills-notice"] span').text()).toBe('Blocked.')
+    expect(w.get('[data-test="skills-refresh"]').attributes('disabled')).toBeUndefined()
+    expect(m(api.getServerSkills).mock.calls.length).toBe(loads + 1) // the reconcile reload still runs
+  })
+
+  it('a late block notice never overwrites the notice of a newer refresh failure', async () => {
+    m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('a')])))
+    let releaseBlock: (v: unknown) => void = () => {}
+    m(api.blockSkills).mockReturnValueOnce(new Promise(r => { releaseBlock = r }))
+    const w = mountPanel(); await flushPromises()
+    await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
+    await w.get('[data-test="skill-block"]').trigger('click'); await flushPromises()
+    m(api.refreshServerSkills).mockResolvedValueOnce({ success: false, error: 'boom-refresh' })
+    await w.get('[data-test="skills-refresh"]').trigger('click'); await flushPromises()
+    expect(w.get('[data-test="skills-notice"] span').text()).toBe('boom-refresh')
+    releaseBlock(ok({ changed: 1 })); await flushPromises()
+    expect(w.get('[data-test="skills-notice"] span').text()).toBe('boom-refresh')
+    expect(w.get('[data-test="skill-block"]').attributes('disabled')).toBeUndefined()
+  })
+
   // Round-6 finding 3: only the newest write publishes its notice.
   it('a late approve reload never overwrites the notice of a newer block', async () => {
     m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([makeSkill('a')])))

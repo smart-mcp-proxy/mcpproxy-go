@@ -156,26 +156,47 @@ if [[ -n "${SWEEP_SELF_TEST_CHILD:-}" ]]; then printf '%s\n%s\n' "$API_KEY" "$WO
 # API key becomes *** and the local paths become placeholders. OUT_REAL is set
 # once OUT is known.
 OUT_REAL=""
+# Paths the run was configured with (PW_CHROMIUM, the binaries, the browser
+# dir), newline-separated: each is replaced as a whole by <path>/basename even
+# when it holds a space, wherever it is printed. Added to by redact_extra_add.
+REDACT_EXTRA=""
+redact_extra_add() {
+  local p
+  for p in "$@"; do [[ "$p" == /* ]] && REDACT_EXTRA+="$p"$'\n'; done
+  return 0
+}
+redact_extra_add "${PW_CHROMIUM:-}" "${MCPPROXY_BINARY_PATH:-}" "${SKILLS_FIXTURE_BINARY:-}" "${PLAYWRIGHT_BROWSERS_PATH:-}"
 # shellcheck disable=SC2016 # JavaScript, expanded by node
 REDACT_JS='
 const fs = require("fs"), f = process.argv[1], e = process.env
 let t = f ? fs.readFileSync(f, "utf8") : fs.readFileSync(0, "utf8")
 const key = e.SWEEP_REDACT_KEY
 if (key) for (const k of [key, encodeURIComponent(key)]) t = t.split(k).join("***")
+const base = p => p.split("/").filter(Boolean).pop() || ""
 const paths = [[e.SWEEP_REDACT_OUT, "<out>"], [e.SWEEP_REDACT_WORK, "<scratch>"], [e.SWEEP_REDACT_REPO, "<repo>"], [e.SWEEP_REDACT_HOME, "~"]]
   .filter(([p]) => p && p.length > 1).sort((a, b) => b[0].length - a[0].length)
+// A configured path outside the known prefixes, as a whole (it may hold a space).
+const known = paths.map(([p]) => p)
+const extra = (e.SWEEP_REDACT_EXTRA || "").split("\n")
+  .filter(p => p.length > 1 && p.startsWith("/") && !known.some(k => p === k || p.startsWith(k + "/")))
+  .sort((a, b) => b.length - a.length)
+for (const p of extra) t = t.split(p).join("<path>/" + base(p))
 for (const [p, r] of paths) t = t.split(p).join(r)
-// Any other absolute local path (a browser named by PW_CHROMIUM, a browser
-// download dir, a toolchain path in a stack trace or in PATH) is reduced to
-// <path>/basename. Only paths under a filesystem root are touched, so a URL path
-// (http://host:port/api/...) or a placeholder (<repo>/e2e/...) is kept.
-const roots = "Users|home|private|var|tmp|usr|opt|etc|Library|System|Applications|Volumes|nix|root|snap|mnt|media|srv|bin|sbin|lib|lib64|run|__w"
-const abs = new RegExp("(^|[\\s\"\x27`(\\[=,:;])(/(?:" + roots + ")(?=/|[\\s\"\x27`()\\[\\],:;]|$)(?:/[^\\s\"\x27`()\\[\\],:;]*)*)", "gm")
-t = t.replace(abs, (m, pre, p) => pre + "<path>/" + p.split("/").filter(Boolean).pop())
+// Any other absolute filesystem path, whatever its root (/data, /work, /opt,
+// ...), is reduced to <path>/basename: a path that starts the text or follows
+// a space, a quote, a bracket, "=", ",", ":", ";", an ANSI colour code or a
+// JSON escape (\n, \t, \u001b[..m). A URL path follows its host, so it is kept
+// (http://127.0.0.1:1/api/...), and so is a bare route of the core (/api/...,
+// /mcp, /ui, /events) and a placeholder (<repo>/e2e/...).
+const pre = "(^|[\\s\"\x27`(\\[{=,:;]|\x1b\\[[0-9;]*m|\\\\u001b\\[[0-9;]*m|\\\\[nrt\"])"
+const seg = "[^\\s\"\x27`()\\[\\]{}<>,:;\\\\/\x1b]+"
+const route = "(?!(?:api|mcp|ui|events|healthz|readyz)(?:[/?#\\s\"\x27`)\\],:;\\\\]|$))"
+const abs = new RegExp(pre + "(/" + route + seg + "(?:/" + seg + ")*/?)", "gm")
+t = t.replace(abs, (m, p1, p) => p1 + "<path>/" + base(p))
 if (f) fs.writeFileSync(f, t); else process.stdout.write(t)'
 redact_node() {
   SWEEP_REDACT_KEY="$API_KEY" SWEEP_REDACT_OUT="$OUT_REAL" SWEEP_REDACT_REPO="$REPO_ROOT" \
-  SWEEP_REDACT_WORK="$WORK" SWEEP_REDACT_HOME="$OPERATOR_HOME" node -e "$REDACT_JS" "$@"
+  SWEEP_REDACT_WORK="$WORK" SWEEP_REDACT_HOME="$OPERATOR_HOME" SWEEP_REDACT_EXTRA="$REDACT_EXTRA" node -e "$REDACT_JS" "$@"
 }
 redact_file() {
   [[ -f "$1" ]] || return 0
@@ -500,7 +521,21 @@ run_self_test() {
   got_path=$(say_path "/srv/odd place/chrome"); [[ "$got_path" == "<path>/chrome" ]] || st_fail "say_path of an outside path with a space gave '$got_path'"
   got_path=$(printf 'launch /opt/google/chrome/chrome failed; PATH=/usr/local/bin:/opt/homebrew/bin url http://127.0.0.1:1/api/v1/servers key %s' "$API_KEY" | redact_stream)
   [[ "$got_path" == 'launch <path>/chrome failed; PATH=<path>/bin:<path>/bin url http://127.0.0.1:1/api/v1/servers key ***' ]] || st_fail "redact_stream gave '$got_path'"
-  echo "self-test: printed paths are relative, placeholders or <path>/basename; URLs are kept"
+  # Roots in no list: /data and /work (round 7), a colour code and JSON escapes
+  # in front of a path (Playwright's JSON report), and a bare core route kept.
+  got_path=$(printf 'executable doesn'\''t exist at /data/tools/chromium; /work/tools/chromium:1 GET /api/v1/servers and /mcp' | redact_stream)
+  [[ "$got_path" == 'executable doesn'\''t exist at <path>/chromium; <path>/chromium:1 GET /api/v1/servers and /mcp' ]] || st_fail "redact_stream of /data and /work roots gave '$got_path'"
+  got_path=$(printf '{"message":"\\u001b[31mError\\u001b[39m: at /data/tools/chromium\\n/work/x/y.js\\t\\"/data/q\\""}' | redact_stream)
+  [[ "$got_path" == '{"message":"\u001b[31mError\u001b[39m: at <path>/chromium\n<path>/y.js\t\"<path>/q\""}' ]] || st_fail "redact_stream of a JSON-escaped message gave '$got_path'"
+  got_path=$(printf 'x\033[2m/data/tools/chromium\033[22m' | redact_stream)
+  [[ "$got_path" == $'x\033[2m<path>/chromium\033[22m' ]] || st_fail "redact_stream after an ANSI code gave '$got_path'"
+  # A configured path with a space is replaced as a whole.
+  local saved_extra="$REDACT_EXTRA"
+  redact_extra_add "/data/odd tools/chromium"
+  got_path=$(printf 'launching /data/odd tools/chromium --headless' | redact_stream)
+  REDACT_EXTRA="$saved_extra"
+  [[ "$got_path" == 'launching <path>/chromium --headless' ]] || st_fail "redact_stream of a configured path with a space gave '$got_path'"
+  echo "self-test: printed paths are relative, placeholders or <path>/basename (any root, configured paths whole); URLs and routes are kept"
 
   # 2. An ambient MCPPROXY_DATA_DIR / MCPPROXY_DATA does not reach the core.
   decoy_new="$WORK/decoy-data-dir"
@@ -681,8 +716,12 @@ if (r.checked_commit !== "0123456789abcdef0123456789abcdef01234567" || r.working
     # it) and exits 1: the run must fail, say so, name the browser as
     # <path>/chromium, print Playwright's failure, and print no key and no
     # absolute path of the stand-in.
-    local ext ext_real
-    ext=$(mktemp -d /tmp/skills-sweep-pwext.XXXXXX)
+    local ext ext_dir ext_real f
+    ext_dir=$(mktemp -d /tmp/skills-sweep-pwext.XXXXXX)
+    # A space in the path: the generic rule alone would stop at it; the
+    # configured path is replaced as a whole.
+    ext="$ext_dir/odd tools"
+    mkdir -p "$ext"
     ext_real=$(cd "$ext" && pwd -P)
     # shellcheck disable=SC2016 # expanded by the stand-in's own shell
     printf '#!/bin/sh\necho "stand-in browser $0 args: $*" >&2\nenv >&2\nexit 1\n' >"$ext/chromium"
@@ -693,10 +732,14 @@ if (r.checked_commit !== "0123456789abcdef0123456789abcdef01234567" || r.working
       bash "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")" --out "$WORK/st-pw-fail" >"$probe_out" 2>&1
     probe_status=$?
     set -e
-    rm -rf "$ext"
+    rm -rf "$ext_dir"
     st_check_child_output "a run whose Playwright fails" "$probe_out" "$probe_key"
-    for p in "$ext" "$ext_real" "${ext_real#/private}"; do
-      grep -qF "$p" "$probe_out" && st_fail "a run whose Playwright fails printed the stand-in browser's path ($(grep -cF "$p" "$probe_out") lines)"
+    for f in "$probe_out" "$WORK/st-pw-fail/playwright-results.json" "$WORK/st-pw-fail/skills-sweep-results.json"; do
+      [[ -f "$f" ]] || st_fail "a run whose Playwright fails left no $(basename "$f")"
+      grep -qF "$(sed -n 1p "$probe_key")" "$f" && st_fail "a run whose Playwright fails wrote its API key into $(basename "$f")"
+      for p in "$ext_dir" "$ext_real" "${ext_real#/private}" "${ext_dir#/private}"; do
+        grep -qF "$p" "$f" && st_fail "a run whose Playwright fails printed the stand-in browser's path into $(basename "$f") ($(grep -cF "$p" "$f") lines)"
+      done
     done
     [[ $probe_status -ne 0 ]] || st_fail "a run whose Playwright fails exited 0"
     grep -qF "skills tab sweep FAILED" "$probe_out" || st_fail "a run whose Playwright fails did not say so"
@@ -722,6 +765,35 @@ if (r.checked_commit !== "0123456789abcdef0123456789abcdef01234567" || r.working
     [[ $probe_status -ne 0 ]] || st_fail "a run whose go build fails exited 0"
     grep -qF "go: error at <repo>/cmd/skillsfixture/main.go:1" "$probe_out" || st_fail "a run whose go build fails did not print the build output redacted"
     echo "self-test: a failing build prints its output redacted, with no absolute path"
+
+    # 8. An unwritable --out or report parent fails at once, with the mkdir
+    # diagnostics redacted: a read-only dir (a new subdir cannot be made in it,
+    # and the dir itself is not writable). Skipped as root, who can write it.
+    if [[ "$(id -u)" != "0" ]]; then
+      local ro="$WORK/st-readonly" case_args
+      mkdir -p "$ro"
+      chmod 555 "$ro"
+      for case_args in "--out|$ro/sub" "--out|$ro" "--report-html|$ro/sub/report.html" "--report-html|$ro/report.html"; do
+        IFS='|' read -r which p <<<"$case_args"
+        rm -f "$probe_key"
+        set +e
+        if [[ $which == --out ]]; then
+          SWEEP_SELF_TEST_CHILD="$probe_key" MCPPROXY_BINARY_PATH="$CORE_BIN" SKILLS_FIXTURE_BINARY="$FIXTURE_BIN" \
+            bash "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")" --out "$p" >"$probe_out" 2>&1
+        else
+          SWEEP_SELF_TEST_CHILD="$probe_key" MCPPROXY_BINARY_PATH="$CORE_BIN" SKILLS_FIXTURE_BINARY="$FIXTURE_BIN" \
+            bash "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")" --out "$WORK/st-ro-out" --report-html "$p" >"$probe_out" 2>&1
+        fi
+        probe_status=$?
+        set -e
+        st_check_child_output "a run with an unwritable $which" "$probe_out" "$probe_key"
+        [[ $probe_status -ne 0 ]] || st_fail "a run with an unwritable $which ($(say_path "$p")) exited 0"
+        grep -qF "cannot create or write the" "$probe_out" || st_fail "a run with an unwritable $which ($(say_path "$p")) did not say so"
+        grep -qF "skillsfixture ready" "$probe_out" && st_fail "a run with an unwritable $which started the sweep"
+      done
+      chmod 755 "$ro"
+      echo "self-test: an unwritable --out or report directory fails at once, with its diagnostics redacted"
+    fi
   fi
   echo "self-test passed"
   DATA_DIR="$sweep_data_dir"
@@ -746,11 +818,24 @@ if [[ $SELF_TEST -eq 1 ]]; then
   exit 0
 fi
 
-mkdir -p "$OUT"
+# The output dirs are made through run_logged, so a failure's diagnostics
+# (mkdir names the absolute path) are printed redacted, and checked writable
+# up front, so an unwritable dir fails here and not after the whole sweep.
+# $1: what it is, $2: the dir.
+make_writable_dir() {
+  local status=0
+  run_logged "mkdir-$1" mkdir -p "$2" >&2 || status=$?
+  if [[ $status -eq 0 && ! -w "$2" ]]; then status=1; fi
+  if [[ $status -ne 0 ]]; then
+    echo "cannot create or write the $1 directory $(say_path "$2") (status $status)" >&2
+    exit 1
+  fi
+}
+make_writable_dir out "$OUT"
 OUT=$(cd "$OUT" && pwd -P)
 OUT_REAL="$OUT"
 if [[ -n "$REPORT_HTML" ]]; then
-  mkdir -p "$(dirname "$REPORT_HTML")"
+  make_writable_dir report "$(dirname "$REPORT_HTML")"
   REPORT_HTML="$(cd "$(dirname "$REPORT_HTML")" && pwd -P)/$(basename "$REPORT_HTML")"
 fi
 rm -rf "$OUT/screenshots" "$OUT/state" "$OUT/playwright-results.json" "$OUT/skills-sweep-results.json"

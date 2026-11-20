@@ -148,6 +148,10 @@ function chipClass(s: SkillEntry) {
 // this one, is dropped.
 let visit = 0
 let requestSeq = 0
+// The notice order shared by refresh and every write: each takes a number when
+// it starts, and publishes a notice only while it is still the newest action.
+// Spinner and button resets and the reconcile reloads do not depend on it.
+let noticeSeq = 0
 const isCurrent = (server: string, v: number, seq?: number) =>
   server === props.serverName && v === visit && (seq === undefined || seq === requestSeq)
 
@@ -195,7 +199,7 @@ async function load(): Promise<SkillsListResponse | null> {
 // newer records, so a superseded refresh reloads instead of overwriting them.
 let refreshSeq = 0
 async function refresh() {
-  const server = props.serverName, v = visit, mine = ++refreshSeq, seq = ++requestSeq
+  const server = props.serverName, v = visit, mine = ++refreshSeq, seq = ++requestSeq, op = ++noticeSeq
   refreshing.value = true
   const res = await settle(() => api.refreshServerSkills(server))
   if (!isCurrent(server, v) || mine !== refreshSeq) return
@@ -209,7 +213,9 @@ async function refresh() {
   // A failed refresh (refresh_superseded, skills_not_supported, skills_disabled,
   // server_replaced, a 500) reloads the listing: the notice says it was reloaded,
   // and the stored records may have moved even though this refresh did not apply.
-  notice.value = skillErrorNotice(res.errorCode, res.error, 'refresh')
+  // Only while no later action (another refresh, a write) has started: the
+  // reconcile reload below runs either way.
+  if (op === noticeSeq) notice.value = skillErrorNotice(res.errorCode, res.error, 'refresh')
   await load()
 }
 
@@ -219,14 +225,14 @@ async function refresh() {
 // for a skill the reviewer has left is not shown on the next one (the listing is
 // still reloaded). A success notice given as a function is worded from the
 // listing reloaded after the write (null when that reload did not apply).
-// Every write takes an operation number when it starts; only the newest write
-// publishes a notice, so a slow reload after an earlier write never replaces
-// the notice of a later one (approve, then block: "Blocked." stays).
+// Every write takes an operation number when it starts, from the one notice
+// order it shares with refresh (noticeSeq); only the newest action publishes a
+// notice, so a slow answer or reload of an earlier one never replaces the
+// notice of a later one (approve, then block: "Blocked." stays).
 type DoneNotice = string | ((reloaded: SkillsListResponse | null) => string)
-let writeSeq = 0
 async function write(action: SkillAction, run: () => Promise<{ success: boolean; error?: string; errorCode?: string }>, done: DoneNotice) {
-  const server = props.serverName, v = visit, token = review.value?.token, op = ++writeSeq
-  const mayPublish = () => op === writeSeq && isCurrent(server, v)
+  const server = props.serverName, v = visit, token = review.value?.token, op = ++noticeSeq
+  const mayPublish = () => op === noticeSeq && isCurrent(server, v)
   busy.value = true
   const res = await settle(run)
   if (!isCurrent(server, v)) return
