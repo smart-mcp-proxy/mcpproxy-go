@@ -57,8 +57,9 @@ Options:
                       leaves no process or listening port of the run alive
                       (and nothing else touched), that the results writer
                       records the first failed attempt and redacts the API key
-                      and local paths, and that a DEBUG=1 run never prints the
-                      API key
+                      and local paths, and that neither a passing DEBUG=1 run
+                      nor a run whose fixture or core fails to start prints
+                      the API key or an absolute local path
   --self-test-first   run the --self-test checks, then the sweep (the release
                       gate does this, so both land in one advisory entry)
   -h, --help          print this message
@@ -142,21 +143,43 @@ if [[ ${#API_KEY} -lt 32 ]]; then
   exit 1
 fi
 
-# Every text file this script leaves behind goes through redact_file: the API
-# key becomes *** and the local paths become placeholders. Set once OUT is known.
+# Self-test hook: a child run of --self-test hands its key and its scratch dir
+# to the parent (a scratch file of the parent's), which checks the child's
+# output for both.
+if [[ -n "${SWEEP_SELF_TEST_CHILD:-}" ]]; then printf '%s\n%s\n' "$API_KEY" "$WORK" >"$SWEEP_SELF_TEST_CHILD"; fi
+
+# Every text file this script leaves behind goes through redact_file, and every
+# message it prints that can carry a path or a log through redact_stream: the
+# API key becomes *** and the local paths become placeholders. OUT_REAL is set
+# once OUT is known.
 OUT_REAL=""
-redact_file() {
-  [[ -f "$1" ]] || return 0
-  SWEEP_REDACT_KEY="$API_KEY" SWEEP_REDACT_OUT="$OUT_REAL" SWEEP_REDACT_REPO="$REPO_ROOT" \
-  SWEEP_REDACT_WORK="$WORK" SWEEP_REDACT_HOME="$OPERATOR_HOME" node -e '
+# shellcheck disable=SC2016 # JavaScript, expanded by node
+REDACT_JS='
 const fs = require("fs"), f = process.argv[1], e = process.env
-let t = fs.readFileSync(f, "utf8")
+let t = f ? fs.readFileSync(f, "utf8") : fs.readFileSync(0, "utf8")
 const key = e.SWEEP_REDACT_KEY
 if (key) for (const k of [key, encodeURIComponent(key)]) t = t.split(k).join("***")
 const paths = [[e.SWEEP_REDACT_OUT, "<out>"], [e.SWEEP_REDACT_WORK, "<scratch>"], [e.SWEEP_REDACT_REPO, "<repo>"], [e.SWEEP_REDACT_HOME, "~"]]
   .filter(([p]) => p && p.length > 1).sort((a, b) => b[0].length - a[0].length)
 for (const [p, r] of paths) t = t.split(p).join(r)
-fs.writeFileSync(f, t)' "$1"
+if (f) fs.writeFileSync(f, t); else process.stdout.write(t)'
+redact_node() {
+  SWEEP_REDACT_KEY="$API_KEY" SWEEP_REDACT_OUT="$OUT_REAL" SWEEP_REDACT_REPO="$REPO_ROOT" \
+  SWEEP_REDACT_WORK="$WORK" SWEEP_REDACT_HOME="$OPERATOR_HOME" node -e "$REDACT_JS" "$@"
+}
+redact_file() {
+  [[ -f "$1" ]] || return 0
+  redact_node "$1"
+}
+# Copies stdin to stdout, redacted.
+redact_stream() { redact_node; }
+# A path as printed: relative to the repo root when it is inside it, else with
+# the placeholders of redact_stream.
+say_path() {
+  case "$1" in
+    "$REPO_ROOT"/*) printf '%s' "${1#"$REPO_ROOT"/}" ;;
+    *) printf '%s' "$1" | redact_stream ;;
+  esac
 }
 
 # Prints $1 and every process descended from it (children first found by
@@ -268,7 +291,7 @@ CLEAN_ENV=(env -i "PATH=${PATH:-/usr/bin:/bin}" "HOME=$CORE_HOME" "TMPDIR=$CORE_
 start_core() {
   local listen="$1"
   if ! data_dir_allowed "$DATA_DIR"; then
-    echo "refusing to start: data dir $DATA_DIR is under $OPERATOR_HOME/.mcpproxy" >&2
+    echo "refusing to start: data dir $(say_path "$DATA_DIR") is under ~/.mcpproxy" >&2
     exit 1
   fi
   debug "starting the core on $listen (data dir: the scratch dir)"
@@ -290,7 +313,7 @@ start_fixture() {
     fi
     if ! kill -0 "$FIXTURE_PID" >/dev/null 2>&1 || [[ $attempt -eq 30 ]]; then
       echo "skillsfixture did not start on $FIXTURE_ADDR" >&2
-      cat "$FIXTURE_LOG" >&2
+      redact_stream <"$FIXTURE_LOG" >&2
       exit 1
     fi
     sleep 0.5
@@ -305,7 +328,7 @@ wait_core() {
     [[ "$code" == "200" ]] && return 0
     if ! kill -0 "$CORE_PID" >/dev/null 2>&1 || [[ $attempt -eq 60 ]]; then
       echo "core did not become ready at $base" >&2
-      cat "$CORE_LOG" >&2
+      redact_stream <"$CORE_LOG" >&2
       exit 1
     fi
     sleep 1
@@ -315,7 +338,7 @@ wait_core() {
 # The core opened its database in the scratch dir, and only there.
 check_core_data_dir() {
   if [[ ! -f "$DATA_DIR/config.db" ]]; then
-    echo "the core did not open its database in the scratch data dir ($DATA_DIR/config.db is missing)" >&2
+    echo "the core did not open its database in the scratch data dir ($(say_path "$DATA_DIR/config.db") is missing)" >&2
     exit 1
   fi
 }
@@ -400,13 +423,29 @@ NODE
 # --- self-test ------------------------------------------------------------------
 # run_self_test: no browser. Uses its own data dir and output dir, so a sweep
 # that follows it (--self-test-first) starts from fresh state.
-st_fail() { echo "self-test FAILED: $*" >&2; exit 1; }
+# st_check_child_output LABEL OUTPUT HANDOFF: the output of a child run (stdout
+# and stderr) contains neither the child's API key nor any absolute path under
+# its scratch dir, this run's scratch dir (the children's --out lives there) or
+# the operator's home (the repo is under it). Never echoes the output.
+st_check_child_output() {
+  local label="$1" output="$2" handoff="$3" child_key child_work p
+  [[ -s "$handoff" ]] || st_fail "$label did not hand back its key"
+  child_key=$(sed -n 1p "$handoff")
+  child_work=$(sed -n 2p "$handoff")
+  [[ ${#child_key} -ge 32 && -n "$child_work" ]] || st_fail "$label handed back no key or scratch dir"
+  grep -qF "$child_key" "$output" && st_fail "$label printed its API key ($(grep -cF "$child_key" "$output") lines)"
+  grep -qF "$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$child_key")" "$output" && st_fail "$label printed its URL-encoded API key"
+  for p in "$child_work" "${child_work#/private}" "$WORK" "${WORK#/private}" "$OPERATOR_HOME" "$REPO_ROOT"; do
+    [[ ${#p} -gt 1 ]] || continue
+    grep -qF "$p" "$output" && st_fail "$label printed a local path ($(grep -cF "$p" "$output") lines)"
+  done
+  return 0
+}
+st_fail() { printf 'self-test FAILED: %s\n' "$*" | redact_stream >&2; exit 1; }
 run_self_test() {
   local sweep_data_dir="$DATA_DIR" st_port d step st_status results enc_key st_out decoy_new decoy_legacy decoy_audit_dir decoy_certs decoy_tpa
   DATA_DIR="$WORK/st-data"
   mkdir -p "$DATA_DIR"
-  # The DEBUG=1 child of step 4 hands its key to the parent (a scratch file of the parent's).
-  if [[ -n "${SWEEP_SELF_TEST_CHILD:-}" ]]; then printf '%s' "$API_KEY" >"$SWEEP_SELF_TEST_CHILD"; fi
 
   # 1. The guard refuses the operator's ~/.mcpproxy and anything inside it.
   [[ -n "$OPERATOR_HOME" ]] || st_fail "HOME is not set"
@@ -539,22 +578,52 @@ if (r.checked_commit !== "0123456789abcdef0123456789abcdef01234567" || r.working
 ' "$results"
   echo "self-test: the results writer records the first failed attempt, redacts the key and local paths, and labels a dirty tree pre-commit evidence"
 
-  # 4. DEBUG=1 never prints the key: the whole self-test above (config, core
-  # start with the key, curl with the key header, redaction) runs again as a
-  # child with DEBUG=1, which hands back its own key through a scratch file;
-  # the child's stderr must not contain it. The child skips this step.
+  # 4. DEBUG=1 never prints the key or a local path: the whole self-test above
+  # (config, core start with the key, curl with the key header, redaction) runs
+  # again as a child with DEBUG=1, which hands back its own key and scratch dir
+  # through a scratch file; the child's stdout and stderr must contain neither,
+  # nor a path under the operator's home. The child skips steps 4 and 5.
   if [[ -z "${SWEEP_SELF_TEST_CHILD:-}" ]]; then
-    local probe_err="$WORK/debug-probe.stderr" probe_key="$WORK/debug-probe.key" probe_status
+    local probe_out="$WORK/debug-probe.out" probe_key="$WORK/debug-probe.key" probe_status
     set +e
     DEBUG=1 SWEEP_SELF_TEST_CHILD="$probe_key" MCPPROXY_BINARY_PATH="$CORE_BIN" SKILLS_FIXTURE_BINARY="$FIXTURE_BIN" \
-      bash "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")" --self-test >/dev/null 2>"$probe_err"
+      bash "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")" --self-test >"$probe_out" 2>&1
     probe_status=$?
     set -e
-    [[ -s "$probe_key" ]] || st_fail "the DEBUG=1 self-test run did not hand back its key (exit $probe_status)"
-    # Never echo the child's stderr here: it is what is being checked for the key.
-    grep -qF "$(cat "$probe_key")" "$probe_err" && st_fail "a DEBUG=1 run printed its API key to stderr ($(grep -cF "$(cat "$probe_key")" "$probe_err") lines)"
+    st_check_child_output "a passing DEBUG=1 self-test run" "$probe_out" "$probe_key"
     [[ $probe_status -eq 0 ]] || st_fail "the DEBUG=1 self-test run failed (exit $probe_status)"
-    echo "self-test: a DEBUG=1 run (the self-test as a child) never printed its API key to stderr"
+    grep -qF "self-test passed" "$probe_out" || st_fail "the DEBUG=1 self-test run did not pass"
+    echo "self-test: a passing DEBUG=1 run (the self-test as a child) printed no API key and no local path"
+
+    # 5. A startup failure dumps the fixture's or the core's log, redacted. A
+    # sweep run as a child with a stand-in fixture (then a stand-in core) that
+    # prints its scratch HOME and TMPDIR, its arguments and (the core) its
+    # environment with the API key, then exits 1: the run must fail, print the
+    # log with the placeholders, and print no key and no local path.
+    local fakes="$WORK/st-fakes" which bin want
+    mkdir -p "$fakes"
+    # shellcheck disable=SC2016 # expanded by the stand-in's own shell
+    printf '#!/bin/sh\necho "fixture HOME=$HOME TMPDIR=$TMPDIR args: $*"\nexit 1\n' >"$fakes/skillsfixture"
+    printf '#!/bin/sh\necho "core args: $*"\nenv\nexit 1\n' >"$fakes/mcpproxy"
+    chmod +x "$fakes/skillsfixture" "$fakes/mcpproxy"
+    for which in fixture core; do
+      if [[ $which == fixture ]]; then bin=("$CORE_BIN" "$fakes/skillsfixture"); want="skillsfixture did not start"
+      else bin=("$fakes/mcpproxy" "$FIXTURE_BIN"); want="core did not become ready"; fi
+      rm -f "$probe_key"
+      set +e
+      SWEEP_SELF_TEST_CHILD="$probe_key" MCPPROXY_BINARY_PATH="${bin[0]}" SKILLS_FIXTURE_BINARY="${bin[1]}" \
+        bash "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")" --out "$WORK/st-fail-$which" >"$probe_out" 2>&1
+      probe_status=$?
+      set -e
+      st_check_child_output "a run whose $which fails to start" "$probe_out" "$probe_key"
+      [[ $probe_status -ne 0 ]] || st_fail "a run whose $which fails to start exited 0"
+      grep -qF "$want" "$probe_out" || st_fail "a run whose $which fails to start did not say '$want'"
+      grep -qF "<scratch>/" "$probe_out" || st_fail "a run whose $which fails to start did not print its log through the redactor"
+      if [[ $which == core ]]; then
+        grep -qF "MCPPROXY_API_KEY=***" "$probe_out" || st_fail "the core's environment with the redacted key was not in the dumped log"
+      fi
+    done
+    echo "self-test: a fixture or core startup failure prints its log redacted, with no API key and no local path"
   fi
   echo "self-test passed"
   DATA_DIR="$sweep_data_dir"
@@ -613,7 +682,7 @@ if [[ -z "$FIXTURE_BIN" ]]; then
 fi
 for b in "$CORE_BIN" "$FIXTURE_BIN"; do
   if [[ ! -x "$b" ]]; then
-    echo "not an executable: $b" >&2
+    echo "not an executable: $(say_path "$b")" >&2
     exit 1
   fi
 done
@@ -646,7 +715,7 @@ echo "core ready at $BASE_URL (data dir: the scratch dir)"
 code=$(curl -s --max-time 10 -o "$WORK/approve.json" -w '%{http_code}' -X POST "${H[@]}" \
   -H 'Content-Type: application/json' -d '{"force":true}' "$BASE_URL/api/v1/servers/${SERVER}/security/approve")
 if [[ "$code" != "200" ]]; then
-  echo "approving ${SERVER} failed with HTTP $code: $(cat "$WORK/approve.json")" >&2
+  echo "approving ${SERVER} failed with HTTP $code: $(redact_stream <"$WORK/approve.json")" >&2
   exit 1
 fi
 ready=0
@@ -659,7 +728,7 @@ for attempt in $(seq 1 60); do
   sleep 1
 done
 if [[ $ready -ne 1 ]]; then
-  echo "the core never listed the fixture's three skills; last refresh: $(cat "$WORK/refresh.json" 2>/dev/null)" >&2
+  echo "the core never listed the fixture's three skills; last refresh: $( (redact_stream <"$WORK/refresh.json") 2>/dev/null)" >&2
   exit 1
 fi
 echo "server ${SERVER} approved; three skills listed"
@@ -675,7 +744,7 @@ lock_hash() {
 LOCK_STAMP="$SWEEP_DIR/node_modules/.sweep-lock-sha256"
 WANT_LOCK_HASH=$(lock_hash "$SWEEP_DIR/package-lock.json")
 if [[ -z "$WANT_LOCK_HASH" ]]; then
-  echo "cannot hash $SWEEP_DIR/package-lock.json" >&2
+  echo "cannot hash $(say_path "$SWEEP_DIR/package-lock.json")" >&2
   exit 1
 fi
 HAVE_LOCK_HASH=""
@@ -687,7 +756,7 @@ fi
 PLAYWRIGHT_BIN="$SWEEP_DIR/node_modules/.bin/playwright"
 if [[ -n "${PW_CHROMIUM:-}" ]]; then
   # playwright.config.ts launches this binary instead of a downloaded one.
-  echo "using PW_CHROMIUM=$PW_CHROMIUM (no browser download)"
+  echo "using PW_CHROMIUM=$(say_path "$PW_CHROMIUM") (no browser download)"
 elif [[ "$(uname -s)" == "Linux" ]]; then
   "$PLAYWRIGHT_BIN" install --with-deps chromium
 else
@@ -785,12 +854,12 @@ NODE
   # Every string in the report comes from the redacted results file; the copy
   # without screenshots (pure text) is redacted once more as a whole.
   [[ $SCREENSHOTS -eq 0 ]] && redact_file "$REPORT_HTML"
-  echo "HTML report written to $REPORT_HTML$([[ $SCREENSHOTS -eq 0 ]] && echo ' (no embedded screenshots)')"
+  echo "HTML report written to $(say_path "$REPORT_HTML")$([[ $SCREENSHOTS -eq 0 ]] && echo ' (no embedded screenshots)')"
 fi
 
-echo "results: $OUT/skills-sweep-results.json"
+echo "results: $(say_path "$OUT/skills-sweep-results.json")"
 if [[ $PLAYWRIGHT_STATUS -ne 0 || $RESULT_STATUS -ne 0 ]]; then
-  echo "skills tab sweep FAILED (playwright exit $PLAYWRIGHT_STATUS); see $OUT" >&2
+  echo "skills tab sweep FAILED (playwright exit $PLAYWRIGHT_STATUS); see $(say_path "$OUT")" >&2
   exit 1
 fi
 echo "skills tab sweep passed"

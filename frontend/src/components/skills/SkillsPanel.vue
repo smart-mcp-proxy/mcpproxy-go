@@ -75,7 +75,7 @@
         @approve="approve()"
         @block="setBlocked(true)"
         @unblock="setBlocked(false)"
-        @content-changed="load"
+        @content-changed="onContentChanged"
       />
     </template>
   </section>
@@ -115,6 +115,19 @@ const liveSelected = computed(() => listing.value?.skills.find(s => s.path === s
 function open(s: SkillEntry) {
   notice.value = ''
   review.value = { path: s.path, entry: s, incarnation: listing.value?.incarnation ?? 0, token: ++reviewToken, stale: false }
+}
+
+// The latch: once set, only open() (the reviewer's explicit re-open) clears it;
+// apply() never does.
+const STALE_CODES = new Set(['review_out_of_date', 'server_replaced'])
+function markStale(token: number | undefined) {
+  if (review.value && review.value.token === token) review.value.stale = true
+}
+
+// SkillDetail read a part of another version: the open review is out of date.
+function onContentChanged() {
+  markStale(review.value?.token)
+  void load()
 }
 
 function chipClass(s: SkillEntry) {
@@ -166,15 +179,23 @@ async function load(): Promise<SkillsListResponse | null> {
 }
 
 // One refresh in flight per visit: a late answer of an earlier one never
-// resets the button of a newer one.
+// resets the button of a newer one. A refresh takes its place in the request
+// order when it starts (like load()): its listing is applied only while it is
+// still the newest request; a load that started later and answered first has
+// newer records, so a superseded refresh reloads instead of overwriting them.
 let refreshSeq = 0
 async function refresh() {
-  const server = props.serverName, v = visit, mine = ++refreshSeq
+  const server = props.serverName, v = visit, mine = ++refreshSeq, seq = ++requestSeq
   refreshing.value = true
   const res = await settle(() => api.refreshServerSkills(server))
   if (!isCurrent(server, v) || mine !== refreshSeq) return
   refreshing.value = false
-  if (res.success && res.data) { requestSeq++; apply(res.data); return }
+  if (res.success && res.data) {
+    if (!isCurrent(server, v, seq)) { await load(); return }
+    loading.value = false
+    apply(res.data)
+    return
+  }
   // A failed refresh (refresh_superseded, skills_not_supported, skills_disabled,
   // server_replaced, a 500) reloads the listing: the notice says it was reloaded,
   // and the stored records may have moved even though this refresh did not apply.
@@ -196,7 +217,12 @@ async function write(run: () => Promise<{ success: boolean; error?: string; erro
   if (!isCurrent(server, v)) return
   busy.value = false
   if (!res.success || typeof done === 'string') {
-    if (review.value?.token === token) notice.value = res.success ? done as string : skillErrorNotice(res.errorCode, res.error)
+    if (review.value?.token === token) {
+      notice.value = res.success ? done as string : skillErrorNotice(res.errorCode, res.error)
+      // The server says the open version is out of date: latch it before the
+      // reload, so a reload that is pending or fails never re-enables Approve.
+      if (!res.success && STALE_CODES.has(res.errorCode ?? '')) markStale(token)
+    }
     await load()
     return
   }
