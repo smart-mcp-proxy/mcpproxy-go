@@ -194,3 +194,24 @@ export function skillErrorNotice(code: string | undefined, message: string | und
       return message || 'The request failed'
   }
 }
+
+/**
+ * The notice after a successful approve, worded from the listing reloaded
+ * after it (round-4 finding 3): an approved skill is not necessarily offered to
+ * agents. `available` decides; the reason is the first one the listing shows.
+ * A skill the listing does not explain (the server is disabled or quarantined,
+ * which the listing does not carry) is "not offered yet" without a reason, and
+ * no listing (the reload failed) or no such skill gives a neutral "Approved.".
+ */
+export function skillApprovedNotice(listing: SkillsListResponse | null | undefined, path: string): string {
+  const s = listing?.skills?.find(k => k.path === path)
+  if (!listing || !s) return 'Approved.'
+  if (s.available) return 'Approved. Agents can use this skill now.'
+  let reason = ''
+  if (!listing.enabled) reason = 'Skills over MCP is turned off (enable_skills).'
+  else if (listing.expose_skills === false) reason = 'this server is excluded from agents (expose_skills: false).'
+  else if (s.blocked) reason = 'the skill is blocked.'
+  else if (!s.listed) reason = 'the server no longer lists this skill.'
+  else if (s.status !== 'approved') reason = `its state is now ${skillStateChip(s).label}.`
+  return reason ? `Approved. Not offered to agents yet: ${reason}` : 'Approved. Not offered to agents yet.'
+}

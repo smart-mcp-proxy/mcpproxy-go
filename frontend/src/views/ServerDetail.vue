@@ -1712,12 +1712,20 @@ let skillsCheckFloor = 0 // answers with a sequence <= this are dropped
 function skillsTabRefused() {
   return isTenant.value || (skillsTabChecked.value && !skillsTabVisible.value)
 }
+// Round-4 finding 2: `route` is the router's current route, not this view's.
+// A late answer (a visibility check, any async step) may arrive after this view
+// was unmounted, or after the URL moved to another server; it must never write
+// ?tab= into that URL. Every ?tab= write goes through this check.
+let viewMounted = true
+function urlIsThisView(): boolean {
+  return viewMounted && route.params.serverName === props.serverName
+}
 function leaveSkillsTabIfNotOffered() {
   if (!skillsTabRefused()) return
   if (activeTab.value === 'skills') activeTab.value = 'tools'
   // activeTab may already read 'tools' (readTabFromQuery set it in the same
   // tick), in which case the watch does not fire: write the URL here.
-  else if (route.query.tab === 'skills') void router.replace({ query: { ...route.query, tab: 'tools' } })
+  else if (route.query.tab === 'skills' && urlIsThisView()) void router.replace({ query: { ...route.query, tab: 'tools' } })
 }
 async function checkSkillsTab(reset = true) {
   // A failed background re-check (reset=false, after skills.changed) never
@@ -1762,7 +1770,7 @@ async function checkSkillsTab(reset = true) {
 // link. The initial value is read from `?tab=` in onMounted below; this watch
 // only ever writes forward from there.
 watch(activeTab, (tab) => {
-  if (route.query.tab === tab) return
+  if (route.query.tab === tab || !urlIsThisView()) return
   void router.replace({ query: { ...route.query, tab } })
 })
 // Sets activeTab from `?tab=` (or resets it to the default when absent),
@@ -4221,6 +4229,7 @@ onMounted(() => {
 
 // Cleanup polling on unmount
 onUnmounted(() => {
+  viewMounted = false
   stopScanPolling()
   window.removeEventListener('mcpproxy:scan-settled', handleScanSettledEvent)
   window.removeEventListener('mcpproxy:servers-changed', handleServersChangedEvent)

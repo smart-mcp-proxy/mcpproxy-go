@@ -210,6 +210,44 @@ describe('ServerDetail Skills tab (Spec 125)', () => {
     expect(wrapper.find('[data-test="skills-tab"]').classes()).toContain('tab-active')
     expect(router.currentRoute.value.query.tab).toBe('skills')
   })
+  // Round-4 finding 2: a late visibility answer never writes ?tab= into a URL
+  // that is no longer this view's: not after unmount, not after a server switch.
+  it('a check that answers after unmount writes nothing into the next URL', async () => {
+    let release: (v: unknown) => void = () => {}
+    ;(api.getServerSkills as any).mockReturnValueOnce(new Promise(r => { release = r }))
+    const { wrapper, router } = await mountServerDetail('/servers/alpha')
+    wrapper.unmount()
+    // The next view (here a fresh page of the same server) asks for the Skills tab.
+    await router.push('/servers/alpha?tab=skills&focus=x')
+    const replace = vi.spyOn(router, 'replace')
+    release({ success: true, data: makeListing([], { supported: false }) })
+    await flushPromises(); await flushPromises()
+    expect(replace).not.toHaveBeenCalled()
+    expect(router.currentRoute.value.fullPath).toBe('/servers/alpha?tab=skills&focus=x')
+  })
+
+  it('a check that answers after a server switch writes nothing into the new server URL', async () => {
+    const pending: Array<(v: unknown) => void> = []
+    ;(api.getServerSkills as any).mockImplementation(() => new Promise(r => { pending.push(r) }))
+    const { wrapper, router } = await mountServerDetail('/servers/alpha')
+    await router.push('/servers/beta?tab=skills')
+    await wrapper.setProps({ serverName: 'beta' })
+    await flushPromises()
+    const replace = vi.spyOn(router, 'replace')
+    // alpha's late answer says "no skills"; beta's check is still in flight.
+    pending[0]({ success: true, data: makeListing([], { supported: false }) })
+    await flushPromises(); await flushPromises()
+    expect(replace).not.toHaveBeenCalled()
+    expect(router.currentRoute.value.fullPath).toBe('/servers/beta?tab=skills')
+    // The same holds once alpha's view is gone and beta's answer arrives late.
+    wrapper.unmount()
+    await router.push('/servers/beta?tab=skills&next=1')
+    for (const r of pending.slice(1)) r({ success: true, data: makeListing([], { supported: false }) })
+    await flushPromises(); await flushPromises()
+    expect(replace).not.toHaveBeenCalled()
+    expect(router.currentRoute.value.fullPath).toBe('/servers/beta?tab=skills&next=1')
+  })
+
   // Round-3 finding 3: overlapping background re-checks are ordered by request:
   // only an answer newer than the last applied one changes the tab.
   for (const order of ['older answer first', 'newer answer first'] as const) {

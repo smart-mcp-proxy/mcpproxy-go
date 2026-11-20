@@ -122,26 +122,47 @@ test('views SKILL.md, pages a large file, and does not offer a binary file', asy
   await shot(page, '02-viewer', '[data-test="skill-viewer"]')
 
   await row(page, 'big').click()
+  // The listed digest and size of data/large.txt in the copy being viewed (the
+  // current copy: View opens it), from the core's own listing; the file row on
+  // screen must name the same digest (its title holds the full value).
+  const FILE = 'data/large.txt'
+  const listingRes = await fetch(`${BASE}/api/v1/servers/${SERVER}/skills`, { headers: { 'X-API-Key': KEY } })
+  expect(listingRes.status, 'GET /skills').toBe(200)
+  const listingBody = await listingRes.json()
+  const bigSkill = (listingBody.data ?? listingBody).skills.find((k: { path: string }) => k.path === 'big')
+  const listedFile = (bigSkill?.files ?? []).find((f: { path: string }) => f.path === FILE)
+  expect(listedFile?.digest, `the listing names ${FILE} in the current copy of big`).toBeTruthy()
+  await expect(page.locator(`[data-test="skill-file-${FILE}"] span.font-mono`)).toHaveAttribute('title', listedFile.digest)
   // Every part is awaited as a response, and its text as a rendered update: the
   // Load more button is hidden while a part loads, so its absence alone is not
-  // the end of the file. The end is a part with no next_offset.
+  // the end of the file. The end is a part with no next_offset. Each part must
+  // be of the current copy, carry the listed digest, start where the previous
+  // part ended (offsets in bytes, the first at 0), and the last one must end at
+  // the listed size.
   const isPart = (offset: number) => (r: { url(): string }) => {
     const u = new URL(r.url())
-    return u.pathname.endsWith('/skills/content') && u.searchParams.get('file') === 'data/large.txt' &&
+    return u.pathname.endsWith('/skills/content') && u.searchParams.get('file') === FILE &&
       Number(u.searchParams.get('offset') ?? 0) === offset
   }
   const text = page.locator('[data-test="skill-viewer-text"]')
   const loadMore = page.locator('[data-test="skill-load-more"]')
-  let [res] = await Promise.all([page.waitForResponse(isPart(0)), page.locator('[data-test="skill-view-data/large.txt"]').click()])
+  let [res] = await Promise.all([page.waitForResponse(isPart(0)), page.locator(`[data-test="skill-view-${FILE}"]`).click()])
   let shown = 0
   let loads = 0
+  let expectedOffset = 0
   for (;;) {
     expect(res.status()).toBe(200)
+    expect(new URL(res.url()).searchParams.get('copy') ?? 'current', `part ${loads}: copy`).toBe('current')
     const body = await res.json()
     const part = body.data ?? body
+    expect(part.digest, `part ${loads}: digest`).toBe(listedFile.digest)
+    expect(part.offset, `part ${loads}: offset`).toBe(expectedOffset)
+    expect(part.size, `part ${loads}: size`).toBe(listedFile.size)
+    expectedOffset = part.offset + Buffer.byteLength(part.text, 'utf8')
     shown += part.text.length
     await expect.poll(() => text.evaluate(e => (e.textContent ?? '').length)).toBe(shown)
     if (part.next_offset === undefined || part.next_offset === null) break
+    expect(part.next_offset, `part ${loads}: next_offset is where this part ends`).toBe(expectedOffset)
     expect(loads, 'the file ends within ten parts').toBeLessThan(10)
     if (loads === 0) {
       await expect(text).toContainText('line 000001')
@@ -151,6 +172,7 @@ test('views SKILL.md, pages a large file, and does not offer a binary file', asy
     ;[res] = await Promise.all([page.waitForResponse(isPart(part.next_offset)), loadMore.click()])
     loads++
   }
+  expect(expectedOffset, 'the last part ends at the listed size').toBe(listedFile.size)
   await expect(loadMore).toHaveCount(0)
   expect(loads, '150 KiB needs more than one 64 KiB part').toBeGreaterThanOrEqual(2)
   await expect(text).toContainText('line 003840')

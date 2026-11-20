@@ -74,6 +74,48 @@ describe('SkillsPanel', () => {
     expect(api.getServerSkills).toHaveBeenCalledTimes(2) // reloaded after the write
   })
 
+  // Round-4 finding 3: the approve notice is worded from the reloaded listing's
+  // `available` for that skill, never a blanket "Agents can use this skill now".
+  describe('approve notice follows the reloaded availability', () => {
+    const approveWith = async (after: ReturnType<typeof makeListing> | { success: false; error: string }) => {
+      m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([makeSkill('a')])))
+      m(api.approveSkills).mockResolvedValue(ok({ approved: 1 }))
+      const w = mountPanel(); await flushPromises()
+      await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
+      m(api.getServerSkills).mockResolvedValue('success' in after ? after : ok(after))
+      await w.get('[data-test="skill-approve"]').trigger('click'); await flushPromises()
+      return w.get('[data-test="skills-notice"] span').text()
+    }
+    const approved = (over: Parameters<typeof makeSkill>[1] = {}) => makeSkill('a', { status: 'approved', approved_hash: 'sk1-a', ...over })
+
+    it('available: says agents can use it', async () => {
+      expect(await approveWith(makeListing([approved({ available: true })]))).toContain('Approved. Agents can use this skill now.')
+    })
+    for (const [why, listing, reason] of [
+      ['expose_skills: false', makeListing([approved()], { expose_skills: false }), /expose_skills: false/],
+      ['the skill is blocked', makeListing([approved({ blocked: true })]), /blocked/i],
+      ['the upstream no longer lists it', makeListing([approved({ listed: false })]), /no longer lists/i],
+      ['the feature is off', makeListing([approved()], { enabled: false }), /enable_skills/],
+    ] as const) {
+      it(`not available (${why}): says not offered, with the reason`, async () => {
+        const text = await approveWith(listing)
+        expect(text).not.toMatch(/agents can use/i)
+        expect(text).toMatch(/^Approved\. Not offered to agents yet: /)
+        expect(text).toMatch(reason)
+      })
+    }
+    it('not available for a reason the listing does not show (server disabled or quarantined): says not offered', async () => {
+      const text = await approveWith(makeListing([approved()]))
+      expect(text).not.toMatch(/agents can use/i)
+      expect(text).toMatch(/^Approved\. Not offered to agents yet\b/)
+    })
+    it('unknown (the reload failed): a neutral "Approved."', async () => {
+      const text = await approveWith({ success: false, error: 'boom' })
+      expect(text).not.toMatch(/agents/i)
+      expect(text).toMatch(/^Approved\.(\s|$)/)
+    })
+  })
+
   it('a 409 review_out_of_date reloads the list and says nothing was approved, with no retry', async () => {
     m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([makeSkill('a', { current_hash: 'sk1-1' })])))
     m(api.approveSkills).mockResolvedValue({ success: false, error: 'review_out_of_date: x', errorCode: 'review_out_of_date' })

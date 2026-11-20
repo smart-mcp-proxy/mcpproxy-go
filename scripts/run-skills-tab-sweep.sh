@@ -52,7 +52,10 @@ Options:
                       reach the core (it starts one with all of them set to
                       decoys and checks the database lands in the scratch dir
                       only and no decoy is touched), that a data dir under
-                      \$HOME/.mcpproxy is refused, that the results writer
+                      \$HOME/.mcpproxy is refused, that the recorded PIDs
+                      are the core and the fixture themselves and cleanup
+                      leaves no process or listening port of the run alive
+                      (and nothing else touched), that the results writer
                       records the first failed attempt and redacts the API key
                       and local paths, and that a DEBUG=1 run never prints the
                       API key
@@ -156,14 +159,43 @@ for (const [p, r] of paths) t = t.split(p).join(r)
 fs.writeFileSync(f, t)' "$1"
 }
 
+# Prints $1 and every process descended from it (children first found by
+# pgrep -P, recursively).
+process_tree() {
+  local child
+  [[ -n "$1" ]] || return 0
+  echo "$1"
+  for child in $(pgrep -P "$1" 2>/dev/null || true); do process_tree "$child"; done
+}
+
+# Stops the core and the fixture this run started (CORE_PID, FIXTURE_PID) and
+# every process descended from them, and nothing else: the tree is read before
+# the first signal (a child of a stopped server is re-parented and would no
+# longer be found), SIGTERM goes to the whole tree, and whatever of it is still
+# alive after 15 s (the core's graceful shutdown) gets SIGKILL.
+stop_started() {
+  local tree pid attempt alive
+  tree="$(process_tree "${CORE_PID:-}") $(process_tree "${FIXTURE_PID:-}")"
+  # The group's stderr also takes the shell's own "Terminated" job notices.
+  {
+    for pid in $tree; do kill "$pid" || true; done
+    for attempt in $(seq 1 150); do
+      alive=""
+      for pid in $tree; do kill -0 "$pid" && alive="$alive $pid"; done
+      [[ -z "$alive" ]] && break
+      sleep 0.1
+    done
+    for pid in $alive; do kill -9 "$pid" || true; done
+    for pid in "${CORE_PID:-}" "${FIXTURE_PID:-}"; do
+      [[ -n "$pid" ]] && { wait "$pid" || true; }
+    done
+  } >/dev/null 2>&1
+  CORE_PID=""
+  FIXTURE_PID=""
+}
+
 cleanup() {
-  local pid
-  for pid in "${CORE_PID:-}" "${FIXTURE_PID:-}"; do
-    if [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1; then
-      kill "$pid" >/dev/null 2>&1 || true
-      wait "$pid" >/dev/null 2>&1 || true
-    fi
-  done
+  stop_started
   if [[ -n "$OUT_REAL" ]]; then
     cp "$CORE_LOG" "$OUT_REAL/core.log" 2>/dev/null && redact_file "$OUT_REAL/core.log"
     cp "$FIXTURE_LOG" "$OUT_REAL/fixture.log" 2>/dev/null && redact_file "$OUT_REAL/fixture.log"
@@ -223,12 +255,14 @@ JSON
 # explicitly by start_core.
 CORE_TMP="$WORK/tmp"
 mkdir -p "$CORE_TMP"
-clean_env() {
-  env -i PATH="${PATH:-/usr/bin:/bin}" HOME="$CORE_HOME" TMPDIR="$CORE_TMP" "$@"
-}
+# An array, not a function: a backgrounded function runs in a subshell, so $!
+# would be that shell's PID and stopping it would orphan the server. With the
+# array, "${CLEAN_ENV[@]}" cmd ... & forks once and execs env, which execs cmd:
+# $! is the server's own PID.
+CLEAN_ENV=(env -i "PATH=${PATH:-/usr/bin:/bin}" "HOME=$CORE_HOME" "TMPDIR=$CORE_TMP")
 
 # Starts the core detached from the operator's data and environment:
-# clean_env above, --data-dir (which wins over the file and the environment)
+# CLEAN_ENV above, --data-dir (which wins over the file and the environment)
 # names the scratch dir, and HOME is a scratch home, so a default path can never
 # resolve to the operator's ~/.mcpproxy. $1: listen.
 start_core() {
@@ -238,9 +272,29 @@ start_core() {
     exit 1
   fi
   debug "starting the core on $listen (data dir: the scratch dir)"
-  clean_env HEADLESS=1 DO_NOT_TRACK=1 MCPPROXY_TELEMETRY=false MCPPROXY_API_KEY="$API_KEY" \
+  "${CLEAN_ENV[@]}" HEADLESS=1 DO_NOT_TRACK=1 MCPPROXY_TELEMETRY=false MCPPROXY_API_KEY="$API_KEY" \
     "$CORE_BIN" serve --config "$CONFIG_PATH" --data-dir "$DATA_DIR" --listen "$listen" >"$CORE_LOG" 2>&1 &
   CORE_PID=$!
+}
+
+# Starts the fixture (FIXTURE_CMD, FIXTURE_URL) and waits for its /mcp.
+start_fixture() {
+  local attempt
+  debug "starting skillsfixture on $FIXTURE_ADDR"
+  "${CLEAN_ENV[@]}" "${FIXTURE_CMD[@]}" >"$FIXTURE_LOG" 2>&1 &
+  FIXTURE_PID=$!
+  for attempt in $(seq 1 30); do
+    if curl -s --connect-timeout 1 --max-time 3 -o /dev/null -X POST -H 'Content-Type: application/json' \
+        -d '{"jsonrpc":"2.0","id":1,"method":"skills/list"}' "$FIXTURE_URL/mcp"; then
+      return 0
+    fi
+    if ! kill -0 "$FIXTURE_PID" >/dev/null 2>&1 || [[ $attempt -eq 30 ]]; then
+      echo "skillsfixture did not start on $FIXTURE_ADDR" >&2
+      cat "$FIXTURE_LOG" >&2
+      exit 1
+    fi
+    sleep 0.5
+  done
 }
 
 # Waits for the core's REST API; $1: base URL.
@@ -381,9 +435,7 @@ run_self_test() {
       st_fail "the core wrote into the ambient data dir $d: $(ls -A "$d")"
     fi
   done
-  kill "$CORE_PID" >/dev/null 2>&1 || true
-  wait "$CORE_PID" >/dev/null 2>&1 || true
-  CORE_PID=""
+  stop_started
   echo "self-test: with MCPPROXY_DATA_DIR and MCPPROXY_DATA set to decoys, the core opened its database in the scratch dir only"
 
   # 2b. Nothing else of the operator's environment reaches the core either:
@@ -400,6 +452,51 @@ run_self_test() {
     grep -qF "$d" "$CORE_LOG" && st_fail "the core log names the ambient decoy $d"
   done
   echo "self-test: with MCPPROXY_AUDIT_LOG_PATH, MCPPROXY_TPA_BUNDLE_PATH and MCPPROXY_CERTS_DIR set to decoys, the core touched none of them"
+
+  # 2c. Cleanup stops what the run started, and only that. The recorded PIDs
+  # must be the core and the fixture themselves (not a shell around them, whose
+  # death would orphan the server), each must own its listening port, and after
+  # stop_started (what the EXIT trap runs) neither PID, no process descended
+  # from them, and neither port is alive, while an unrelated process of the
+  # same shell is left running.
+  local st_fx_port st_core_port tree pid want got bystander listener
+  st_fx_port=$(free_port)
+  FIXTURE_ADDR="127.0.0.1:${st_fx_port}"
+  FIXTURE_URL="http://${FIXTURE_ADDR}"
+  FIXTURE_CMD=("$FIXTURE_BIN" -addr "$FIXTURE_ADDR")
+  start_fixture
+  st_core_port=$(free_port)
+  write_config "127.0.0.1:${st_core_port}" ""
+  start_core "127.0.0.1:${st_core_port}"
+  wait_core "http://127.0.0.1:${st_core_port}"
+  sleep 30 &
+  bystander=$!
+  for pid in "$CORE_PID:$CORE_BIN:$st_core_port" "$FIXTURE_PID:$FIXTURE_BIN:$st_fx_port"; do
+    IFS=: read -r pid want st_port <<<"$pid"
+    want=$(basename "$want"); want=${want:0:15}
+    got=$(ps -o comm= -p "$pid" 2>/dev/null || true); got=$(basename "${got:-?}"); got=${got:0:15}
+    [[ "$got" == "$want" ]] || st_fail "the recorded PID $pid is '$got', not the $want process it started"
+    if command -v lsof >/dev/null 2>&1; then
+      listener=$(lsof -nP -iTCP:"$st_port" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)
+      [[ "$listener" == "$pid" ]] || st_fail "port $st_port is held by PID '${listener}', not by the recorded PID $pid ($want)"
+    fi
+  done
+  tree="$(process_tree "$CORE_PID") $(process_tree "$FIXTURE_PID")"
+  stop_started
+  for pid in $tree; do
+    kill -0 "$pid" >/dev/null 2>&1 && st_fail "PID $pid ($(ps -o comm= -p "$pid" 2>/dev/null)) of the run is still alive after cleanup"
+  done
+  for st_port in "$st_core_port" "$st_fx_port"; do
+    set +e
+    curl -s --connect-timeout 1 --max-time 2 -o /dev/null "http://127.0.0.1:${st_port}/"
+    got=$?
+    set -e
+    [[ $got -eq 7 ]] || st_fail "port $st_port still answers after cleanup (curl exit $got)"
+  done
+  kill -0 "$bystander" >/dev/null 2>&1 || st_fail "cleanup killed a process it did not start"
+  kill "$bystander" >/dev/null 2>&1 || true
+  wait "$bystander" >/dev/null 2>&1 || true
+  echo "self-test: the recorded PIDs are the core and the fixture themselves; after cleanup no process of the run is alive and both ports are closed, an unrelated process is untouched"
 
   # 3. The results writer: first failed attempt, redaction, provenance.
   st_out="$WORK/st-out"
@@ -449,7 +546,7 @@ if (r.checked_commit !== "0123456789abcdef0123456789abcdef01234567" || r.working
   if [[ -z "${SWEEP_SELF_TEST_CHILD:-}" ]]; then
     local probe_err="$WORK/debug-probe.stderr" probe_key="$WORK/debug-probe.key" probe_status
     set +e
-    DEBUG=1 SWEEP_SELF_TEST_CHILD="$probe_key" MCPPROXY_BINARY_PATH="$CORE_BIN" \
+    DEBUG=1 SWEEP_SELF_TEST_CHILD="$probe_key" MCPPROXY_BINARY_PATH="$CORE_BIN" SKILLS_FIXTURE_BINARY="$FIXTURE_BIN" \
       bash "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")" --self-test >/dev/null 2>"$probe_err"
     probe_status=$?
     set -e
@@ -471,6 +568,12 @@ if [[ $SELF_TEST -eq 1 ]]; then
     # The data-dir proof needs no frontend: a plain build of the core.
     CORE_BIN="$WORK/bin/mcpproxy"
     (cd "$REPO_ROOT" && go build -o "$CORE_BIN" ./cmd/mcpproxy)
+  fi
+  FIXTURE_BIN="${SKILLS_FIXTURE_BINARY:-}"
+  if [[ -z "$FIXTURE_BIN" ]]; then
+    required go
+    FIXTURE_BIN="$WORK/bin/skillsfixture"
+    (cd "$REPO_ROOT" && go build -o "$FIXTURE_BIN" ./cmd/skillsfixture)
   fi
   run_self_test
   exit 0
@@ -524,21 +627,7 @@ FIXTURE_PORT=$(free_port)
 FIXTURE_ADDR="127.0.0.1:${FIXTURE_PORT}"
 FIXTURE_URL="http://${FIXTURE_ADDR}"
 FIXTURE_CMD=("$FIXTURE_BIN" -addr "$FIXTURE_ADDR")
-debug "starting skillsfixture on $FIXTURE_ADDR"
-clean_env "${FIXTURE_CMD[@]}" >"$FIXTURE_LOG" 2>&1 &
-FIXTURE_PID=$!
-for attempt in $(seq 1 30); do
-  if curl -s --connect-timeout 1 --max-time 3 -o /dev/null -X POST -H 'Content-Type: application/json' \
-      -d '{"jsonrpc":"2.0","id":1,"method":"skills/list"}' "$FIXTURE_URL/mcp"; then
-    break
-  fi
-  if ! kill -0 "$FIXTURE_PID" >/dev/null 2>&1 || [[ $attempt -eq 30 ]]; then
-    echo "skillsfixture did not start on $FIXTURE_ADDR" >&2
-    cat "$FIXTURE_LOG" >&2
-    exit 1
-  fi
-  sleep 0.5
-done
+start_fixture
 echo "skillsfixture ready at $FIXTURE_URL"
 
 # --- core -------------------------------------------------------------------
@@ -652,7 +741,7 @@ const shotNote = shots => (!withShots && shots.length)
 // One section per scenario, in spec order, with what it proves and its screenshots.
 const about = [
   ['Tab and list', 'The Skills tab is offered on a server with enable_skills on and a skills-capable upstream (cmd/skillsfixture, manual trust). The three skills show as Awaiting review and Not offered.', ['01-list']],
-  ['Viewer and paging', 'SKILL.md opens in the text viewer (inert text). A 150 KiB file is read part by part: each Load more waits for its content response and the rendered text, every part carries the digest listed on screen, and the last part has no next_offset. A binary file (logo.bin) is listed as binary, not shown, with no View button.', ['02-viewer', '03-paged']],
+  ['Viewer and paging', 'SKILL.md opens in the text viewer (inert text). A 150 KiB file (data/large.txt of big) is read part by part in at least three parts: each Load more waits for its content response and for the rendered text to grow by that part. Every part is of the current copy, its digest equals the digest the core lists for that file in the current copy (the same digest the file row shows on screen), its size equals the listed size, its offset is where the previous part ended (in bytes, the first at 0) and its next_offset is where it ends; the last part has no next_offset and ends at the listed size. A binary file (logo.bin) is listed as binary, not shown, with no View button.', ['02-viewer', '03-paged']],
   ['Approve', 'Approve sends the current_hash and incarnation of the version the reviewer opened; the chip turns Approved.', ['04-approved']],
   ['Changed while open, re-open, diff', 'A mutate without the X-Skills-Fixture header is refused (403). The approved skill plain changes upstream while it is open; after Refresh the chip says Changed and the open review says it changed while you were reviewing it (the review shows the approved version, so it offers no Approve). Re-opening shows the file-set diff (SKILL.md changed) and the line diff with the added line; approving binds the new hash.', ['05a-stale', '05-changed-diff']],
   ['Pending skill changed while open', 'The pending skill with-files changes upstream while it is open; after Refresh the review is marked stale and its Approve button stays on screen but disabled, until the new version is re-opened.', ['05b-pending-stale']],

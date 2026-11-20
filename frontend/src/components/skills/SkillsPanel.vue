@@ -86,7 +86,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import api from '@/services/api'
 import type { SkillEntry, SkillsListResponse } from '@/types/api'
 import { formatDateTime } from '@/utils/datetime'
-import { skillStateChip, skillExpectedHashes, skillErrorNotice } from '@/utils/skills'
+import { skillStateChip, skillExpectedHashes, skillErrorNotice, skillApprovedNotice } from '@/utils/skills'
 import SkillDetail from './SkillDetail.vue'
 
 const props = defineProps<{ serverName: string }>()
@@ -153,14 +153,16 @@ async function settle<T>(run: () => Promise<Answer<T>>): Promise<Answer<T>> {
   }
 }
 
-async function load() {
+// Returns the listing it applied, or null (a failure, or a superseded answer).
+async function load(): Promise<SkillsListResponse | null> {
   const server = props.serverName, v = visit, seq = ++requestSeq
   loading.value = true
   const res = await settle(() => api.getServerSkills(server))
-  if (!isCurrent(server, v, seq)) return
+  if (!isCurrent(server, v, seq)) return null
   loading.value = false
-  if (res.success && res.data) apply(res.data)
-  else error.value = res.error || 'Could not load skills'
+  if (res.success && res.data) { apply(res.data); return res.data }
+  error.value = res.error || 'Could not load skills'
+  return null
 }
 
 // One refresh in flight per visit: a late answer of an earlier one never
@@ -184,15 +186,23 @@ async function refresh() {
 // the listing on screen. A 409 reloads and tells the operator; it never retries.
 // The answer is shown only while the same review is still open: a late answer
 // for a skill the reviewer has left is not shown on the next one (the listing is
-// still reloaded).
-async function write(run: () => Promise<{ success: boolean; error?: string; errorCode?: string }>, done: string) {
+// still reloaded). A success notice given as a function is worded from the
+// listing reloaded after the write (null when that reload did not apply).
+type DoneNotice = string | ((reloaded: SkillsListResponse | null) => string)
+async function write(run: () => Promise<{ success: boolean; error?: string; errorCode?: string }>, done: DoneNotice) {
   const server = props.serverName, v = visit, token = review.value?.token
   busy.value = true
   const res = await settle(run)
   if (!isCurrent(server, v)) return
   busy.value = false
-  if (review.value?.token === token) notice.value = res.success ? done : skillErrorNotice(res.errorCode, res.error)
-  await load()
+  if (!res.success || typeof done === 'string') {
+    if (review.value?.token === token) notice.value = res.success ? done as string : skillErrorNotice(res.errorCode, res.error)
+    await load()
+    return
+  }
+  const reloaded = await load()
+  // Still the same review (or none: the reload dropped a skill that vanished).
+  if (isCurrent(server, v) && (!review.value || review.value.token === token)) notice.value = done(reloaded)
 }
 
 // Approve sends exactly the hash and the incarnation the reviewer opened.
@@ -201,7 +211,7 @@ function approve() {
   if (!r || r.stale || busy.value) return
   return write(
     () => api.approveSkills(props.serverName, [r.path], skillExpectedHashes([r.entry]), r.incarnation),
-    'Approved. Agents can use this skill now.',
+    reloaded => skillApprovedNotice(reloaded, r.path),
   )
 }
 
