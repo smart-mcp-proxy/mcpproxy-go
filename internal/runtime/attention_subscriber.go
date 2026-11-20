@@ -189,9 +189,14 @@ func (a *attentionSubscriber) loop(ctx context.Context) {
 			if evt.Type == EventTypeServersChanged && !a.updateFromPayload(evt.Payload) {
 				continue
 			}
-			if debounceTimer == nil {
+			switch {
+			case debounceTimer == nil:
 				debounceTimer = time.NewTimer(a.debounce)
-			} else {
+			case evt.Type == EventTypeSkillsChanged:
+				// Spec 125 review round 1: a skills change joins the
+				// recompute already pending instead of pushing it back, so
+				// skill refreshes never delay any caller's frames.
+			default:
 				resetTimer(debounceTimer, a.debounce)
 			}
 		case <-debounceC:

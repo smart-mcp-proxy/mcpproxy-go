@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
@@ -224,7 +226,15 @@ func (r *Runtime) GetReviewQueue(ctx context.Context) (*ReviewQueue, error) {
 		}
 		skillsPending, skillsChanged, skillsSince, err := r.heldSkills(cfg, server)
 		if err != nil {
-			return nil, fmt.Errorf("list skill reviews for %q: %w", server.Name, err)
+			// A failed skills read must not fail the whole queue: that would
+			// be a 500 for every caller, which a scoped caller could observe
+			// (FR-019a). Count no skills for this server, as the attention
+			// subscriber does; the next read tries again.
+			if r.logger != nil {
+				r.logger.Warn("Review queue: cannot read skill records; counting none",
+					zap.String("server", server.Name), zap.Error(err))
+			}
+			skillsPending, skillsChanged, skillsSince = 0, 0, time.Time{}
 		}
 		row.SkillsPending, row.SkillsChanged = skillsPending, skillsChanged
 		heldTools := row.Pending+row.Changed > 0

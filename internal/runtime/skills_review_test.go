@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.etcd.io/bbolt"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
@@ -121,6 +122,24 @@ func TestReviewQueue_HeldSkillsIgnoredWithTheFeatureOff(t *testing.T) {
 	assert.Equal(t, 2, queue.Count)
 }
 
+// Review round 1, finding 3: a skill records read that fails must not fail
+// the whole queue (a 500 for every caller would let a scoped caller observe
+// it). The skill counts of that server read as zero; tool rows are intact.
+func TestReviewQueue_ASkillsReadFailureLeavesTheToolRows(t *testing.T) {
+	rt := heldSkillsRuntime(t, true)
+	require.NoError(t, rt.storageManager.GetDB().Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte(storage.SkillApprovalBucket)).Put([]byte("both:skill://broken/SKILL.md"), []byte("{not json"))
+	}))
+	queue, rows := reviewRowsByName(t, rt)
+	both, ok := rows["both"]
+	require.True(t, ok, "the tool row stays")
+	assert.Equal(t, "tool_review", both.Kind)
+	assert.Equal(t, 1, both.Pending)
+	assert.Zero(t, both.SkillsPending+both.SkillsChanged, "a failed read counts no skills")
+	assert.Equal(t, ReviewKindSkillReview, rows["skills-only"].Kind, "other servers are unaffected")
+	assert.Equal(t, 3, queue.Count)
+}
+
 func TestAttentionSkillReviewOneItemPerNonZeroState(t *testing.T) {
 	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 	items := Compute(AttentionInput{Now: now, Servers: []AttentionServer{
@@ -225,5 +244,130 @@ func TestSkillsChangedAlsoAnnouncesAnAdminOnlyReviewChange(t *testing.T) {
 		case <-deadline:
 			t.Fatal("no review.changed after skills.changed")
 		}
+	}
+}
+
+// Review round 1, finding 4: skills.changed makes the list stale but must not
+// push back a recompute that is already pending. Otherwise a steady stream of
+// skill refreshes (or one at the wrong moment) delays every caller's frames,
+// a scoped caller's included, and that delay is itself a sign of skills.
+func TestAttentionSubscriber_SkillsChangedDoesNotPostponeAPendingRecompute(t *testing.T) {
+	rt := heldSkillsRuntime(t, true)
+	rt.skills.noAutoTrigger.Store(true)
+	a := newAttentionSubscriber(rt, 500*time.Millisecond)
+	a.clientSource = nil
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a.start(ctx)
+	// Let the start-up recompute (no servers known yet) run first.
+	time.Sleep(time.Second)
+	require.Empty(t, a.Items())
+
+	servers := []contracts.Server{contractsServerForAttention(skillsServerConfig(rt.Config(), "skills-only"))}
+	rt.publishEvent(newEvent(EventTypeServersChanged, map[string]any{"servers": servers}))
+	hasSkillItem := func() bool {
+		for _, it := range a.Items() {
+			if it.Kind == AttentionKindSkillReview {
+				return true
+			}
+		}
+		return false
+	}
+	stop := time.After(3 * time.Second)
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for !hasSkillItem() {
+		select {
+		case <-tick.C:
+			rt.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": "skills-only"}))
+		case <-stop:
+			t.Fatal("skills.changed every 100 ms kept the pending recompute from running")
+		}
+	}
+}
+
+// Review round 1, finding 2: the held-skill counts depend on enable_skills
+// and on a server's enabled and expose_skills, so a commit that moves whether
+// a server's skills are read announces a skills review change (and a skills
+// change, for the Skills tab and the attention list) for exactly those
+// servers. The skills marker keeps the frame administrator-only.
+func TestSkillsExposureChangeAnnouncesAReviewChange(t *testing.T) {
+	off := false
+	for _, tc := range []struct {
+		name   string
+		enable bool
+		mutate func(*CommitTx) error
+		want   []string
+	}{
+		{"enable_skills on", false, func(tx *CommitTx) error {
+			return tx.MutateGlobal(func(c *config.Config) error { c.EnableSkills = true; return nil })
+		}, []string{"both", "skills-only", "settled"}},
+		{"enable_skills off", true, func(tx *CommitTx) error {
+			return tx.MutateGlobal(func(c *config.Config) error { c.EnableSkills = false; return nil })
+		}, []string{"both", "skills-only", "settled"}},
+		{"server disabled", true, func(tx *CommitTx) error {
+			return tx.UpdateServer("skills-only", func(sc *config.ServerConfig) error { sc.Enabled = false; return nil })
+		}, []string{"skills-only"}},
+		{"server enabled", true, func(tx *CommitTx) error {
+			return tx.UpdateServer("parked", func(sc *config.ServerConfig) error { sc.Enabled = true; return nil })
+		}, []string{"parked"}},
+		{"expose_skills off", true, func(tx *CommitTx) error {
+			return tx.UpdateServer("skills-only", func(sc *config.ServerConfig) error { sc.ExposeSkills = &off; return nil })
+		}, []string{"skills-only"}},
+		{"expose_skills back on", true, func(tx *CommitTx) error {
+			return tx.UpdateServer("excluded", func(sc *config.ServerConfig) error { sc.ExposeSkills = nil; return nil })
+		}, []string{"excluded"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := heldSkillsRuntime(t, tc.enable)
+			rt.skills.noAutoTrigger.Store(true)
+			ch := rt.SubscribeEvents()
+			defer rt.UnsubscribeEvents(ch)
+			_, err := rt.Commit("test", tc.mutate)
+			require.NoError(t, err)
+
+			reviewed, skills := map[string]bool{}, map[string]bool{}
+			deadline := time.After(5 * time.Second)
+		collect:
+			for {
+				select {
+				case evt := <-ch:
+					name, _ := evt.Payload["server"].(string)
+					switch evt.Type {
+					case EventTypeReviewChanged:
+						if marked, _ := evt.Payload[ReviewChangedSkillsKey].(bool); marked {
+							reviewed[name] = true
+						}
+					case EventTypeSkillsChanged:
+						skills[name] = true
+					}
+					if len(reviewed) == len(tc.want) && len(skills) == len(tc.want) {
+						// Give a wrongly announced extra server a moment to show.
+						select {
+						case <-time.After(200 * time.Millisecond):
+						case evt := <-ch:
+							if evt.Type == EventTypeReviewChanged {
+								if marked, _ := evt.Payload[ReviewChangedSkillsKey].(bool); marked {
+									n, _ := evt.Payload["server"].(string)
+									reviewed[n] = true
+								}
+							}
+						}
+						break collect
+					}
+				case <-deadline:
+					break collect
+				}
+			}
+			var gotReview, gotSkills []string
+			for n := range reviewed {
+				gotReview = append(gotReview, n)
+			}
+			for n := range skills {
+				gotSkills = append(gotSkills, n)
+			}
+			assert.ElementsMatch(t, tc.want, gotReview, "skills-marked review.changed")
+			assert.ElementsMatch(t, tc.want, gotSkills, "skills.changed")
+		})
 	}
 }

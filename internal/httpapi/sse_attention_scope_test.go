@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
@@ -73,7 +74,10 @@ func TestSSE_AttentionChangedRenderedPerSubscriber(t *testing.T) {
 // must send that subscriber NO attention.changed frame — its narrowed id set
 // (empty, then empty again) has not changed.
 func TestSSE_AttentionChangedSuppressedWhenScopedSetUnchanged(t *testing.T) {
-	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: scopeFixtureServers(), withManagement: true}
+	// Nothing needs attention when the subscriber connects: its narrowed set
+	// at connect is empty (Spec 125 review round 1 seeds the suppression with it).
+	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: scopeFixtureServers(), withManagement: true,
+		attentionItemsOverride: []contracts.AttentionItem{}}
 	srv, token := scopedAgentServer(t, ctrl, []string{"alpha"})
 
 	ts := httptest.NewServer(srv)
@@ -83,6 +87,26 @@ func TestSSE_AttentionChangedSuppressedWhenScopedSetUnchanged(t *testing.T) {
 	defer agentClose()
 
 	require.Eventually(t, func() bool { return ctrl.subscriberCount() == 1 }, 5*time.Second, 20*time.Millisecond)
+
+	sentinel := func() {
+		ctrl.publishToAll(internalRuntime.Event{
+			Type:      internalRuntime.EventTypeOAuthTokenRefreshed,
+			Payload:   map[string]any{"server_name": "alpha", "expires_at": time.Now().Format(time.RFC3339)},
+			Timestamp: time.Now(),
+		})
+	}
+	attentionFrames := func() int {
+		frames := readSSEFramesUntil(t, agentBody, time.Now().Add(5*time.Second), func(e sseEvent) bool {
+			return e.Name == "oauth.token_refreshed"
+		})
+		n := 0
+		for _, f := range frames {
+			if f.Name == "attention.changed" {
+				n++
+			}
+		}
+		return n
+	}
 
 	betaOnly := func(count int, id string) internalRuntime.Event {
 		return internalRuntime.Event{
@@ -97,31 +121,26 @@ func TestSSE_AttentionChangedSuppressedWhenScopedSetUnchanged(t *testing.T) {
 		}
 	}
 
-	// First beta-only change: the scoped subscriber's narrowed set goes from
-	// nil (never sent) to empty — that IS a change (the first frame), so it
-	// must still be delivered once, with an empty id list.
+	// A beta-only change narrows to the empty set the subscriber had at
+	// connect: no frame (a sentinel guaranteed to arrive bounds the wait).
 	ctrl.publishToAll(betaOnly(1, "server_error:server:beta"))
-	first := readSSEUntil(t, agentBody, "attention.changed", time.Now().Add(5*time.Second))
-	firstPayload := first.Data["payload"].(map[string]interface{})
-	assert.Equal(t, float64(0), firstPayload["count"])
-	ids, _ := firstPayload["ids"].([]interface{})
-	assert.Empty(t, ids)
+	sentinel()
+	assert.Zero(t, attentionFrames(), "a narrowed set equal to the one at connect must not send a frame")
 
-	// A second beta-only change (still narrows to empty for this subscriber)
-	// must be suppressed: use a sentinel event guaranteed to arrive to prove
-	// no attention.changed frame appeared in between.
+	// A change the subscriber can see is delivered.
+	ctrl.publishToAll(internalRuntime.Event{Type: internalRuntime.EventTypeAttentionChanged, Timestamp: time.Now(),
+		Payload: map[string]any{"count": 1, "items": []internalRuntime.AttentionEventItem{
+			{ID: "server_error:server:alpha", SubjectType: "server", SubjectID: "alpha"},
+		}}})
+	evt := readSSEUntil(t, agentBody, "attention.changed", time.Now().Add(5*time.Second))
+	assert.Equal(t, []interface{}{"server_error:server:alpha"}, evt.Data["payload"].(map[string]interface{})["ids"])
+
+	// A second beta-only change (alpha's item gone again: the set moves to
+	// empty) is delivered once, then the same empty set again is suppressed.
+	ctrl.publishToAll(betaOnly(1, "server_error:server:beta"))
+	sentinel()
+	assert.Equal(t, 1, attentionFrames())
 	ctrl.publishToAll(betaOnly(1, "server_error:server:beta:again"))
-	ctrl.publishToAll(internalRuntime.Event{
-		Type:      internalRuntime.EventTypeOAuthTokenRefreshed,
-		Payload:   map[string]any{"server_name": "alpha", "expires_at": time.Now().Format(time.RFC3339)},
-		Timestamp: time.Now(),
-	})
-
-	frames := readSSEFramesUntil(t, agentBody, time.Now().Add(5*time.Second), func(e sseEvent) bool {
-		return e.Name == "oauth.token_refreshed"
-	})
-	for _, f := range frames {
-		assert.NotEqual(t, "attention.changed", f.Name,
-			"an unchanged (still empty) narrowed set must not re-send a frame")
-	}
+	sentinel()
+	assert.Zero(t, attentionFrames(), "an unchanged (still empty) narrowed set must not re-send a frame")
 }

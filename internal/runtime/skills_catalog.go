@@ -1268,11 +1268,49 @@ func (r *Runtime) triggerSkillsRefreshAll() {
 // effective trust mode changed (a pending skill may now be approved, or a
 // changed one held), and, for every eligible server, when quarantine_enabled
 // changed. Switching off or narrowing never refreshes.
+// announceSkillsExposureChanges publishes a skills change (skills.changed plus
+// the administrator-only review.changed) for every server whose skills are
+// read under one configuration and not the other: enable_skills moved, or the
+// server's enabled, quarantine or expose_skills moved, or it was added or
+// removed. The held-skill counts of the review queue and the attention list
+// follow that rule (Runtime.heldSkills), and the stored records do not change,
+// so no refresh would announce it: a refresh that finds the records as they
+// were publishes nothing (review round 1, finding 2).
+func (r *Runtime) announceSkillsExposureChanges(oldCfg, newCfg *config.Config) {
+	if oldCfg == nil || newCfg == nil {
+		return
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, cfg := range []*config.Config{oldCfg, newCfg} {
+		for _, sc := range cfg.Servers {
+			if sc == nil || seen[sc.Name] {
+				continue
+			}
+			seen[sc.Name] = true
+			if skillsServerExposed(oldCfg, skillsServerConfig(oldCfg, sc.Name)) != skillsServerExposed(newCfg, skillsServerConfig(newCfg, sc.Name)) {
+				names = append(names, sc.Name)
+			}
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		var counts map[string]int
+		if r.storageManager != nil {
+			if recs, err := r.ListSkillRecords(name); err == nil {
+				counts = r.skillCounts(name, recs)
+			}
+		}
+		r.publishSkillsChanged(name, counts)
+	}
+}
+
 func (r *Runtime) onSkillsConfigChanged(oldCfg, newCfg *config.Config) {
 	// Any configuration change may alter which skills are available (the
 	// switch, a server's expose_skills, enabled, quarantine, add or remove):
 	// the search index is rebuilt at its next use (spec 125 D12).
 	r.skills.bumpIndexGeneration()
+	r.announceSkillsExposureChanges(oldCfg, newCfg)
 	if newCfg == nil || !newCfg.EnableSkills {
 		return
 	}

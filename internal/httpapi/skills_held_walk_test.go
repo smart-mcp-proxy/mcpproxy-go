@@ -234,3 +234,55 @@ func TestSSE_AttentionChangedSkillReviewNeverReachesAScopedSubscriber(t *testing
 	agentIDs, _ := (<-agentDone).Data["payload"].(map[string]interface{})["ids"].([]interface{})
 	assert.Equal(t, []interface{}{"sign_in_required:server:alpha"}, agentIDs)
 }
+
+// Review round 1, finding 1 (FR-019a timing): a scoped subscriber that
+// connected before a skill became held must get NO attention.changed frame
+// when the only change is that held skill. Its narrowed id set did not move,
+// so a frame would tell it, by its timing alone, that a skill was held. The
+// per-connection suppression is seeded at connect with the caller's current
+// narrowed set. The administrator, whose set did move, gets the frame.
+func TestSSE_AttentionChangedFromAHeldSkillAloneSendsAScopedSubscriberNothing(t *testing.T) {
+	signIn := contracts.AttentionItem{ID: "sign_in_required:server:alpha", Kind: internalRuntime.AttentionKindSignInRequired,
+		Subject: contracts.AttentionSubject{Type: "server", ID: "alpha", Name: "alpha"}}
+	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: scopeFixtureServers(), withManagement: true,
+		attentionItemsOverride: []contracts.AttentionItem{signIn}}
+	srv, token := scopedAgentServer(t, ctrl, []string{"alpha"})
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	adminBody, adminClose := sseSubscribe(t, ts.URL, scopeAdminAPIKey)
+	defer adminClose()
+	agentBody, agentClose := sseSubscribe(t, ts.URL, token)
+	defer agentClose()
+	require.Eventually(t, func() bool { return ctrl.subscriberCount() == 2 }, 5*time.Second, 20*time.Millisecond)
+
+	held := internalRuntime.Event{Type: internalRuntime.EventTypeAttentionChanged, Timestamp: time.Now(),
+		Payload: map[string]any{"count": 2, "items": []internalRuntime.AttentionEventItem{
+			{ID: signIn.ID, Kind: signIn.Kind, SubjectType: "server", SubjectID: "alpha"},
+			{ID: "skill_review:server:alpha:pending", Kind: internalRuntime.AttentionKindSkillReview, SubjectType: "server", SubjectID: "alpha"},
+		}}}
+	// A frame every subscriber that sees alpha receives, published after the
+	// attention change: everything before it is what the change produced.
+	sentinel := internalRuntime.Event{Type: internalRuntime.EventTypeReviewChanged, Timestamp: time.Now(),
+		Payload: map[string]any{"server": "alpha"}}
+
+	deadline := time.Now().Add(10 * time.Second)
+	isSentinel := func(f sseEvent) bool { return f.Name == string(internalRuntime.EventTypeReviewChanged) }
+	adminDone := make(chan []sseEvent, 1)
+	go func() { adminDone <- readSSEFramesUntil(t, adminBody, deadline, isSentinel) }()
+	agentDone := make(chan []sseEvent, 1)
+	go func() { agentDone <- readSSEFramesUntil(t, agentBody, deadline, isSentinel) }()
+	ctrl.publishToAll(held)
+	ctrl.publishToAll(sentinel)
+
+	names := func(frames []sseEvent) []string {
+		var out []string
+		for _, f := range frames {
+			out = append(out, f.Name)
+		}
+		return out
+	}
+	assert.Contains(t, names(<-adminDone), string(internalRuntime.EventTypeAttentionChanged), "the administrator's set moved")
+	assert.NotContains(t, names(<-agentDone), string(internalRuntime.EventTypeAttentionChanged),
+		"a scoped subscriber whose narrowed set did not move gets no frame")
+}

@@ -4607,8 +4607,8 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 	// narrowed id set is unchanged since the last frame it received — a
 	// scoped caller's own view is what matters, not the shared event's raw
 	// id set (two scoped subscribers with different scopes must each get
-	// their own suppression decision). nil (not an empty set) so the very
-	// first frame is never suppressed.
+	// their own suppression decision). Seeded below, once the caller is
+	// known, with its narrowed set at connect.
 	var lastAttentionIDs map[string]struct{}
 
 	// Create heartbeat ticker to keep connection alive
@@ -4624,6 +4624,13 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warnw("Closing SSE stream after caller revalidation failed", "error", err)
 		return
 	}
+	// Spec 125 FR-019a (review round 1): seed the suppression with the
+	// caller's narrowed attention set as it is now. Left nil, the first
+	// attention.changed always reached the subscriber, so a scoped caller
+	// connected before a skill became held got a frame (its own ids
+	// unchanged) exactly when it was held. Every caller class is seeded the
+	// same way; a subscriber still gets the first frame that moves its set.
+	lastAttentionIDs = attentionIDSetFor(callerCtx, s.controller.Attention())
 	initialLiveStats := filterUpstreamStatsServers(callerCtx, s.controller.GetUpstreamStats())
 	initialStatus := map[string]interface{}{
 		"running":        s.controller.IsRunning(),
