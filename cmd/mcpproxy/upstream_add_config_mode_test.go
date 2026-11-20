@@ -80,3 +80,60 @@ func TestParseAddJSONTrustMode(t *testing.T) {
 		assert.Equal(t, "stdio", req.Protocol)
 	})
 }
+
+// TestParseAddJSONOAuthAndUnknownKeys: add-json dropped oauth (and any other
+// key it did not name) while reporting success.
+func TestParseAddJSONOAuthAndUnknownKeys(t *testing.T) {
+	t.Run("oauth carried through", func(t *testing.T) {
+		req, err := parseAddJSONRequest("ha", `{"url":"https://ha.example.com/api/mcp","oauth":{"client_id":"http://127.0.0.1:8765/","redirect_uri":"http://127.0.0.1:8765/oauth/callback"}}`)
+		require.NoError(t, err)
+		require.NotNil(t, req.OAuth)
+		assert.Equal(t, "http://127.0.0.1:8765/", req.OAuth.ClientID)
+		assert.Equal(t, "http://127.0.0.1:8765/oauth/callback", req.OAuth.RedirectURI)
+	})
+
+	t.Run("invalid oauth refused", func(t *testing.T) {
+		_, err := parseAddJSONRequest("ha", `{"url":"https://ha.example.com/api/mcp","oauth":{"redirect_uri":"https://example.com/cb"}}`)
+		require.Error(t, err)
+	})
+
+	t.Run("unknown top-level keys refused and all listed", func(t *testing.T) {
+		_, err := parseAddJSONRequest("srv", `{"url":"https://example.com/mcp","enabled":true,"isolation":{}}`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `"enabled", "isolation"`)
+		assert.Contains(t, err.Error(), "oauth")
+	})
+
+	t.Run("unknown key inside oauth refused", func(t *testing.T) {
+		_, err := parseAddJSONRequest("srv", `{"url":"https://example.com/mcp","oauth":{"clientId":"x"}}`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "clientId")
+	})
+
+	t.Run("type is an alias for protocol", func(t *testing.T) {
+		req, err := parseAddJSONRequest("srv", `{"type":"http","url":"https://example.com/mcp"}`)
+		require.NoError(t, err)
+		assert.Equal(t, "http", req.Protocol)
+
+		_, err = parseAddJSONRequest("srv", `{"type":"http","protocol":"sse","url":"https://example.com/mcp"}`)
+		require.Error(t, err)
+	})
+}
+
+// TestUpstreamAddConfigModeKeepsOAuth: the no-daemon path writes the oauth
+// block to the config, like the daemon path does.
+func TestUpstreamAddConfigModeKeepsOAuth(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	req := &cliclient.AddServerRequest{
+		Name:     "ha",
+		URL:      "https://ha.example.com/api/mcp",
+		Protocol: "http",
+		OAuth:    &config.OAuthConfig{ClientID: "http://127.0.0.1:8765/"},
+	}
+	added, err := runUpstreamAddConfigMode(req, cfg)
+	require.NoError(t, err)
+	require.True(t, added)
+	require.NotNil(t, cfg.Servers[0].OAuth)
+	assert.Equal(t, "http://127.0.0.1:8765/", cfg.Servers[0].OAuth.ClientID)
+}

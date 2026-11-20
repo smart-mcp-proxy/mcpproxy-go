@@ -11,7 +11,9 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -125,9 +127,13 @@ Examples:
 		Short: "Add an upstream server using JSON configuration",
 		Long: `Add a new upstream MCP server using a JSON configuration object.
 
+Accepted keys: url, command, args, env, headers, working_dir, protocol
+(or its alias type), trust_mode, oauth. Any other key is refused.
+
 Examples:
   mcpproxy upstream add-json weather '{"url":"https://api.weather.com/mcp","headers":{"Authorization":"Bearer token"}}'
-  mcpproxy upstream add-json sqlite '{"command":"uvx","args":["mcp-server-sqlite","--db","mydb.db"]}'`,
+  mcpproxy upstream add-json sqlite '{"command":"uvx","args":["mcp-server-sqlite","--db","mydb.db"]}'
+  mcpproxy upstream add-json ha '{"url":"https://ha.example.com/api/mcp","oauth":{"client_id":"http://127.0.0.1:8765/","redirect_uri":"http://127.0.0.1:8765/oauth/callback"}}'`,
 		Args: cobra.ExactArgs(2),
 		RunE: runUpstreamAddJSON,
 	}
@@ -1793,6 +1799,7 @@ func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *con
 		Enabled:     true,
 		Quarantined: quarantined,
 		TrustMode:   req.TrustMode,
+		OAuth:       req.OAuth,
 	}
 	if req.Quarantined != nil {
 		// A stated --quarantine/--no-quarantine is written to the file as an
@@ -1931,24 +1938,55 @@ func runUpstreamRemoveConfigMode(serverName string, globalConfig *config.Config)
 // — the operator believed the tier had been applied. A bogus value is refused
 // with the same vocabulary every other write seam uses instead of being
 // silently downgraded.
+//
+// The same happened to oauth, and to every other key the struct did not name,
+// so any key outside addJSONKeys is now refused, and so is an unknown key
+// inside oauth. "type" (the Claude Desktop / VS Code spelling) is accepted as
+// an alias for protocol so configs pasted from those clients still work.
 func parseAddJSONRequest(serverName, jsonStr string) (*cliclient.AddServerRequest, error) {
-	var jsonConfig struct {
-		URL        string            `json:"url"`
-		Command    string            `json:"command"`
-		Args       []string          `json:"args"`
-		Env        map[string]string `json:"env"`
-		Headers    map[string]string `json:"headers"`
-		WorkingDir string            `json:"working_dir"`
-		Protocol   string            `json:"protocol"`
-		TrustMode  string            `json:"trust_mode"`
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(jsonStr), &keys); err != nil {
+		return nil, fmt.Errorf("invalid JSON: %w", err)
+	}
+	var unknown []string
+	for k := range keys {
+		if !slices.Contains(addJSONKeys, k) {
+			unknown = append(unknown, strconv.Quote(k))
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return nil, fmt.Errorf("unsupported key(s) %s: add-json accepts only %s",
+			strings.Join(unknown, ", "), strings.Join(addJSONKeys, ", "))
 	}
 
-	if err := json.Unmarshal([]byte(jsonStr), &jsonConfig); err != nil {
+	var jsonConfig struct {
+		URL        string              `json:"url"`
+		Command    string              `json:"command"`
+		Args       []string            `json:"args"`
+		Env        map[string]string   `json:"env"`
+		Headers    map[string]string   `json:"headers"`
+		WorkingDir string              `json:"working_dir"`
+		Protocol   string              `json:"protocol"`
+		Type       string              `json:"type"`
+		TrustMode  string              `json:"trust_mode"`
+		OAuth      *config.OAuthConfig `json:"oauth"`
+	}
+	dec := json.NewDecoder(strings.NewReader(jsonStr))
+	dec.DisallowUnknownFields() // catches a misspelled key inside oauth
+	if err := dec.Decode(&jsonConfig); err != nil {
 		return nil, fmt.Errorf("invalid JSON: %w", err)
 	}
 
-	// Auto-detect protocol
 	protocol := jsonConfig.Protocol
+	if jsonConfig.Type != "" {
+		if protocol != "" && protocol != jsonConfig.Type {
+			return nil, fmt.Errorf("conflicting protocol %q and type %q: set only one", protocol, jsonConfig.Type)
+		}
+		protocol = jsonConfig.Type
+	}
+
+	// Auto-detect protocol
 	if protocol == "" {
 		if jsonConfig.Command != "" {
 			protocol = "stdio"
@@ -1964,6 +2002,9 @@ func parseAddJSONRequest(serverName, jsonStr string) (*cliclient.AddServerReques
 	if err := validateTrustModeFlag(jsonConfig.TrustMode); err != nil {
 		return nil, err
 	}
+	if err := jsonConfig.OAuth.Validate(); err != nil {
+		return nil, err
+	}
 
 	return &cliclient.AddServerRequest{
 		Name:       serverName,
@@ -1975,8 +2016,12 @@ func parseAddJSONRequest(serverName, jsonStr string) (*cliclient.AddServerReques
 		WorkingDir: jsonConfig.WorkingDir,
 		Protocol:   protocol,
 		TrustMode:  jsonConfig.TrustMode,
+		OAuth:      jsonConfig.OAuth,
 	}, nil
 }
+
+// addJSONKeys are the top-level keys `upstream add-json` understands.
+var addJSONKeys = []string{"args", "command", "env", "headers", "oauth", "protocol", "trust_mode", "type", "url", "working_dir"}
 
 // runUpstreamAddJSON handles the 'upstream add-json' command
 func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
