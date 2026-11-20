@@ -22,9 +22,12 @@ The same operation is available from the CLI, the REST API, and the MCP
 The Web UI's **+ Add → Server** page, the macOS Add Server sheet and the CLI's
 `mcpproxy catalog` commands are a **catalog** over every enabled registry
 (each registry is a *catalog source*). One search merges the sources and ranks
-the results: the official source first, then verified publishers, then
-popularity, then text relevance, then title. Every surface shows the same order
-and the same words:
+the results first by how well the name matches the query (publisher match,
+exact name, prefix, name token, substring or description, then namespace-only),
+then official source, verified publisher, popularity, title and id. With an
+empty query there is no ranked list; the catalog shows two sections instead:
+Official (curated order) and Popular (sorted by popularity). Every surface
+shows the same order and the same words:
 
 - A result shows its title (the id as secondary text), publisher, a verified
   badge and the stars or installs when the source provides them.
