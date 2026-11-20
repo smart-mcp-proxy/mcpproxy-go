@@ -151,11 +151,10 @@ Tools are automatically approved (no manual review needed) when:
   unchanged) **and the offline TPA scan is clean for the tool** — recorded with
   `approved_by: "auto-baseline"`. A flagged first-seen tool is never
   auto-baselined, on that pass or any repeat (R2-1).
-- Under `trust_mode: scan`, a new tool is approved only after a clean scan with
-  full coverage. A changed contract also requires no Spec 120 structural hold
-  signal; safety-hint changes, input-schema widening, output-schema changes,
-  and dispatch-tier changes stay pending regardless of the scan verdict.
-  Findings and incomplete scan coverage keep a new tool pending.
+- Under `trust_mode: scan`, a new tool is approved when the offline scan is
+  clean with full coverage. A changed contract is approved only when the scan
+  is clean with full coverage **and** the structural gate finds no hold signal;
+  findings, coverage gaps and structural changes keep it pending.
 
 Under `trust_mode: manual`, new tools and changed contracts stay pending until
 approved, except for a trusted server's clean first-discovery baseline, which
