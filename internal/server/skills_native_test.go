@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/skills"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/skills/skillstest"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -534,4 +535,49 @@ func TestNativeSkills_ExcludedAndChangedSkills(t *testing.T) {
 	r := c2.call(nativeMethodRead, map[string]any{"uri": "skill://pdf/scripts/x.py"})
 	require.NotNil(t, r.err)
 	assert.Equal(t, mcp.METHOD_NOT_FOUND, r.err.Code)
+}
+
+// Native answers are never rewritten: under a policy that strips control
+// characters, a skill whose decoded frontmatter carries one is withheld from
+// the listing (the stored JSON escapes it, so the check must decode), and a
+// file the policy would change is refused rather than served changed.
+func TestNativeSkills_PolicyWithholdsInsteadOfRewriting(t *testing.T) {
+	strip := &config.OutputSanitisationConfig{ResponseAction: "spotlight", StripControlChars: true,
+		StripClasses: []string{"ansi", "c0c1"}, MaxRedactions: 100}
+
+	t.Run("frontmatter is checked decoded", func(t *testing.T) {
+		fx := newSkillFixture(t)
+		fx.proxy.config.OutputSanitisation = strip
+		clean := fx.proxy.skillWordCleaner(fx.proxy.skillPolicy())
+		sk := &runtime.AvailableSkill{
+			URI: "skill://a/SKILL.md", Path: "a",
+			Frontmatter: json.RawMessage(`{"name":"a","note":"\u001b[31mRED\u001b[0m"}`),
+		}
+		assert.Nil(t, nativeEntryOf(clean, sk), "an escaped ESC in a frontmatter value withholds the skill")
+		sk.Frontmatter = json.RawMessage(`{"name":"a","\u001bkey":"v"}`)
+		assert.Nil(t, nativeEntryOf(clean, sk), "and in a key")
+		sk.Frontmatter = json.RawMessage(`{"name":"a","tags":["ok","\u001b[1m"]}`)
+		assert.Nil(t, nativeEntryOf(clean, sk), "and in a list")
+		sk.Frontmatter = json.RawMessage(`{"name":"a","description":"plain"}`)
+		assert.NotNil(t, nativeEntryOf(clean, sk), "clean frontmatter is listed")
+	})
+
+	t.Run("a file the policy would change is refused", func(t *testing.T) {
+		g := newRealSkills(t, func(fx *skillstest.Fixture) {
+			fx.AddSkill(skillstest.Skill{Path: "esc", Files: map[string][]byte{
+				"SKILL.md": realSkillMD("esc", "has escapes", "plain"),
+				"ref.txt":  []byte("before \x1b[31mRED\x1b[0m after\n"),
+			}})
+		}, nil)
+		g.approve(t, "esc")
+		g.commitGlobal(t, func(c *config.Config) { c.OutputSanitisation = strip })
+		c := newRawMCP(t, g.singleURL())
+		c.initialize()
+		read := c.call(nativeMethodRead, map[string]any{"uri": "skill://esc/ref.txt"})
+		require.NotNil(t, read.err, string(read.body))
+		assert.Contains(t, read.err.Message, "blocked by the output sanitisation policy")
+		assert.NotContains(t, string(read.body), "RED")
+		ok := c.call(nativeMethodRead, map[string]any{"uri": "skill://esc/SKILL.md"})
+		require.Nil(t, ok.err, "a file the policy leaves alone is served: %s", ok.body)
+	})
 }

@@ -271,7 +271,7 @@ func nativeEntryOf(clean func(string) string, sk *runtime.AvailableSkill) *nativ
 	if len(bytes.TrimSpace(fm)) == 0 {
 		fm = json.RawMessage(`{}`)
 	}
-	if clean(string(fm)) != string(fm) {
+	if !frontmatterUnchangedBy(clean, fm) {
 		return nil
 	}
 	e := &nativeSkillEntry{URI: sk.URI, Frontmatter: fm, Resources: []skills.FileRef{}}
@@ -285,6 +285,39 @@ func nativeEntryOf(clean func(string) string, sk *runtime.AvailableSkill) *nativ
 		e.Resources = append(e.Resources, skills.FileRef{URI: f.URI, Digest: f.Digest, Size: f.Size})
 	}
 	return e
+}
+
+// frontmatterUnchangedBy reports whether the policy leaves every key and every
+// string value of the frontmatter unchanged. The check runs on the decoded
+// text: the stored JSON escapes control characters (an ESC is "\u001b" there),
+// so checking the serialized form would let through what a client decodes.
+// Frontmatter that does not decode is not served.
+func frontmatterUnchangedBy(clean func(string) string, fm json.RawMessage) bool {
+	var doc any
+	if err := json.Unmarshal(fm, &doc); err != nil {
+		return false
+	}
+	var walk func(v any) bool
+	walk = func(v any) bool {
+		switch t := v.(type) {
+		case string:
+			return clean(t) == t
+		case map[string]any:
+			for k, val := range t {
+				if clean(k) != k || !walk(val) {
+					return false
+				}
+			}
+		case []any:
+			for _, val := range t {
+				if !walk(val) {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	return walk(doc)
 }
 
 // answerNativeSkills answers one of the three methods for the endpoint's
