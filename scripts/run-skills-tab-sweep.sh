@@ -188,17 +188,28 @@ for (const [p, r] of paths) {
     t = t.split(p.slice("/private".length)).join(r)
   }
 }
-// Any other absolute filesystem path, whatever its root (/data, /work, /opt,
-// ...), is reduced to <path>/basename: a path that starts the text or follows
-// a space, a quote, a bracket, "=", ",", ":", ";", an ANSI colour code or a
-// JSON escape (\n, \t, \u001b[..m). A URL path follows its host, so it is kept
+// Any other absolute filesystem path is reduced to <path>/basename when its
+// first segment exists on this machine (/usr, /tmp, /var, /opt, /data where
+// there is one, ...): a path that starts the text or follows a space, a quote,
+// a bracket, "=", ",", ":", ";", an ANSI colour code or a JSON escape (\n, \t,
+// \u001b[..m). Text whose first segment does not exist here is not a local
+// path and is kept: a regex literal (/approved/i), a route fragment
+// (/skills/refresh, /servers/{id}/skills), and so a path under a root this
+// machine does not have. A configured path (PW_CHROMIUM, ...) is replaced whole
+// above, whatever its root. A URL path follows its host, so it is kept
 // (http://127.0.0.1:1/api/...), and so is a bare route of the core (/api/...,
 // /mcp, /ui, /events) and a placeholder (<repo>/e2e/...).
 const pre = "(^|[\\s\"\x27`(\\[{=,:;]|\x1b\\[[0-9;]*m|\\\\u001b\\[[0-9;]*m|\\\\[nrt\"])"
 const seg = "[^\\s\"\x27`()\\[\\]{}<>,:;\\\\/\x1b]+"
 const route = "(?!(?:api|mcp|ui|events|healthz|readyz)(?:[/?#\\s\"\x27`)\\],:;\\\\]|$))"
 const abs = new RegExp(pre + "(/" + route + seg + "(?:/" + seg + ")*/?)", "gm")
-t = t.replace(abs, (m, p1, p) => p1 + "<path>/" + base(p))
+const rootExists = new Map()
+const isLocal = p => {
+  const first = p.split("/")[1]
+  if (!rootExists.has(first)) rootExists.set(first, fs.existsSync("/" + first))
+  return rootExists.get(first)
+}
+t = t.replace(abs, (m, p1, p) => isLocal(p) ? p1 + "<path>/" + base(p) : m)
 if (f) fs.writeFileSync(f, t); else process.stdout.write(t)'
 redact_node() {
   SWEEP_REDACT_KEY="$API_KEY" SWEEP_REDACT_OUT="$OUT_REAL" SWEEP_REDACT_REPO="$REPO_ROOT" \
@@ -482,6 +493,71 @@ NODE
   return $status
 }
 
+# write_report OUT DEST SCREENSHOTS(1|0): the HTML report from
+# OUT/skills-sweep-results.json, one section per scenario. Every string in it
+# comes from the redacted results file and is HTML-escaped, so the report is not
+# redacted again (a second pass would match after an entity such as &gt; and
+# put a raw <path> into the HTML). The writer's own output (a failed write
+# names the destination) is captured and printed redacted; its status is kept.
+write_report() {
+  run_logged report-html node - "$1" "$2" "$3" >&2 <<'NODE'
+const fs = require('fs'), path = require('path')
+const [out, dest, screenshots] = process.argv.slice(2)
+const withShots = screenshots === '1'
+const r = JSON.parse(fs.readFileSync(path.join(out, 'skills-sweep-results.json'), 'utf8'))
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#x27;' })[c])
+const img = name => {
+  if (!withShots) return ''
+  const f = path.join(out, 'screenshots', `skills-tab-${name}.png`)
+  return fs.existsSync(f) ? `<img alt="${esc(name)}" src="data:image/png;base64,${fs.readFileSync(f).toString('base64')}">` : ''
+}
+const shotNote = shots => (!withShots && shots.length)
+  ? `<p class="t">Screenshots (not embedded in this copy): ${shots.map(s => `<code>screenshots/skills-tab-${esc(s)}.png</code>`).join(', ')}</p>` : ''
+// One section per scenario, in spec order, with what it proves and its screenshots.
+const about = [
+  ['Tab and list', 'The Skills tab is offered on a server with enable_skills on and a skills-capable upstream (cmd/skillsfixture, manual trust). The three skills show as Awaiting review and Not offered.', ['01-list']],
+  ['Viewer and paging', 'SKILL.md opens in the text viewer (inert text). A 150 KiB file (data/large.txt of big) is read part by part in at least three parts: each Load more waits for its content response and for the rendered text to grow by that part. Every part is of the current copy, its digest equals the digest the core lists for that file in the current copy (the same digest the file row shows on screen), its size equals the listed size, its offset is where the previous part ended (in bytes, the first at 0) and its next_offset is where it ends; the last part has no next_offset and ends at the listed size. A binary file (logo.bin) is listed as binary, not shown, with no View button.', ['02-viewer', '03-paged']],
+  ['Approve', 'Approve sends the current_hash and incarnation of the version the reviewer opened; the chip turns Approved.', ['04-approved']],
+  ['Changed while open, re-open, diff', 'A mutate without the X-Skills-Fixture header is refused (403). The approved skill plain changes upstream while it is open; after Refresh the chip says Changed and the open review says it changed while you were reviewing it (the review shows the approved version, so it offers no Approve). Re-opening shows the file-set diff (SKILL.md changed) and the line diff with the added line; approving binds the new hash.', ['05a-stale', '05-changed-diff']],
+  ['Pending skill changed while open', 'The pending skill with-files changes upstream while it is open; after Refresh the review is marked stale and its Approve button stays on screen but disabled, until the new version is re-opened.', ['05b-pending-stale']],
+  ['Live skills.changed', 'With the pending skill big open, its SKILL.md changes upstream and the refresh is made through POST /api/v1/servers/{id}/skills/refresh, not in the page. The core\'s skills.changed SSE frame, re-dispatched by the Web UI, reloads the listing by itself and the open review shows the stale banner with Approve disabled.', ['05c-live-event-stale']],
+  ['Block and unblock', 'Block marks the skill Blocked and removes Approve; Unblock returns it to Awaiting review.', ['06-blocked']],
+  ['Reload', 'The tab survives a reload through ?tab=skills, and no uncaught page error was thrown in any scenario.', []],
+]
+const stateTable = step => {
+  const s = r.states[step]
+  if (!s) return `<p>missing</p>`
+  return `<table><tr><th>skill</th><th>status</th><th>blocked</th><th>available</th><th>current_hash</th><th>approved_hash</th></tr>${s.skills.map(k =>
+    `<tr><td>${esc(k.path)}</td><td>${esc(k.status)}</td><td>${k.blocked}</td><td>${k.available}</td><td><code>${esc(k.current_hash)}</code></td><td><code>${esc(k.approved_hash || '')}</code></td></tr>`).join('')}</table>`
+}
+const passed = r.scenarios.filter(s => s.passed).length
+const sections = r.scenarios.map((s, i) => {
+  const [title, text, shots] = about[i] || [s.title, '', []]
+  const badge = s.passed ? '<span class="ok">PASS</span>' : '<span class="bad">FAIL</span>'
+  return `<details open><summary>${i + 1}. ${esc(title)} ${badge}</summary><p class="t">${esc(s.title)}</p><p>${esc(text)}</p>${s.error ? `<pre>${esc(s.error)}</pre>` : ''}${shots.map(img).join('')}${shotNote(shots)}</details>`
+}).join('\n')
+const provenance = r.working_tree_dirty
+  ? `<div class="card warn"><strong>Pre-commit evidence.</strong> The working tree had uncommitted changes on top of <code>${esc(r.checked_commit)}</code>; this report does not describe that commit. Regenerate it from a clean checkout before committing it.</div>`
+  : ''
+const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Spec 125 Skills tab verification</title>
+<style>body{font:15px/1.5 system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#1c1e21}
+.card{border:1px solid #d0d7de;border-radius:8px;padding:1rem 1.25rem;margin-bottom:1.25rem;background:#f6f8fa}.warn{background:#fff8c5;border-color:#d4a72c}
+details{border:1px solid #d0d7de;border-radius:8px;margin-bottom:1rem;padding:.5rem 1rem}summary{cursor:pointer;font-weight:600}
+.ok{background:#1a7f37;color:#fff;border-radius:4px;padding:0 .4rem;font-size:.8em;margin-left:.5rem}.bad{background:#cf222e;color:#fff;border-radius:4px;padding:0 .4rem;font-size:.8em;margin-left:.5rem}
+.t{color:#57606a;font-size:.85em;margin:.25rem 0}img{max-width:100%;border:1px solid #d0d7de;border-radius:4px;margin:.25rem 0}code{background:#eaeef2;padding:0 .25rem;border-radius:3px;font-size:.85em}
+table{border-collapse:collapse;font-size:.85em;margin:.5rem 0}td,th{border:1px solid #d0d7de;padding:.2rem .4rem;text-align:left}</style></head><body>
+<h1>Spec 125: Skills tab (PR-4a) Playwright verification</h1>
+${provenance}<div class="card"><strong>${passed} of ${r.scenarios.length} scenarios passed</strong>, ${esc(r.generated_at.slice(0, 10))}, produced by <code>scripts/run-skills-tab-sweep.sh</code> from commit <strong><code>${esc(r.checked_commit)}</code></strong> (working tree ${r.working_tree_dirty ? 'dirty' : 'clean'}).<br>
+A throwaway core (${esc(r.core.listen)}, scratch data dir, <code>enable_skills: true</code>, generated API key) served the embedded frontend; the upstream <code>${esc(r.core.server)}</code> (<code>trust_mode: manual</code>) was <code>${esc(r.fixture.command.join(' '))}</code> on port ${r.fixture.port}.<br>
+Spec: <code>e2e/web-ui-sweep/skills-tab.spec.ts</code>. Results file: <code>skills-sweep-results.json</code>. Repeat: <code>./scripts/run-skills-tab-sweep.sh --report-html specs/125-skills-over-mcp/verification/report.html --no-screenshots</code>.</div>
+${sections}
+<details open><summary>Skill records read back from GET /api/v1/servers/${esc(r.core.server)}/skills</summary>
+<h3>After approve</h3>${stateTable('approve')}<h3>After approving the change</h3>${stateTable('approve-changed')}<h3>After block</h3>${stateTable('block')}<h3>After unblock</h3>${stateTable('unblock')}</details>
+</body></html>
+`
+fs.writeFileSync(dest, html)
+NODE
+}
 # --- self-test ------------------------------------------------------------------
 # run_self_test: no browser. Uses its own data dir and output dir, so a sweep
 # that follows it (--self-test-first) starts from fresh state.
@@ -518,30 +594,42 @@ run_self_test() {
 
   # 1b. A printed path never shows an absolute local path: inside the repo it is
   # relative, under a known prefix it gets its placeholder, and any other
-  # absolute path is reduced to <path>/basename (say_path), also inside a
-  # message or a captured log (redact_stream).
+  # absolute path is reduced to <path>/basename (say_path); inside a message or
+  # a captured log (redact_stream) so is any path whose root exists here.
   local got_path
   got_path=$(say_path "$REPO_ROOT/e2e/web-ui-sweep/x.json"); [[ "$got_path" == "e2e/web-ui-sweep/x.json" ]] || st_fail "say_path in the repo gave '$got_path'"
   got_path=$(say_path "$WORK/st-data/config.db"); [[ "$got_path" == "<scratch>/st-data/config.db" ]] || st_fail "say_path in the scratch dir gave '$got_path'"
   got_path=$(say_path "/usr/bin/chromium"); [[ "$got_path" == "<path>/chromium" ]] || st_fail "say_path of an outside path gave '$got_path'"
   got_path=$(say_path "/srv/odd place/chrome"); [[ "$got_path" == "<path>/chrome" ]] || st_fail "say_path of an outside path with a space gave '$got_path'"
-  got_path=$(printf 'launch /opt/google/chrome/chrome failed; PATH=/usr/local/bin:/opt/homebrew/bin url http://127.0.0.1:1/api/v1/servers key %s' "$API_KEY" | redact_stream)
+  got_path=$(printf 'launch /usr/lib/chrome/chrome failed; PATH=/usr/local/bin:/bin url http://127.0.0.1:1/api/v1/servers key %s' "$API_KEY" | redact_stream)
   [[ "$got_path" == 'launch <path>/chrome failed; PATH=<path>/bin:<path>/bin url http://127.0.0.1:1/api/v1/servers key ***' ]] || st_fail "redact_stream gave '$got_path'"
-  # Roots in no list: /data and /work (round 7), a colour code and JSON escapes
-  # in front of a path (Playwright's JSON report), and a bare core route kept.
-  got_path=$(printf 'executable doesn'\''t exist at /data/tools/chromium; /work/tools/chromium:1 GET /api/v1/servers and /mcp' | redact_stream)
-  [[ "$got_path" == 'executable doesn'\''t exist at <path>/chromium; <path>/chromium:1 GET /api/v1/servers and /mcp' ]] || st_fail "redact_stream of /data and /work roots gave '$got_path'"
-  got_path=$(printf '{"message":"\\u001b[31mError\\u001b[39m: at /data/tools/chromium\\n/work/x/y.js\\t\\"/data/q\\""}' | redact_stream)
+  # A real absolute path (a temp dir outside the known prefixes), also after a
+  # colour code or a JSON escape (Playwright's JSON report); a bare route kept.
+  local st_real st_real_dir
+  st_real_dir=$(mktemp -d /tmp/skills-sweep-st.XXXXXX)
+  st_real="$st_real_dir/tools/chromium"
+  got_path=$(printf 'executable doesn'\''t exist at %s; %s:1 GET /api/v1/servers and /mcp' "$st_real" "$st_real" | redact_stream)
+  [[ "$got_path" == 'executable doesn'\''t exist at <path>/chromium; <path>/chromium:1 GET /api/v1/servers and /mcp' ]] || st_fail "redact_stream of a temp-dir path gave '$got_path'"
+  got_path=$(printf '{"message":"\\u001b[31mError\\u001b[39m: at %s\\n/usr/x/y.js\\t\\"/tmp/q\\""}' "$st_real" | redact_stream)
   [[ "$got_path" == '{"message":"\u001b[31mError\u001b[39m: at <path>/chromium\n<path>/y.js\t\"<path>/q\""}' ]] || st_fail "redact_stream of a JSON-escaped message gave '$got_path'"
-  got_path=$(printf 'x\033[2m/data/tools/chromium\033[22m' | redact_stream)
+  got_path=$(printf 'x\033[2m%s\033[22m' "$st_real" | redact_stream)
   [[ "$got_path" == $'x\033[2m<path>/chromium\033[22m' ]] || st_fail "redact_stream after an ANSI code gave '$got_path'"
+  rmdir "$st_real_dir"
+  # Not paths (round 8): regex literals and route fragments of Playwright's
+  # messages are kept, and so is a path whose root does not exist here.
+  local no_root="/skills-sweep-no-root-$$" kept
+  [[ -e "$no_root" ]] && st_fail "$no_root exists"
+  for kept in 'Expected pattern: /approved/i' 'toHaveClass(/tab-active/)' "waiting for '/skills/refresh'" 'POST /servers/{id}/skills' "at $no_root/tools/chromium"; do
+    got_path=$(printf '%s' "$kept" | redact_stream)
+    [[ "$got_path" == "$kept" ]] || st_fail "redact_stream changed '$kept' to '$got_path'"
+  done
   # A configured path with a space is replaced as a whole.
   local saved_extra="$REDACT_EXTRA"
   redact_extra_add "/data/odd tools/chromium"
   got_path=$(printf 'launching /data/odd tools/chromium --headless' | redact_stream)
   REDACT_EXTRA="$saved_extra"
   [[ "$got_path" == 'launching <path>/chromium --headless' ]] || st_fail "redact_stream of a configured path with a space gave '$got_path'"
-  echo "self-test: printed paths are relative, placeholders or <path>/basename (any root, configured paths whole); URLs and routes are kept"
+  echo "self-test: printed paths are relative, placeholders or <path>/basename (configured paths whole); URLs, routes and regex literals are kept"
 
   # 2. An ambient MCPPROXY_DATA_DIR / MCPPROXY_DATA does not reach the core.
   decoy_new="$WORK/decoy-data-dir"
@@ -642,6 +730,8 @@ const report = { suites: [{ specs: [
     { status: "failed", error: { message: `page.goto: net::ERR at http://127.0.0.1:1/ui?apikey=${e.ENC_KEY} key=${e.API_KEY} in ${e.REPO_ROOT}/e2e/x.spec.ts` } },
     { status: "failed", error: { message: "the retry replayed against changed state" } }] }] },
   { title: "fine", ok: true, tests: [{ results: [{ status: "passed" }] }] },
+  { title: "report-strings", ok: false, tests: [{ results: [
+    { status: "failed", error: { message: `at ${e.REPO_ROOT}/e2e/web-ui-sweep/x.spec.ts:1:2 launching /usr/bin/chromium waiting for \x27/skills/refresh\x27 Expected pattern: /approved/i in /usr/local/usr` } }] }] },
 ] }] }
 fs.writeFileSync(e.ST_OUT + "/playwright-results.json", JSON.stringify(report))'
   set +e
@@ -666,6 +756,33 @@ if (JSON.stringify(r.fixture.command) !== JSON.stringify(["skillsfixture", "-add
 if (r.checked_commit !== "0123456789abcdef0123456789abcdef01234567" || r.working_tree_dirty !== true || r.evidence !== "pre-commit" || !/^pre-commit evidence/.test(r.checked)) fail("provenance: " + JSON.stringify([r.checked_commit, r.working_tree_dirty, r.evidence, r.checked]))
 ' "$results"
   echo "self-test: the results writer records the first failed attempt, redacts the key and local paths, and labels a dirty tree pre-commit evidence"
+
+  # 3b. The report without screenshots keeps the redacted, escaped strings of
+  # the results intact (round 8: no second pass over the escaped HTML), and a
+  # failing report write prints its diagnostics redacted, with its status.
+  local want_err="at <repo>/e2e/web-ui-sweep/x.spec.ts:1:2 launching <path>/chromium waiting for '/skills/refresh' Expected pattern: /approved/i in <path>/usr"
+  node -e '
+const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))
+const s = r.scenarios.find(x => x.title === "report-strings")
+if (!s || s.error !== process.argv[2]) { console.error("self-test FAILED: report-strings error: " + JSON.stringify(s && s.error)); process.exit(1) }
+' "$results" "$want_err"
+  write_report "$st_out" "$st_out/report.html" 0 >"$WORK/st-report.out" 2>&1 || st_fail "the report writer failed: $(redact_stream <"$WORK/st-report.out")"
+  grep -qF "at &lt;repo&gt;/e2e/web-ui-sweep/x.spec.ts:1:2 launching &lt;path&gt;/chromium waiting for &#x27;/skills/refresh&#x27; Expected pattern: /approved/i in &lt;path&gt;/usr" "$st_out/report.html" ||
+    st_fail "the report does not carry the failure message intact: $(grep -o 'at &lt;repo&gt;[^<]*' "$st_out/report.html" | head -1)"
+  grep -qF "<path>" "$st_out/report.html" && st_fail "the report has a raw <path> in its HTML"
+  grep -qF "$REPO_ROOT" "$st_out/report.html" && st_fail "the report names the repo path"
+  local ro_report="$WORK/st-ro-report"
+  mkdir -p "$ro_report"
+  chmod 555 "$ro_report"
+  set +e
+  write_report "$st_out" "$ro_report/report.html" 0 >"$WORK/st-report.out" 2>&1
+  st_status=$?
+  set -e
+  chmod 755 "$ro_report"
+  [[ $st_status -ne 0 ]] || st_fail "a report write into a read-only dir exited 0"
+  grep -qF "$WORK" "$WORK/st-report.out" && st_fail "a failing report write printed a local path"
+  grep -qF "<scratch>/st-ro-report/report.html" "$WORK/st-report.out" || st_fail "a failing report write did not print its diagnostics redacted"
+  echo "self-test: the report keeps the escaped strings intact; a failing report write prints its diagnostics redacted and fails"
 
   # 4. DEBUG=1 never prints the key or a local path: the whole self-test above
   # (config, core start with the key, curl with the key header, redaction) runs
@@ -730,7 +847,7 @@ if (r.checked_commit !== "0123456789abcdef0123456789abcdef01234567" || r.working
     mkdir -p "$ext"
     ext_real=$(cd "$ext" && pwd -P)
     # shellcheck disable=SC2016 # expanded by the stand-in's own shell
-    printf '#!/bin/sh\necho "stand-in browser $0 args: $*" >&2\necho "MCPPROXY_API_KEY=$MCPPROXY_API_KEY" >&2\nexit 1\n' >"$ext/chromium"
+    printf '#!/bin/sh\necho "stand-in browser $0 args: $*" >&2\nenv >&2\nexit 1\n' >"$ext/chromium"
     chmod +x "$ext/chromium"
     rm -f "$probe_key"
     set +e
@@ -798,7 +915,35 @@ if (r.checked_commit !== "0123456789abcdef0123456789abcdef01234567" || r.working
         grep -qF "skillsfixture ready" "$probe_out" && st_fail "a run with an unwritable $which started the sweep"
       done
       chmod 755 "$ro"
-      echo "self-test: an unwritable --out or report directory fails at once, with its diagnostics redacted"
+      # An existing read-only report FILE in a writable dir fails at once too.
+      local ro_file_dir="$WORK/st-rofile"
+      mkdir -p "$ro_file_dir"
+      : >"$ro_file_dir/report.html"
+      chmod 444 "$ro_file_dir/report.html"
+      rm -f "$probe_key"
+      set +e
+      SWEEP_SELF_TEST_CHILD="$probe_key" MCPPROXY_BINARY_PATH="$CORE_BIN" SKILLS_FIXTURE_BINARY="$FIXTURE_BIN" \
+        bash "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")" --out "$WORK/st-ro-out" --report-html "$ro_file_dir/report.html" >"$probe_out" 2>&1
+      probe_status=$?
+      set -e
+      chmod 644 "$ro_file_dir/report.html"
+      st_check_child_output "a run with a read-only report file" "$probe_out" "$probe_key"
+      [[ $probe_status -ne 0 ]] || st_fail "a run with a read-only report file exited 0"
+      grep -qF "cannot write the report file" "$probe_out" || st_fail "a run with a read-only report file did not say so"
+      grep -qF "skillsfixture ready" "$probe_out" && st_fail "a run with a read-only report file started the sweep"
+      # An unwritable PLAYWRIGHT_BROWSERS_PATH fails with redacted diagnostics.
+      chmod 555 "$ro"
+      rm -f "$probe_key"
+      set +e
+      SWEEP_SELF_TEST_CHILD="$probe_key" PLAYWRIGHT_BROWSERS_PATH="$ro/browsers" MCPPROXY_BINARY_PATH="$CORE_BIN" SKILLS_FIXTURE_BINARY="$FIXTURE_BIN" \
+        bash "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")" --out "$WORK/st-ro-out" >"$probe_out" 2>&1
+      probe_status=$?
+      set -e
+      chmod 755 "$ro"
+      st_check_child_output "a run with an unwritable PLAYWRIGHT_BROWSERS_PATH" "$probe_out" "$probe_key"
+      [[ $probe_status -ne 0 ]] || st_fail "a run with an unwritable PLAYWRIGHT_BROWSERS_PATH exited 0"
+      grep -qF "cannot create or write the browsers directory" "$probe_out" || st_fail "a run with an unwritable PLAYWRIGHT_BROWSERS_PATH did not say so"
+      echo "self-test: an unwritable --out, report directory, report file or browsers directory fails with its diagnostics redacted"
     fi
   fi
   echo "self-test passed"
@@ -843,6 +988,12 @@ OUT_REAL="$OUT"
 if [[ -n "$REPORT_HTML" ]]; then
   make_writable_dir report "$(dirname "$REPORT_HTML")"
   REPORT_HTML="$(cd "$(dirname "$REPORT_HTML")" && pwd -P)/$(basename "$REPORT_HTML")"
+  # The file itself: an existing read-only file (or a directory) in a writable
+  # dir would only fail at the very end.
+  if [[ -e "$REPORT_HTML" && ( ! -f "$REPORT_HTML" || ! -w "$REPORT_HTML" ) ]]; then
+    echo "cannot write the report file $(say_path "$REPORT_HTML")" >&2
+    exit 1
+  fi
 fi
 rm -rf "$OUT/screenshots" "$OUT/state" "$OUT/playwright-results.json" "$OUT/skills-sweep-results.json"
 mkdir -p "$OUT/screenshots" "$OUT/state"
@@ -926,7 +1077,7 @@ debug "running Playwright"
 # --- Playwright (same locked install as scripts/run-web-smoke.sh) -------------
 SWEEP_DIR="$REPO_ROOT/e2e/web-ui-sweep"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$REPO_ROOT/tmp/playwright-browsers}"
-mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
+make_writable_dir browsers "$PLAYWRIGHT_BROWSERS_PATH"
 lock_hash() {
   node -e 'const c=require("crypto"),f=require("fs");process.stdout.write(c.createHash("sha256").update(f.readFileSync(process.argv[1])).digest("hex"))' "$1" 2>/dev/null || true
 }
@@ -984,66 +1135,7 @@ RESULT_STATUS=$?
 set -e
 
 if [[ -n "$REPORT_HTML" ]]; then
-  node - "$OUT" "$REPORT_HTML" "$SCREENSHOTS" <<'NODE'
-const fs = require('fs'), path = require('path')
-const [out, dest, screenshots] = process.argv.slice(2)
-const withShots = screenshots === '1'
-const r = JSON.parse(fs.readFileSync(path.join(out, 'skills-sweep-results.json'), 'utf8'))
-const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#x27;' })[c])
-const img = name => {
-  if (!withShots) return ''
-  const f = path.join(out, 'screenshots', `skills-tab-${name}.png`)
-  return fs.existsSync(f) ? `<img alt="${esc(name)}" src="data:image/png;base64,${fs.readFileSync(f).toString('base64')}">` : ''
-}
-const shotNote = shots => (!withShots && shots.length)
-  ? `<p class="t">Screenshots (not embedded in this copy): ${shots.map(s => `<code>screenshots/skills-tab-${esc(s)}.png</code>`).join(', ')}</p>` : ''
-// One section per scenario, in spec order, with what it proves and its screenshots.
-const about = [
-  ['Tab and list', 'The Skills tab is offered on a server with enable_skills on and a skills-capable upstream (cmd/skillsfixture, manual trust). The three skills show as Awaiting review and Not offered.', ['01-list']],
-  ['Viewer and paging', 'SKILL.md opens in the text viewer (inert text). A 150 KiB file (data/large.txt of big) is read part by part in at least three parts: each Load more waits for its content response and for the rendered text to grow by that part. Every part is of the current copy, its digest equals the digest the core lists for that file in the current copy (the same digest the file row shows on screen), its size equals the listed size, its offset is where the previous part ended (in bytes, the first at 0) and its next_offset is where it ends; the last part has no next_offset and ends at the listed size. A binary file (logo.bin) is listed as binary, not shown, with no View button.', ['02-viewer', '03-paged']],
-  ['Approve', 'Approve sends the current_hash and incarnation of the version the reviewer opened; the chip turns Approved.', ['04-approved']],
-  ['Changed while open, re-open, diff', 'A mutate without the X-Skills-Fixture header is refused (403). The approved skill plain changes upstream while it is open; after Refresh the chip says Changed and the open review says it changed while you were reviewing it (the review shows the approved version, so it offers no Approve). Re-opening shows the file-set diff (SKILL.md changed) and the line diff with the added line; approving binds the new hash.', ['05a-stale', '05-changed-diff']],
-  ['Pending skill changed while open', 'The pending skill with-files changes upstream while it is open; after Refresh the review is marked stale and its Approve button stays on screen but disabled, until the new version is re-opened.', ['05b-pending-stale']],
-  ['Live skills.changed', 'With the pending skill big open, its SKILL.md changes upstream and the refresh is made through POST /api/v1/servers/{id}/skills/refresh, not in the page. The core\'s skills.changed SSE frame, re-dispatched by the Web UI, reloads the listing by itself and the open review shows the stale banner with Approve disabled.', ['05c-live-event-stale']],
-  ['Block and unblock', 'Block marks the skill Blocked and removes Approve; Unblock returns it to Awaiting review.', ['06-blocked']],
-  ['Reload', 'The tab survives a reload through ?tab=skills, and no uncaught page error was thrown in any scenario.', []],
-]
-const stateTable = step => {
-  const s = r.states[step]
-  if (!s) return `<p>missing</p>`
-  return `<table><tr><th>skill</th><th>status</th><th>blocked</th><th>available</th><th>current_hash</th><th>approved_hash</th></tr>${s.skills.map(k =>
-    `<tr><td>${esc(k.path)}</td><td>${esc(k.status)}</td><td>${k.blocked}</td><td>${k.available}</td><td><code>${esc(k.current_hash)}</code></td><td><code>${esc(k.approved_hash || '')}</code></td></tr>`).join('')}</table>`
-}
-const passed = r.scenarios.filter(s => s.passed).length
-const sections = r.scenarios.map((s, i) => {
-  const [title, text, shots] = about[i] || [s.title, '', []]
-  const badge = s.passed ? '<span class="ok">PASS</span>' : '<span class="bad">FAIL</span>'
-  return `<details open><summary>${i + 1}. ${esc(title)} ${badge}</summary><p class="t">${esc(s.title)}</p><p>${esc(text)}</p>${s.error ? `<pre>${esc(s.error)}</pre>` : ''}${shots.map(img).join('')}${shotNote(shots)}</details>`
-}).join('\n')
-const provenance = r.working_tree_dirty
-  ? `<div class="card warn"><strong>Pre-commit evidence.</strong> The working tree had uncommitted changes on top of <code>${esc(r.checked_commit)}</code>; this report does not describe that commit. Regenerate it from a clean checkout before committing it.</div>`
-  : ''
-const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Spec 125 Skills tab verification</title>
-<style>body{font:15px/1.5 system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#1c1e21}
-.card{border:1px solid #d0d7de;border-radius:8px;padding:1rem 1.25rem;margin-bottom:1.25rem;background:#f6f8fa}.warn{background:#fff8c5;border-color:#d4a72c}
-details{border:1px solid #d0d7de;border-radius:8px;margin-bottom:1rem;padding:.5rem 1rem}summary{cursor:pointer;font-weight:600}
-.ok{background:#1a7f37;color:#fff;border-radius:4px;padding:0 .4rem;font-size:.8em;margin-left:.5rem}.bad{background:#cf222e;color:#fff;border-radius:4px;padding:0 .4rem;font-size:.8em;margin-left:.5rem}
-.t{color:#57606a;font-size:.85em;margin:.25rem 0}img{max-width:100%;border:1px solid #d0d7de;border-radius:4px;margin:.25rem 0}code{background:#eaeef2;padding:0 .25rem;border-radius:3px;font-size:.85em}
-table{border-collapse:collapse;font-size:.85em;margin:.5rem 0}td,th{border:1px solid #d0d7de;padding:.2rem .4rem;text-align:left}</style></head><body>
-<h1>Spec 125: Skills tab (PR-4a) Playwright verification</h1>
-${provenance}<div class="card"><strong>${passed} of ${r.scenarios.length} scenarios passed</strong>, ${esc(r.generated_at.slice(0, 10))}, produced by <code>scripts/run-skills-tab-sweep.sh</code> from commit <strong><code>${esc(r.checked_commit)}</code></strong> (working tree ${r.working_tree_dirty ? 'dirty' : 'clean'}).<br>
-A throwaway core (${esc(r.core.listen)}, scratch data dir, <code>enable_skills: true</code>, generated API key) served the embedded frontend; the upstream <code>${esc(r.core.server)}</code> (<code>trust_mode: manual</code>) was <code>${esc(r.fixture.command.join(' '))}</code> on port ${r.fixture.port}.<br>
-Spec: <code>e2e/web-ui-sweep/skills-tab.spec.ts</code>. Results file: <code>skills-sweep-results.json</code>. Repeat: <code>./scripts/run-skills-tab-sweep.sh --report-html specs/125-skills-over-mcp/verification/report.html --no-screenshots</code>.</div>
-${sections}
-<details open><summary>Skill records read back from GET /api/v1/servers/${esc(r.core.server)}/skills</summary>
-<h3>After approve</h3>${stateTable('approve')}<h3>After approving the change</h3>${stateTable('approve-changed')}<h3>After block</h3>${stateTable('block')}<h3>After unblock</h3>${stateTable('unblock')}</details>
-</body></html>
-`
-fs.writeFileSync(dest, html)
-NODE
-  # Every string in the report comes from the redacted results file; the copy
-  # without screenshots (pure text) is redacted once more as a whole.
-  [[ $SCREENSHOTS -eq 0 ]] && redact_file "$REPORT_HTML"
+  write_report "$OUT" "$REPORT_HTML" "$SCREENSHOTS"
   echo "HTML report written to $(say_path "$REPORT_HTML")$([[ $SCREENSHOTS -eq 0 ]] && echo ' (no embedded screenshots)')"
 fi
 

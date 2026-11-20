@@ -149,9 +149,16 @@ function chipClass(s: SkillEntry) {
 let visit = 0
 let requestSeq = 0
 // The notice order shared by refresh and every write: each takes a number when
-// it starts, and publishes a notice only while it is still the newest action.
+// it starts, and its notice is shown only if no later action has already shown
+// one (an action that shows nothing, e.g. a successful refresh, hides nothing).
 // Spinner and button resets and the reconcile reloads do not depend on it.
 let noticeSeq = 0
+let lastPublishedOp = 0
+function publish(op: number, text: string) {
+  if (op <= lastPublishedOp) return
+  lastPublishedOp = op
+  notice.value = text
+}
 const isCurrent = (server: string, v: number, seq?: number) =>
   server === props.serverName && v === visit && (seq === undefined || seq === requestSeq)
 
@@ -213,9 +220,13 @@ async function refresh() {
   // A failed refresh (refresh_superseded, skills_not_supported, skills_disabled,
   // server_replaced, a 500) reloads the listing: the notice says it was reloaded,
   // and the stored records may have moved even though this refresh did not apply.
-  // Only while no later action (another refresh, a write) has started: the
+  // Its notice is shown unless a later action already showed one (publish); the
   // reconcile reload below runs either way.
-  if (op === noticeSeq) notice.value = skillErrorNotice(res.errorCode, res.error, 'refresh')
+  // server_replaced: the open review belongs to the server that was replaced;
+  // latch it before the reload, as a write does.
+  const code = skillErrorCode(res.errorCode, res.error)
+  if (code === 'server_replaced') markStale(review.value?.token)
+  publish(op, skillErrorNotice(code, res.error, 'refresh'))
   await load()
 }
 
@@ -226,13 +237,14 @@ async function refresh() {
 // still reloaded). A success notice given as a function is worded from the
 // listing reloaded after the write (null when that reload did not apply).
 // Every write takes an operation number when it starts, from the one notice
-// order it shares with refresh (noticeSeq); only the newest action publishes a
-// notice, so a slow answer or reload of an earlier one never replaces the
-// notice of a later one (approve, then block: "Blocked." stays).
+// order it shares with refresh (noticeSeq); a notice is shown only if no later
+// action has shown one (publish), so a slow answer or reload of an earlier one
+// never replaces the notice of a later one (approve, then block: "Blocked."
+// stays), and an action that shows nothing hides nothing.
 type DoneNotice = string | ((reloaded: SkillsListResponse | null) => string)
 async function write(action: SkillAction, run: () => Promise<{ success: boolean; error?: string; errorCode?: string }>, done: DoneNotice) {
   const server = props.serverName, v = visit, token = review.value?.token, op = ++noticeSeq
-  const mayPublish = () => op === noticeSeq && isCurrent(server, v)
+  const mayPublish = () => isCurrent(server, v)
   busy.value = true
   const res = await settle(run)
   if (!isCurrent(server, v)) return
@@ -245,7 +257,7 @@ async function write(action: SkillAction, run: () => Promise<{ success: boolean;
       // The server says the open version is out of date: latch it before the
       // reload, so a reload that is pending or fails never re-enables Approve.
       if (code && STALE_CODES.has(code)) markStale(token)
-      if (mayPublish()) notice.value = res.success ? done as string : skillErrorNotice(code, res.error, action)
+      if (mayPublish()) publish(op, res.success ? done as string : skillErrorNotice(code, res.error, action))
     }
     await load()
     return
@@ -253,7 +265,7 @@ async function write(action: SkillAction, run: () => Promise<{ success: boolean;
   const reloaded = await load()
   // Still the newest write and the same review (or none: the reload dropped a
   // skill that vanished).
-  if (mayPublish() && (!review.value || review.value.token === token)) notice.value = done(reloaded)
+  if (mayPublish() && (!review.value || review.value.token === token)) publish(op, done(reloaded))
 }
 
 // Approve sends exactly the hash and the incarnation the reviewer opened.
@@ -305,5 +317,10 @@ onMounted(() => {
   window.addEventListener('mcpproxy:skills-changed', onSkillsChanged)
   void load()
 })
-onUnmounted(() => window.removeEventListener('mcpproxy:skills-changed', onSkillsChanged))
+// Unmounting ends the visit: an answer still pending (a write, a refresh, a
+// load) then fails isCurrent(), so it shows nothing and starts no reload.
+onUnmounted(() => {
+  window.removeEventListener('mcpproxy:skills-changed', onSkillsChanged)
+  visit++
+})
 </script>

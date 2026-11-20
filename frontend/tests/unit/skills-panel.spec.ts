@@ -193,6 +193,75 @@ describe('SkillsPanel', () => {
     expect(w.get('[data-test="skills-notice"]').text()).toMatch(/nothing was refreshed/)
   })
 
+  // Round-8 finding A: a refresh refused with server_replaced latches the open
+  // review stale before its reload, like a write does.
+  describe('refresh 409 server_replaced', () => {
+    const bodies = [
+      ['with error_code', { success: false, error: 'server_replaced: the server was removed or replaced while its skills were read; retry', errorCode: 'server_replaced' }],
+      ['message only', { success: false, error: 'server_replaced: the server was removed or replaced while its skills were read; retry' }],
+    ] as const
+    const reloads: Array<[string, () => unknown]> = [
+      ['pending', () => new Promise(() => {})],
+      ['failed', () => Promise.resolve({ success: false, error: 'reload boom' })],
+    ]
+    for (const [kind, body] of bodies) {
+      for (const [outcome, reload] of reloads) {
+        it(`${kind}, reload ${outcome}: the review is stale and Approve is off`, async () => {
+          m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([makeSkill('a')])))
+          const w = mountPanel(); await flushPromises()
+          await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
+          m(api.getServerSkills).mockImplementation(reload)
+          m(api.refreshServerSkills).mockResolvedValueOnce(body)
+          await w.get('[data-test="skills-refresh"]').trigger('click'); await flushPromises()
+          expect(api.getServerSkills).toHaveBeenCalledTimes(2)
+          expect(w.get('[data-test="skills-notice"]').text()).toMatch(/removed and added again/i)
+          expect(w.find('[data-test="skill-stale"]').exists()).toBe(true)
+          expect(w.get('[data-test="skill-approve"]').attributes('disabled')).toBeDefined()
+          await w.get('[data-test="skill-approve"]').trigger('click'); await flushPromises()
+          expect(api.approveSkills).not.toHaveBeenCalled()
+        })
+      }
+    }
+  })
+
+  // Round-8 finding B: answers that arrive after unmount publish nothing and
+  // start no request.
+  it('a write and a refresh answered after unmount start no further request', async () => {
+    m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('a')])))
+    let releaseApprove: (v: unknown) => void = () => {}
+    let releaseRefresh: (v: unknown) => void = () => {}
+    m(api.approveSkills).mockReturnValueOnce(new Promise(r => { releaseApprove = r }))
+    m(api.refreshServerSkills).mockReturnValueOnce(new Promise(r => { releaseRefresh = r }))
+    const w = mountPanel(); await flushPromises()
+    await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
+    await w.get('[data-test="skill-approve"]').trigger('click'); await flushPromises()
+    await w.get('[data-test="skills-refresh"]').trigger('click'); await flushPromises()
+    const calls = () => [api.getServerSkills, api.refreshServerSkills, api.approveSkills, api.blockSkills, api.unblockSkills, api.getSkillContent]
+      .reduce((n, f) => n + m(f).mock.calls.length, 0)
+    const before = calls()
+    w.unmount()
+    releaseApprove(ok({ approved: 1 }))
+    releaseRefresh({ success: false, error: 'boom', errorCode: 'refresh_superseded' })
+    await flushPromises()
+    expect(calls()).toBe(before)
+  })
+
+  // Round-8 finding C: a refresh that publishes nothing does not hide the
+  // failure of an earlier write.
+  it('an approve failing after a successful refresh still shows its notice', async () => {
+    m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('a')])))
+    let releaseApprove: (v: unknown) => void = () => {}
+    m(api.approveSkills).mockReturnValueOnce(new Promise(r => { releaseApprove = r }))
+    const w = mountPanel(); await flushPromises()
+    await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
+    await w.get('[data-test="skill-approve"]').trigger('click'); await flushPromises()
+    m(api.refreshServerSkills).mockResolvedValueOnce(ok(makeListing([makeSkill('a')])))
+    await w.get('[data-test="skills-refresh"]').trigger('click'); await flushPromises()
+    expect(w.find('[data-test="skills-notice"]').exists()).toBe(false)
+    releaseApprove(OUT_OF_DATE); await flushPromises()
+    expect(w.get('[data-test="skills-notice"]').text()).toMatch(/changed since you opened it/i)
+  })
+
   // Round-7 finding 1: refresh and the writes share one notice order, taken
   // when each action starts; a late refresh failure never replaces a newer notice.
   it('a late refresh failure never overwrites the notice of a newer block, and still resets and reloads', async () => {
