@@ -248,7 +248,9 @@ A held, changed, blocked or unusable skill is not listed, and asking for it by a
 
 The aggregated endpoints (`/mcp`, `/mcp/all`, `/mcp/code`, `/mcp/call`, `/mcp/p/<profile>`) never announce the extension. They offer the [skill tools](#agent-tools) instead.
 
-**Same door as the tools.** A caller whose credential or profile does not reach the server gets the endpoint's `404`, exactly as for its tools. Each of the three requests is answered only after the endpoint's transport has accepted it the way it accepts a `tools/call`: a request without a session id, with a session id another endpoint issued, or with a protocol version the endpoint does not serve gets the same refusal a `tools/call` gets.
+**Same door as the tools.** A caller whose credential or profile does not reach the server gets the endpoint's `404`, exactly as for its tools. Each of the three requests is answered only after the endpoint's transport has accepted it the way it accepts a `tools/call`: a request without a session id, with a session id another endpoint issued, or with a protocol version the endpoint does not serve gets the same refusal a `tools/call` gets. The single-server endpoint currently serves protocol revisions for which the transport ignores the `Mcp-Method` and `Mcp-Name` headers.
+
+**Ordinary resources stay ordinary.** Only `resources/read` of a skill address (`skill://…`, or a file address a skill of that server lists) is answered by the skills surface. Any other `resources/read` on the same endpoint goes to the endpoint's transport unchanged, gets the answer it gets without native skills, and is not recorded as a `skill_access`.
 
 **Following the switch.** Turning `enable_skills` on or off, or changing a server's `expose_skills`, retires that server's single-server endpoint: its open streams are closed and the session ids it issued are refused (`404`), so the client initializes again and sees the new capabilities. Nothing has to be restarted.
 
