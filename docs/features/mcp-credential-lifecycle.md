@@ -96,7 +96,7 @@ A refusal is a tool result with `isError: true` whose text is a JSON object `{co
 | `profile_required`, `unknown_profile` | `profile` is `""` or names no profile. |
 | `invalid_expiry` | `expires_in` does not parse, is not positive, or exceeds 365 days. |
 | `identity_exists`, `reserved_identity`, `identity_not_found` | Identity rules above. |
-| `token_limit_reached` | 100 stored tokens. |
+| `token_limit_reached` | The deployment-wide cap is 100 stored tokens; in the server edition, each owner is additionally capped at 25. |
 | `read_only_mode`, `management_disabled` | `create_*` and `revoke` under `read_only_mode` or `disable_management` (`list` and `get` still work). The texts are those of `profiles`. |
 | `unsupported_edition` | Client operations in the server edition (tokens work there). |
 | `binding_bypassable_without_auth` | The binding guard below. |
