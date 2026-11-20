@@ -1144,12 +1144,18 @@ epics:
         depends_on: [skills-over-mcp-web]
   - id: profile-argument-rules
     title: "Spec 127 argument rules in profiles (deny a value, narrow values, path prefix, forbid)"
-    status: in_review
+    status: todo
     priority: P1
     spec: specs/127-profile-argument-rules
-    pr: "#1943"
     depends_on: [profiles-v3]
     note: "Spec-only PR. Idea 1 of the 2026-11-19 LiteLLM MCP Gateway comparison (LiteLLM allowed_params)."
+    tasks:
+      - id: profile-argument-rules-spec
+        title: "Agree on the specification"
+        status: done
+        priority: P1
+        pr: "#1943"
+        depends_on: []
   - id: server-list-outcomes
     title: "Spec 128 server outcomes on retrieve_tools and tools/list (unavailable servers in reach, fixed vocabulary)"
     status: todo

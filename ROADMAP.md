@@ -101,8 +101,8 @@ graph LR
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
   class sandbox_isolation,scanner_v2,analytics_dashboard,scanner_simplification,schema_deferred,agent_scope_hardening,sso,upstream_resilience,mcp_credential_lifecycle,config_commit_consistency,review_bound_approvals,quarantine_approval_pilot,auto_rescan_on_change,pin_visibility_boundary,scan_default_trust,scan_structural_gate done;
   class ux_audit,action_log_transparency,tpa_db,token_bench,telemetry_identity,telemetry_v7_churn,profiles_v3,skills_over_mcp in_progress;
-  class pending_call_outcome,profile_argument_rules in_review;
-  class remote_access_tunnel,auto_routing_mode,tool_graph,server_list_outcomes,per_user_upstream_credentials todo;
+  class pending_call_outcome in_review;
+  class remote_access_tunnel,auto_routing_mode,tool_graph,profile_argument_rules,server_list_outcomes,per_user_upstream_credentials todo;
 ```
 
 **Independent epics** (19) — no cross-epic prerequisites; each stands alone:
@@ -584,15 +584,6 @@ graph LR
 </details>
 
 <details>
-<summary>🟡 Spec 127 argument rules in profiles (deny a value, narrow values, path prefix, forbid) — In review · P1</summary>
-
-> Spec-only PR. Idea 1 of the 2026-11-19 LiteLLM MCP Gateway comparison (LiteLLM allowed_params).
-
-Spec: [127-profile-argument-rules](./specs/127-profile-argument-rules/) · PR: #1943
-
-</details>
-
-<details>
 <summary>🟡 Spec 114 typed pending-call outcome + call correlation for long-running stdio tool calls — In review · P2</summary>
 
 > Spec-only PR #1536 open; implementation follows the spec review. Tracks issue #1321 (follow-up to #1317).
@@ -632,6 +623,28 @@ graph LR
 | --- | --- | --- |
 | P1 (US1-4): per-session measurement of the three candidates on the scoped catalog, rung selection under the budget, stable sessions, decision record in routing API + doctor | ⚪ Todo | — |
 | P2 (US5-6): hysteresis reporting on catalog change, tray + Web UI rendering of the decision, telemetry counters | ⚪ Todo | — |
+
+</details>
+
+<details>
+<summary>⚪ Spec 127 argument rules in profiles (deny a value, narrow values, path prefix, forbid) — Todo · P1</summary>
+
+> Spec-only PR. Idea 1 of the 2026-11-19 LiteLLM MCP Gateway comparison (LiteLLM allowed_params).
+
+Spec: [127-profile-argument-rules](./specs/127-profile-argument-rules/)
+
+```mermaid
+graph LR
+  profile_argument_rules_spec["Agree on the specification"]
+
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  class profile_argument_rules_spec done;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Agree on the specification | 🟢 Done | #1943 |
 
 </details>
 
@@ -1252,10 +1265,10 @@ graph LR
 | Spec 125 Skills over MCP: catalog, approval gate, read-only agent tools | In progress | P1 | 41/51 (80%) | [125-skills-over-mcp](./specs/125-skills-over-mcp/) |  |
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
-| Spec 127 argument rules in profiles (deny a value, narrow values, path prefix, forbid) | In review | P1 | — | [127-profile-argument-rules](./specs/127-profile-argument-rules/) | #1943 |
 | Spec 114 typed pending-call outcome + call correlation for long-running stdio tool calls | In review | P2 | — |  | #1536 |
 | Spec 121 install surfaces: registry packages, winget/scoop, agent install prompt, install-channel telemetry (E7) | In review | P2 | — |  | #1711 |
 | Auto routing mode: budget-fitted tool surface per session (spec 104) | Todo | P1 | — | [104-auto-routing-mode](./specs/104-auto-routing-mode/) |  |
+| Spec 127 argument rules in profiles (deny a value, narrow values, path prefix, forbid) | Todo | P1 | — | [127-profile-argument-rules](./specs/127-profile-argument-rules/) |  |
 | Spec 128 server outcomes on retrieve_tools and tools/list (unavailable servers in reach, fixed vocabulary) | Todo | P1 | — | [128-server-list-outcomes](./specs/128-server-list-outcomes/) |  |
 | Spec 129 per-user upstream credentials (server edition): user slots, RFC 8693 / Entra OBO, injected oauth_connect | Todo | P1 | — | [129-per-user-upstream-credentials](./specs/129-per-user-upstream-credentials/) |  |
 | Windows native tray app `MCP-43` | Todo | P2 | — |  |  |
@@ -1427,5 +1440,6 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [123-oauth-token-encryption](./specs/123-oauth-token-encryption/) | `drafted` | 0/56 (0%) |
 | [124-session-failure-timeline](./specs/124-session-failure-timeline/) | `drafted` | 0/74 (0%) |
 | [125-skills-over-mcp](./specs/125-skills-over-mcp/) | `in-flight` | 41/51 (80%) |
+| [127-profile-argument-rules](./specs/127-profile-argument-rules/) | — | — |
 | [128-server-list-outcomes](./specs/128-server-list-outcomes/) | — | — |
 | [129-per-user-upstream-credentials](./specs/129-per-user-upstream-credentials/) | — | — |
