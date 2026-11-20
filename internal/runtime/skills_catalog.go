@@ -1270,23 +1270,19 @@ func (r *Runtime) triggerSkillsRefreshAll() {
 	}
 }
 
-// announceSkillsExposureChanges notifies each affected Skills tab when exposure
-// changes, and the review queue once per commit when held skills appear or
-// disappear. Only a server that has skill records or supports skills is
-// announced (any other has no Skills tab content and no held skill), and the coalesced
-// skills-marked review.changed goes out before the per-server skills.changed.
-// The commit calls it last, after its own events (review round 3): a large
-// fleet must not fill a subscriber's buffer ahead of them.
-func (r *Runtime) announceSkillsExposureChanges(oldCfg, newCfg *config.Config) {
+// announceSkillsExposureChanges tells the review queue, once per commit, when
+// held skills appear or disappear because exposure changed (a skills-marked
+// review.changed), and returns the servers whose Skills tab must refresh: a
+// server that has skill records or supports skills (any other has no Skills
+// tab content and no held skill). The commit publishes those as one
+// skills.changed list (publishSkillsExposureChanged) after its own events, so
+// a large fleet cannot fill a subscriber's buffer ahead of them.
+func (r *Runtime) announceSkillsExposureChanges(oldCfg, newCfg *config.Config) []string {
 	if oldCfg == nil || newCfg == nil || r.storageManager == nil {
-		return
-	}
-	type announcement struct {
-		name   string
-		counts map[string]int
+		return nil
 	}
 	seen := map[string]bool{}
-	var tabs []announcement
+	var tabs []string
 	var reviewNames []string
 	for _, cfg := range []*config.Config{oldCfg, newCfg} {
 		for _, sc := range cfg.Servers {
@@ -1306,24 +1302,33 @@ func (r *Runtime) announceSkillsExposureChanges(oldCfg, newCfg *config.Config) {
 			if err != nil || (len(recs) == 0 && !r.SkillsStatus(sc.Name).Supported) {
 				continue
 			}
-			tabs = append(tabs, announcement{name: sc.Name, counts: r.skillCounts(sc.Name, recs)})
+			tabs = append(tabs, sc.Name)
 			if wasRead != isRead && heldSkillCount(recs) > 0 {
 				reviewNames = append(reviewNames, sc.Name)
 			}
 		}
 	}
 	if len(tabs) == 0 {
-		return
+		return nil
 	}
 	r.skills.bumpIndexGeneration()
 	if len(reviewNames) > 0 {
 		sort.Strings(reviewNames)
 		r.publishEvent(newEvent(EventTypeReviewChanged, map[string]any{"servers": reviewNames, ReviewChangedSkillsKey: true}))
 	}
-	sort.Slice(tabs, func(i, j int) bool { return tabs[i].name < tabs[j].name })
-	for _, a := range tabs {
-		r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": a.name, "counts": a.counts}))
+	sort.Strings(tabs)
+	return tabs
+}
+
+// publishSkillsExposureChanged sends the ONE skills.changed of a commit's
+// exposure change: `{"servers": [sorted names]}`, no "server" key (per-server
+// refresh and approval events keep `{server, counts}`). One event, not one per
+// server, so a fleet larger than a subscriber's buffer cannot overflow it.
+func (r *Runtime) publishSkillsExposureChanged(names []string) {
+	if len(names) == 0 {
+		return
 	}
+	r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"servers": names}))
 }
 
 // onSkillsConfigChanged refreshes after a config change. A server is refreshed

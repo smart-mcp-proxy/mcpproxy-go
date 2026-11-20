@@ -459,3 +459,45 @@ func TestSSE_ReachChangeMidStreamDoesNotLetAnInvisibleContentChangeThrough(t *te
 			"a content change on a server outside the new reach must not produce a frame")
 	}
 }
+
+// Spec 125: an exposure change sends ONE skills.changed listing the affected
+// servers. skills.changed is administrator-only: the administrator gets the
+// list as published, a scoped caller gets no frame at all, not even a
+// narrowed list for the servers it can see.
+func TestSSE_SkillsChangedListIsForAdministratorsOnly(t *testing.T) {
+	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: scopeFixtureServers(), withManagement: true}
+	srv, token := scopedAgentServer(t, ctrl, []string{"alpha"})
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	adminBody, adminClose := sseSubscribe(t, ts.URL, scopeAdminAPIKey)
+	defer adminClose()
+	agentBody, agentClose := sseSubscribe(t, ts.URL, token)
+	defer agentClose()
+	require.Eventually(t, func() bool { return ctrl.subscriberCount() == 2 }, 5*time.Second, 20*time.Millisecond)
+
+	deadline := time.Now().Add(10 * time.Second)
+	isSentinel := func(f sseEvent) bool { return f.Name == string(internalRuntime.EventTypeReviewChanged) }
+	adminDone := make(chan []sseEvent, 1)
+	go func() { adminDone <- readSSEFramesUntil(t, adminBody, deadline, isSentinel) }()
+	agentDone := make(chan []sseEvent, 1)
+	go func() { agentDone <- readSSEFramesUntil(t, agentBody, deadline, isSentinel) }()
+	for _, list := range [][]string{{"alpha", "beta"}, {"beta"}} {
+		ctrl.publishToAll(internalRuntime.Event{Type: internalRuntime.EventTypeSkillsChanged, Timestamp: time.Now(),
+			Payload: map[string]any{"servers": list}})
+	}
+	ctrl.publishToAll(internalRuntime.Event{Type: internalRuntime.EventTypeReviewChanged, Timestamp: time.Now(),
+		Payload: map[string]any{"server": "alpha"}})
+
+	var adminLists [][]interface{}
+	for _, f := range <-adminDone {
+		if f.Name == string(internalRuntime.EventTypeSkillsChanged) {
+			list, _ := f.Data["payload"].(map[string]interface{})["servers"].([]interface{})
+			adminLists = append(adminLists, list)
+		}
+	}
+	assert.Equal(t, [][]interface{}{{"alpha", "beta"}, {"beta"}}, adminLists)
+	for _, f := range <-agentDone {
+		assert.NotEqual(t, string(internalRuntime.EventTypeSkillsChanged), f.Name, "skills.changed is administrator-only")
+	}
+}

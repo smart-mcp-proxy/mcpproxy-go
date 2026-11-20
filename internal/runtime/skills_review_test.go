@@ -364,6 +364,12 @@ func skillsAnnouncements(t *testing.T, ch <-chan Event, window time.Duration) (s
 		case evt := <-ch:
 			switch evt.Type {
 			case EventTypeSkillsChanged:
+				// Per-server events name one server; the exposure path
+				// sends one list event for the whole commit.
+				if list, ok := evt.Payload["servers"].([]string); ok {
+					skills = append(skills, list...)
+					continue
+				}
 				name, _ := evt.Payload["server"].(string)
 				skills = append(skills, name)
 			case EventTypeReviewChanged:
@@ -486,8 +492,8 @@ collect:
 		case evt := <-ch:
 			switch evt.Type {
 			case EventTypeSkillsChanged:
-				name, _ := evt.Payload["server"].(string)
-				skills = append(skills, name)
+				list, _ := evt.Payload["servers"].([]string)
+				skills = append(skills, list...)
 				order = append(order, "skills")
 			case EventTypeReviewChanged:
 				if marked, _ := evt.Payload[ReviewChangedSkillsKey].(bool); marked {

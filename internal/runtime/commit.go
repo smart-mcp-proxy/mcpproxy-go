@@ -1293,15 +1293,17 @@ func (r *Runtime) afterCommitFunc(tx *CommitTx, res *CommitResult, snap *configs
 		if res.DiskWritten {
 			r.emitConfigSaved(r.configSvc.Current().Path)
 		}
-		// Spec 125 (review round 3): the per-server skills announcements go
-		// out after the commit's own events, so on a large fleet they cannot
-		// fill a subscriber's buffer ahead of them.
+		// Spec 125: the skills announcements of an exposure change go out
+		// after the commit's own events: the skills-marked review.changed
+		// here, the one skills.changed list after tx.after.
+		var skillsTabs []string
 		if res.Published && tx.base != nil {
-			r.announceSkillsExposureChanges(tx.base.Config, tx.next)
+			skillsTabs = r.announceSkillsExposureChanges(tx.base.Config, tx.next)
 		}
 		for _, fn := range tx.after {
 			fn(res)
 		}
+		r.publishSkillsExposureChanged(skillsTabs)
 	}
 }
 
