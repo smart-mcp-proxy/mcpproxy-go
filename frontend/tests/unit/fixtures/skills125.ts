@@ -25,7 +25,7 @@ export const ok = <T,>(data: T) => ({ success: true, data })
  * through the store's own re-dispatch to `mcpproxy:skills-changed`. Call it with
  * a Pinia active and the spec's mocked api object (it sets createEventSource).
  */
-export async function connectSkillsSSE(apiMock: object): Promise<(server: string, counts?: Record<string, number>) => void> {
+export async function connectSkillsSSE(apiMock: object): Promise<(server: string | string[], counts?: Record<string, number>) => void> {
   const { vi } = await import('vitest')
   const { useSystemStore } = await import('@/stores/system')
   const g = globalThis as any
@@ -38,5 +38,5 @@ export async function connectSkillsSSE(apiMock: object): Promise<(server: string
   }))
   if (typeof a.hasAPIKey !== 'function') a.hasAPIKey = vi.fn(() => true)
   useSystemStore().connectEventSource()
-  return (server, counts = {}) => listeners['skills.changed']({ data: JSON.stringify({ payload: { server, counts }, timestamp: 1763300000 }) })
+  return (server, counts = {}) => listeners['skills.changed']({ data: JSON.stringify({ payload: Array.isArray(server) ? { servers: server } : { server, counts }, timestamp: 1763300000 }) })
 }

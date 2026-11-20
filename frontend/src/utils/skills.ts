@@ -1,6 +1,11 @@
 // Spec 125 (skills over MCP, PR-4a): pure helpers for the Skills tab.
 import type { SkillEntry, SkillFileInfo, SkillContentResponse, SkillsListResponse } from '@/types/api'
 
+export function skillsChangeIncludesServer(event: Event, serverName: string): boolean {
+  const payload = (event as CustomEvent).detail?.payload
+  return payload?.server === serverName || (Array.isArray(payload?.servers) && payload.servers.includes(serverName))
+}
+
 export type SkillTone = 'error' | 'warning' | 'info' | 'success' | 'neutral'
 
 /** The one state chip of a skill: blocked > unusable > changed > pending > approved. */

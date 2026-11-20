@@ -34,7 +34,7 @@ vi.mock('@/services/api', () => {
   } }
 })
 
-let emitSkillsChanged: (server: string) => void = () => { throw new Error('not connected') }
+let emitSkillsChanged: (server: string | string[]) => void = () => { throw new Error('not connected') }
 
 async function mountServerDetail(path: string, tenant = false) {
   const pinia = createPinia()
@@ -155,6 +155,19 @@ describe('ServerDetail Skills tab (Spec 125)', () => {
     release({ success: true, data: makeListing([makeSkill('hf')]) }); await flushPromises(); await flushPromises()
     expect(wrapper.find('[data-test="skills-tab"]').classes()).toContain('tab-active')
     expect(wrapper.find('[data-test="skills-panel"]').exists()).toBe(true)
+  })
+
+  it('rechecks an open Skills tab only when a bulk change includes its server', async () => {
+    const { wrapper, router } = await mountServerDetail('/servers/alpha?tab=skills')
+    vi.mocked(api.getServerSkills).mockClear()
+    emitSkillsChanged(['beta', 'gamma'])
+    await flushPromises()
+    expect(api.getServerSkills).not.toHaveBeenCalled()
+    vi.mocked(api.getServerSkills).mockResolvedValue({ success: true, data: makeListing([], { enabled: false }) })
+    emitSkillsChanged(['beta', 'alpha'])
+    await flushPromises()
+    expect(router.currentRoute.value.query.tab).toBe('tools')
+    wrapper.unmount()
   })
 
   it('falls back to Tools when a skills change turns the open tab off', async () => {

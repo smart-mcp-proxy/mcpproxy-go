@@ -1609,7 +1609,7 @@ import FlaggedToolsPanel from '@/components/FlaggedToolsPanel.vue'
 import ReviewScreen from '@/components/ReviewScreen.vue'
 import SkillsPanel from '@/components/skills/SkillsPanel.vue'
 import { useAuthStore } from '@/stores/auth'
-import { skillsTabVisible as listingOffersSkills } from '@/utils/skills'
+import { skillsChangeIncludesServer, skillsTabVisible as listingOffersSkills } from '@/utils/skills'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Server, Tool, ToolApproval, SecurityScanReport, HealthStatus } from '@/types'
 import api from '@/services/api'
@@ -4194,8 +4194,7 @@ watch(logTail, () => {
 // Spec 125: a skills change on this server can turn the tab on or off.
 // The store re-dispatches the core's frame whole ({payload: {server, counts}, timestamp}).
 function handleSkillsChangedEvent(e: Event) {
-  const detail = (e as CustomEvent).detail as { payload?: { server?: string } } | null
-  if (detail?.payload?.server === props.serverName) void checkSkillsTab(false)
+  if (skillsChangeIncludesServer(e, props.serverName)) void checkSkillsTab(false)
 }
 
 // Load data on mount

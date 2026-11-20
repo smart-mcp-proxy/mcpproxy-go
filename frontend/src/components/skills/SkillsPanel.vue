@@ -90,7 +90,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import api from '@/services/api'
 import type { SkillEntry, SkillsListResponse } from '@/types/api'
 import { formatDateTime } from '@/utils/datetime'
-import { skillStateChip, skillExpectedHashes, skillErrorCode, skillErrorNotice, skillApprovedNotice, type SkillAction } from '@/utils/skills'
+import { skillsChangeIncludesServer, skillStateChip, skillExpectedHashes, skillErrorCode, skillErrorNotice, skillApprovedNotice, type SkillAction } from '@/utils/skills'
 import SkillDetail from './SkillDetail.vue'
 
 const props = defineProps<{ serverName: string }>()
@@ -295,8 +295,7 @@ function setBlocked(block: boolean) {
 // The store re-dispatches the core's frame whole ({payload: {server, counts},
 // timestamp}), like every other runtime event.
 function onSkillsChanged(e: Event) {
-  const detail = (e as CustomEvent).detail as { payload?: { server?: string } } | null
-  if (detail?.payload?.server !== props.serverName) return
+  if (!skillsChangeIncludesServer(e, props.serverName)) return
   awaitingReload.value = true
   void load()
 }
