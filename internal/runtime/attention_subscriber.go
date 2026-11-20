@@ -36,6 +36,7 @@ type attentionServerState struct {
 // re-deriving summaries/fixes on the SSE hot path.
 type AttentionEventItem struct {
 	ID          string `json:"id"`
+	Kind        string `json:"kind"`
 	SubjectType string `json:"subject_type"`
 	SubjectID   string `json:"subject_id"`
 }
@@ -212,7 +213,9 @@ func attentionTriggers(t EventType) bool {
 	switch t {
 	case EventTypeServersChanged, EventTypeClientPresenceChanged,
 		EventTypeClientBindingChanged, EventTypeProfilesChanged, EventTypeCredentialsChanged,
-		EventTypeConfigReloaded, EventTypeConfigSaved:
+		EventTypeConfigReloaded, EventTypeConfigSaved,
+		// Spec 125: a skills refresh or approval moves the held-skill counts.
+		EventTypeSkillsChanged:
 		return true
 	}
 	return false
@@ -269,8 +272,17 @@ func (a *attentionSubscriber) recompute() time.Duration {
 		ServerErrorThreshold:     a.serverErrorThreshold,
 		ClientNeverSeenThreshold: a.clientNeverSeenThreshold,
 	}
+	cfg := a.rt.Config()
 	for _, s := range serversCopy {
-		input.Servers = append(input.Servers, a.buildAttentionServer(s, now))
+		as := a.buildAttentionServer(s, now)
+		// Spec 125: held skills, read from the records against the live
+		// config (the servers.changed row carries no skill counts). A read
+		// failure leaves the counts at zero for this pass; the next
+		// skills.changed or servers.changed recomputes.
+		if sc := skillsServerConfig(cfg, s.Name); sc != nil {
+			as.SkillsPending, as.SkillsChanged, _, _ = a.rt.heldSkills(cfg, sc)
+		}
+		input.Servers = append(input.Servers, as)
 	}
 	a.pruneState(serversCopy)
 
@@ -488,7 +500,7 @@ func attentionIDSet(items []contracts.AttentionItem) map[string]struct{} {
 func AttentionEventItems(items []contracts.AttentionItem) []AttentionEventItem {
 	out := make([]AttentionEventItem, len(items))
 	for i, it := range items {
-		out[i] = AttentionEventItem{ID: it.ID, SubjectType: it.Subject.Type, SubjectID: it.Subject.ID}
+		out[i] = AttentionEventItem{ID: it.ID, Kind: it.Kind, SubjectType: it.Subject.Type, SubjectID: it.Subject.ID}
 	}
 	return out
 }

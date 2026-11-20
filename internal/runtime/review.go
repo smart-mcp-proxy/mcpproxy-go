@@ -55,8 +55,14 @@ type ReviewQueueRow struct {
 	TierCounts    map[contracts.Tier]int `json:"tier_counts,omitempty"`
 	Pending       int                    `json:"pending,omitempty"`
 	Changed       int                    `json:"changed,omitempty"`
-	Scan          *ReviewScan            `json:"scan,omitempty"`
-	Since         *time.Time             `json:"since,omitempty"`
+	// SkillsPending and SkillsChanged count the server's held skills (Spec
+	// 125): pending or changed, not blocked, listed, on a server whose skills
+	// are read. Administrator-only: the REST layer removes them, and drops a
+	// skill_review row, for every scoped caller.
+	SkillsPending int         `json:"skills_pending,omitempty"`
+	SkillsChanged int         `json:"skills_changed,omitempty"`
+	Scan          *ReviewScan `json:"scan,omitempty"`
+	Since         *time.Time  `json:"since,omitempty"`
 }
 
 // Review scan coverage values (ReviewScan.Coverage). They say whether the
@@ -176,8 +182,11 @@ type ReviewToolDiff struct {
 	Annotations  string `json:"annotations"`
 }
 
-// GetReviewQueue composes one row for each quarantined server and each
-// trusted server with pending or changed tool definitions.
+// GetReviewQueue composes one row for each quarantined server, each trusted
+// server with pending or changed tool definitions, and (Spec 125) each server
+// with held skills. A server with held tools keeps its kind and also carries
+// its skill counts; a server whose only owed review is held skills gets a
+// skill_review row.
 func (r *Runtime) GetReviewQueue(ctx context.Context) (*ReviewQueue, error) {
 	cfg, err := r.GetConfig()
 	if err != nil {
@@ -213,14 +222,27 @@ func (r *Runtime) GetReviewQueue(ctx context.Context) (*ReviewQueue, error) {
 				row.Since = &since
 			}
 		}
-		if !server.Quarantined && row.Pending+row.Changed == 0 {
+		skillsPending, skillsChanged, skillsSince, err := r.heldSkills(cfg, server)
+		if err != nil {
+			return nil, fmt.Errorf("list skill reviews for %q: %w", server.Name, err)
+		}
+		row.SkillsPending, row.SkillsChanged = skillsPending, skillsChanged
+		heldTools := row.Pending+row.Changed > 0
+		if !server.Quarantined && !heldTools && skillsPending+skillsChanged == 0 {
 			continue
 		}
-		if server.Quarantined {
+		switch {
+		case server.Quarantined:
 			row.Kind = "server_review"
-		} else {
+		case heldTools:
 			row.Kind = "tool_review"
 			row.TierCounts = nil
+		default:
+			row.Kind = ReviewKindSkillReview
+			row.TierCounts = nil
+			if !skillsSince.IsZero() {
+				row.Since = &skillsSince
+			}
 		}
 		if server.Quarantined {
 			row.Scan, _, _ = r.reviewScanFor(ctx, server.Name, true, records)

@@ -7328,7 +7328,8 @@ paths:
         reads from it. Filtered per caller: an administrator sees every item; a scoped
         caller (agent token, or a non-admin server-edition OAuth user session) sees
         only server items whose server it may enumerate (for a profile-pinned token:
-        servers within its pin); every other subject type (client, setting) is administrator-only.'
+        servers within its pin); every other subject type (client, setting) and the
+        skill_review kind (Spec 125 held skills) are administrator-only.'
       responses:
         "200":
           content:
@@ -9874,9 +9875,11 @@ paths:
       - registries
   /api/v1/review:
     get:
-      description: 'Returns one row per quarantined server or trusted server with
-        pending or changed tools. Scoped callers see only servers they may enumerate
-        (for a profile-pinned token: servers within its pin), with count recomputed.'
+      description: 'Returns one row per quarantined server, trusted server with pending
+        or changed tools, or (Spec 125) server with held skills (kind skill_review;
+        skills_pending / skills_changed counts). Scoped callers see only servers they
+        may enumerate (for a profile-pinned token: servers within its pin), with count
+        recomputed; held-skill counts and skill_review rows are administrator-only.'
       responses:
         "200":
           content:

@@ -87,7 +87,7 @@ Env values and headers whose names look like secrets default to **Secret**, whic
 
 ### Review before approval
 
-Quarantined servers wait on the [Review queue](/features/security-quarantine). The review screen lists every tool read-only with its tier, annotations and scan verdict before you approve, and lets you leave tools out. Approving always goes through the scan gate. The queue lists every server that is owed a review, including disabled ones (marked **Disabled**). It opens on **Active blockers** (enabled servers and tool changes that hold a live agent) when there are any, with **All reviews** one click away, plus a search box and a sort menu. The Home attention list covers enabled servers only, so its number can be smaller than the full queue.
+Quarantined servers wait on the [Review queue](/features/security-quarantine). The review screen lists every tool read-only with its tier, annotations and scan verdict before you approve, and lets you leave tools out. Approving always goes through the scan gate. The queue lists every server that is owed a review, including disabled ones (marked **Disabled**). It opens on **Active blockers** (enabled servers and tool changes that hold a live agent) when there are any, with **All reviews** one click away, plus a search box and a sort menu. The Home attention list covers enabled servers only, so its number can be smaller than the full queue. With [Skills over MCP](/features/skills#held-skills-in-review) on, held skills appear here too (administrators only): a row reads "N skills awaiting review · M changed", and a server whose only owed review is skills links to its Skills tab.
 
 ## Tool Search
 

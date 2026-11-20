@@ -44,7 +44,15 @@ type AvailableSkill struct {
 func (r *Runtime) publishSkillsChanged(serverName string, counts map[string]int) {
 	r.skills.bumpIndexGeneration()
 	r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": serverName, "counts": counts}))
+	// The review queue counts held skills (T031): tell its readers. The
+	// "skills" marker makes this frame administrator-only on SSE (FR-019a),
+	// so a scoped caller does not learn from its timing that a skill changed.
+	r.publishEvent(newEvent(EventTypeReviewChanged, map[string]any{"server": serverName, ReviewChangedSkillsKey: true}))
 }
+
+// ReviewChangedSkillsKey marks a review.changed frame caused by a skills
+// change. internal/httpapi delivers such a frame to administrators only.
+const ReviewChangedSkillsKey = "skills"
 
 func (s *skillsCatalogState) bumpIndexGeneration() { s.indexGen.Add(1) }
 

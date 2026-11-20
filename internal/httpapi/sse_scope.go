@@ -284,6 +284,11 @@ func eventVisibleToCaller(ctx context.Context, evt internalRuntime.Event) bool {
 	if _, adminOnly := adminConfigEventTypes[evt.Type]; adminOnly {
 		return false
 	}
+	// Spec 125 FR-019a: a review change caused by skills tells of held skills
+	// by its timing alone, even on a server the caller can see.
+	if isSkillsReviewChange(evt) && !skillVisibleTo(ctx) {
+		return false
+	}
 	named := false
 	for _, key := range eventServerIdentityFields {
 		name, ok := evt.Payload[key].(string)

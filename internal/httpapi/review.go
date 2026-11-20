@@ -18,7 +18,7 @@ type reviewReader interface {
 
 // handleGetReviewQueue godoc
 // @Summary Get the server review queue
-// @Description Returns one row per quarantined server or trusted server with pending or changed tools. Scoped callers see only servers they may enumerate (for a profile-pinned token: servers within its pin), with count recomputed.
+// @Description Returns one row per quarantined server, trusted server with pending or changed tools, or (Spec 125) server with held skills (kind skill_review; skills_pending / skills_changed counts). Scoped callers see only servers they may enumerate (for a profile-pinned token: servers within its pin), with count recomputed; held-skill counts and skill_review rows are administrator-only.
 // @Tags review
 // @Produce json
 // @Security ApiKeyAuth
@@ -49,6 +49,10 @@ func (s *Server) handleGetReviewQueue(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		queue = &internalRuntime.ReviewQueue{Count: len(visible), Servers: visible}
+	}
+	// Spec 125 FR-019a: held skills are administrator-only data.
+	if !skillVisibleTo(r.Context()) {
+		queue = withoutHeldSkills(queue)
 	}
 	s.writeSuccess(w, queue)
 }
