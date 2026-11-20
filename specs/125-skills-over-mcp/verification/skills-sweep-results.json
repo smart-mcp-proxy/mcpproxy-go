@@ -1,18 +1,19 @@
 {
-  "checked_commit": "6370f1f45e05cec3b095da62bddcd6a0d4bfb025",
-  "working_tree_dirty": true,
-  "checked": "working tree on top of 6370f1f45e05cec3b095da62bddcd6a0d4bfb025",
-  "generated_at": "2026-11-18T12:54:51.927Z",
+  "checked_commit": "d10ee8b6706624e6ed1211d8fbde3c36b7f92014",
+  "working_tree_dirty": false,
+  "evidence": "commit",
+  "checked": "d10ee8b6706624e6ed1211d8fbde3c36b7f92014",
+  "generated_at": "2026-11-20T10:34:36.753Z",
   "fixture": {
     "command": [
-      "/var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T//skills-sweep.K6rjBB/bin/skillsfixture",
+      "skillsfixture",
       "-addr",
-      "127.0.0.1:64492"
+      "127.0.0.1:60070"
     ],
-    "port": 64492
+    "port": 60070
   },
   "core": {
-    "listen": "127.0.0.1:64512",
+    "listen": "127.0.0.1:60072",
     "server": "skillsfx",
     "enable_skills": true,
     "trust_mode": "manual"
@@ -22,32 +23,50 @@
     {
       "title": "the Skills tab lists the fixture skills as awaiting review",
       "passed": true,
-      "status": "passed"
+      "status": "passed",
+      "attempts": 1
     },
     {
       "title": "views SKILL.md, pages a large file, and does not offer a binary file",
       "passed": true,
-      "status": "passed"
+      "status": "passed",
+      "attempts": 1
     },
     {
       "title": "approve turns the chip to Approved",
       "passed": true,
-      "status": "passed"
+      "status": "passed",
+      "attempts": 1
     },
     {
       "title": "an upstream change plus Refresh shows Changed with a file diff and a line diff",
       "passed": true,
-      "status": "passed"
+      "status": "passed",
+      "attempts": 1
+    },
+    {
+      "title": "a pending skill changed while open is stale, with Approve disabled until re-opened",
+      "passed": true,
+      "status": "passed",
+      "attempts": 1
+    },
+    {
+      "title": "a refresh through the REST API marks the open review stale by the live event alone",
+      "passed": true,
+      "status": "passed",
+      "attempts": 1
     },
     {
       "title": "block and unblock",
       "passed": true,
-      "status": "passed"
+      "status": "passed",
+      "attempts": 1
     },
     {
       "title": "the tab survives a reload through ?tab=skills and no page error was thrown",
       "passed": true,
-      "status": "passed"
+      "status": "passed",
+      "attempts": 1
     }
   ],
   "states": {
@@ -117,7 +136,7 @@
           "status": "pending",
           "blocked": false,
           "available": false,
-          "current_hash": "sk1-e546542d22642918aeab759cd6ebd414e007f0e78e7597a568a737ec3ebda041",
+          "current_hash": "sk1-1c78d19e9aee62b7cdb33fccb285107beaa369ea754f66d43f3538a0367a9949",
           "approved_hash": ""
         },
         {
@@ -133,7 +152,7 @@
           "status": "pending",
           "blocked": true,
           "available": false,
-          "current_hash": "sk1-11bf1bd99f40de60b2ebb00ea7d54be85ce487d61abcea4e7c14f725168097e3",
+          "current_hash": "sk1-58734ade9dd0562aade1f395b623dffbd7caad4b9c2b72d23cc6cafbde76648c",
           "approved_hash": ""
         }
       ]
@@ -146,7 +165,7 @@
           "status": "pending",
           "blocked": false,
           "available": false,
-          "current_hash": "sk1-e546542d22642918aeab759cd6ebd414e007f0e78e7597a568a737ec3ebda041",
+          "current_hash": "sk1-1c78d19e9aee62b7cdb33fccb285107beaa369ea754f66d43f3538a0367a9949",
           "approved_hash": ""
         },
         {
@@ -162,7 +181,7 @@
           "status": "pending",
           "blocked": false,
           "available": false,
-          "current_hash": "sk1-11bf1bd99f40de60b2ebb00ea7d54be85ce487d61abcea4e7c14f725168097e3",
+          "current_hash": "sk1-58734ade9dd0562aade1f395b623dffbd7caad4b9c2b72d23cc6cafbde76648c",
           "approved_hash": ""
         }
       ]
