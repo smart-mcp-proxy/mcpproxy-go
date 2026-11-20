@@ -1462,7 +1462,8 @@ export interface ReviewScan {
 
 export interface ReviewQueueRow {
   server: string
-  kind: 'server_review' | 'tool_review' | string
+  /** skill_review (Spec 125): the server's only owed review is held skills. */
+  kind: 'server_review' | 'tool_review' | 'skill_review' | string
   quarantined: boolean
   /** Configured enabled state; absent on an older core (treat as enabled). */
   enabled?: boolean
@@ -1470,6 +1471,9 @@ export interface ReviewQueueRow {
   tier_counts?: Record<string, number>
   pending?: number
   changed?: number
+  /** Held skills (Spec 125). Administrator-only: absent for a scoped caller. */
+  skills_pending?: number
+  skills_changed?: number
   scan?: ReviewScan
   since?: string
 }
