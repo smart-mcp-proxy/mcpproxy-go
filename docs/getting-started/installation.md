@@ -435,8 +435,13 @@ docker run -d --name mcpproxy \
   directory: with it the config is still looked up in the working directory and `$HOME/.mcpproxy`
   (`/root/.mcpproxy` in this image). Releases before this change ignored `<data-dir>/mcp_config.json`
   under `serve`, so on those, mount the volume at the default `/root/.mcpproxy` path instead.
-- **Port**: the entrypoint is `mcpproxy serve --listen 0.0.0.0:8080`, so the container listens on
-  `8080` inside the network namespace. The `-p 127.0.0.1:8080:8080` above keeps it reachable only
+- **Port**: the entrypoint is `mcpproxy serve` and the image sets `MCPPROXY_LISTEN=0.0.0.0:8080`,
+  so the container listens on `8080` inside the network namespace. To move it, pass
+  `-e MCPPROXY_LISTEN=0.0.0.0:9090` (and publish that port), or append `--listen 0.0.0.0:9090`
+  after the image name — the flag wins over the variable. The config file's `listen` is used only
+  when `MCPPROXY_LISTEN` is set empty (`-e MCPPROXY_LISTEN=`); releases before v0.75 hardcoded
+  `--listen 0.0.0.0:8080` in the entrypoint and ignored `MCPPROXY_LISTEN`.
+  The `-p 127.0.0.1:8080:8080` above keeps it reachable only
   from the host; drop the `127.0.0.1:` prefix only if you deliberately want it on the network, and
   read [Network exposure: localhost by default](#network-exposure-localhost-by-default) first.
 - **State**: config, the BBolt DB, and the search index live in `/root/.mcpproxy`. Mount a volume
