@@ -215,9 +215,15 @@ redact_node() {
   SWEEP_REDACT_KEY="$API_KEY" SWEEP_REDACT_OUT="$OUT_REAL" SWEEP_REDACT_REPO="$REPO_ROOT" \
   SWEEP_REDACT_WORK="$WORK" SWEEP_REDACT_HOME="$OPERATOR_HOME" SWEEP_REDACT_EXTRA="$REDACT_EXTRA" node -e "$REDACT_JS" "$@"
 }
+# Rewrites the file in place. A failed rewrite (an unwritable file, a full
+# disk) names the file in node's error: that error is printed redacted, and the
+# status is kept.
 redact_file() {
   [[ -f "$1" ]] || return 0
-  redact_node "$1"
+  local err status=0
+  err=$(redact_node "$1" 2>&1 >/dev/null) || status=$?
+  if [[ $status -ne 0 ]]; then printf '%s\n' "$err" | redact_stream >&2; fi
+  return "$status"
 }
 # Copies stdin to stdout, redacted.
 redact_stream() { redact_node; }
@@ -429,9 +435,11 @@ free_port() {
 # attempt (a retry replays against changed state and would hide the original
 # error). The fixture command is recorded as basename + args. The file is then
 # redacted (API key, local paths). Exit status 0 only when everything passed.
+# The writer's own output (a failed write names the results path) is captured
+# and printed redacted (run_logged); a failed write is a non-zero status too.
 write_results() {
-  local out="$1"
-  node - "$@" <<'NODE'
+  local out="$1" status=0
+  run_logged results node - "$@" >&2 <<'NODE'
 const fs = require('fs'), path = require('path')
 const [out, commit, dirty, fixturePort, pwStatus, server, corePort, ...fixtureCmd] = process.argv.slice(2)
 const problems = []
@@ -488,8 +496,8 @@ const result = {
 fs.writeFileSync(path.join(out, 'skills-sweep-results.json'), JSON.stringify(result, null, 2) + '\n')
 process.exit(result.passed ? 0 : 1)
 NODE
-  local status=$?
-  redact_file "$out/skills-sweep-results.json"
+  status=$?
+  redact_file "$out/skills-sweep-results.json" || status=$?
   return $status
 }
 
@@ -783,6 +791,29 @@ if (!s || s.error !== process.argv[2]) { console.error("self-test FAILED: report
   grep -qF "$WORK" "$WORK/st-report.out" && st_fail "a failing report write printed a local path"
   grep -qF "<scratch>/st-ro-report/report.html" "$WORK/st-report.out" || st_fail "a failing report write did not print its diagnostics redacted"
   echo "self-test: the report keeps the escaped strings intact; a failing report write prints its diagnostics redacted and fails"
+
+  # 3c. A results file that cannot be written (a directory at its path, or an
+  # existing read-only file) fails the results writer with its diagnostics
+  # redacted: no absolute path, no key (round 9).
+  local rr_dir rr_case
+  for rr_case in dir readonly; do
+    [[ $rr_case == readonly && "$(id -u)" == "0" ]] && continue
+    rr_dir="$WORK/st-results-$rr_case"
+    mkdir -p "$rr_dir"
+    if [[ $rr_case == dir ]]; then mkdir -p "$rr_dir/skills-sweep-results.json"
+    else printf '{}' >"$rr_dir/skills-sweep-results.json"; chmod 444 "$rr_dir/skills-sweep-results.json"; fi
+    set +e
+    write_results "$rr_dir" "0123456789abcdef0123456789abcdef01234567" false 4242 0 skillsfx 4343 "$WORK/bin/skillsfixture" -addr 127.0.0.1:4242 >"$WORK/st-results.out" 2>&1
+    st_status=$?
+    set -e
+    [[ $rr_case == readonly ]] && chmod 644 "$rr_dir/skills-sweep-results.json"
+    [[ $st_status -ne 0 ]] || st_fail "a results write to a $rr_case path exited 0"
+    grep -qF "$WORK" "$WORK/st-results.out" && st_fail "a failing results write ($rr_case) printed a local path"
+    grep -qF "${WORK#/private}" "$WORK/st-results.out" && st_fail "a failing results write ($rr_case) printed a local path"
+    grep -qF "$API_KEY" "$WORK/st-results.out" && st_fail "a failing results write ($rr_case) printed the API key"
+    grep -qF "<scratch>/st-results-$rr_case/skills-sweep-results.json" "$WORK/st-results.out" || st_fail "a failing results write ($rr_case) did not print its diagnostics redacted"
+  done
+  echo "self-test: a results file that cannot be written fails the results writer with its diagnostics redacted"
 
   # 4. DEBUG=1 never prints the key or a local path: the whole self-test above
   # (config, core start with the key, curl with the key header, redaction) runs
