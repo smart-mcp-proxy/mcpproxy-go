@@ -1,19 +1,19 @@
 {
-  "checked_commit": "d10ee8b6706624e6ed1211d8fbde3c36b7f92014",
+  "checked_commit": "f1889571e465798fdf48d9c3625fe57a902db3c2",
   "working_tree_dirty": false,
   "evidence": "commit",
-  "checked": "d10ee8b6706624e6ed1211d8fbde3c36b7f92014",
-  "generated_at": "2026-11-20T10:34:36.753Z",
+  "checked": "f1889571e465798fdf48d9c3625fe57a902db3c2",
+  "generated_at": "2026-11-20T10:53:27.518Z",
   "fixture": {
     "command": [
       "skillsfixture",
       "-addr",
-      "127.0.0.1:60070"
+      "127.0.0.1:50572"
     ],
-    "port": 60070
+    "port": 50572
   },
   "core": {
-    "listen": "127.0.0.1:60072",
+    "listen": "127.0.0.1:50574",
     "server": "skillsfx",
     "enable_skills": true,
     "trust_mode": "manual"
