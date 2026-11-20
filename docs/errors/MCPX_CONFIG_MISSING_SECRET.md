@@ -60,7 +60,7 @@ mcpproxy upstream restart <server>
 ### Add the missing secret
 
 ```bash
-mcpproxy secrets set <NAME>          # prompts; typed characters are echoed in the terminal
+mcpproxy secrets set <NAME>          # prompts; input is hidden when stdin is a terminal
 ```
 
 Secrets are stored in the OS keychain on macOS / Windows and in an encrypted

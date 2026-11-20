@@ -14,6 +14,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"golang.org/x/term"
 )
 
 // GetSecretsCommand returns the secrets management command
@@ -434,11 +435,34 @@ func shellQuoteArg(arg string) string {
 	return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
 }
 
-// readPassword reads a password from stdin without echoing
+// readPassword reads a secret without echoing the typed characters when the
+// input is a terminal. For piped input (including --from-stdin) there is
+// nothing to echo and the whole stream is the value.
 func readPassword(in io.Reader) (string, error) {
-	// For now, use a simple implementation
-	// In production, you'd want to use something like golang.org/x/term
-	var password string
-	_, err := fmt.Fscanln(in, &password)
-	return password, err
+	if fd, ok := terminalFd(in); ok {
+		password, err := term.ReadPassword(fd)
+		fmt.Println()
+		return string(password), err
+	}
+	return readSecretStdin(in)
+}
+
+// terminalFd reports the file descriptor of in when it is a terminal, which
+// is the only case where typed characters would otherwise be echoed.
+func terminalFd(in io.Reader) (int, bool) {
+	f, ok := in.(*os.File)
+	if !ok {
+		return 0, false
+	}
+	fd := int(f.Fd())
+	return fd, term.IsTerminal(fd)
+}
+
+// readSecretStdin reads all piped input and removes only line-ending bytes.
+func readSecretStdin(input io.Reader) (string, error) {
+	value, err := io.ReadAll(input)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(string(value), "\r\n"), nil
 }
