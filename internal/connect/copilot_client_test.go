@@ -49,7 +49,7 @@ func TestConnectCopilotWritesTheCopilotUserConfig(t *testing.T) {
 // Each clientInfo.name a host sends must be an alias of the client whose config it reads (#1959).
 func TestClientInfoNamesMatchWhatEachHostSends(t *testing.T) {
 	for id, wants := range map[string][]string{
-		"copilot": {"copilot-cli", "github-copilot-developer", "vscode-agent-host", "vscode"},
+		"copilot": {"copilot-cli", "github-copilot-developer", "vscode-agent-host"},
 		"vscode":  {"Visual Studio Code", "Visual Studio Code - Insiders"},
 	} {
 		def := FindClient(id)
