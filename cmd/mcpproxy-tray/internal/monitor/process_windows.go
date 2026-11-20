@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/sys/windows"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy-tray/internal/state"
 )
@@ -142,10 +143,9 @@ func (pm *ProcessMonitor) Start() error {
 			"env_vars", pm.maskSensitiveEnv(pm.config.Env))
 	}
 
-	// Hide console window on Windows
-	// CREATE_NO_WINDOW = 0x08000000
+	// Hide the console window; a process group of its own lets Stop() send it CTRL_BREAK.
 	pm.cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+		CreationFlags: windows.CREATE_NO_WINDOW | windows.CREATE_NEW_PROCESS_GROUP,
 	}
 
 	// Set up output capture if enabled
@@ -198,9 +198,13 @@ func (pm *ProcessMonitor) Stop() error {
 
 	pm.logger.Infow("Stopping process", "pid", pid)
 
-	// Try graceful stop via taskkill without /F first
-	killCmd := exec.Command("taskkill", "/PID", fmt.Sprint(pid), "/T")
-	_ = killCmd.Run()
+	// Force kill after 45 seconds to allow core time to clean up Docker containers
+	// (typically 10-30s for 7 containers).
+	grace := 45 * time.Second
+	if err := requestGracefulStop(pid); err != nil {
+		pm.logger.Warnw("Could not ask process to stop gracefully, force killing", "pid", pid, "error", err)
+		grace = 0
+	}
 
 	// Wait for monitor goroutine to detect exit (via doneCh)
 	// This avoids the cmd.Wait() race condition
@@ -218,11 +222,9 @@ func (pm *ProcessMonitor) Stop() error {
 		pm.logger.Infow("Process stopped (no exit info)", "pid", pid)
 		return nil
 
-	case <-time.After(45 * time.Second):
-		// Force kill after 45 seconds to allow core time to clean up Docker containers
-		// Core needs time for parallel container cleanup (typically 10-30s for 7 containers)
-		pm.logger.Warn("Process did not stop gracefully after 45s, sending force kill", "pid", pid)
-		killCmd := exec.Command("taskkill", "/PID", fmt.Sprint(pid), "/T", "/F")
+	case <-time.After(grace):
+		pm.logger.Warnw("Process did not stop gracefully, sending force kill", "pid", pid, "grace", grace)
+		killCmd := HiddenCommand("taskkill", "/PID", fmt.Sprint(pid), "/T", "/F")
 		_ = killCmd.Run()
 
 		// Wait for monitor to detect the kill
@@ -230,6 +232,34 @@ func (pm *ProcessMonitor) Stop() error {
 		pm.logger.Info("Process force killed", "pid", pid)
 		return fmt.Errorf("process force killed after timeout")
 	}
+}
+
+var (
+	kernel32          = windows.NewLazySystemDLL("kernel32.dll")
+	procAttachConsole = kernel32.NewProc("AttachConsole")
+	procFreeConsole   = kernel32.NewProc("FreeConsole")
+	consoleMu         sync.Mutex // the console a process is attached to is process-wide
+)
+
+// requestGracefulStop sends CTRL_BREAK to the process group led by pid; Go turns it into
+// SIGINT, so the core runs its normal graceful shutdown. taskkill without /F cannot do this:
+// it only sends WM_CLOSE, which a windowless console process never receives.
+func requestGracefulStop(pid int) error {
+	consoleMu.Lock()
+	defer consoleMu.Unlock()
+	_, _, _ = procFreeConsole.Call() // a tray started from a terminal must leave it to attach
+	if r, _, err := procAttachConsole.Call(uintptr(pid)); r == 0 {
+		return fmt.Errorf("attach to console of pid %d: %w", pid, err)
+	}
+	defer procFreeConsole.Call()
+	return windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(pid))
+}
+
+// HiddenCommand is exec.Command without the console window a GUI process would otherwise flash.
+func HiddenCommand(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+	return cmd
 }
 
 // setupOutputCapture sets up stdout/stderr capture (Windows shares POSIX impl)
