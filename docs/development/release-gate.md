@@ -34,7 +34,7 @@ fragments against a hardcoded manifest and exits per the verdict.
 | `suite-scan-eval` | `suite/scan-eval` | 10 min | `go run ./cmd/scan-eval --gate --min-recall 0.90 --max-fp 0.05` over the detect corpus — runs on **every** tag regardless of changed paths (FR-015). |
 | `matrix-invariants` | `matrix/{stdio,http,sse,docker,oauth}`, `invariant/{activity-request-id,counters,quarantine-flow,upgrade-in-place}` | 20 min | Boots the candidate against five local fixture upstreams (connect → list → call → kill/reconnect) and asserts the US2 invariants against the live instance. |
 | `surface-consistency` | `invariant/surface-consistency` (T4) | 20 min | Boots the same matrix, adds quarantined/disabled/unhealthy/live servers and asserts the CLI, MCP and rendered Web UI agree with the core on every server's state — see [Surface consistency](#surface-consistency-t4--blocking). |
-| `web-ui-sweep` | — (advisory `advisory/web-ui-sweep`, T2, and `advisory/skills-tab-sweep`, spec 125) | 20 min | Playwright sweep over the Web UI **served by the candidate binary**, with a live stdio fixture upstream. `continue-on-error: true` — see [Web UI sweep](#web-ui-sweep-t2--advisory). |
+| `web-ui-sweep` | — (advisory `advisory/web-ui-sweep`, T2, and `advisory/skills-tab-sweep`, spec 125) | 35 min | Playwright sweep over the Web UI **served by the candidate binary**, with a live stdio fixture upstream. `continue-on-error: true` — see [Web UI sweep](#web-ui-sweep-t2--advisory). |
 | `verdict` | (merges all) | 10 min | `release-gate report` → `gate-report.json` + `$GITHUB_STEP_SUMMARY`; its exit code **is** the gate verdict. |
 
 Every job uploads its fragment with `if: always()`, so a job that dies before

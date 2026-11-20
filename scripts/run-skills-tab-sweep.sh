@@ -57,9 +57,12 @@ Options:
                       leaves no process or listening port of the run alive
                       (and nothing else touched), that the results writer
                       records the first failed attempt and redacts the API key
-                      and local paths, and that neither a passing DEBUG=1 run
-                      nor a run whose fixture or core fails to start prints
-                      the API key or an absolute local path
+                      and local paths, that printed paths are relative,
+                      placeholders or <path>/basename, and that neither a
+                      passing DEBUG=1 run nor a run whose fixture or core
+                      fails to start, whose Playwright fails (a stand-in
+                      PW_CHROMIUM outside every known prefix) or whose build
+                      fails prints the API key or an absolute local path
   --self-test-first   run the --self-test checks, then the sweep (the release
                       gate does this, so both land in one advisory entry)
   -h, --help          print this message
@@ -162,6 +165,13 @@ if (key) for (const k of [key, encodeURIComponent(key)]) t = t.split(k).join("**
 const paths = [[e.SWEEP_REDACT_OUT, "<out>"], [e.SWEEP_REDACT_WORK, "<scratch>"], [e.SWEEP_REDACT_REPO, "<repo>"], [e.SWEEP_REDACT_HOME, "~"]]
   .filter(([p]) => p && p.length > 1).sort((a, b) => b[0].length - a[0].length)
 for (const [p, r] of paths) t = t.split(p).join(r)
+// Any other absolute local path (a browser named by PW_CHROMIUM, a browser
+// download dir, a toolchain path in a stack trace or in PATH) is reduced to
+// <path>/basename. Only paths under a filesystem root are touched, so a URL path
+// (http://host:port/api/...) or a placeholder (<repo>/e2e/...) is kept.
+const roots = "Users|home|private|var|tmp|usr|opt|etc|Library|System|Applications|Volumes|nix|root|snap|mnt|media|srv|bin|sbin|lib|lib64|run|__w"
+const abs = new RegExp("(^|[\\s\"\x27`(\\[=,:;])(/(?:" + roots + ")(?=/|[\\s\"\x27`()\\[\\],:;]|$)(?:/[^\\s\"\x27`()\\[\\],:;]*)*)", "gm")
+t = t.replace(abs, (m, pre, p) => pre + "<path>/" + p.split("/").filter(Boolean).pop())
 if (f) fs.writeFileSync(f, t); else process.stdout.write(t)'
 redact_node() {
   SWEEP_REDACT_KEY="$API_KEY" SWEEP_REDACT_OUT="$OUT_REAL" SWEEP_REDACT_REPO="$REPO_ROOT" \
@@ -174,12 +184,37 @@ redact_file() {
 # Copies stdin to stdout, redacted.
 redact_stream() { redact_node; }
 # A path as printed: relative to the repo root when it is inside it, else with
-# the placeholders of redact_stream.
+# the placeholders of redact_stream, and any other absolute path (outside every
+# known prefix, e.g. PW_CHROMIUM=/usr/bin/chromium) as <path>/basename.
 say_path() {
-  case "$1" in
-    "$REPO_ROOT"/*) printf '%s' "${1#"$REPO_ROOT"/}" ;;
-    *) printf '%s' "$1" | redact_stream ;;
+  local p="$1" pre
+  case "$p" in
+    "$REPO_ROOT"/*) printf '%s' "${p#"$REPO_ROOT"/}"; return 0 ;;
   esac
+  if [[ "$p" == /* ]]; then
+    for pre in "$OUT_REAL" "$WORK" "$OPERATOR_HOME"; do
+      if [[ ${#pre} -gt 1 && "$p" == "$pre"/* ]]; then printf '%s' "$p" | redact_stream; return 0; fi
+    done
+    printf '<path>/%s' "$(basename "$p")"
+    return 0
+  fi
+  printf '%s' "$p" | redact_stream
+}
+
+# run_logged NAME CMD...: runs CMD with its stdout and stderr captured into the
+# scratch file $WORK/logs/NAME.log, then prints only a redacted copy of it (the
+# tools' own output names the repo, the home, a browser download dir or the
+# browser, and Playwright's launch errors carry the browser's environment with
+# the API key). Returns CMD's exit status. Call it as `run_logged ... || status=$?`
+# (or as a plain command where a failure should end the run under set -e).
+run_logged() {
+  local name="$1" log status=0
+  shift
+  mkdir -p "$WORK/logs"
+  log="$WORK/logs/$name.log"
+  "$@" >"$log" 2>&1 || status=$?
+  redact_stream <"$log"
+  return "$status"
 }
 
 # Prints $1 and every process descended from it (children first found by
@@ -454,6 +489,19 @@ run_self_test() {
   data_dir_allowed "$DATA_DIR" || st_fail "the scratch data dir was refused"
   echo "self-test: a data dir under \$HOME/.mcpproxy is refused; the scratch dir is allowed"
 
+  # 1b. A printed path never shows an absolute local path: inside the repo it is
+  # relative, under a known prefix it gets its placeholder, and any other
+  # absolute path is reduced to <path>/basename (say_path), also inside a
+  # message or a captured log (redact_stream).
+  local got_path
+  got_path=$(say_path "$REPO_ROOT/e2e/web-ui-sweep/x.json"); [[ "$got_path" == "e2e/web-ui-sweep/x.json" ]] || st_fail "say_path in the repo gave '$got_path'"
+  got_path=$(say_path "$WORK/st-data/config.db"); [[ "$got_path" == "<scratch>/st-data/config.db" ]] || st_fail "say_path in the scratch dir gave '$got_path'"
+  got_path=$(say_path "/usr/bin/chromium"); [[ "$got_path" == "<path>/chromium" ]] || st_fail "say_path of an outside path gave '$got_path'"
+  got_path=$(say_path "/srv/odd place/chrome"); [[ "$got_path" == "<path>/chrome" ]] || st_fail "say_path of an outside path with a space gave '$got_path'"
+  got_path=$(printf 'launch /opt/google/chrome/chrome failed; PATH=/usr/local/bin:/opt/homebrew/bin url http://127.0.0.1:1/api/v1/servers key %s' "$API_KEY" | redact_stream)
+  [[ "$got_path" == 'launch <path>/chrome failed; PATH=<path>/bin:<path>/bin url http://127.0.0.1:1/api/v1/servers key ***' ]] || st_fail "redact_stream gave '$got_path'"
+  echo "self-test: printed paths are relative, placeholders or <path>/basename; URLs are kept"
+
   # 2. An ambient MCPPROXY_DATA_DIR / MCPPROXY_DATA does not reach the core.
   decoy_new="$WORK/decoy-data-dir"
   decoy_legacy="$WORK/decoy-data-legacy"
@@ -624,6 +672,56 @@ if (r.checked_commit !== "0123456789abcdef0123456789abcdef01234567" || r.working
       fi
     done
     echo "self-test: a fixture or core startup failure prints its log redacted, with no API key and no local path"
+
+    # 6. A Playwright failure prints Playwright's own output (list reporter,
+    # launch errors with the browser's logs) redacted only. A sweep run as a
+    # child with PW_CHROMIUM naming a stand-in browser outside every known
+    # prefix (a fresh dir under /tmp, not the scratch dir, the repo or the
+    # home), which prints its arguments and its environment (the API key is in
+    # it) and exits 1: the run must fail, say so, name the browser as
+    # <path>/chromium, print Playwright's failure, and print no key and no
+    # absolute path of the stand-in.
+    local ext ext_real
+    ext=$(mktemp -d /tmp/skills-sweep-pwext.XXXXXX)
+    ext_real=$(cd "$ext" && pwd -P)
+    # shellcheck disable=SC2016 # expanded by the stand-in's own shell
+    printf '#!/bin/sh\necho "stand-in browser $0 args: $*" >&2\nenv >&2\nexit 1\n' >"$ext/chromium"
+    chmod +x "$ext/chromium"
+    rm -f "$probe_key"
+    set +e
+    SWEEP_SELF_TEST_CHILD="$probe_key" PW_CHROMIUM="$ext/chromium" MCPPROXY_BINARY_PATH="$CORE_BIN" SKILLS_FIXTURE_BINARY="$FIXTURE_BIN" \
+      bash "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")" --out "$WORK/st-pw-fail" >"$probe_out" 2>&1
+    probe_status=$?
+    set -e
+    rm -rf "$ext"
+    st_check_child_output "a run whose Playwright fails" "$probe_out" "$probe_key"
+    for p in "$ext" "$ext_real" "${ext_real#/private}"; do
+      grep -qF "$p" "$probe_out" && st_fail "a run whose Playwright fails printed the stand-in browser's path ($(grep -cF "$p" "$probe_out") lines)"
+    done
+    [[ $probe_status -ne 0 ]] || st_fail "a run whose Playwright fails exited 0"
+    grep -qF "skills tab sweep FAILED" "$probe_out" || st_fail "a run whose Playwright fails did not say so"
+    grep -qF "using PW_CHROMIUM=<path>/chromium" "$probe_out" || st_fail "a run whose Playwright fails did not name the browser as <path>/chromium"
+    grep -qE "[0-9]+ failed" "$probe_out" || st_fail "a run whose Playwright fails did not print Playwright's own summary"
+    echo "self-test: a Playwright failure with an outside PW_CHROMIUM prints Playwright's output redacted, with no API key and no absolute path"
+
+    # 7. Build output is printed redacted too: a self-test run as a child that
+    # has to build the fixture, with a stand-in go first on PATH that prints its
+    # working directory, its home and its arguments and exits 1.
+    local fakego="$WORK/st-fakego"
+    mkdir -p "$fakego"
+    # shellcheck disable=SC2016 # expanded by the stand-in's own shell
+    printf '#!/bin/sh\necho "go in $PWD home $HOME args: $*"\necho "go: error at $PWD/cmd/skillsfixture/main.go:1" >&2\nexit 1\n' >"$fakego/go"
+    chmod +x "$fakego/go"
+    rm -f "$probe_key"
+    set +e
+    SWEEP_SELF_TEST_CHILD="$probe_key" PATH="$fakego:$PATH" MCPPROXY_BINARY_PATH="$CORE_BIN" SKILLS_FIXTURE_BINARY="" \
+      bash "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")" --self-test >"$probe_out" 2>&1
+    probe_status=$?
+    set -e
+    st_check_child_output "a run whose go build fails" "$probe_out" "$probe_key"
+    [[ $probe_status -ne 0 ]] || st_fail "a run whose go build fails exited 0"
+    grep -qF "go: error at <repo>/cmd/skillsfixture/main.go:1" "$probe_out" || st_fail "a run whose go build fails did not print the build output redacted"
+    echo "self-test: a failing build prints its output redacted, with no absolute path"
   fi
   echo "self-test passed"
   DATA_DIR="$sweep_data_dir"
@@ -636,13 +734,13 @@ if [[ $SELF_TEST -eq 1 ]]; then
     required go
     # The data-dir proof needs no frontend: a plain build of the core.
     CORE_BIN="$WORK/bin/mcpproxy"
-    (cd "$REPO_ROOT" && go build -o "$CORE_BIN" ./cmd/mcpproxy)
+    (cd "$REPO_ROOT" && run_logged go-build-core go build -o "$CORE_BIN" ./cmd/mcpproxy)
   fi
   FIXTURE_BIN="${SKILLS_FIXTURE_BINARY:-}"
   if [[ -z "$FIXTURE_BIN" ]]; then
     required go
     FIXTURE_BIN="$WORK/bin/skillsfixture"
-    (cd "$REPO_ROOT" && go build -o "$FIXTURE_BIN" ./cmd/skillsfixture)
+    (cd "$REPO_ROOT" && run_logged go-build-fixture go build -o "$FIXTURE_BIN" ./cmd/skillsfixture)
   fi
   run_self_test
   exit 0
@@ -664,21 +762,21 @@ if [[ -z "$CORE_BIN" ]]; then
   required go
   echo "building the frontend and the core (embedded frontend) from this checkout..."
   if [[ ! -d "$REPO_ROOT/frontend/node_modules" ]]; then
-    (cd "$REPO_ROOT/frontend" && npm ci)
+    (cd "$REPO_ROOT/frontend" && run_logged frontend-npm-ci npm ci)
   fi
-  (cd "$REPO_ROOT/frontend" && npm run build)
+  (cd "$REPO_ROOT/frontend" && run_logged frontend-build npm run build)
   rm -rf "$REPO_ROOT/web/frontend"
   mkdir -p "$REPO_ROOT/web/frontend/dist"
   cp -r "$REPO_ROOT/frontend/dist/." "$REPO_ROOT/web/frontend/dist/"
   touch "$REPO_ROOT/web/frontend/dist/.gitkeep"
   CORE_BIN="$WORK/bin/mcpproxy"
-  (cd "$REPO_ROOT" && go build -o "$CORE_BIN" ./cmd/mcpproxy)
+  (cd "$REPO_ROOT" && run_logged go-build-core go build -o "$CORE_BIN" ./cmd/mcpproxy)
 fi
 FIXTURE_BIN="${SKILLS_FIXTURE_BINARY:-}"
 if [[ -z "$FIXTURE_BIN" ]]; then
   required go
   FIXTURE_BIN="$WORK/bin/skillsfixture"
-  (cd "$REPO_ROOT" && go build -o "$FIXTURE_BIN" ./cmd/skillsfixture)
+  (cd "$REPO_ROOT" && run_logged go-build-fixture go build -o "$FIXTURE_BIN" ./cmd/skillsfixture)
 fi
 for b in "$CORE_BIN" "$FIXTURE_BIN"; do
   if [[ ! -x "$b" ]]; then
@@ -750,7 +848,7 @@ fi
 HAVE_LOCK_HASH=""
 [[ -f "$LOCK_STAMP" ]] && HAVE_LOCK_HASH=$(cat "$LOCK_STAMP")
 if [[ ! -x "$SWEEP_DIR/node_modules/.bin/playwright" || "$HAVE_LOCK_HASH" != "$WANT_LOCK_HASH" ]]; then
-  (cd "$SWEEP_DIR" && npm ci)
+  (cd "$SWEEP_DIR" && run_logged sweep-npm-ci npm ci)
   printf '%s' "$WANT_LOCK_HASH" >"$LOCK_STAMP"
 fi
 PLAYWRIGHT_BIN="$SWEEP_DIR/node_modules/.bin/playwright"
@@ -758,29 +856,30 @@ if [[ -n "${PW_CHROMIUM:-}" ]]; then
   # playwright.config.ts launches this binary instead of a downloaded one.
   echo "using PW_CHROMIUM=$(say_path "$PW_CHROMIUM") (no browser download)"
 elif [[ "$(uname -s)" == "Linux" ]]; then
-  "$PLAYWRIGHT_BIN" install --with-deps chromium
+  run_logged playwright-install "$PLAYWRIGHT_BIN" install --with-deps chromium
 else
-  "$PLAYWRIGHT_BIN" install chromium
+  run_logged playwright-install "$PLAYWRIGHT_BIN" install chromium
 fi
 
 # The key reaches the spec through the environment only: it sets it in the Web
 # UI's localStorage, never in a page URL, and records no traces (the Web UI's
-# SSE URL carries it). Playwright's own output stays in the scratch dir.
-set +e
+# SSE URL carries it). Playwright's own output (the list reporter, failure stack
+# traces, launch errors with the browser's logs) is captured into the scratch
+# dir and printed redacted; its exit status is kept.
+PLAYWRIGHT_STATUS=0
 (
   cd "$SWEEP_DIR" || exit 1
-  MCPPROXY_BASE_URL="$BASE_URL" \
-  MCPPROXY_API_KEY="$API_KEY" \
-  SWEEP_SERVER_NAME="$SERVER" \
-  SKILLS_FIXTURE_URL="$FIXTURE_URL" \
-  SKILLS_SWEEP_STATE_DIR="$OUT/state" \
-  SWEEP_SCREENSHOT_DIR="$OUT/screenshots" \
-  SWEEP_REPORT_DIR="$OUT/playwright-report" \
-  PLAYWRIGHT_JSON_OUTPUT_NAME="$OUT/playwright-results.json" \
+  run_logged playwright-test env \
+    MCPPROXY_BASE_URL="$BASE_URL" \
+    MCPPROXY_API_KEY="$API_KEY" \
+    SWEEP_SERVER_NAME="$SERVER" \
+    SKILLS_FIXTURE_URL="$FIXTURE_URL" \
+    SKILLS_SWEEP_STATE_DIR="$OUT/state" \
+    SWEEP_SCREENSHOT_DIR="$OUT/screenshots" \
+    SWEEP_REPORT_DIR="$OUT/playwright-report" \
+    PLAYWRIGHT_JSON_OUTPUT_NAME="$OUT/playwright-results.json" \
     "$PLAYWRIGHT_BIN" test skills-tab.spec.ts --reporter=list,json --output "$WORK/test-results"
-)
-PLAYWRIGHT_STATUS=$?
-set -e
+) || PLAYWRIGHT_STATUS=$?
 redact_file "$OUT/playwright-results.json"
 for f in "$OUT"/state/*.json; do redact_file "$f"; done
 

@@ -176,20 +176,39 @@ export function skillsTabVisible(listing: SkillsListResponse | undefined | null)
   return listing.enabled === true && (listing.supported || (listing.skills?.length ?? 0) > 0)
 }
 
-/** Operator-facing words for an error code of the skills routes. */
-export function skillErrorNotice(code: string | undefined, message: string | undefined): string {
-  switch (code) {
+/**
+ * The error code of a failed skills request. The listing and refresh routes send
+ * error_code; approve/block/unblock answer 409 server_replaced through the shared
+ * approval error writer, whose body has only `error` ("server_replaced: ..."),
+ * like the tool approval routes. The code is then the message's prefix (the
+ * only codes that writer puts first are read; any other message has no code).
+ */
+const MESSAGE_CODE = /^(server_replaced|review_out_of_date)\b(?=:|$)/
+export function skillErrorCode(code: string | undefined, message: string | undefined): string | undefined {
+  if (code) return code
+  return message ? MESSAGE_CODE.exec(message)?.[1] : undefined
+}
+
+/** The request a notice answers: the refresh, or one of the writes. */
+export type SkillAction = 'refresh' | 'approve' | 'block' | 'unblock'
+const NOTHING_DONE: Record<SkillAction, string> = {
+  refresh: 'nothing was refreshed', approve: 'nothing was approved', block: 'nothing was blocked', unblock: 'nothing was unblocked',
+}
+
+/** Operator-facing words for a failed skills request, worded for the action it refused. */
+export function skillErrorNotice(code: string | undefined, message: string | undefined, action: SkillAction = 'refresh'): string {
+  switch (skillErrorCode(code, message)) {
     case 'review_out_of_date':
       return 'This skill changed since you opened it, so nothing was approved. The list was reloaded; review it again.'
     case 'server_replaced':
-      return 'This server was removed and added again since you opened it, so nothing was changed. The list was reloaded.'
+      return `This server was removed and added again since you opened it, so ${NOTHING_DONE[action]}. The list was reloaded.`
     // The refresh codes of POST /skills/refresh (a concurrent refresh is joined, never refused).
     case 'refresh_superseded':
       return 'The server reconnected during the refresh, so its skills are read again after the reconnect. The list was reloaded.'
     case 'skills_not_supported':
       return 'This server does not announce the skills extension, so there is nothing to refresh. The list was reloaded.'
     case 'skills_disabled':
-      return 'Skills over MCP was turned off (enable_skills), so nothing was refreshed. The list was reloaded.'
+      return `Skills over MCP was turned off (enable_skills), so ${NOTHING_DONE[action]}. The list was reloaded.`
     default:
       return message || 'The request failed'
   }

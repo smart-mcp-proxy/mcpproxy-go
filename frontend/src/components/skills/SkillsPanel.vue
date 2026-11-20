@@ -63,6 +63,10 @@
         <span>This skill changed while you were reviewing it. Approve is off until you open the new version.</span>
         <button v-if="liveSelected" class="btn btn-xs" data-test="skill-reopen" @click="open(liveSelected)">Open the new version</button>
       </div>
+      <div v-else-if="review && awaitingReload" class="alert alert-info text-sm" data-test="skill-checking" role="status">
+        <span>The server's skills changed. Approve is off until the list is reloaded.</span>
+        <button class="btn btn-xs" data-test="skill-checking-reload" :disabled="loading" @click="load">Reload</button>
+      </div>
 
       <!-- Keyed by the review: re-opening resets the viewer and the diff. -->
       <SkillDetail
@@ -71,7 +75,7 @@
         :server-name="serverName"
         :skill="review.entry"
         :busy="busy"
-        :stale="review.stale"
+        :stale="review.stale || awaitingReload"
         @approve="approve()"
         @block="setBlocked(true)"
         @unblock="setBlocked(false)"
@@ -86,7 +90,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import api from '@/services/api'
 import type { SkillEntry, SkillsListResponse } from '@/types/api'
 import { formatDateTime } from '@/utils/datetime'
-import { skillStateChip, skillExpectedHashes, skillErrorNotice, skillApprovedNotice } from '@/utils/skills'
+import { skillStateChip, skillExpectedHashes, skillErrorCode, skillErrorNotice, skillApprovedNotice, type SkillAction } from '@/utils/skills'
 import SkillDetail from './SkillDetail.vue'
 
 const props = defineProps<{ serverName: string }>()
@@ -97,6 +101,11 @@ const error = ref('')
 const notice = ref('')
 const refreshing = ref(false)
 const busy = ref(false)
+// A live skills.changed for this server: the records moved, so the version on
+// screen may be out of date. Approve is off (for the open review and for one
+// opened from the listing still on screen) until a reload for this server
+// applies; apply() then clears it, or marks the review stale if its hash moved.
+const awaitingReload = ref(false)
 
 // The review in progress: the entry and the incarnation as they were when the
 // reviewer opened the skill. A reload never swaps in a new version of the
@@ -145,6 +154,7 @@ const isCurrent = (server: string, v: number, seq?: number) =>
 function apply(data: SkillsListResponse) {
   listing.value = data
   error.value = ''
+  awaitingReload.value = false
   const r = review.value
   if (!r) return
   const live = data.skills.find(s => s.path === r.path)
@@ -199,7 +209,7 @@ async function refresh() {
   // A failed refresh (refresh_superseded, skills_not_supported, skills_disabled,
   // server_replaced, a 500) reloads the listing: the notice says it was reloaded,
   // and the stored records may have moved even though this refresh did not apply.
-  notice.value = skillErrorNotice(res.errorCode, res.error)
+  notice.value = skillErrorNotice(res.errorCode, res.error, 'refresh')
   await load()
 }
 
@@ -209,33 +219,43 @@ async function refresh() {
 // for a skill the reviewer has left is not shown on the next one (the listing is
 // still reloaded). A success notice given as a function is worded from the
 // listing reloaded after the write (null when that reload did not apply).
+// Every write takes an operation number when it starts; only the newest write
+// publishes a notice, so a slow reload after an earlier write never replaces
+// the notice of a later one (approve, then block: "Blocked." stays).
 type DoneNotice = string | ((reloaded: SkillsListResponse | null) => string)
-async function write(run: () => Promise<{ success: boolean; error?: string; errorCode?: string }>, done: DoneNotice) {
-  const server = props.serverName, v = visit, token = review.value?.token
+let writeSeq = 0
+async function write(action: SkillAction, run: () => Promise<{ success: boolean; error?: string; errorCode?: string }>, done: DoneNotice) {
+  const server = props.serverName, v = visit, token = review.value?.token, op = ++writeSeq
+  const mayPublish = () => op === writeSeq && isCurrent(server, v)
   busy.value = true
   const res = await settle(run)
   if (!isCurrent(server, v)) return
   busy.value = false
   if (!res.success || typeof done === 'string') {
     if (review.value?.token === token) {
-      notice.value = res.success ? done as string : skillErrorNotice(res.errorCode, res.error)
+      // The approval routes answer 409 server_replaced with no error_code: the
+      // code is read from the message.
+      const code = res.success ? undefined : skillErrorCode(res.errorCode, res.error)
       // The server says the open version is out of date: latch it before the
       // reload, so a reload that is pending or fails never re-enables Approve.
-      if (!res.success && STALE_CODES.has(res.errorCode ?? '')) markStale(token)
+      if (code && STALE_CODES.has(code)) markStale(token)
+      if (mayPublish()) notice.value = res.success ? done as string : skillErrorNotice(code, res.error, action)
     }
     await load()
     return
   }
   const reloaded = await load()
-  // Still the same review (or none: the reload dropped a skill that vanished).
-  if (isCurrent(server, v) && (!review.value || review.value.token === token)) notice.value = done(reloaded)
+  // Still the newest write and the same review (or none: the reload dropped a
+  // skill that vanished).
+  if (mayPublish() && (!review.value || review.value.token === token)) notice.value = done(reloaded)
 }
 
 // Approve sends exactly the hash and the incarnation the reviewer opened.
 function approve() {
   const r = review.value
-  if (!r || r.stale || busy.value) return
+  if (!r || r.stale || awaitingReload.value || busy.value) return
   return write(
+    'approve',
     () => api.approveSkills(props.serverName, [r.path], skillExpectedHashes([r.entry]), r.incarnation),
     reloaded => skillApprovedNotice(reloaded, r.path),
   )
@@ -245,6 +265,7 @@ function setBlocked(block: boolean) {
   const r = review.value
   if (!r || busy.value) return
   return write(
+    block ? 'block' : 'unblock',
     // Called as methods: the API client's methods use `this`.
     () => (block
       ? api.blockSkills(props.serverName, [r.path], r.incarnation)
@@ -257,7 +278,9 @@ function setBlocked(block: boolean) {
 // timestamp}), like every other runtime event.
 function onSkillsChanged(e: Event) {
   const detail = (e as CustomEvent).detail as { payload?: { server?: string } } | null
-  if (detail?.payload?.server === props.serverName) void load()
+  if (detail?.payload?.server !== props.serverName) return
+  awaitingReload.value = true
+  void load()
 }
 
 watch(() => props.serverName, () => {
@@ -268,6 +291,7 @@ watch(() => props.serverName, () => {
   notice.value = ''
   refreshing.value = false
   busy.value = false
+  awaitingReload.value = false
   void load()
 })
 

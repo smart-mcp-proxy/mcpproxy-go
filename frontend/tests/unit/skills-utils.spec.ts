@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   skillStateChip, skillFileDiff, lineDiff, skillExpectedHashes, readWholeSkillFile,
-  skillsTabVisible, skillErrorNotice, SKILL_CONTENT_CHANGED, LINE_DIFF_CONTEXT, LINE_DIFF_MAX_OPS,
+  skillsTabVisible, skillErrorNotice, skillErrorCode, SKILL_CONTENT_CHANGED, LINE_DIFF_CONTEXT, LINE_DIFF_MAX_OPS,
 } from '@/utils/skills'
 
 const file = (path: string, digest: string, size = 10, text = true) => ({ path, size, digest, text })
@@ -176,5 +176,31 @@ describe('skillErrorNotice', () => {
     expect(skillErrorNotice('skills_disabled', 'x')).toMatch(/turned off/i)
     expect(skillErrorNotice('skill_unusable', 'cannot approve: bad')).toBe('cannot approve: bad')
     expect(skillErrorNotice(undefined, 'plain')).toBe('plain')
+  })
+
+  // Round-6 finding 1: approve/block/unblock answer 409 server_replaced with no
+  // error_code (writeApprovalWriteError); the code is the message's prefix.
+  it('reads the code from the message when the body has no error_code', () => {
+    expect(skillErrorCode(undefined, "server_replaced: server 'srv' was removed or replaced since it was reviewed")).toBe('server_replaced')
+    expect(skillErrorCode(undefined, 'server_replaced: the server was removed or replaced since it was reviewed')).toBe('server_replaced')
+    expect(skillErrorCode(undefined, 'review_out_of_date: skill review of server srv is out of date (changed since the review: a); nothing was approved')).toBe('review_out_of_date')
+    expect(skillErrorCode('skill_unusable', 'server_replaced: x')).toBe('skill_unusable')
+    expect(skillErrorCode(undefined, 'Failed to approve skills: server_replaced: x')).toBeUndefined()
+    expect(skillErrorCode(undefined, 'server_replacedx: y')).toBeUndefined()
+    expect(skillErrorCode(undefined, undefined)).toBeUndefined()
+    expect(skillErrorNotice(undefined, "server_replaced: server 'srv' was removed or replaced since it was reviewed", 'block')).toMatch(/removed and added again/i)
+  })
+
+  // Round-6 finding 4: the notice names the action that was refused.
+  it('words skills_disabled and server_replaced per action', () => {
+    expect(skillErrorNotice('skills_disabled', 'x')).toMatch(/nothing was refreshed/)
+    expect(skillErrorNotice('skills_disabled', 'x', 'refresh')).toMatch(/nothing was refreshed/)
+    for (const [action, verb] of [['approve', 'approved'], ['block', 'blocked'], ['unblock', 'unblocked']] as const) {
+      const n = skillErrorNotice('skills_disabled', 'x', action)
+      expect(n).toMatch(/turned off/i)
+      expect(n).toContain(`nothing was ${verb}`)
+      expect(n).not.toMatch(/refreshed/)
+      expect(skillErrorNotice('server_replaced', 'x', action)).toContain(`nothing was ${verb}`)
+    }
   })
 })

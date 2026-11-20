@@ -15,6 +15,20 @@ const mountPanel = (serverName = 'srv') => mount(SkillsPanel, { props: { serverN
 // Round-3 finding 1: every skills.changed goes through the real store's re-dispatch of the core's frame.
 let emitSkillsChanged: (server: string) => void = () => { throw new Error('not connected') }
 
+// Round-6 finding 1: the bodies the core really sends, as the API client returns
+// them. approve/block/unblock answer 409 server_replaced through
+// writeApprovalWriteError (internal/httpapi/server_incarnation.go), which has NO
+// error_code: the runtime's ServerReplacedError text, or the sentinel's text.
+// review_out_of_date (approve only) does carry error_code.
+const REPLACED = { success: false, error: "server_replaced: server 'srv' was removed or replaced since it was reviewed" }
+const REPLACED_SENTINEL = { success: false, error: 'server_replaced: the server was removed or replaced since it was reviewed' }
+const OUT_OF_DATE = {
+  success: false,
+  error: 'review_out_of_date: skill review of server srv is out of date (changed since the review: a); nothing was approved',
+  errorCode: 'review_out_of_date',
+}
+const DISABLED = { success: false, error: 'skills_disabled: enable_skills is off; set enable_skills: true in the configuration', errorCode: 'skills_disabled' }
+
 describe('SkillsPanel', () => {
   beforeEach(async () => {
     vi.clearAllMocks()
@@ -118,7 +132,7 @@ describe('SkillsPanel', () => {
 
   it('a 409 review_out_of_date reloads the list and says nothing was approved, with no retry', async () => {
     m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([makeSkill('a', { current_hash: 'sk1-1' })])))
-    m(api.approveSkills).mockResolvedValue({ success: false, error: 'review_out_of_date: x', errorCode: 'review_out_of_date' })
+    m(api.approveSkills).mockResolvedValue(OUT_OF_DATE)
     const w = mountPanel(); await flushPromises()
     await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
     m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('a', { current_hash: 'sk1-2', status: 'changed' })])))
@@ -129,15 +143,72 @@ describe('SkillsPanel', () => {
     expect(w.get('[data-test="skill-chip-a"]').text()).toBe('Changed')
   })
 
-  it('a 409 server_replaced reloads the list and says so', async () => {
+  // Round-6 finding 1: the real 409 server_replaced body of every write route has
+  // no error_code; the code is read from the message, the notice names it and the
+  // review is latched stale.
+  for (const [action, body] of [
+    ['approve', REPLACED], ['approve', REPLACED_SENTINEL], ['block', REPLACED], ['unblock', REPLACED],
+  ] as const) {
+    it(`a real 409 server_replaced on ${action} (${body.error.slice(17, 40)}…) reloads, says so and latches the review stale`, async () => {
+      const blocked = action === 'unblock'
+      m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([makeSkill('a', { blocked })])))
+      const fn = action === 'approve' ? api.approveSkills : action === 'block' ? api.blockSkills : api.unblockSkills
+      m(fn).mockResolvedValue(body)
+      const w = mountPanel(); await flushPromises()
+      await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
+      // The reload after the refusal fails: the latch alone keeps Approve off.
+      m(api.getServerSkills).mockResolvedValue({ success: false, error: 'reload boom' })
+      await w.get(`[data-test="skill-${action}"]`).trigger('click'); await flushPromises()
+      expect(fn).toHaveBeenCalledTimes(1) // no retry
+      expect(api.getServerSkills).toHaveBeenCalledTimes(2)
+      const notice = w.get('[data-test="skills-notice"]').text()
+      expect(notice).toMatch(/removed and added again/i)
+      expect(notice).not.toContain('server_replaced:')
+      expect(w.find('[data-test="skill-stale"]').exists()).toBe(true)
+      if (!blocked) expect(w.get('[data-test="skill-approve"]').attributes('disabled')).toBeDefined()
+    })
+  }
+
+  // Round-6 finding 4: a write refused with skills_disabled says what was not done.
+  for (const [action, verb] of [['approve', 'approved'], ['block', 'blocked'], ['unblock', 'unblocked']] as const) {
+    it(`a 409 skills_disabled on ${action} says nothing was ${verb}, not refreshed`, async () => {
+      m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('a', { blocked: action === 'unblock' })])))
+      const fn = action === 'approve' ? api.approveSkills : action === 'block' ? api.blockSkills : api.unblockSkills
+      m(fn).mockResolvedValue(DISABLED)
+      const w = mountPanel(); await flushPromises()
+      await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
+      await w.get(`[data-test="skill-${action}"]`).trigger('click'); await flushPromises()
+      const notice = w.get('[data-test="skills-notice"]').text()
+      expect(notice).toMatch(/turned off/i)
+      expect(notice).toContain(`nothing was ${verb}`)
+      expect(notice).not.toMatch(/refreshed/i)
+    })
+  }
+
+  it('a 409 skills_disabled on refresh still says nothing was refreshed', async () => {
     m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('a')])))
-    m(api.approveSkills).mockResolvedValue({ success: false, error: 'server_replaced: x', errorCode: 'server_replaced' })
+    const w = mountPanel(); await flushPromises()
+    m(api.refreshServerSkills).mockResolvedValueOnce(DISABLED)
+    await w.get('[data-test="skills-refresh"]').trigger('click'); await flushPromises()
+    expect(w.get('[data-test="skills-notice"]').text()).toMatch(/nothing was refreshed/)
+  })
+
+  // Round-6 finding 3: only the newest write publishes its notice.
+  it('a late approve reload never overwrites the notice of a newer block', async () => {
+    m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([makeSkill('a')])))
+    m(api.approveSkills).mockResolvedValue(ok({ approved: 1 }))
+    m(api.blockSkills).mockResolvedValue(ok({ changed: 1 }))
+    let releaseApproveReload: (v: unknown) => void = () => {}
     const w = mountPanel(); await flushPromises()
     await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
+    m(api.getServerSkills).mockReturnValueOnce(new Promise(r => { releaseApproveReload = r }))
     await w.get('[data-test="skill-approve"]').trigger('click'); await flushPromises()
-    expect(api.approveSkills).toHaveBeenCalledTimes(1) // no retry
-    expect(api.getServerSkills).toHaveBeenCalledTimes(2)
-    expect(w.get('[data-test="skills-notice"]').text()).toMatch(/removed and added again/i)
+    // Approve answered; its reload is in flight. The reviewer blocks.
+    m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([makeSkill('a', { status: 'approved', blocked: true })])))
+    await w.get('[data-test="skill-block"]').trigger('click'); await flushPromises()
+    expect(w.get('[data-test="skills-notice"] span').text()).toBe('Blocked.')
+    releaseApproveReload(ok(makeListing([makeSkill('a', { status: 'approved', available: true })]))); await flushPromises()
+    expect(w.get('[data-test="skills-notice"] span').text()).toBe('Blocked.')
   })
 
   it('a 422 skill_unusable shows the message', async () => {
@@ -342,7 +413,7 @@ describe('SkillsPanel', () => {
     await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
     await w.get('[data-test="skill-approve"]').trigger('click'); await flushPromises()
     await w.get('[data-test="skill-row-b"]').trigger('click'); await flushPromises()
-    release({ success: false, error: 'review_out_of_date: x', errorCode: 'review_out_of_date' }); await flushPromises()
+    release(OUT_OF_DATE); await flushPromises()
     expect(w.find('[data-test="skills-notice"]').exists()).toBe(false)
     expect(w.get('[data-test="skill-name"]').text()).toBe('b')
     expect(api.getServerSkills).toHaveBeenCalledTimes(2)
@@ -462,13 +533,19 @@ describe('SkillsPanel', () => {
     })
     const signals: Array<[string, (w: ReturnType<typeof mountPanel>) => Promise<void>]> = [
       ['approve 409 review_out_of_date', async w => {
-        m(api.approveSkills).mockResolvedValueOnce({ success: false, error: 'review_out_of_date: x', errorCode: 'review_out_of_date' })
+        m(api.approveSkills).mockResolvedValueOnce(OUT_OF_DATE)
         await w.get('[data-test="skill-approve"]').trigger('click'); await flushPromises()
       }],
+      // Round-6 finding 1: the real body, with no error_code.
       ['approve 409 server_replaced', async w => {
-        m(api.approveSkills).mockResolvedValueOnce({ success: false, error: 'server_replaced: x', errorCode: 'server_replaced' })
+        m(api.approveSkills).mockResolvedValueOnce(REPLACED)
         await w.get('[data-test="skill-approve"]').trigger('click'); await flushPromises()
       }],
+      ['block 409 server_replaced', async w => {
+        m(api.blockSkills).mockResolvedValueOnce(REPLACED)
+        await w.get('[data-test="skill-block"]').trigger('click'); await flushPromises()
+      }],
+
       ['a viewer part of another version', async w => {
         m(api.getSkillContent).mockResolvedValue(ok({ text: 'x', offset: 0, size: 1, digest: 'sha256:moved' }))
         await w.get('[data-test="skill-view-SKILL.md"]').trigger('click'); await flushPromises()
@@ -505,6 +582,67 @@ describe('SkillsPanel', () => {
       }
     }
 
+    // Round-6 finding 2: a live skills.changed says the records moved; until a
+    // reload for this server applies, Approve is off for the open review (and for
+    // a review opened from the listing still on screen).
+    describe('after a live skills.changed', () => {
+      const openA = async () => {
+        m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([changedSkill()])))
+        const w = mountPanel(); await flushPromises()
+        await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
+        expect(w.get('[data-test="skill-approve"]').attributes('disabled')).toBeUndefined()
+        return w
+      }
+      const approveIsOff = async (w: ReturnType<typeof mountPanel>) => {
+        expect(w.get('[data-test="skill-approve"]').attributes('disabled')).toBeDefined()
+        expect(w.find('[data-test="skill-checking"]').exists()).toBe(true)
+        await w.get('[data-test="skill-approve"]').trigger('click'); await flushPromises()
+        expect(api.approveSkills).not.toHaveBeenCalled()
+      }
+
+      it('reload pending: Approve is off; the reload applying with the same hash turns it back on', async () => {
+        const w = await openA()
+        let release: (v: unknown) => void = () => {}
+        m(api.getServerSkills).mockReturnValueOnce(new Promise(r => { release = r }))
+        emitSkillsChanged('srv'); await flushPromises()
+        await approveIsOff(w)
+        release(ok(makeListing([changedSkill()]))); await flushPromises()
+        expect(w.find('[data-test="skill-checking"]').exists()).toBe(false)
+        expect(w.find('[data-test="skill-stale"]').exists()).toBe(false)
+        expect(w.get('[data-test="skill-approve"]').attributes('disabled')).toBeUndefined()
+      })
+
+      it('reload failed: Approve stays off, also after re-opening, until a reload applies', async () => {
+        const w = await openA()
+        m(api.getServerSkills).mockResolvedValueOnce({ success: false, error: 'reload boom' })
+        emitSkillsChanged('srv'); await flushPromises()
+        await approveIsOff(w)
+        await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
+        await approveIsOff(w)
+        // The banner's reload applies the same version: Approve is back on.
+        m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([changedSkill()])))
+        await w.get('[data-test="skill-checking-reload"]').trigger('click'); await flushPromises()
+        expect(w.find('[data-test="skill-checking"]').exists()).toBe(false)
+        expect(w.get('[data-test="skill-approve"]').attributes('disabled')).toBeUndefined()
+      })
+
+      it('reload applies a new hash: the review is stale as before', async () => {
+        const w = await openA()
+        m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([{ ...changedSkill(), current_hash: 'sk1-moved' }])))
+        emitSkillsChanged('srv'); await flushPromises()
+        expect(w.find('[data-test="skill-checking"]').exists()).toBe(false)
+        expect(w.find('[data-test="skill-stale"]').exists()).toBe(true)
+        expect(w.get('[data-test="skill-approve"]').attributes('disabled')).toBeDefined()
+      })
+
+      it('a skills.changed for another server does not turn Approve off', async () => {
+        const w = await openA()
+        emitSkillsChanged('other'); await flushPromises()
+        expect(w.find('[data-test="skill-checking"]').exists()).toBe(false)
+        expect(w.get('[data-test="skill-approve"]').attributes('disabled')).toBeUndefined()
+      })
+    })
+
     it('a stale signal for a review the reviewer has left does not mark the new one', async () => {
       m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('a'), makeSkill('b')])))
       let release: (v: unknown) => void = () => {}
@@ -513,7 +651,7 @@ describe('SkillsPanel', () => {
       await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
       await w.get('[data-test="skill-approve"]').trigger('click'); await flushPromises()
       await w.get('[data-test="skill-row-b"]').trigger('click'); await flushPromises()
-      release({ success: false, error: 'review_out_of_date: x', errorCode: 'review_out_of_date' }); await flushPromises()
+      release(OUT_OF_DATE); await flushPromises()
       expect(w.find('[data-test="skill-stale"]').exists()).toBe(false)
       expect(w.get('[data-test="skill-approve"]').attributes('disabled')).toBeUndefined()
     })
