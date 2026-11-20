@@ -1262,49 +1262,59 @@ func (r *Runtime) triggerSkillsRefreshAll() {
 	}
 }
 
-// onSkillsConfigChanged refreshes after a config change. A server is refreshed
-// when it becomes eligible to serve skills (enable_skills turned on, its
-// expose_skills turned on, it was enabled or left quarantine), when its
-// effective trust mode changed (a pending skill may now be approved, or a
-// changed one held), and, for every eligible server, when quarantine_enabled
-// changed. Switching off or narrowing never refreshes.
-// announceSkillsExposureChanges publishes a skills change (skills.changed plus
-// the administrator-only review.changed) for every server whose skills are
-// read under one configuration and not the other: enable_skills moved, or the
-// server's enabled, quarantine or expose_skills moved, or it was added or
-// removed. The held-skill counts of the review queue and the attention list
-// follow that rule (Runtime.heldSkills), and the stored records do not change,
-// so no refresh would announce it: a refresh that finds the records as they
-// were publishes nothing (review round 1, finding 2).
+// Notify each affected Skills tab when exposure changes. Only servers with held
+// skills affect the review queue, which receives one notification per commit.
 func (r *Runtime) announceSkillsExposureChanges(oldCfg, newCfg *config.Config) {
-	if oldCfg == nil || newCfg == nil {
+	if oldCfg == nil || newCfg == nil || r.storageManager == nil {
 		return
 	}
 	seen := map[string]bool{}
-	var names []string
+	var names, reviewNames []string
 	for _, cfg := range []*config.Config{oldCfg, newCfg} {
 		for _, sc := range cfg.Servers {
 			if sc == nil || seen[sc.Name] {
 				continue
 			}
 			seen[sc.Name] = true
-			if skillsServerExposed(oldCfg, skillsServerConfig(oldCfg, sc.Name)) != skillsServerExposed(newCfg, skillsServerConfig(newCfg, sc.Name)) {
-				names = append(names, sc.Name)
+			oldSc, newSc := skillsServerConfig(oldCfg, sc.Name), skillsServerConfig(newCfg, sc.Name)
+			wasRead, isRead := skillsServerExposed(oldCfg, oldSc), skillsServerExposed(newCfg, newSc)
+			if wasRead == isRead {
+				continue
+			}
+			names = append(names, sc.Name)
+			readCfg, readSc := newCfg, newSc
+			if wasRead {
+				readCfg, readSc = oldCfg, oldSc
+			}
+			if pending, changed, _, err := r.heldSkills(readCfg, readSc); err == nil && pending+changed > 0 {
+				reviewNames = append(reviewNames, sc.Name)
 			}
 		}
 	}
+	if len(names) == 0 {
+		return
+	}
 	sort.Strings(names)
+	r.skills.bumpIndexGeneration()
 	for _, name := range names {
 		var counts map[string]int
-		if r.storageManager != nil {
-			if recs, err := r.ListSkillRecords(name); err == nil {
-				counts = r.skillCounts(name, recs)
-			}
+		if recs, err := r.ListSkillRecords(name); err == nil {
+			counts = r.skillCounts(name, recs)
 		}
-		r.publishSkillsChanged(name, counts)
+		r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": name, "counts": counts}))
+	}
+	if len(reviewNames) > 0 {
+		sort.Strings(reviewNames)
+		r.publishEvent(newEvent(EventTypeReviewChanged, map[string]any{"servers": reviewNames, ReviewChangedSkillsKey: true}))
 	}
 }
 
+// onSkillsConfigChanged refreshes after a config change. A server is refreshed
+// when it becomes eligible to serve skills (enable_skills turned on, its
+// expose_skills turned on, it was enabled or left quarantine), when its
+// effective trust mode changed (a pending skill may now be approved, or a
+// changed one held), and, for every eligible server, when quarantine_enabled
+// changed. Switching off or narrowing never refreshes.
 func (r *Runtime) onSkillsConfigChanged(oldCfg, newCfg *config.Config) {
 	// Any configuration change may alter which skills are available (the
 	// switch, a server's expose_skills, enabled, quarantine, add or remove):

@@ -16,6 +16,11 @@ type reviewReader interface {
 	GetServerReview(ctx context.Context, serverName string) (*internalRuntime.ServerReview, error)
 }
 
+// reviewQueueWithSkillsReader is the optional caller-aware queue read.
+type reviewQueueWithSkillsReader interface {
+	GetReviewQueueWithSkills(ctx context.Context, includeSkills bool) (*internalRuntime.ReviewQueue, error)
+}
+
 // handleGetReviewQueue godoc
 // @Summary Get the server review queue
 // @Description Returns one row per quarantined server, trusted server with pending or changed tools, or (Spec 125) server with held skills (kind skill_review; skills_pending / skills_changed counts). Scoped callers see only servers they may enumerate (for a profile-pinned token: servers within its pin), with count recomputed; held-skill counts and skill_review rows are administrator-only.
@@ -32,7 +37,17 @@ func (s *Server) handleGetReviewQueue(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusServiceUnavailable, "Review service unavailable")
 		return
 	}
-	queue, err := reader.GetReviewQueue(r.Context())
+	// Spec 125 FR-019a: a caller that may not see held skills gets a queue
+	// composed without reading any skill approval, so the cost of its request
+	// does not depend on how many skills are held. The narrowing below stays
+	// for a controller that offers only the full queue.
+	var queue *internalRuntime.ReviewQueue
+	var err error
+	if aware, ok := s.controller.(reviewQueueWithSkillsReader); ok {
+		queue, err = aware.GetReviewQueueWithSkills(r.Context(), skillVisibleTo(r.Context()))
+	} else {
+		queue, err = reader.GetReviewQueue(r.Context())
+	}
 	if err != nil {
 		s.logger.Errorw("Failed to load review queue", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to load review queue")

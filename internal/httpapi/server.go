@@ -4655,6 +4655,10 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		initialIDs = append(initialIDs, item.ID)
 	}
 	lastAttentionIDs = attentionIDSet(initialIDs)
+	// Administrators also follow content changes with stable ids (a count in
+	// a summary; Spec 125 review round 2). For an administrator the visible
+	// list is the whole list, so this equals the runtime's fingerprint of it.
+	lastAttentionFingerprint := internalRuntime.AttentionFingerprint(visibleAttention)
 	initialAttention := map[string]interface{}{
 		"payload":   map[string]interface{}{"count": len(initialIDs), "ids": initialIDs},
 		"timestamp": time.Now().Unix(),
@@ -4747,10 +4751,20 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 			if evt.Type == internalRuntime.EventTypeAttentionChanged {
 				ids, _ := rendered["ids"].([]string)
 				current := attentionIDSet(ids)
-				if lastAttentionIDs != nil && attentionIDSetsEqual(lastAttentionIDs, current) {
+				// An administrator also gets a frame when the content moved
+				// with the same ids; a scoped caller only when its own
+				// narrowed ids moved (FR-019a: the fingerprint covers items
+				// it cannot see).
+				admin := !auth.IsScopedCaller(callerCtx)
+				fingerprint, _ := evt.Payload[internalRuntime.AttentionFingerprintKey].(string)
+				contentMoved := admin && fingerprint != "" && fingerprint != lastAttentionFingerprint
+				if lastAttentionIDs != nil && attentionIDSetsEqual(lastAttentionIDs, current) && !contentMoved {
 					continue
 				}
 				lastAttentionIDs = current
+				if admin && fingerprint != "" {
+					lastAttentionFingerprint = fingerprint
+				}
 			}
 
 			eventPayload := map[string]interface{}{

@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/url"
 	"os"
 	"sync"
@@ -71,6 +73,8 @@ type attentionSubscriber struct {
 	clients []AttentionClient
 	state   map[string]attentionServerState
 	lastIDs map[string]struct{}
+	// lastFingerprint is AttentionFingerprint of the last published list.
+	lastFingerprint string
 	// firstSeen records when each client warning (code + client id) first
 	// appeared, for the item's `since`; pruned when the warning clears. It
 	// resets on restart, like state.
@@ -96,6 +100,7 @@ func newAttentionSubscriber(rt *Runtime, debounce time.Duration) *attentionSubsc
 		timerCap:                 AttentionTimerCap,
 		state:                    make(map[string]attentionServerState),
 		lastIDs:                  make(map[string]struct{}),
+		lastFingerprint:          AttentionFingerprint(nil),
 		firstSeen:                make(map[string]time.Time),
 	}
 	if rt != nil && rt.clientsService != nil {
@@ -296,17 +301,24 @@ func (a *attentionSubscriber) recompute() time.Duration {
 	a.snapshot.Store(&itemsCopy)
 
 	ids := attentionIDSet(items)
+	fingerprint := AttentionFingerprint(items)
 	a.mu.Lock()
-	changed := !equalStringSets(ids, a.lastIDs)
+	// Spec 125 review round 2: a count change keeps the ids (one of three
+	// pending skills approved), so the content fingerprint is compared too.
+	// internal/httpapi uses the fingerprint for administrators only; a scoped
+	// subscriber's frame is still suppressed by its own narrowed ids.
+	changed := !equalStringSets(ids, a.lastIDs) || fingerprint != a.lastFingerprint
 	if changed {
 		a.lastIDs = ids
+		a.lastFingerprint = fingerprint
 	}
 	a.mu.Unlock()
 
 	if changed {
 		a.rt.publishEvent(newEvent(EventTypeAttentionChanged, map[string]any{
-			"count": len(items),
-			"items": AttentionEventItems(items),
+			"count":                 len(items),
+			"items":                 AttentionEventItems(items),
+			AttentionFingerprintKey: fingerprint,
 		}))
 	}
 
@@ -500,6 +512,26 @@ func attentionIDSet(items []contracts.AttentionItem) map[string]struct{} {
 		out[it.ID] = struct{}{}
 	}
 	return out
+}
+
+// AttentionFingerprintKey is the attention.changed payload key carrying
+// AttentionFingerprint of the whole (administrator) list. Never rendered to a
+// subscriber; internal/httpapi compares it for administrators only.
+const AttentionFingerprintKey = "fingerprint"
+
+// AttentionFingerprint is a digest of what each item shows (id, summary,
+// detail, fix), in list order. It moves when a count in a summary moves even
+// though the ids do not.
+func AttentionFingerprint(items []contracts.AttentionItem) string {
+	h := sha256.New()
+	for _, it := range items {
+		for _, part := range []string{it.ID, it.Summary, it.Detail, it.Fix.Verb, it.Fix.Label, it.Fix.Target} {
+			h.Write([]byte(part))
+			h.Write([]byte{0})
+		}
+		h.Write([]byte{1})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func AttentionEventItems(items []contracts.AttentionItem) []AttentionEventItem {

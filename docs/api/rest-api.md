@@ -1055,7 +1055,7 @@ Administrators see every item. A scoped caller (an agent token, or a non-admin u
 }
 ```
 
-Items are sorted by `rank` ascending, then by `subject.name`; `id` (`kind:type:subject[:state]`) is stable, so a client can diff successive lists. `fix.target` is a Web UI route, and a fix never approves anything by itself. The SSE event `attention.changed` (`{count, ids}`) is emitted when the set of ids changes; see [Real-time Updates](#real-time-updates).
+Items are sorted by `rank` ascending, then by `subject.name`; `id` (`kind:type:subject[:state]`) is stable, so a client can diff successive lists. `fix.target` is a Web UI route, and a fix never approves anything by itself. The SSE event `attention.changed` (`{count, ids}`) sends the current visible ids at connection time and when that set changes. Administrators also receive an update when item details change with the same ids, for example when a held-skill count decreases; see [Real-time Updates](#real-time-updates).
 
 ### Review
 

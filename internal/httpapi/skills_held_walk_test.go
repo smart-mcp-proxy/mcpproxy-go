@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -124,6 +125,48 @@ func heldSkillsReviewServer(t *testing.T) (*Server, string) {
 		files: map[string][]byte{}, queue: heldSkillQueue(),
 	}
 	return scopedAgentServer(t, ctrl, []string{"alpha", "beta"})
+}
+
+// skillAwareQueueController records which queue a request asked for.
+type skillAwareQueueController struct {
+	*skillsTestController
+	mu    sync.Mutex
+	asked []bool
+	plain int
+}
+
+func (c *skillAwareQueueController) GetReviewQueue(ctx context.Context) (*internalRuntime.ReviewQueue, error) {
+	c.mu.Lock()
+	c.plain++
+	c.mu.Unlock()
+	return c.skillsTestController.GetReviewQueue(ctx)
+}
+
+func (c *skillAwareQueueController) GetReviewQueueWithSkills(ctx context.Context, includeSkills bool) (*internalRuntime.ReviewQueue, error) {
+	c.mu.Lock()
+	c.asked = append(c.asked, includeSkills)
+	c.mu.Unlock()
+	return c.skillsTestController.GetReviewQueue(ctx)
+}
+
+// Review round 2, finding 3: the handler asks the composer for held skills
+// only for a caller that may see them, so a scoped request never reads skill
+// approvals (its cost cannot depend on how many skills are held).
+func TestReviewQueue_ScopedCallerAsksForNoSkills(t *testing.T) {
+	cfg := scopeFixtureConfig(false)
+	cfg.EnableSkills = true
+	inner := &skillsTestController{
+		scopeController: scopeController{cfg: cfg, servers: scopeFixtureServers(), withManagement: true},
+		recs:            map[string][]*storage.SkillApprovalRecord{}, status: map[string]internalRuntime.SkillsServerStatus{},
+		files: map[string][]byte{}, queue: heldSkillQueue(),
+	}
+	ctrl := &skillAwareQueueController{skillsTestController: inner}
+	srv, token := scopedAgentServer(t, ctrl, []string{"alpha", "beta"})
+
+	require.Equal(t, http.StatusOK, scopeGet(t, srv, "/api/v1/review", token).Code)
+	require.Equal(t, http.StatusOK, skillsDo(t, srv, http.MethodGet, "/api/v1/review", scopeAdminAPIKey).Code)
+	assert.Equal(t, []bool{false, true}, ctrl.asked)
+	assert.Zero(t, ctrl.plain, "the caller-aware read is used when the controller offers it")
 }
 
 func TestReviewQueue_HeldSkillsAreForAdministratorsOnly(t *testing.T) {
@@ -290,4 +333,57 @@ func TestSSE_AttentionChangedFromAHeldSkillAloneSendsAScopedSubscriberNothing(t 
 	assert.Contains(t, names(<-adminDone), string(internalRuntime.EventTypeAttentionChanged), "the administrator's set moved")
 	assert.NotContains(t, names(<-agentDone), string(internalRuntime.EventTypeAttentionChanged),
 		"a scoped subscriber whose narrowed set did not move gets no frame")
+}
+
+// Review round 2, finding 2: approving one of three pending skills keeps the
+// id skill_review:server:alpha:pending but changes its count. The runtime
+// publishes the change with a new content fingerprint; an administrator gets
+// a frame (Home refetches the new count), a scoped subscriber, whose own ids
+// did not move, still gets none.
+func TestSSE_AttentionCountChangeWithStableIDsReachesOnlyAdministrators(t *testing.T) {
+	tool := contracts.AttentionItem{ID: "tool_review:server:alpha:pending", Kind: internalRuntime.AttentionKindToolReview,
+		Subject: contracts.AttentionSubject{Type: "server", ID: "alpha", Name: "alpha"}, Summary: "alpha: 3 new tool(s), needs review"}
+	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: scopeFixtureServers(), withManagement: true,
+		attentionItemsOverride: []contracts.AttentionItem{tool}}
+	srv, token := scopedAgentServer(t, ctrl, []string{"alpha"})
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	adminBody, adminClose := sseSubscribe(t, ts.URL, scopeAdminAPIKey)
+	defer adminClose()
+	readSSEUntil(t, adminBody, "attention.changed", time.Now().Add(5*time.Second))
+	agentBody, agentClose := sseSubscribe(t, ts.URL, token)
+	defer agentClose()
+	readSSEUntil(t, agentBody, "attention.changed", time.Now().Add(5*time.Second))
+	require.Eventually(t, func() bool { return ctrl.subscriberCount() == 2 }, 5*time.Second, 20*time.Millisecond)
+
+	recount := tool
+	recount.Summary = "alpha: 2 new tool(s), needs review"
+	items := []contracts.AttentionItem{recount}
+	evt := internalRuntime.Event{Type: internalRuntime.EventTypeAttentionChanged, Timestamp: time.Now(),
+		Payload: map[string]any{"count": 1, "items": internalRuntime.AttentionEventItems(items),
+			internalRuntime.AttentionFingerprintKey: internalRuntime.AttentionFingerprint(items)}}
+	sentinel := internalRuntime.Event{Type: internalRuntime.EventTypeReviewChanged, Timestamp: time.Now(),
+		Payload: map[string]any{"server": "alpha"}}
+
+	deadline := time.Now().Add(10 * time.Second)
+	isSentinel := func(f sseEvent) bool { return f.Name == string(internalRuntime.EventTypeReviewChanged) }
+	adminDone := make(chan []sseEvent, 1)
+	go func() { adminDone <- readSSEFramesUntil(t, adminBody, deadline, isSentinel) }()
+	agentDone := make(chan []sseEvent, 1)
+	go func() { agentDone <- readSSEFramesUntil(t, agentBody, deadline, isSentinel) }()
+	ctrl.publishToAll(evt)
+	ctrl.publishToAll(sentinel)
+
+	count := func(frames []sseEvent) int {
+		n := 0
+		for _, f := range frames {
+			if f.Name == string(internalRuntime.EventTypeAttentionChanged) {
+				n++
+			}
+		}
+		return n
+	}
+	assert.Equal(t, 1, count(<-adminDone), "the administrator learns the count moved")
+	assert.Zero(t, count(<-agentDone), "a scoped subscriber's suppression is by its own ids only")
 }

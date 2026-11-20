@@ -2,12 +2,15 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/bbolt"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
@@ -138,6 +141,71 @@ func TestReviewQueue_ASkillsReadFailureLeavesTheToolRows(t *testing.T) {
 	assert.Zero(t, both.SkillsPending+both.SkillsChanged, "a failed read counts no skills")
 	assert.Equal(t, ReviewKindSkillReview, rows["skills-only"].Kind, "other servers are unaffected")
 	assert.Equal(t, 3, queue.Count)
+}
+
+// Review round 2, finding 2: a count change keeps the item ids (approving one
+// of three pending skills leaves skill_review:server:<name>:pending) but must
+// still publish attention.changed, with a content fingerprint that moved, so
+// administrators refetch the new count.
+func TestAttentionSubscriber_ACountChangeWithStableIDsIsPublished(t *testing.T) {
+	rt := heldSkillsRuntime(t, true)
+	a := newAttentionSubscriber(rt, time.Millisecond)
+	a.clientSource = nil
+	a.servers = []contracts.Server{contractsServerForAttention(skillsServerConfig(rt.Config(), "skills-only"))}
+	ch := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(ch)
+
+	next := func() map[string]any {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case evt := <-ch:
+				if evt.Type == EventTypeAttentionChanged {
+					return evt.Payload
+				}
+			case <-deadline:
+				t.Fatal("no attention.changed")
+				return nil
+			}
+		}
+	}
+	a.recompute()
+	first := next()
+	saveHeldSkill(t, rt, "skills-only", "p3", storage.SkillStatusPending)
+	a.recompute()
+	second := next()
+	assert.Equal(t, first["items"], second["items"], "the ids did not move")
+	assert.NotEmpty(t, second[AttentionFingerprintKey])
+	assert.NotEqual(t, first[AttentionFingerprintKey], second[AttentionFingerprintKey])
+}
+
+// Review round 2, finding 3 (FR-019a timing): a queue composed for a caller
+// that may not see held skills reads no skill approvals at all, so its cost
+// does not grow with held skills. A broken skill record proves it: the
+// tool-only queue neither notices it (no warning) nor shows any skill data.
+func TestReviewQueue_WithoutSkillsReadsNoSkillApprovals(t *testing.T) {
+	rt := heldSkillsRuntime(t, true)
+	core, logs := observer.New(zap.WarnLevel)
+	rt.logger = zap.New(core)
+	require.NoError(t, rt.storageManager.GetDB().Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte(storage.SkillApprovalBucket)).Put([]byte("both:skill://broken/SKILL.md"), []byte("{not json"))
+	}))
+
+	queue, err := rt.GetReviewQueueWithSkills(context.Background(), false)
+	require.NoError(t, err)
+	for _, row := range queue.Servers {
+		assert.NotEqual(t, ReviewKindSkillReview, row.Kind)
+		assert.Zero(t, row.SkillsPending+row.SkillsChanged)
+	}
+	assert.Equal(t, 2, queue.Count, "both (tools) and quarantined")
+	assert.Zero(t, logs.Len(), "the tool-only queue must not read skill records: %v", logs.All())
+
+	// The administrator's queue does read them (and logs the broken one).
+	full, err := rt.GetReviewQueueWithSkills(context.Background(), true)
+	require.NoError(t, err)
+	assert.Equal(t, 3, full.Count)
+	assert.NotZero(t, logs.Len())
 }
 
 func TestAttentionSkillReviewOneItemPerNonZeroState(t *testing.T) {
@@ -286,11 +354,29 @@ func TestAttentionSubscriber_SkillsChangedDoesNotPostponeAPendingRecompute(t *te
 	}
 }
 
-// Review round 1, finding 2: the held-skill counts depend on enable_skills
-// and on a server's enabled and expose_skills, so a commit that moves whether
-// a server's skills are read announces a skills review change (and a skills
-// change, for the Skills tab and the attention list) for exactly those
-// servers. The skills marker keeps the frame administrator-only.
+// skillsAnnouncements collects, for a short window after a commit, the
+// servers named by skills.changed and every skills-marked review.changed.
+func skillsAnnouncements(t *testing.T, ch <-chan Event, window time.Duration) (skills []string, reviews []map[string]any) {
+	t.Helper()
+	deadline := time.After(window)
+	for {
+		select {
+		case evt := <-ch:
+			switch evt.Type {
+			case EventTypeSkillsChanged:
+				name, _ := evt.Payload["server"].(string)
+				skills = append(skills, name)
+			case EventTypeReviewChanged:
+				if marked, _ := evt.Payload[ReviewChangedSkillsKey].(bool); marked {
+					reviews = append(reviews, evt.Payload)
+				}
+			}
+		case <-deadline:
+			return skills, reviews
+		}
+	}
+}
+
 func TestSkillsExposureChangeAnnouncesAReviewChange(t *testing.T) {
 	off := false
 	for _, tc := range []struct {
@@ -299,12 +385,13 @@ func TestSkillsExposureChangeAnnouncesAReviewChange(t *testing.T) {
 		mutate func(*CommitTx) error
 		want   []string
 	}{
+		// "settled" affects the Skills tab only.
 		{"enable_skills on", false, func(tx *CommitTx) error {
 			return tx.MutateGlobal(func(c *config.Config) error { c.EnableSkills = true; return nil })
-		}, []string{"both", "skills-only", "settled"}},
+		}, []string{"both", "skills-only"}},
 		{"enable_skills off", true, func(tx *CommitTx) error {
 			return tx.MutateGlobal(func(c *config.Config) error { c.EnableSkills = false; return nil })
-		}, []string{"both", "skills-only", "settled"}},
+		}, []string{"both", "skills-only"}},
 		{"server disabled", true, func(tx *CommitTx) error {
 			return tx.UpdateServer("skills-only", func(sc *config.ServerConfig) error { sc.Enabled = false; return nil })
 		}, []string{"skills-only"}},
@@ -326,48 +413,43 @@ func TestSkillsExposureChangeAnnouncesAReviewChange(t *testing.T) {
 			_, err := rt.Commit("test", tc.mutate)
 			require.NoError(t, err)
 
-			reviewed, skills := map[string]bool{}, map[string]bool{}
-			deadline := time.After(5 * time.Second)
-		collect:
-			for {
-				select {
-				case evt := <-ch:
-					name, _ := evt.Payload["server"].(string)
-					switch evt.Type {
-					case EventTypeReviewChanged:
-						if marked, _ := evt.Payload[ReviewChangedSkillsKey].(bool); marked {
-							reviewed[name] = true
-						}
-					case EventTypeSkillsChanged:
-						skills[name] = true
-					}
-					if len(reviewed) == len(tc.want) && len(skills) == len(tc.want) {
-						// Give a wrongly announced extra server a moment to show.
-						select {
-						case <-time.After(200 * time.Millisecond):
-						case evt := <-ch:
-							if evt.Type == EventTypeReviewChanged {
-								if marked, _ := evt.Payload[ReviewChangedSkillsKey].(bool); marked {
-									n, _ := evt.Payload["server"].(string)
-									reviewed[n] = true
-								}
-							}
-						}
-						break collect
-					}
-				case <-deadline:
-					break collect
-				}
+			skills, reviews := skillsAnnouncements(t, ch, time.Second)
+			wantSkills := append([]string{}, tc.want...)
+			if tc.name == "enable_skills on" || tc.name == "enable_skills off" {
+				wantSkills = append(wantSkills, "settled")
 			}
-			var gotReview, gotSkills []string
-			for n := range reviewed {
-				gotReview = append(gotReview, n)
-			}
-			for n := range skills {
-				gotSkills = append(gotSkills, n)
-			}
-			assert.ElementsMatch(t, tc.want, gotReview, "skills-marked review.changed")
-			assert.ElementsMatch(t, tc.want, gotSkills, "skills.changed")
+			assert.ElementsMatch(t, wantSkills, skills, "skills.changed")
+			require.Len(t, reviews, 1, "one skills-marked review.changed per commit")
+			assert.NotContains(t, reviews[0], "server", "the coalesced frame names no single server")
+			assert.ElementsMatch(t, tc.want, reviews[0]["servers"])
 		})
+	}
+}
+
+func TestSkillsExposureChangeWithNothingHeldRefreshesTabsOnly(t *testing.T) {
+	var servers []*config.ServerConfig
+	for i := 0; i < 8; i++ {
+		servers = append(servers, explicitServer(&config.ServerConfig{
+			Name: fmt.Sprintf("srv-%d", i), URL: "http://127.0.0.1:9/mcp", Protocol: "http", Enabled: true,
+		}))
+	}
+	rt, _ := newSpec116Runtime(t, nil, servers...)
+	rt.skills.noAutoTrigger.Store(true)
+	saveHeldSkill(t, rt, "srv-0", "ok", storage.SkillStatusApproved)
+	saveHeldSkill(t, rt, "srv-1", "blocked", storage.SkillStatusPending, func(r *storage.SkillApprovalRecord) { r.Blocked = true })
+	ch := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(ch)
+	for _, enable := range []bool{true, false} {
+		_, err := rt.Commit("test", func(tx *CommitTx) error {
+			return tx.MutateGlobal(func(c *config.Config) error { c.EnableSkills = enable; return nil })
+		})
+		require.NoError(t, err)
+		skills, reviews := skillsAnnouncements(t, ch, 500*time.Millisecond)
+		var wantSkills []string
+		for _, server := range servers {
+			wantSkills = append(wantSkills, server.Name)
+		}
+		assert.ElementsMatch(t, wantSkills, skills)
+		assert.Emptyf(t, reviews, "enable_skills=%v: skills-marked review.changed", enable)
 	}
 }
