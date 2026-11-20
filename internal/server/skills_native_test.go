@@ -57,6 +57,12 @@ func newRawMCP(t *testing.T, url string) *rawMCP { return &rawMCP{t: t, url: url
 // send posts one message with the given session id and protocol header.
 func (c *rawMCP) send(sid, proto string, msg map[string]any) rawReply {
 	c.t.Helper()
+	return c.sendWith(sid, proto, nil, msg)
+}
+
+// sendWith is send with extra request headers.
+func (c *rawMCP) sendWith(sid, proto string, extra map[string]string, msg map[string]any) rawReply {
+	c.t.Helper()
 	body, err := json.Marshal(msg)
 	require.NoError(c.t, err)
 	req, err := http.NewRequest(http.MethodPost, c.url, bytes.NewReader(body))
@@ -68,6 +74,9 @@ func (c *rawMCP) send(sid, proto string, msg map[string]any) rawReply {
 	}
 	if proto != "" {
 		req.Header.Set("Mcp-Protocol-Version", proto)
+	}
+	for k, v := range extra {
+		req.Header.Set(k, v)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(c.t, err)
@@ -162,9 +171,12 @@ func (g *realSkills) nativeRows(t *testing.T) []*storage.ActivityRecord {
 	return out
 }
 
+const nativeUpstreamInstructions = "Prefer the pdf skill for reading documents."
+
 func newNativeSkills(t *testing.T) *realSkills {
 	t.Helper()
 	g := newRealSkills(t, func(fx *skillstest.Fixture) {
+		fx.SetInstructions(nativeUpstreamInstructions)
 		fx.AddSkill(skillstest.Skill{Path: "pdf", Files: map[string][]byte{
 			"SKILL.md":     realSkillMD("pdf", "reads pdf files", "Use the script.\n«ünïcødé» line"),
 			"scripts/x.py": []byte("print('hello')\n"),
@@ -218,7 +230,16 @@ func TestNativeSkills_SingleServerSurface(t *testing.T) {
 
 	get := c.call(nativeMethodGet, map[string]any{"uri": "skill://pdf/SKILL.md"})
 	require.Nil(t, get.err, string(get.body))
-	assert.Contains(t, string(get.result), `"uri":"skill://pdf/SKILL.md"`)
+	var single struct {
+		Skill json.RawMessage `json:"skill"`
+	}
+	require.NoError(t, json.Unmarshal(get.result, &single), string(get.body))
+	var listed struct {
+		Skills []json.RawMessage `json:"skills"`
+	}
+	require.NoError(t, json.Unmarshal(list.result, &listed))
+	require.Len(t, listed.Skills, 1)
+	assert.JSONEq(t, string(listed.Skills[0]), string(single.Skill), "the single entry is the listed entry")
 
 	// The held skill: absent, and not found by address.
 	for _, r := range []rawReply{
@@ -286,6 +307,9 @@ func TestNativeSkills_RefusalParityWithToolsCall(t *testing.T) {
 		{"unsupported protocol version", c.sid, mcp.ProtocolVersion20260728, true},
 		{"protocol version header without meta", c.sid, mcp.ProtocolVersion20260728, false},
 	}
+	// The modern case is otherwise a valid modern request (Mcp-Method agrees
+	// with the body), so the refusal is the one for the version itself.
+	wantCode := map[string]int{"unsupported protocol version": mcp.UNSUPPORTED_PROTOCOL_VERSION}
 	methods := map[string]map[string]any{
 		"tools/call":     {"name": "echo", "arguments": map[string]any{}},
 		nativeMethodList: {},
@@ -304,8 +328,16 @@ func TestNativeSkills_RefusalParityWithToolsCall(t *testing.T) {
 				if tc.meta {
 					params["_meta"] = map[string]any{"io.modelcontextprotocol/protocolVersion": tc.proto}
 				}
-				got := c.send(tc.sid, tc.proto, map[string]any{"jsonrpc": "2.0", "id": 99, "method": m, "params": params})
+				var extra map[string]string
+				if tc.meta {
+					extra = map[string]string{mcp.HeaderMethod: m}
+				}
+				got := c.sendWith(tc.sid, tc.proto, extra, map[string]any{"jsonrpc": "2.0", "id": 99, "method": m, "params": params})
 				assert.GreaterOrEqual(t, got.status, 400, "%s is refused: %s", m, got.body)
+				if code, ok := wantCode[tc.name]; ok {
+					require.NotNil(t, got.err, "%s: %s", m, got.body)
+					assert.Equal(t, code, got.err.Code, "%s: refused for the version: %s", m, got.body)
+				}
 				if m == "tools/call" {
 					want = got
 					continue
@@ -333,6 +365,8 @@ func openStream(t *testing.T, url, sid string) (closed <-chan struct{}, cancel f
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.True(t, strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream"),
+		"a listening stream: %s", resp.Header.Get("Content-Type"))
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -344,6 +378,11 @@ func openStream(t *testing.T, url, sid string) (closed <-chan struct{}, cancel f
 			}
 		}
 	}()
+	select {
+	case <-done:
+		t.Fatalf("the stream closed by itself")
+	case <-time.After(300 * time.Millisecond):
+	}
 	return done, stop
 }
 
@@ -432,11 +471,17 @@ func TestNativeSkills_AcquireRacesRetire(t *testing.T) {
 			}
 		}()
 	}
+	countAcquired := func() int { mu.Lock(); defer mu.Unlock(); return len(acquired) }
+	require.Eventually(t, func() bool { return countAcquired() > 0 }, 10*time.Second, time.Millisecond,
+		"the workers acquire before the toggling starts")
 	on := true
 	for i := 0; i < 40; i++ {
 		on = !on
 		g.commitGlobal(t, func(c *config.Config) { c.EnableSkills = on })
+		before := countAcquired()
 		g.p.retireStaleNativeSurfaces()
+		require.Eventually(t, func() bool { return countAcquired() > before }, 10*time.Second, time.Millisecond,
+			"acquisitions keep running between retirements")
 	}
 	close(stop)
 	wg.Wait()
@@ -445,6 +490,7 @@ func TestNativeSkills_AcquireRacesRetire(t *testing.T) {
 	g.p.singleServersMu.Lock()
 	live := g.p.singleServers[realSkillsSrv]
 	g.p.singleServersMu.Unlock()
+	retiredSeen := 0
 	for _, ep := range acquired {
 		if live != nil && ep.server == live.server {
 			assert.Same(t, live.transport, ep.transport, "the live instance has exactly one transport")
@@ -452,10 +498,12 @@ func TestNativeSkills_AcquireRacesRetire(t *testing.T) {
 		}
 		select {
 		case <-ep.retired:
+			retiredSeen++
 		default:
 			t.Fatalf("an acquired endpoint that is not live was never retired")
 		}
 	}
+	assert.Positive(t, retiredSeen, "endpoints were acquired and then retired")
 }
 
 // T050: an initialize that acquired its endpoint before a retirement answers
@@ -464,11 +512,18 @@ func TestNativeSkills_PausedInitializeKeepsItsUpstream(t *testing.T) {
 	g := newNativeSkills(t)
 	url := g.singleURL()
 
+	// The upstream's own instructions reach a client of the endpoint.
+	plain := newRawMCP(t, url)
+	_, instr := plain.initialize()
+	require.Equal(t, nativeUpstreamInstructions, instr)
+
 	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
+	var pauseOnce, releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseAll)
 	hook := func(string) {
 		paused := false
-		once.Do(func() { paused = true })
+		pauseOnce.Do(func() { paused = true })
 		if paused {
 			close(entered)
 			<-release
@@ -478,28 +533,41 @@ func TestNativeSkills_PausedInitializeKeepsItsUpstream(t *testing.T) {
 	t.Cleanup(func() { g.env.proxyServer.singleServerAcquired.Store(nil) })
 
 	type initOut struct {
+		ok           bool
 		caps         map[string]any
 		instructions string
 	}
 	out := make(chan initOut, 1)
 	go func() {
+		res := initOut{}
+		// require in this goroutine ends it with Goexit: still report.
+		defer func() { out <- res }()
 		c := newRawMCP(t, url)
-		caps, instr := c.initialize()
-		out <- initOut{caps, instr}
+		res.caps, res.instructions = c.initialize()
+		res.ok = true
 	}()
-	<-entered
+	select {
+	case <-entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the initialize never reached the endpoint")
+	}
 	g.commitGlobal(t, func(c *config.Config) { c.EnableSkills = false })
 	g.p.RefreshSkillsAvailability()
 	g.p.singleServersMu.Lock()
 	_, cached := g.p.singleServers[realSkillsSrv]
 	g.p.singleServersMu.Unlock()
-	require.False(t, cached, "the endpoint was retired while the initialize was paused")
-	close(release)
+	assert.False(t, cached, "the endpoint was retired while the initialize was paused")
+	releaseAll()
 
-	got := <-out
+	var got initOut
+	select {
+	case got = <-out:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the paused initialize never answered")
+	}
+	require.True(t, got.ok, "the paused initialize failed")
 	assert.True(t, hasSkillsExtension(got.caps), "served by the instance it acquired")
-	assert.NotContains(t, got.instructions, "retrieve_tools", "never the aggregate instructions")
-	assert.NotContains(t, got.instructions, "mcpproxy")
+	assert.Equal(t, nativeUpstreamInstructions, got.instructions, "the upstream's instructions, never the aggregate ones")
 }
 
 // An excluded server (expose_skills: false) does not announce the extension;
