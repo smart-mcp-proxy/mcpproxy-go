@@ -320,6 +320,12 @@ func TestSocketInfoEndpoint(t *testing.T) {
 
 // Helper functions
 
+// stopTestProcess stops the server the test started. On Windows `Signal` has no
+// SIGTERM, so the deferred `cmd.Wait()` used to hang: the child never exited and
+// cancel() (which would have terminated it) only ran after the wait. Canceling
+// the CommandContext first terminates the child there. On other platforms the
+// graceful SIGTERM shutdown is preserved, with cancellation as a fallback when
+// signaling fails.
 func stopTestProcess(cmd *exec.Cmd, cancel context.CancelFunc) {
 	if cmd.Process == nil {
 		cancel()
@@ -327,10 +333,8 @@ func stopTestProcess(cmd *exec.Cmd, cancel context.CancelFunc) {
 	}
 
 	if runtime.GOOS == "windows" {
-		// CommandContext uses process termination on cancel; Windows does not support SIGTERM.
 		cancel()
 	} else if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		// Fall back to CommandContext termination if graceful shutdown cannot be requested.
 		cancel()
 	}
 
