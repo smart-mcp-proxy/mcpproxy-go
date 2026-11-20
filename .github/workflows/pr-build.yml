@@ -443,3 +443,7 @@ jobs:
           set -eo pipefail
           docker run --rm --entrypoint mcpproxy mcpproxy-server:pr version | tee /tmp/version.txt
           grep -q '(server)' /tmp/version.txt
+
+      # #1942: default 0.0.0.0:8080, MCPPROXY_LISTEN honoured, --listen wins.
+      - name: Smoke-test the listen address
+        run: bash scripts/test-docker-listen.sh mcpproxy-server:pr
