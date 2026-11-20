@@ -80,7 +80,7 @@ func (c *rawMCP) sendWith(sid, proto string, extra map[string]string, msg map[st
 	}
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(c.t, err)
-	defer resp.Body.Close()
+	defer func() { assert.NoError(c.t, resp.Body.Close()) }()
 	raw, err := io.ReadAll(resp.Body)
 	require.NoError(c.t, err)
 	out := rawReply{status: resp.StatusCode, header: resp.Header, body: raw}
@@ -370,7 +370,7 @@ func openStream(t *testing.T, url, sid string) (closed <-chan struct{}, cancel f
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		defer resp.Body.Close()
+		defer func() { assert.NoError(t, resp.Body.Close()) }()
 		r := bufio.NewReader(resp.Body)
 		for {
 			if _, err := r.ReadString('\n'); err != nil {

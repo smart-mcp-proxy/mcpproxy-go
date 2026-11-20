@@ -457,7 +457,7 @@ func TestNativeSkills_NonObjectParamsAndRepeatedURI(t *testing.T) {
 	req.Header.Set("Mcp-Protocol-Version", mcp.LATEST_LEGACY_PROTOCOL_VERSION)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { assert.NoError(t, resp.Body.Close()) }()
 	raw, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	// A repeated member in params is the transport's: an ordinary read, the
