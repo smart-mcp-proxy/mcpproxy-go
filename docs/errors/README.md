@@ -53,6 +53,7 @@ Run `mcpproxy doctor list-codes` for the machine-readable list.
 - [`MCPX_OAUTH_DISCOVERY_FAILED`](MCPX_OAUTH_DISCOVERY_FAILED.md) — `.well-known` discovery failed
 - [`MCPX_OAUTH_CALLBACK_TIMEOUT`](MCPX_OAUTH_CALLBACK_TIMEOUT.md) — browser callback timed out
 - [`MCPX_OAUTH_CALLBACK_MISMATCH`](MCPX_OAUTH_CALLBACK_MISMATCH.md) — redirect URI mismatch
+- [`MCPX_OAUTH_TOKEN_UNDECRYPTABLE`](MCPX_OAUTH_TOKEN_UNDECRYPTABLE.md) — stored token cannot be decrypted with the configured key
 
 ## HTTP
 

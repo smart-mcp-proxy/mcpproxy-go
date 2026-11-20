@@ -252,21 +252,30 @@ func (m *TokenStoreManager) HasTokenStore(serverName string) bool {
 // records would make the upstream connection loop forever asking for re-auth even though a
 // valid token is on disk. This mirrors HasValidToken (see below), which already treats
 // IsZero() as "never expires".
-func HasPersistedToken(serverName, serverURL string, boltStorage *storage.BoltDB) (hasToken bool, hasRefreshToken bool, isExpired bool) {
+//
+// Spec 123 FR-031: err is non-nil only for a stored row the configured key
+// cannot decrypt (TokenUndecryptableError, MCPX_OAUTH_TOKEN_UNDECRYPTABLE):
+// the row exists but cannot be used, and a caller must not read that as "no
+// token, log in". Any other read failure, "not found" included, is reported
+// as no token with a nil error, as before.
+func HasPersistedToken(serverName, serverURL string, boltStorage *storage.BoltDB) (hasToken bool, hasRefreshToken bool, isExpired bool, err error) {
 	return HasPersistedTokenBound(serverName, serverURL, boltStorage, commitview.CredentialBinding{})
 }
 
 // HasPersistedTokenBound is HasPersistedToken for an upstream instance bound
 // to b (Spec 116 PR2b): a record written under another binding is absent.
-func HasPersistedTokenBound(serverName, serverURL string, boltStorage *storage.BoltDB, b commitview.CredentialBinding) (hasToken bool, hasRefreshToken bool, isExpired bool) {
+func HasPersistedTokenBound(serverName, serverURL string, boltStorage *storage.BoltDB, b commitview.CredentialBinding) (hasToken bool, hasRefreshToken bool, isExpired bool, err error) {
 	if boltStorage == nil {
-		return false, false, false
+		return false, false, false, nil
 	}
 
 	serverKey := GenerateServerKey(serverName, serverURL)
-	record, err := boltStorage.GetOAuthTokenBound(serverKey, b)
-	if err != nil || record == nil {
-		return false, false, false
+	record, rerr := boltStorage.GetOAuthTokenBound(serverKey, b)
+	if IsTokenUndecryptable(rerr) {
+		return false, false, false, TokenUndecryptableError(serverName, rerr)
+	}
+	if rerr != nil || record == nil {
+		return false, false, false, nil
 	}
 
 	hasToken = record.AccessToken != ""
@@ -281,18 +290,24 @@ func HasPersistedTokenBound(serverName, serverURL string, boltStorage *storage.B
 
 // GetPersistedRefreshToken retrieves the refresh token from persistent storage if available.
 // Returns empty string if no token exists or token has no refresh_token.
-func GetPersistedRefreshToken(serverName, serverURL string, boltStorage *storage.BoltDB) string {
+//
+// Spec 123 FR-031: an undecryptable stored row returns "" with
+// TokenUndecryptableError: do not refresh, report.
+func GetPersistedRefreshToken(serverName, serverURL string, boltStorage *storage.BoltDB) (string, error) {
 	if boltStorage == nil {
-		return ""
+		return "", nil
 	}
 
 	serverKey := GenerateServerKey(serverName, serverURL)
 	record, err := boltStorage.GetOAuthToken(serverKey)
+	if IsTokenUndecryptable(err) {
+		return "", TokenUndecryptableError(serverName, err)
+	}
 	if err != nil || record == nil {
-		return ""
+		return "", nil
 	}
 
-	return record.RefreshToken
+	return record.RefreshToken, nil
 }
 
 // TokenRefreshResult contains the result of a token refresh attempt.
@@ -2172,9 +2187,20 @@ func GetGlobalCallbackManager() *CallbackServerManager {
 	return globalCallbackManager
 }
 
-// ShouldUseOAuth determines if OAuth should be attempted for a given server
-// Headers are tried first if configured, then OAuth as fallback on auth errors
-func ShouldUseOAuth(serverConfig *config.ServerConfig) bool {
+// ManualLoginApplicable reports whether a user-requested OAuth sign-in can be
+// started for the server at all. It is the preflight of every manual-login
+// entry point (REST, CLI, tray, MCP), and it only rules out what can never
+// work: a stdio server, and the test fixture gate.
+//
+// GH #1922: static headers are NOT a reason to refuse. The connection path
+// tries a server's headers first and falls back to OAuth when the upstream
+// rejects them (headers -> no-auth -> OAuth), so a server with a rejected
+// static credential and no oauth block is parked awaiting sign-in and its
+// health offers "Sign in". A config-only "headers are configured" veto here
+// refused exactly that sign-in before any OAuth request was made. Whether the
+// upstream really supports OAuth is the flow's own question (discovery,
+// client registration), and it answers with a specific error.
+func ManualLoginApplicable(serverConfig *config.ServerConfig) bool {
 	logger := zap.L().Named("oauth")
 
 	// Check if OAuth is disabled for tests
@@ -2188,28 +2214,6 @@ func ShouldUseOAuth(serverConfig *config.ServerConfig) bool {
 		logger.Debug("OAuth not supported for stdio protocol", zap.String("server", serverConfig.Name))
 		return false
 	}
-
-	// A declared oauth block is the operator's word that this upstream needs
-	// OAuth (GH #1271) — it must not be vetoed by unrelated static headers,
-	// or a manual login could never be started for such a server.
-	if serverConfig.OAuth != nil {
-		logger.Debug("oauth block configured - OAuth applies regardless of headers",
-			zap.String("server", serverConfig.Name))
-		return true
-	}
-
-	// If headers are configured, try headers first, not OAuth
-	if len(serverConfig.Headers) > 0 {
-		logger.Debug("Headers configured - will try headers first, OAuth as fallback if needed",
-			zap.String("server", serverConfig.Name),
-			zap.Int("header_count", len(serverConfig.Headers)))
-		return false
-	}
-
-	// For HTTP/SSE servers without headers, try OAuth-enabled clients
-	logger.Debug("No headers configured - OAuth-enabled client will be used",
-		zap.String("server", serverConfig.Name),
-		zap.String("protocol", serverConfig.Protocol))
 
 	return true
 }

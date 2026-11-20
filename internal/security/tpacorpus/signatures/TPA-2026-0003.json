@@ -1,0 +1,55 @@
+{
+  "category": "tpa_sensitive_file_coaxing",
+  "gating": true,
+  "id": "TPA-2026-0003",
+  "license": "MIT",
+  "provenance": {
+    "note": "<IMPORTANT>/<SYSTEM> block instructing the agent to read ~/.ssh/id_rsa or cloud credentials.",
+    "published": "2025-04-01",
+    "source": "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks"
+  },
+  "rules": [
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "hidden_tag",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0003",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$imp",
+          "type": "regex",
+          "value": "<IMPORTANT>|<SYSTEM>"
+        },
+        {
+          "context": "tool_description",
+          "id": "$rsa",
+          "type": "string",
+          "value": "id_rsa"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<important>.*?(read|cat).*?(id_rsa|credentials|\\.ssh).*?</important>",
+      "severity": "critical",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": [
+    {
+      "detector": "intent_judge",
+      "id": "TPA-2026-0003",
+      "reason": "engine llm_judge not offline-capable"
+    },
+    {
+      "detector": "unrelated_param",
+      "id": "TPA-2026-0003",
+      "reason": "engine jsonpath not offline-capable"
+    }
+  ]
+}

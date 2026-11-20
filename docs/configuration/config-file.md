@@ -59,6 +59,7 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
 | `listen` | string | `127.0.0.1:8080` | Address and port to listen on |
 | `data_dir` | string | `~/.mcpproxy` | Directory for data storage |
 | `api_key` | string | auto-generated | API key for REST API authentication |
+| `oauth_token_encryption_key` | string | `""` (off) | Key that encrypts the upstream OAuth tokens in `config.db` (AES-256-GCM): 32 random bytes, base64. A literal key or one reference: `${file:/abs/path}`, `${env:NAME}`, `${keyring:NAME}`. Env `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY` / `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE` override it. A key that cannot be resolved stops startup with exit code 4 before `config.db` is opened. Needs a restart. Masked in the REST API and the Web UI. See [OAuth Token Encryption](/features/oauth-token-encryption) |
 | `trusted_hosts` | string[] | `[]` | Non-loopback `Host` header values accepted on a loopback listener. Needed when running behind a reverse proxy — see [Reverse Proxy Deployment](/operations/reverse-proxy). This is DNS-rebinding protection only; it is **not** the control for forwarded headers (see `trusted_proxies`) |
 | `trusted_proxies` | string[] | `[]` (trust nobody) | CIDRs or IP addresses whose `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto` and `X-Forwarded-Host` headers are believed. Headers from any other peer are ignored and the direct `RemoteAddr` is used. Env `MCPPROXY_TRUSTED_PROXIES` (comma list). Live (hot-reload, no restart). Validation: `trusted_proxies[N] "value" is not a valid CIDR or IP address` — refused identically at boot, `PATCH /api/v1/config` and `/config/apply`. See [Reverse Proxy Deployment](/operations/reverse-proxy#trusted_proxies-forwarded-headers) |
 | `require_mcp_auth` | boolean | `false` | Require an API key on the `/mcp` endpoint (off by default for client compatibility). Enable when exposing MCPProxy beyond localhost. **Server edition:** forced to `true` whenever `server_edition.enabled` is `true` — an explicit `false` is not an error, but boot logs `require_mcp_auth: false is overridden to true because server_edition.enabled is true` and `mcpproxy doctor` reports the same finding |
@@ -115,7 +116,7 @@ the read timeout — see its row). Valid range: `1s`–`24h`, or `0s`.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `tools_limit` | integer | `15` | Maximum tools to return in a single request |
-| `tool_response_limit` | integer | `20000` | Maximum characters in tool response |
+| `tool_response_limit` | integer | `20000` | Maximum characters in tool response (0 = unlimited). Also bounds `structuredContent`: when its JSON is longer than the limit it is withheld and delivered as a text block (sanitised, then truncated with a `read_cache` handle), or left out when a text block already carries the same JSON. On the direct surface a tool listed with an `outputSchema` keeps its `structuredContent` |
 | `instructions` | string | _(built-in)_ | Custom text for the MCP `initialize` response, sent verbatim to every client. Do not put server names or secrets in it. A per-caller access block is always appended; see [Agent Instructions](/features/agent-instructions). |
 | `advertise_upstream_servers` | boolean | `true` | Name the caller's reachable upstream servers in the initialize instructions and the `retrieve_tools` description, filtered to its profile and agent-token scope. Set `false` to keep server names out of client context. Hot-reloadable. See [Agent Instructions](/features/agent-instructions). |
 
@@ -469,6 +470,15 @@ A profile is a named view over your upstream servers with a tool policy. The ful
 A profile that sets only `name` and `servers` behaves exactly as before: no cap, unannotated tools count as read, no rules. Invalid input (an unknown tier or `unannotated` value, a malformed pattern, `switchable_to` naming the profile itself) is refused with the same message on every surface. Both `profiles` and `anonymous_profile` are **live**: an edit takes effect without a restart, and `PATCH /api/v1/config` reports them in `changed_fields`.
 
 With `require_mcp_auth` off, a change that would let a client bound to a profile escape it by omitting its credential is refused with `409 binding_bypassable_without_auth` (see [Profiles, the binding guard](/features/profiles#the-binding-guard)). **Before downgrading to a pre-profiles-v3 binary, turn `require_mcp_auth` on**; the older binary does not know client credentials or `anonymous_profile`.
+
+### Skills (`enable_skills`) {#skills}
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enable_skills` | boolean | `false` | Read the skills that upstream servers expose through the MCP skills extension. In this release they are shown to administrators only and are not offered to agents. Hot-reloaded. |
+| `mcpServers[].expose_skills` | boolean | follows `enable_skills` | Per-server override. `false` excludes the server: it is not asked for skills. Hot-reloaded. |
+
+See [Skills over MCP](/features/skills).
 
 ### MCP Servers
 

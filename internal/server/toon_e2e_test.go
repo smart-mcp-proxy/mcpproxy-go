@@ -62,7 +62,7 @@ func createToonFixtureUpstream(t *testing.T, env *TestEnvironment, name, payload
 		tools:      []mcp.Tool{tool},
 		addr:       fmt.Sprintf("http://127.0.0.1:%d", port),
 		httpServer: httpServer,
-		stopFunc:   func() error { return httpServer.Shutdown(context.Background()) },
+		stopFunc:   func() error { return httpServer.Close() },
 	}
 	env.mockServers[name] = mock
 	return mock

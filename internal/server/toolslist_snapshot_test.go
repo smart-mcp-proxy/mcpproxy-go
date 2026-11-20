@@ -469,10 +469,13 @@ func TestCodeExecutionDescriptions_EnumerationIsAdminOnly(t *testing.T) {
 					assertArgumentErrorModeSchema(t, surface, postM)
 					delete(props, "forward_headers_json")
 					delete(props, "tool_argument_error_mode")
+					assert.Contains(t, props, "expose_skills",
+						"surface %s: upstream_servers carries the spec 125 parameter", surface)
+					delete(props, "expose_skills")
 					trimmed, err := json.Marshal(postM)
 					require.NoError(t, err)
 					assert.JSONEq(t, string(pre), string(trimmed),
-						"surface %s: upstream_servers may differ from pre-105 only by forward_headers_json and tool_argument_error_mode", surface)
+						"surface %s: upstream_servers may differ from pre-105 only by forward_headers_json, tool_argument_error_mode and expose_skills", surface)
 					continue
 				}
 				if name == "retrieve_tools" {

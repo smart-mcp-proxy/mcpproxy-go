@@ -51,6 +51,7 @@ func ConvertServerConfig(cfg *config.ServerConfig, globalIsolation *config.Docke
 		// F9: surface the per-server prompt-aggregation override so a caller that
 		// PATCHed it can read it back.
 		ExposePrompts: cfg.ExposePrompts,
+		ExposeSkills:  cfg.ExposeSkills,
 		// Spec 112: allowlist of forwarded client header names (no values).
 		ForwardHeaders: append([]string(nil), cfg.ForwardHeaders...),
 		// Spec 093: surface the per-server concurrency overrides (tri-state) so a
@@ -302,6 +303,10 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 		if exposePrompts, ok := generic["expose_prompts"].(bool); ok {
 			v := exposePrompts
 			server.ExposePrompts = &v
+		}
+		if exposeSkills, ok := generic["expose_skills"].(bool); ok {
+			v := exposeSkills
+			server.ExposeSkills = &v
 		}
 		// Spec 112: forward_headers is a list of header names. The generic map
 		// carries []string from the runtime projection or []interface{} after a

@@ -50,7 +50,7 @@ func TestRetryConnection_DoesNotKillInFlightCall(t *testing.T) {
 	release := make(chan struct{})
 	upstream := newBlockingToolUpstreamServer(started, release)
 	testServer := servertest.NewTestStreamableHTTPServer(upstream)
-	t.Cleanup(testServer.Close)
+	t.Cleanup(func() { closeHTTPFixture(testServer) })
 
 	cfg := &config.ServerConfig{Name: "blocking-server", Enabled: true, Protocol: "streamable-http", URL: testServer.URL}
 	require.NoError(t, m.AddServerConfig("blocking-server", cfg))

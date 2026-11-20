@@ -3,6 +3,7 @@
 package server
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -115,5 +116,43 @@ func TestWorkspaceDisplayName(t *testing.T) {
 	}
 	for in, want := range cases {
 		assert.Equal(t, want, workspaceDisplayName(in))
+	}
+}
+
+// Review round 3 (Spec 124): a connection pins a bounded number of work
+// sessions over its life. Past the bound an id is still returned, from the
+// resolver, and nothing more is kept; ids already pinned stay.
+func TestSessionStore_ConnectionWorkSessionKeysAreBounded(t *testing.T) {
+	for _, persisted := range []bool{true, false} {
+		store := NewSessionStore(zap.NewNop())
+		store.SetSession("c1", "ide", "1.0", false, false, nil)
+		store.mu.Lock()
+		info := store.sessions["c1"]
+		info.persisted = persisted
+		full := make(map[string]string, maxConnectionWorkSessionKeys)
+		for i := 0; i < maxConnectionWorkSessionKeys; i++ {
+			full[fmt.Sprintf("p\x00run-%d", i)] = fmt.Sprintf("ws-%d", i)
+		}
+		if persisted {
+			info.workSessionByKey, info.workSessionID = full, "ws-0"
+		} else {
+			info.provisionalByKey = full
+		}
+		store.mu.Unlock()
+
+		calls := 0
+		resolve := func(_ *SessionInfo, _ func(string) (string, bool)) (string, string) {
+			calls++
+			return "ws-new", "p\x00run-new"
+		}
+		assert.Equal(t, "ws-new", store.WorkSessionForKey("c1", "p\x00run-new", resolve))
+		assert.Equal(t, "ws-new", store.WorkSessionForKey("c1", "p\x00run-new", resolve))
+		assert.Equal(t, 2, calls, "nothing was pinned, so the resolver answers each time")
+		assert.Equal(t, "ws-7", store.WorkSessionForKey("c1", "p\x00run-7", resolve), "pinned ids are kept")
+
+		store.mu.RLock()
+		assert.Len(t, info.workSessionByKey, map[bool]int{true: maxConnectionWorkSessionKeys, false: 0}[persisted])
+		assert.Len(t, info.provisionalByKey, map[bool]int{true: 0, false: maxConnectionWorkSessionKeys}[persisted])
+		store.mu.RUnlock()
 	}
 }

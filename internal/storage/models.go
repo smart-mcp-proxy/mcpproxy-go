@@ -31,6 +31,8 @@ const (
 	ToolHashBucket        = "toolhash"
 	ToolApprovalBucket    = "tool_approvals"
 	PromptApprovalBucket  = "prompt_approvals" // spec 100: per-prompt rug-pull baseline
+	SkillApprovalBucket   = "skill_approvals"  // spec 125: per-skill review records
+	SkillFileBucket       = "skill_files"      // spec 125: content-addressed text files of skills
 	OAuthTokenBucket      = "oauth_tokens"     //nolint:gosec // bucket name, not a credential
 	OAuthCompletionBucket = "oauth_completion"
 	MetaBucket            = "meta"
@@ -171,6 +173,13 @@ const (
 	// its contents — is what suppresses a re-run, so the sweep stays one-shot
 	// across restarts and upgrades.
 	BaselineSweepDoneKey = "baseline_sweep_done"
+	// OAuthSealCompactAdvisedKey (Spec 123 FR-016) is set, to the RFC3339
+	// time of the first such write, by any write that replaced a plaintext
+	// oauth_tokens value with an envelope, in that write's transaction: bbolt
+	// does not zero freed pages, so the old plaintext can survive in the file
+	// until it is compacted. Cleared only by a compaction that keeps no
+	// backup.
+	OAuthSealCompactAdvisedKey = "oauth_seal_compact_advised"
 )
 
 // BaselineSweepState records the outcome of the one-shot informational baseline
@@ -315,6 +324,9 @@ type UpstreamRecord struct {
 	// ExposePrompts is the per-server override for exposing upstream prompts
 	// through mcpproxy's aggregated prompts/list and prompts/get.
 	ExposePrompts *bool `json:"expose_prompts,omitempty"`
+	// ExposeSkills is the per-server override for reading the server's skills
+	// (Spec 125): nil follows enable_skills, false excludes the server.
+	ExposeSkills *bool `json:"expose_skills,omitempty"`
 	// ForwardHeaders (Spec 112) is the per-server allowlist of inbound MCP
 	// client header NAMES to forward on tools/call. Names only, never values.
 	// Persisted here because SaveConfiguration rebuilds the JSON server list

@@ -157,6 +157,7 @@ The first section is the same needs-attention list `mcpproxy attention` prints; 
 - Docker isolation status
 - Tools pending quarantine approval (pending/changed counts per server)
 - Security features status (routing mode, sensitive data detection)
+- OAuth token storage (printed once a key is configured or any row is encrypted): whether encryption is on, the public key id and key source kind, how many rows are sealed, plaintext or undecryptable (and why), whether `db compact` is pending, and warnings for a literal key, a key file inside the data directory, plaintext rows with a key set and a leftover `config.db.bak`. It never prints the key, key bytes, the key source contents or the key reference. See [OAuth Token Encryption](/features/oauth-token-encryption)
 
 ### attention
 
@@ -533,6 +534,41 @@ mcpproxy auth logout [flags]
 | `-s, --server` | Server name to logout from (required) | - |
 | `--timeout` | Logout timeout | `30s` |
 
+### auth tokens
+
+Offline commands for the stored OAuth tokens when `oauth_token_encryption_key` is configured
+(see [OAuth Token Encryption](/features/oauth-token-encryption)). They open `config.db`
+directly, so stop mcpproxy first: with a running core they exit `3` and change nothing. The key is
+resolved as the daemon resolves it, so `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE=<source>` supplies a
+key that only exists inside a service. None of them prints a token value or key material. All
+accept `-o json` and `-o yaml`.
+
+```bash
+mcpproxy auth tokens status
+mcpproxy auth tokens encrypt [--dry-run]
+mcpproxy auth tokens decrypt --yes [--leave-undecryptable]
+```
+
+| Command | Description |
+|---------|-------------|
+| `status` | Encryption on or off, the public key id, the key source kind, row counts (`sealed`, `plaintext`, `undecryptable` by reason), compaction pending, warnings, and one line per server |
+| `encrypt` | Seal every plaintext row under the configured key in one transaction (what the startup sweep does). Idempotent. Exits `1` when a row could not be sealed or remains undecryptable; exits `4` without a key |
+| `decrypt` | Rewrite every row the key opens as plaintext in one transaction, for a downgrade, disabling or a key rotation. Requires `--yes`; refuses (writes nothing) when a row cannot be opened unless `--leave-undecryptable` is given, and then still exits `1` |
+
+| Flag | Command | Description |
+|------|---------|-------------|
+| `--dry-run` | `encrypt` | Report what would be sealed; change no OAuth row, nor the compaction marker |
+| `--yes` | `decrypt` | Confirm that the tokens are stored as plaintext |
+| `--leave-undecryptable` | `decrypt` | Rewrite the rows the key opens and leave the others as they are |
+| `--config`, `--log-level` | all | As for the other `auth` commands |
+
+After `encrypt` or a key rotation, finish with `mcpproxy db compact --keep-backup=false` (see
+[Database Commands](/cli/db-commands)).
+
+`auth login --server=<name>` reads the stored row first; an undecryptable one gets the
+`MCPX_OAUTH_TOKEN_UNDECRYPTABLE` explanation with the reason, the key ids and the next commands,
+exits non-zero and opens no browser. `auth status` shows such a server as "cannot be decrypted".
+
 ## Secrets Management
 
 ### secrets set
@@ -540,8 +576,12 @@ mcpproxy auth logout [flags]
 Store a secret in the system keyring:
 
 ```bash
-mcpproxy secrets set <key> <value> [flags]
+mcpproxy secrets set <key> [value] [flags]
 ```
+
+On macOS, storing from a terminal needs an explicit opt-in: run `MCPPROXY_KEYRING_WRITE=1 mcpproxy secrets set <key>`. Without it the command stops before asking for the value and prints that command; see [macOS: storing a secret from a terminal](../features/keyring-integration.md#macos-storing-a-secret-from-a-terminal). Linux and Windows need no opt-in.
+
+Omit `value` to enter it at the prompt. The current CLI prompt echoes typed characters in the terminal. A literal value argument may be retained in shell history or exposed in process listings; use `--from-stdin` with a trusted secret source when that matters.
 
 | Flag | Description |
 |------|-------------|
@@ -551,9 +591,9 @@ mcpproxy secrets set <key> <value> [flags]
 
 **Examples:**
 ```bash
-mcpproxy secrets set github-token "ghp_abc123" --type=oauth-token
+mcpproxy secrets set github-token --type=oauth-token
 mcpproxy secrets set api-key --from-env=MY_API_KEY
-echo "secret-value" | mcpproxy secrets set db-password --from-stdin
+mcpproxy secrets set db-password --from-stdin < secret.txt
 ```
 
 ### secrets get

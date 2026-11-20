@@ -177,6 +177,17 @@ var adminConfigEventTypes = map[internalRuntime.EventType]struct{}{
 	// A credential lifecycle invalidation names identities and their
 	// profiles (Spec 115 FR-024): administrator-only, like the binding event.
 	internalRuntime.EventTypeCredentialsChanged: {},
+	// A skills catalog change carries per-state counts of every skill of a
+	// server, available or not (Spec 125 FR-019a): until agents are offered
+	// skills it is an administrator-only invalidation.
+	internalRuntime.EventTypeSkillsChanged: {},
+	// A skill's approval change names a skill that may be unapproved (Spec 125
+	// FR-019a); it also carries a server name, but a scoped caller must not
+	// learn of an unapproved skill even on a server it can see.
+	internalRuntime.EventTypeActivitySkillQuarantineChange: {},
+	// A skill access names the id its caller asked for, which may be a held
+	// skill: administrator-only for the same reason.
+	internalRuntime.EventTypeActivitySkillAccess: {},
 }
 
 // identityBearingEventTypes are the event types whose payload is ABOUT one
@@ -421,7 +432,11 @@ func renderActivityAttributionForCaller(ctx context.Context, eventType internalR
 	if keep {
 		view := make(map[string]any, len(attr))
 		for k, v := range attr {
-			if k != "_token_prefix" {
+			// Keys that start with an underscore are internal to the
+			// activity service (the token prefix, the owning user id, the
+			// work-session id and the counting marks); no subscriber gets
+			// them.
+			if !strings.HasPrefix(k, "_") {
 				view[k] = v
 			}
 		}

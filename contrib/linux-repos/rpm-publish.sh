@@ -48,23 +48,17 @@ mkdir -p "${workdir}/x86_64" "${workdir}/aarch64"
 
 # 2. Copy new .rpm files
 echo "[2/7] adding new .rpm files from ${ARTIFACTS_DIR}"
-found=0
+new_packages=()
 while IFS= read -r -d '' rpm; do
   name=$(basename "${rpm}")
-  if [[ "${name}" =~ ^mcpproxy-[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\.x86_64\.rpm$ ]]; then
-    cp -f "${rpm}" "${workdir}/x86_64/${name}"
-    echo "  added x86_64: ${name}"
-    found=$(( found + 1 ))
-  elif [[ "${name}" =~ ^mcpproxy-[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\.aarch64\.rpm$ ]]; then
-    cp -f "${rpm}" "${workdir}/aarch64/${name}"
-    echo "  added aarch64: ${name}"
-    found=$(( found + 1 ))
+  if [[ "${name}" =~ ^mcpproxy-[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\.(x86_64|aarch64)\.rpm$ ]]; then
+    new_packages+=("${rpm}")
   else
     echo "  skip: ${name} does not match expected filename pattern"
   fi
 done < <(find "${ARTIFACTS_DIR}" -maxdepth 2 -name '*.rpm' -print0)
 
-if (( found == 0 )); then
+if (( ${#new_packages[@]} == 0 )); then
   echo "error: no .rpm files matching mcpproxy-*-*.{x86_64,aarch64}.rpm found in ${ARTIFACTS_DIR}" >&2
   exit 1
 fi
@@ -74,31 +68,38 @@ fi
 # must be signed before createrepo_c is run.
 echo "[2b/7] signing new .rpm packages"
 
-# rpmsign reads the signing key via rpm macros; set them up against our GNUPGHOME.
-cat > "${HOME}/.rpmmacros" <<EOF
-%_signature gpg
-%_gpg_name ${GPG_KEY_ID}
-%_gpg_path ${GNUPGHOME}
-%__gpg_sign_cmd /usr/bin/gpg --batch --yes --pinentry-mode loopback --passphrase ${PACKAGES_GPG_PASSPHRASE} --no-armor --no-secmem-warning -u %{_gpg_name} -sbo %{__signature_filename} --digest-algo sha256 %{__plaintext_filename}
-EOF
+# Keep RPM's own GPG invocation: the macro arguments differ between RPM 4
+# and RPM 6. Pass only the noninteractive options, with the passphrase in
+# a private temporary file rather than an rpm macro or process argument.
+passfile=$(mktemp)
+trap 'rm -rf "${workdir}"; rm -f "${passfile}"' EXIT
+printf '%s\n' "${PACKAGES_GPG_PASSPHRASE}" > "${passfile}"
 
-for arch in x86_64 aarch64; do
-  for rpm in "${workdir}/${arch}/"mcpproxy-*-1.${arch}.rpm; do
-    [[ -e "${rpm}" ]] || continue
-    # Skip if already signed (idempotent re-runs)
-    if rpm --checksig "${rpm}" 2>&1 | grep -q "pgp"; then
-      echo "  already signed: $(basename "${rpm}")"
-      continue
-    fi
-    rpmsign --addsign "${rpm}" > /dev/null 2>&1 || {
-      echo "error: rpmsign failed for ${rpm}" >&2
-      exit 1
-    }
-    echo "  signed: $(basename "${rpm}")"
-  done
+# Verify with an isolated keyring containing only our public signing key.
+verify_db=$(mktemp -d "${workdir}/verify.XXXXXX")
+gpg --armor --export "${GPG_KEY_ID}" > "${verify_db}/signer.asc"
+rpmkeys --dbpath "${verify_db}" --import "${verify_db}/signer.asc"
+for input in "${new_packages[@]}"; do
+  name=$(basename "${input}")
+  arch=${name%.rpm}
+  package="${workdir}/${arch##*.}/${name}"
+  # Keep an identical signed package byte-for-byte on retries. Repository
+  # metadata and immutable download URLs refer to the signed file's hash.
+  if [[ -f "${package}" ]] &&
+     rpmkeys --dbpath "${verify_db}" --define "_pkgverify_level signature" --checksig "${package}" &&
+     rpmkeys --nosignature --checksig "${input}" &&
+     [[ "$(rpm --dbpath "${verify_db}" -qp --qf '%{SHA256HEADER}' "${input}")" == "$(rpm --dbpath "${verify_db}" -qp --qf '%{SHA256HEADER}' "${package}")" ]]; then
+    echo "  already signed: ${name}"
+    continue
+  fi
+  cp -f "${input}" "${package}"
+  rpmsign --define "_openpgp_sign gpg" --define "_gpg_name ${GPG_KEY_ID}" \
+    --define "_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file ${passfile}" \
+    --addsign "${package}"
+  rpmkeys --dbpath "${verify_db}" --define "_pkgverify_level signature" --checksig "${package}"
 done
-
-rm -f "${HOME}/.rpmmacros"
+rm -f "${passfile}"
+rm -rf "${verify_db}"
 
 # 3. Prune per-arch to top RETAIN_N versions
 for arch in x86_64 aarch64; do

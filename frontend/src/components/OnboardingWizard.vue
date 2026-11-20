@@ -1819,7 +1819,8 @@ async function recordDismissalEngagement() {
 
 // Spec 109-b: same per-client glyph ClientConnectList.vue uses (clientIcon there),
 // duplicated rather than imported so this file stays self-contained — falls
-// back to the server-supplied ClientStatus.icon id, then a generic wrench.
+// back to the glyph of the server-supplied ClientStatus.icon id, then a generic
+// wrench.
 function clientRowIcon(client: ClientStatus): string {
   const iconMap: Record<string, string> = {
     'claude-desktop': '✨',
@@ -1835,7 +1836,9 @@ function clientRowIcon(client: ClientStatus): string {
     'continue': '➡️',
     'zcode': '\u{1F9BE}',
   }
-  return iconMap[client.id] || client.icon || '\u{1F527}'
+  // client.icon is the id of the glyph to reuse (Copilot reuses VS Code's), never
+  // a glyph itself: resolve it through the table rather than printing it.
+  return iconMap[client.id] || (client.icon && iconMap[client.icon]) || '\u{1F527}'
 }
 
 // --- ClientRow component ------------------------------------------------

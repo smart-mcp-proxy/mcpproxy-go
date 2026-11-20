@@ -112,6 +112,19 @@ func (r *Resolver) KeyringAvailability() (bool, string) {
 	return false, "keyring unavailable"
 }
 
+// KeyringWriteOptInRequired reports whether the registered "keyring" provider
+// would refuse a Store only because the macOS write opt-in is absent (GH
+// #1924), so a caller can tell the user how to opt in instead of reporting an
+// unavailable keyring. False for a provider with no such gate.
+func (r *Resolver) KeyringWriteOptInRequired() bool {
+	provider, exists := r.providers["keyring"]
+	if !exists {
+		return false
+	}
+	gated, ok := provider.(interface{ WriteOptInRequired() bool })
+	return ok && gated.WriteOptInRequired()
+}
+
 // GetAvailableProviders returns a list of available providers
 func (r *Resolver) GetAvailableProviders() []string {
 	var available []string

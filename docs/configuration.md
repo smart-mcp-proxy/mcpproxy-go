@@ -88,6 +88,7 @@ A running MCPProxy core watches `mcp_config.json` and hot-reloads external edits
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `oauth_token_encryption_key` | string | `""` (off) | Key that encrypts the upstream OAuth tokens in `config.db` (AES-256-GCM): 32 random bytes, base64. A literal key or one reference: `${file:/abs/path}`, `${env:NAME}`, `${keyring:NAME}`. Env `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY` / `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE` override it. A key that cannot be resolved stops startup with exit code 4 before `config.db` is opened. Needs a restart. Masked in the REST API and the Web UI. See [OAuth Token Encryption](features/oauth-token-encryption.md) |
 | `enable_socket` | boolean | `true` | Enable the Unix socket (macOS/Linux) or named pipe (Windows) the tray uses to talk to the core. **Connections over it are trusted without the API key**, and that includes every stdio server the proxy itself spawns under `none` or `sandbox` isolation: such a server can call the admin API and mint agent tokens with no credential. The tray is the only socket client, so **set `false` on headless installs, and whenever a stdio server you do not fully trust runs outside `docker` isolation**. `mcpproxy doctor` warns about the combination. See [What the sandbox does not hide](features/sandbox-isolation.md#what-the-sandbox-does-not-hide). |
 | `tray_endpoint` | string | `""` | Override socket/pipe path (advanced, usually not needed) |
 
@@ -105,7 +106,7 @@ A running MCPProxy core watches `mcp_config.json` and hot-reloads external edits
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `tools_limit` | integer | `15` | Maximum number of tools to return per request (1-1000) |
-| `tool_response_limit` | integer | `20000` | Maximum characters in tool responses (0 = unlimited). Applies to built-in tools too: an oversize `retrieve_tools` result is truncated and the full payload is retrievable via `read_cache` (except on the code-execution surface, which does not expose `read_cache`) |
+| `tool_response_limit` | integer | `20000` | Maximum characters in tool responses (0 = unlimited). Applies to built-in tools too: an oversize `retrieve_tools` result is truncated and the full payload is retrievable via `read_cache` (except on the code-execution surface, which does not expose `read_cache`). Also bounds a tool's `structuredContent`: when its JSON is longer than the limit it is withheld and delivered as a text block instead (sanitised, then truncated with a `read_cache` handle like any other block), or left out when a text block already carries the same JSON. Results within the limit are forwarded unchanged. On the direct surface a tool listed with an `outputSchema` keeps its `structuredContent`, because MCP clients require it; other direct tools get the text block cut plainly, since that surface has no `read_cache` |
 | `call_tool_timeout` | string | `"2m"` | Timeout for tool calls (e.g., `"30s"`, `"2m"`, `"5m"`). **Note**: When using agents like Codex or Claude as MCP servers, you may need to increase this timeout significantly, even up to 10 minutes (`"10m"`), as these agents may require longer processing times for complex operations |
 | `init_timeout` | duration | `"30s"` | Deadline for an upstream's MCP `initialize` handshake (e.g. `"30s"`, `"120s"`, `"3m"`). Raise this for servers that do legitimate first-run warmup — building a cache/index or prefetching — before they answer `initialize`, so they are not killed mid-startup. Global default; can be overridden per server (see [Server Fields](#server-fields)). Range: `1s`–`30m`; `"0s"`/unset uses the 30s default. |
 
@@ -404,6 +405,7 @@ the error names the field.
 | `debug_search` | boolean | `false` | Enable debug logging for search operations |
 | `enable_prompts` | boolean | `true` | Enable mcpproxy's built-in prompts (setup / troubleshoot workflows) and advertise the MCP `prompts` capability. Governs only the built-ins; upstream aggregation is controlled separately by `aggregate_upstream_prompts`. |
 | `aggregate_upstream_prompts` | boolean | `false` | **Opt-in.** When `true`, aggregate every connected upstream server's MCP prompts into mcpproxy's own `prompts/list` (exposed as `<server>__<prompt>`). Off by default so users are safe until they deliberately enable it. Requires `enable_prompts: true` (the default) to have any effect. Hot-reloadable. The per-server [`expose_prompts`](#per-server-settings) override further filters which servers contribute once this is on. |
+| `enable_skills` | boolean | `false` | **Opt-in.** When `true`, mcpproxy reads the skills that upstream servers expose through the MCP skills extension. In this release they are visible to administrators only and are not offered to agents. Hot-reloadable. The per-server `expose_skills` override further filters which servers contribute once this is on. See [Skills over MCP](features/skills.md). |
 | `check_server_repo` | boolean | `true` | Enable repository detection for MCP servers (shows install commands) |
 
 ---
@@ -456,6 +458,7 @@ the error names the field.
 | `quarantined` | boolean | No | Security quarantine status. The default depends on how the server arrives. A server added through the UI, CLI, REST API or an AI agent follows its [trust mode](features/security-quarantine.md#trust-modes-auto--scan--manual) at add time (quarantined under the default tier until you approve it; an explicit `trust_mode: scan` releases it automatically on a clean scan). A server you add by editing this file, with no `quarantined` key and no prior `config.db` record, is **held for review** on first load when quarantine is enabled and its trust mode is not `auto` (no `trust_mode` means `scan`, unless a legacy `auto_approve_tool_changes` resolves it — `true` to `auto`, `false` to `manual` — or `skip_quarantine: true` resolves it to `auto`). An explicit `"quarantined": false` admits it, and an explicit `true` holds it. A server that is already recorded in `config.db` keeps its recorded state. See [Servers added by hand-editing `mcp_config.json`](features/security-quarantine.md#servers-added-by-hand-editing-mcp_configjson) for the full admission rules. |
 | `reconnect_on_use` | boolean | No | When `true`, tool calls to a disconnected server trigger an immediate reconnect attempt (15s timeout) before failing (default: `false`) |
 | `expose_prompts` | boolean | No | Per-server override for whether this server's MCP prompts are aggregated into mcpproxy's `prompts/list`. Only takes effect when the global `aggregate_upstream_prompts` master switch is on. Omit to expose prompts whenever the server advertises `Capabilities.Prompts`; `false` opts this server out even if it does. |
+| `expose_skills` | boolean | No | Per-server override for whether mcpproxy reads this server's skills (MCP skills extension). Only takes effect when the global `enable_skills` switch is on. Omit to read skills whenever the server supports them; `false` opts this server out. See [Skills over MCP](features/skills.md). |
 | `toon_output` | string | No | Per-server override for the global [`toon_output`](#toon-output-adaptive-result-encoding): `off`, `adaptive`, or `always`. Non-empty value wins over the global for this server's tools; omit to inherit. See [TOON Output](features/toon-output.md). |
 | `tool_argument_error_mode` | string | No | Argument-error policy for this upstream: omitted, empty, or `detailed` retains diagnostic messages; `redacted` replaces eligible argument-error messages with `Invalid tool arguments.`. See [Tool Argument Errors](#tool-argument-errors). |
 | `forward_headers` | array | No | Names of inbound MCP client HTTP headers to forward to this server on `tools/call`. Exact names only. See [Client Header Forwarding](#client-header-forwarding). Ignored for `stdio` and `sse`. `[]` clears it. |
@@ -1033,7 +1036,6 @@ block** — off by default, best-effort, and unable to change the baseline verdi
     "scan_timeout_default": "60s",
     "integrity_check_interval": "1h",
     "integrity_check_on_restart": false,
-    "scanner_registry_url": "",
     "tpa_bundle_path": "",
     "require_signed_bundle": false,
     "tpa_active_root": "publisher",
@@ -1999,6 +2001,8 @@ Many configuration options can be overridden via environment variables:
 | `MCPPROXY_LISTEN` / `MCPP_LISTEN` | `listen` | Network binding address |
 | `MCPPROXY_API_KEY` | `api_key` | API key for authentication (empty values trigger auto-generation; auth remains enabled) |
 | `MCPPROXY_API_KEY_FILE` | `api_key` | Absolute path of a file that holds the API key; set it or `MCPPROXY_API_KEY`, not both (both set stops startup with an error naming both); an unusable file stops startup (no fallback, nothing generated) |
+| `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY` | `oauth_token_encryption_key` | The key itself (base64, 32 bytes); overrides the field. Set it or the `_FILE` form, not both (exit 4) |
+| `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE` | `oauth_token_encryption_key` | Absolute path of a file that holds the key; overrides the field. A key source that is named but unusable or empty stops startup with exit 4 (no fallback to plaintext) |
 | `MCPPROXY_TRUSTED_HOSTS` | `trusted_hosts` | Comma-separated `Host` allowlist for loopback listeners behind a reverse proxy |
 | `MCPPROXY_TRUSTED_PROXIES` | `trusted_proxies` | Comma-separated CIDRs/IPs whose `X-Forwarded-*` headers are honoured |
 | `MCPPROXY_AUDIT_LOG_ENABLED` | `audit_log.enabled` | Turn audit logging on/off |

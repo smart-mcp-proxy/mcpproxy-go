@@ -75,7 +75,7 @@ func TestDiscoverToolsListsServersConcurrently(t *testing.T) {
 	defer cancel()
 	for i := 0; i < 3; i++ {
 		ts := servertest.NewTestStreamableHTTPServer(newGaugedUpstream(t, g, fmt.Sprintf("tool_%d", i)))
-		t.Cleanup(ts.Close)
+		t.Cleanup(func() { closeHTTPFixture(ts) })
 		id := fmt.Sprintf("srv-%d", i)
 		require.NoError(t, m.AddServerConfig(id, &config.ServerConfig{
 			Name: fmt.Sprintf("server-%d", i), Protocol: "streamable-http", URL: ts.URL, Enabled: true,
@@ -160,7 +160,7 @@ func TestDiscoverToolsBoundsConcurrentLists(t *testing.T) {
 	defer cancel()
 	for i := 0; i < serverCount; i++ {
 		ts := servertest.NewTestStreamableHTTPServer(newSlotGaugedUpstream(t, g, fmt.Sprintf("tool_%d", i)))
-		t.Cleanup(ts.Close)
+		t.Cleanup(func() { closeHTTPFixture(ts) })
 		id := fmt.Sprintf("srv-%d", i)
 		require.NoError(t, m.AddServerConfig(id, &config.ServerConfig{
 			Name: fmt.Sprintf("server-%d", i), Protocol: "streamable-http", URL: ts.URL, Enabled: true,

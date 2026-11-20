@@ -68,7 +68,7 @@ func startCredMock(t *testing.T, name string, tools []mcp.Tool) *MockUpstreamSer
 	mock.addr = "http://" + ln.Addr().String()
 	httpSrv := &http.Server{Handler: mcpserver.NewStreamableHTTPServer(srv), ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = httpSrv.Serve(ln) }()
-	mock.stopFunc = func() error { return httpSrv.Shutdown(context.Background()) }
+	mock.stopFunc = func() error { return httpSrv.Close() }
 	t.Cleanup(func() { _ = mock.stopFunc() })
 	return mock
 }

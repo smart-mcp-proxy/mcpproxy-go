@@ -678,6 +678,7 @@ type mockRuntimeOperations struct {
 	servers      []map[string]interface{}
 	enableCalls  []enableCall
 	restartCalls []string
+	restartCtxs  []context.Context
 	enableError  error
 	restartError error
 	getAllError  error
@@ -688,6 +689,7 @@ type mockRuntimeOperations struct {
 type enableCall struct {
 	serverName string
 	enabled    bool
+	ctx        context.Context
 }
 
 func newMockRuntime() *mockRuntimeOperations {
@@ -706,8 +708,12 @@ func (m *mockRuntimeOperations) GetAllServers() ([]map[string]interface{}, error
 }
 
 func (m *mockRuntimeOperations) EnableServer(serverName string, enabled bool) error {
+	return m.EnableServerCtx(context.Background(), serverName, enabled)
+}
+
+func (m *mockRuntimeOperations) EnableServerCtx(ctx context.Context, serverName string, enabled bool) error {
 	m.mu.Lock()
-	m.enableCalls = append(m.enableCalls, enableCall{serverName: serverName, enabled: enabled})
+	m.enableCalls = append(m.enableCalls, enableCall{serverName: serverName, enabled: enabled, ctx: ctx})
 	m.mu.Unlock()
 	if m.failOnServer != "" && serverName == m.failOnServer {
 		return m.enableError
@@ -730,8 +736,13 @@ func (m *mockRuntimeOperations) BulkEnableServers(serverNames []string, enabled 
 }
 
 func (m *mockRuntimeOperations) RestartServer(serverName string) error {
+	return m.RestartServerCtx(context.Background(), serverName)
+}
+
+func (m *mockRuntimeOperations) RestartServerCtx(ctx context.Context, serverName string) error {
 	m.mu.Lock()
 	m.restartCalls = append(m.restartCalls, serverName)
+	m.restartCtxs = append(m.restartCtxs, ctx)
 	m.mu.Unlock()
 	if m.failOnServer != "" && serverName == m.failOnServer {
 		return m.restartError
@@ -1168,4 +1179,39 @@ func TestTriggerOAuthLogin_EmptyServerName(t *testing.T) {
 
 func (m *mockRuntimeOperations) GetToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
 	return nil, fmt.Errorf("not found")
+}
+
+// Issue #1698: the request context (and the caller it names) reaches the
+// runtime's enable toggle, so the config_change row says who flipped it.
+func TestService_EnableServer_PassesRequestContext(t *testing.T) {
+	runtime := newMockRuntime()
+	svc := NewService(runtime, &config.Config{}, "", &mockEventEmitter{}, nil, zaptest.NewLogger(t).Sugar())
+
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "caller")
+	require.NoError(t, svc.EnableServer(ctx, "test-server", false))
+
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	require.Len(t, runtime.enableCalls, 1)
+	assert.Equal(t, "test-server", runtime.enableCalls[0].serverName)
+	assert.False(t, runtime.enableCalls[0].enabled)
+	require.NotNil(t, runtime.enableCalls[0].ctx, "the runtime was called with the request context")
+	assert.Equal(t, "caller", runtime.enableCalls[0].ctx.Value(key{}))
+}
+
+// Issue #1698 (review F3): a restart carries the request context too, since a
+// restart of a disabled server enables it and records that.
+func TestService_RestartServer_PassesRequestContext(t *testing.T) {
+	runtime := newMockRuntime()
+	svc := NewService(runtime, &config.Config{}, "", &mockEventEmitter{}, nil, zaptest.NewLogger(t).Sugar())
+
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "caller")
+	require.NoError(t, svc.RestartServer(ctx, "test-server"))
+
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	require.Len(t, runtime.restartCtxs, 1)
+	assert.Equal(t, "caller", runtime.restartCtxs[0].Value(key{}))
 }

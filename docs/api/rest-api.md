@@ -34,7 +34,7 @@ curl "http://127.0.0.1:8080/api/v1/servers?apikey=your-api-key"
 Two kinds of credential authenticate against the REST API:
 
 - **Admin API key** — full access to every endpoint.
-- **Agent tokens** (`mcp_agt_` prefix, see [Agent Tokens](../features/agent-tokens.md)) — scoped, read-oriented access. Agent tokens may **read** (`GET /api/v1/servers`, diagnostics, config/registry reads, `GET /api/v1/index/search`) but may **not** perform mutating operations that touch server/security/config state. These return **`403 Forbidden`** with `operation requires admin access` for an agent token, mirroring the MCP `upstream_servers`/`quarantine_security` denylist so the two surfaces cannot drift. Socket (tray) connections authenticate as admin and are unaffected. Gated routes:
+- **Agent tokens** (`mcp_agt_` prefix, see [Agent Tokens](../features/agent-tokens.md)) — scoped, read-oriented access. They may **read** (`GET /api/v1/servers`, diagnostics, registry browsing, read-only `POST /api/v1/config/validate`, and `GET /api/v1/index/search`). The full configuration document (`GET /api/v1/config`) is admin-only. They may **not** perform mutating operations that touch server/security/config state. These return **`403 Forbidden`** with `operation requires admin access` for an agent token, mirroring the MCP `upstream_servers`/`quarantine_security` denylist so the two surfaces cannot drift. Socket (tray) connections authenticate as admin and are unaffected. Gated routes:
   - **Servers** — add, remove, patch, enable, disable, restart, reconnect, quarantine, unquarantine, login, logout, config-to-secret, discover-tools, refresh, tool approve/block, the bulk `enable_all`/`disable_all`/`restart_all`, and the security scanner (`scan`, `scan/cancel`, `security/approve`, `security/reject`).
   - **Config** — `POST /config/apply`, `PATCH /config`, `PATCH /config/docker-isolation` (config can add/remove/enable/disable servers). `POST /config/validate` is read-only and stays open.
   - **Registries** — `POST/PUT/DELETE /registries[/{id}]` (source management) and `POST /registries/{id}/servers/{serverId}/add`. Registry browsing (`GET`) stays open.
@@ -1271,7 +1271,7 @@ Drop a registry's cached server lists. Returns
 #### GET /api/v1/connect
 
 Lists the connection status of every known MCP client (Claude Desktop, Cursor,
-VS Code, Codex, Gemini, OpenCode, ZCode, …).
+VS Code, GitHub Copilot, Codex, Gemini, OpenCode, ZCode, …).
 
 As of Spec 075, the overall listing determines each client's installed state
 using **file-existence metadata only** (`os.Stat`) and performs **zero config
@@ -1707,6 +1707,102 @@ when the token was not already revoked) and publishes `credentials.changed`.
 Neither route enforces the binding guard; the MCP `credentials` tool does (see
 [Credential lifecycle over MCP](../features/mcp-credential-lifecycle.md)).
 
+### Skills
+
+Spec 125. The two read endpoints (`GET /servers/{id}/skills` and `.../skills/content`) answer a scoped agent token whose reach includes the server, with the approved copy of the skills that are available to agents and nothing about any other skill: no counts, no scan result, no current hash, no refresh or error detail, and one `404` for every skill or file that is unknown or held. For such a caller `copy` is always `approved`. A server outside the token's reach is `404`, as for the server itself. Refresh, approve, block and unblock are administrator-only (the API key, the socket or an administrator session): a scoped agent token gets `403` and nothing is read. See [Skills over MCP](../features/skills.md).
+
+#### GET /api/v1/servers/{id}/skills
+
+Every skill record of one server. With `enable_skills` off the answer is `200` with `{"enabled": false, "skills": []}` and no upstream is contacted. An unknown server is `404`.
+
+```json
+{
+  "success": true,
+  "data": {
+    "enabled": true,
+    "incarnation": 3,
+    "server": "hf",
+    "supported": true,
+    "expose_skills": null,
+    "last_refresh": "2026-11-16T19:20:00Z",
+    "error": "",
+    "truncated": false,
+    "skills": [
+      {
+        "id": "hf:hf-cli",
+        "uri": "skill://hf-cli/SKILL.md",
+        "path": "hf-cli",
+        "name": "hf-cli",
+        "description": "Hugging Face CLI",
+        "status": "pending",
+        "blocked": false,
+        "listed": true,
+        "available": false,
+        "unusable_reason": "",
+        "current_hash": "sk1-...",
+        "approved_hash": "",
+        "approved_by": "",
+        "files": [{"path": "SKILL.md", "size": 34197, "digest": "sha256:...", "text": true}],
+        "total_size": 34197,
+        "scan": {"verdict": "", "complete": false, "incomplete": "", "findings_truncated": false, "findings": []}
+      }
+    ]
+  }
+}
+```
+
+`available` is true only for an approved, unblocked, listed skill on an enabled server.
+
+Fields added with the approval gate:
+
+- `incarnation` (top level) identifies the server this listing was read from. Send it back as `expected_incarnation` on approve, block and unblock.
+- `approved_at` (omitted for a skill that was never approved) and `approved_by`; `approved_files` (omitted without an approved copy) is the file list of the approved copy, in the shape of `files`.
+- `scan` describes the scan of the skill's **current** content only. It is reported when the scan was made of exactly `current_hash`; a scan of older content is not shown (`verdict` empty, no `scanned_at`). `incomplete` says why `complete` is false: `size_cap`, `time_limit`, `coverage` or `interrupted`. `scanned_at` is omitted when there is no scan of the current content. `findings_truncated` is true when more findings existed than `findings` lists. Each finding has `file`, `offset` (byte position), `rule`, `severity` and `evidence`.
+
+#### GET /api/v1/servers/{id}/skills/content
+
+Query: `skill` (required, the skill path), `file` (default `SKILL.md`), `copy` (`current`, the default, or `approved`), `offset` (byte position, default 0) and `limit` (default and maximum 65536 bytes).
+
+```json
+{"success": true, "data": {"text": "# hf-cli\n...", "offset": 0, "next_offset": 65536, "size": 82000, "digest": "sha256:..."}}
+```
+
+`next_offset` is absent at the end of the file. A chunk never splits a UTF-8 character, so it can be a few bytes shorter than `limit`; an `offset` inside a character is `400`. Errors: `400` for a bad parameter, `404` for an unknown skill or file (or with `enable_skills` off), `415` for a binary file, `409` with `error_code` `stored_copy_damaged` when the stored bytes no longer match their digest.
+
+#### POST /api/v1/servers/{id}/skills/refresh
+
+Reads the server's skills again, verifies every file and returns the same payload as the list endpoint. A refresh already running for the server is joined. `409` with `error_code` `skills_disabled` when `enable_skills` is off (or is turned off while the refresh runs), `409` `skills_not_supported` when the server does not announce the skills extension, and `409` `refresh_superseded` when the server reconnected during the refresh, in which case its skills are read again after the reconnect.
+
+#### POST /api/v1/servers/{id}/skills/approve
+
+Administrator only. Approves skills for exactly the content that was reviewed. Body:
+
+```json
+{"skills": ["hf-cli"], "expected_hashes": {"hf-cli": "sk1-..."}, "expected_incarnation": 3}
+```
+
+`skills` holds 1 to 200 skill paths (the part of the id after `<server>:`). `expected_hashes` maps each path to the `current_hash` the reviewer saw; a skill without an entry is refused as unreviewed. `expected_incarnation` is the listing's `incarnation`; `0` or absent binds to the server as it is when the request starts. A skill that is already approved for its current content is left as it is and not counted. The blocked mark is never touched. The approver is recorded as `api`, as for tool approvals.
+
+```json
+{"success": true, "data": {"approved": 1}}
+```
+
+Errors (nothing is written for any of them):
+
+| Status | `error_code` | Meaning |
+|--------|--------------|---------|
+| `400` | | Body is not JSON, has unknown fields or trailing data, is over 1 MiB, `skills` is empty, has an empty name or more than 200 names, or `expected_incarnation` is negative |
+| `403` | | A scoped agent token |
+| `404` | | Unknown server, or a named skill has no record |
+| `409` | `skills_disabled` | `enable_skills` is off |
+| `409` | `review_out_of_date` | A current hash differs from the expected one, or a skill has no expected hash. The body carries `changed` and `unreviewed` (both always present, `[]` when empty) |
+| `409` | | `server_replaced: ...` when the server was removed or replaced since the review (same body as the tool approval endpoint) |
+| `422` | `skill_unusable` | A named skill cannot be approved (a failed check, or a dynamic file list). The body carries `skills` |
+
+#### POST /api/v1/servers/{id}/skills/block and /unblock
+
+Administrator only. Set or clear the blocked mark. A blocked skill is never offered to an agent, and no refresh, content change or automatic approval clears the mark. Unblocking does not approve: a skill that is not approved stays unavailable. Body: `{"skills": ["hf-cli"], "expected_incarnation": 3}`; `expected_incarnation` is optional. Answer: `{"success": true, "data": {"changed": 1}}` with the number of skills whose mark changed. The same `400`, `403`, `404`, `409 skills_disabled` and `409 server_replaced` answers as approve apply.
+
 ### Real-time Updates
 
 #### GET /events
@@ -1779,6 +1875,47 @@ Validate configuration without applying.
 #### GET /api/v1/diagnostics
 
 Get system diagnostics.
+
+When an OAuth token encryption key is configured, or any stored OAuth row is encrypted, the
+response's `data` object carries an `oauth_token_storage` object (Spec 123). The
+example shows that part of `data` only:
+
+```json
+{
+  "oauth_token_storage": {
+    "encryption_enabled": true,
+    "key_id": "0329a64b3f620111",
+    "key_source_kind": "ref_file",
+    "plaintext": 0,
+    "sealed": 2,
+    "undecryptable": 1,
+    "undecryptable_by_reason": {
+      "no_key": 0, "key_mismatch": 1, "auth_failed": 0, "unsupported_version": 0, "malformed": 0
+    },
+    "servers": [
+      { "bucket_key": "notion_0123456789abcdef", "server": "notion",
+        "reason": "key_mismatch", "row_key_id": "132087b39d6d2462" }
+    ],
+    "compaction_advised": true,
+    "warnings": ["compaction_advised"]
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `encryption_enabled` | A key is configured |
+| `key_id` | Public fingerprint of the configured key (administrators only) |
+| `key_source_kind` | `literal`, `env`, `env_file`, `ref_file`, `ref_env` or `ref_keyring`; `key_source_in_data_dir` is true when the key file lies inside the data directory (administrators only) |
+| `plaintext`, `sealed`, `undecryptable` | A partition of the stored rows: they sum to the row total, and a `key_mismatch` row is counted once, under `undecryptable` |
+| `undecryptable_by_reason` | The `undecryptable` count by reason |
+| `servers` | One entry per undecryptable row (`row_key_id` for administrators only) |
+| `compaction_advised` | A plaintext row was replaced by an encrypted one and freed pages may still hold the old plaintext; cleared by `mcpproxy db compact --keep-backup=false` |
+| `warnings` | `literal_key`, `key_file_in_data_dir`, `plaintext_rows_with_key`, `compaction_advised`, `backup_file_present` (administrators only) |
+
+The object never carries the key, key bytes, key source contents or the key reference. A caller
+scoped to some servers sees counts and entries for those servers only, and no key id or warnings.
+Each undecryptable server also adds one entry to `runtime_warnings`.
 
 #### GET /api/v1/doctor
 
@@ -1920,6 +2057,48 @@ idle client does not appear until its first tool call.
 #### GET /api/v1/sessions/{id}
 
 Get session details.
+
+### Work sessions
+
+A work session is one agent's run of work (see [Activity log](../features/activity-log.md#work-sessions-and-the-failure-timeline)). These doors are separate from `/api/v1/sessions`, which lists MCP connections and is admin-only.
+
+**Authorization.** An administrator sees every session. An agent token sees only its own sessions, and of each only the part that touched servers in its reach: start, end, status, counts and failure facts are recomputed from that part, and `profile`, `connection_count` and `truncated_start_at` are omitted. A session that belongs to another credential, one with nothing in the caller's reach and an unknown id all return the same `404`.
+
+#### GET /api/v1/work-sessions
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `failed` | boolean | Only sessions with at least one failure |
+| `include_blocked` | boolean | With `failed`: count policy blocks as failures (default `true`) |
+| `token` | string | Filter by agent token name |
+| `client` | string | Filter by client id |
+| `profile` | string | Filter by profile (administrators only; matches nothing for a scoped caller) |
+| `run` | string | Filter by run name (`X-MCPProxy-Run`) |
+| `error_class` | string | Filter by the error class of the last failure |
+| `since`, `until` | RFC3339 | Sessions active in the time range |
+| `sort` | string | `last_activity` (default) or `last_failure` |
+| `limit` | integer | 1-100, default 25 |
+| `offset` | integer | Pagination offset |
+
+Each session carries `id`, `token_name`, `client_id`, `client_name`, `surface`, `run_name`, `status` (`active` or `ended`), `started_at`, `last_activity_at`, `ended_at`, `duration_ms`, `attempts`, `failures`, `policy_blocks` (included in `failures`), `stored_failures`, `first_failure_at` and `last_failure` (`at`, `error_class`, `error_code`, `server`, `tool`, `reason`, `policy_block`). `reason` is fixed wording for the error class, never the row's own error text, which can echo request data; the full message is on the row in the timeline. `attempts`, `failures` and `policy_blocks` are lifetime counts; `stored_failures` counts the failures whose rows are still in the log.
+
+#### GET /api/v1/work-sessions/{id}
+
+One session, in the same shape.
+
+#### GET /api/v1/work-sessions/{id}/timeline
+
+The session's activity rows and the upstream events of the servers it called, in time order.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `at` | string | Where to position the page: `first_failure` (default), `failure:<n>` (1-based), `row:<activity id>` or `end` |
+| `before`, `after` | integer | Rows before and after the position, 0-250, default 20 |
+| `include_bodies` | boolean | Include argument and response bodies (omitted by default) |
+
+The response has `session`, `rows`, `position` and `total_rows`, `failure_index` and `failure_total` (the stored failures the caller can navigate), `lifetime_failures`, `earlier_failures_not_stored`, `has_before` and `has_after`. Each row has `index`, `kind` (`call`, `internal_call`, `policy_decision`, `prompt`, `upstream_event`, `session_start`, `session_end`), `at`, `failed`, `policy_block`, `bodies_removed`, `precedes_session` and the `activity` record. `session_start` and `session_end` are synthetic rows derived from the session; they carry `at` and no `activity`. A row with `precedes_session: true` comes before `session_start`: one per server on which a call in the session failed `network`: the server's latest `connection_lost` or `process_exited` event recorded before the session (and since MCPProxy started), with no `connection_restored` after it before the session started. A page holds at most 500 rows, the positioned row included.
+
+When retention has removed some of a session's failures, positions count only the failures still stored, and `earlier_failures_not_stored` is `true` with the lifetime count in `lifetime_failures`. With no stored failure the default position is the earliest stored row.
 
 ### Activity
 

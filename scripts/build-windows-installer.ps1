@@ -99,7 +99,7 @@ if ($InstallerType -eq 'inno' -or $InstallerType -eq 'both') {
     $ISCC = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
     if (-not (Test-Path $ISCC)) {
         Write-Host "    Inno Setup not found at $ISCC" -ForegroundColor Yellow
-        Write-Host "    Install via: choco install innosetup -y" -ForegroundColor Yellow
+        Write-Host "    Install Inno Setup 6.7.4 or newer from https://jrsoftware.org/isdl.php (the installer script refuses older compilers)" -ForegroundColor Yellow
     } else {
         $InnoScript = Join-Path $RepoRoot "scripts\installer.iss"
         $RelativeBinPath = "..\dist\windows-$Arch"

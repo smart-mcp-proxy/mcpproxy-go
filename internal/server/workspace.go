@@ -161,10 +161,27 @@ func principalFromContext(ctx context.Context) string {
 		// user so their work sessions (and the work_session_id stamped onto
 		// their activity records) cannot collapse into one. Personal-edition
 		// tokens have no owner and keep the historical bare form.
+		//
+		// Spec 124 FR-009: the credential's generation, the prefix of the
+		// secret that authenticated, is part of the principal, for agent
+		// tokens and client credentials alike. A token regenerated or
+		// recreated under the same name, and a rotated client credential,
+		// therefore start a new work session even inside the idle window,
+		// and a session never spans two secrets.
+		base := "agent:" + ac.AgentName
 		if ac.UserID != "" {
-			return "agent:" + ac.UserID + ":" + ac.AgentName
+			base = "agent:" + ac.UserID + ":" + ac.AgentName
 		}
-		return "agent:" + ac.AgentName
+		// The generation is a collision-resistant id of the secret when the
+		// request was authenticated through validation; the 12-character
+		// display prefix has only four random characters and is the fallback.
+		if ac.TokenGeneration != "" {
+			return base + ":" + ac.TokenGeneration
+		}
+		if ac.TokenPrefix != "" {
+			return base + ":" + ac.TokenPrefix
+		}
+		return base
 	case ac.UserID != "":
 		return "user:" + ac.UserID
 	default:
@@ -203,31 +220,87 @@ func (p *MCPProxyServer) markSessionWorked(ctx context.Context, sessionID string
 	p.sessionStore.WorkspaceSettled(sessionID, workspaceSettleWait)
 
 	principal := principalFromContext(ctx)
+	runName := p.requestRunName(ctx, principal)
 
-	return p.sessionStore.EnsurePersisted(sessionID, func(info *SessionInfo) string {
-		resolve := p.resolveWorkSession()
-		if resolve == nil {
-			return ""
-		}
-		return resolve(runtime.WorkSessionIdentity{
+	return p.sessionStore.EnsurePersistedKeyed(sessionID, workSessionKey(principal, runName), func(info *SessionInfo, cached func(string) (string, bool)) (string, string) {
+		id, effective := p.resolveKeyedWorkSession(runtime.WorkSessionIdentity{
 			Principal:     principal,
 			ClientName:    info.ClientName,
 			ClientVersion: info.ClientVersion,
 			WorkspaceRoot: info.Workspace,
-		})
+			RunName:       runName,
+		}, cached)
+		return id, workSessionKey(principal, effective.RunName)
 	})
 }
 
-// resolveWorkSession is the runtime's work-session tracker, or the stub a test
-// injected in its place. Nil when neither is available.
-func (p *MCPProxyServer) resolveWorkSession() func(runtime.WorkSessionIdentity) string {
-	if p.workSessionResolver != nil {
-		return p.workSessionResolver
+// resolveKeyedWorkSession resolves a connection's work session for one
+// credential. It first asks which identity the session would be filed under
+// and whether the connection already holds that identity's session; only when
+// it does not is a session resolved, so a dropped run name never opens a
+// competing session beside the one the connection keeps.
+func (p *MCPProxyServer) resolveKeyedWorkSession(identity runtime.WorkSessionIdentity, cached func(string) (string, bool)) (string, runtime.WorkSessionIdentity) {
+	effective := p.effectiveWorkSessionIdentity(identity)
+	if id, ok := cached(workSessionKey(effective.Principal, effective.RunName)); ok {
+		return id, effective
+	}
+	id, filed := p.resolveWorkSessionEffective(identity)
+	if filed.RunName != effective.RunName {
+		// The identity changed between the question and the resolution (a
+		// concurrent request used the last named session of the day). If
+		// the connection already holds the session of the identity it ended
+		// up with, that one is the answer, and the tracker is told so: the
+		// session just opened beside it must not be the one a reconnect
+		// joins.
+		if kept, ok := cached(workSessionKey(filed.Principal, filed.RunName)); ok && kept != id {
+			p.adoptWorkSession(kept, filed)
+			return kept, filed
+		}
+	}
+	return id, filed
+}
+
+// adoptWorkSession files the identity under the given session in the tracker.
+func (p *MCPProxyServer) adoptWorkSession(id string, identity runtime.WorkSessionIdentity) {
+	if p.workSessionAdopter != nil {
+		p.workSessionAdopter(id, identity)
+		return
 	}
 	if p.mainServer == nil || p.mainServer.runtime == nil {
-		return nil
+		return
 	}
-	return p.mainServer.runtime.ResolveWorkSession
+	p.mainServer.runtime.AdoptWorkSession(id, identity)
+}
+
+// effectiveWorkSessionIdentity is the identity a session would be filed under,
+// without resolving it.
+func (p *MCPProxyServer) effectiveWorkSessionIdentity(id runtime.WorkSessionIdentity) runtime.WorkSessionIdentity {
+	if p.workSessionEffectiveIdentity != nil {
+		return p.workSessionEffectiveIdentity(id)
+	}
+	if p.workSessionResolver != nil || p.workSessionResolverEffective != nil {
+		return id
+	}
+	if p.mainServer == nil || p.mainServer.runtime == nil {
+		return id
+	}
+	return p.mainServer.runtime.EffectiveWorkSessionIdentity(id)
+}
+
+// resolveWorkSessionEffective resolves a work session and returns the identity
+// it was filed under. With a test's stub resolver the identity is returned
+// unchanged.
+func (p *MCPProxyServer) resolveWorkSessionEffective(id runtime.WorkSessionIdentity) (string, runtime.WorkSessionIdentity) {
+	if p.workSessionResolverEffective != nil {
+		return p.workSessionResolverEffective(id)
+	}
+	if p.workSessionResolver != nil {
+		return p.workSessionResolver(id), id
+	}
+	if p.mainServer == nil || p.mainServer.runtime == nil {
+		return "", id
+	}
+	return p.mainServer.runtime.ResolveWorkSessionEffective(id)
 }
 
 // markWorkIfToolCall attributes a request to a work session when — and only when

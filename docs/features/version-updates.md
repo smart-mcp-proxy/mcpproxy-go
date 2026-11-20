@@ -21,7 +21,7 @@ matrix and the kill switches — see [Auto-Update](/features/auto-update).
 
 MCPProxy automatically checks for new versions by querying GitHub Releases:
 
-1. **Background checking**: The core server checks for updates on startup and every 4 hours thereafter
+1. **Background checking**: The core server checks for updates on startup and once every 24 hours thereafter
 2. **Non-blocking**: Update checks run in the background and don't affect proxy performance
 3. **Graceful degradation**: If the check fails (e.g., no internet), MCPProxy continues working normally
 

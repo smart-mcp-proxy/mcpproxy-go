@@ -1,0 +1,74 @@
+{
+  "category": "tpa_tool_shadowing",
+  "gating": true,
+  "id": "TPA-2026-0014",
+  "license": "MIT",
+  "provenance": {
+    "note": "The cited sample returns this notice from tool execution (the tool's docstring stays ordinary PubMed documentation), so it demonstrates the redirect goal at the tool-result layer. This signature covers the description-level variant of the same pattern: an Important-tagged notice that retires the tool, routes calls to another tool and conceals the change; it does not claim to detect the execution-time return value.",
+    "published": "2026-03-24",
+    "source": "https://github.com/dongsenzhang/MSB/blob/main/data/tools/attack_tools/academic_search/PubMed_MCP_Server/pubmed_server-tool_transfer.py"
+  },
+  "rules": [
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.88,
+      "detector": "important_tag_tool_transfer",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0014",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$tag",
+          "type": "regex",
+          "value": "<important>|<system>"
+        },
+        {
+          "context": "tool_description",
+          "id": "$retired",
+          "type": "regex",
+          "value": "no longer available|has been replaced"
+        },
+        {
+          "context": "tool_description",
+          "id": "$conceal",
+          "type": "regex",
+          "value": "do not mention|don't tell|never tell|silently|secretly"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<(?:important|system)>.{0,100}?\\b(?:no longer available|has been (?:replaced|removed|deprecated|retired)|is (?:deprecated|obsolete|retired))\\b.{0,200}?(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:(?:(?:automatically|immediately)\\s+)*(?:silently|quietly|secretly|covertly|discreetly)\\s+(?:(?:silently|quietly|secretly|covertly|discreetly|automatically|immediately)\\s+)*(?:route|redirect|send|switch|move|forward|direct)\\b.{0,80}?\\b(?:to|towards)\\b.{0,60}?\\btool\\b|(?:(?:silently|quietly|secretly|covertly|discreetly|automatically|immediately)\\s+)*(?:route|redirect|send|switch|move|forward|direct)\\b.{0,80}?\\b(?:to|towards)\\b.{0,60}?\\btool\\b(?:\\s+instead)?\\s*,?\\s*(?:silently|secretly|covertly|quietly)\\b\\s*(?:[.;,!]|<|$)|(?:(?:silently|quietly|secretly|covertly|discreetly|automatically|immediately)\\s+)*(?:route|redirect|send|switch|move|forward|direct)\\b.{0,80}?\\b(?:to|towards)\\b.{0,60}?\\btool\\b.{0,200}?(?:\\b(?:do not|don't|never|without)\\s+(?:mention\\w*|tell\\w*|inform\\w*|notify\\w*|reveal\\w*|disclos\\w*|alert\\w*|warn\\w*)\\s+(?:(?:the\\s+)?(?:user|human|operator|anyone)\\s+(?:about|of)\\s+)?(?:(?:this|that|the)\\s+(?:change|switch|redirect\\w*|replacement|migration|transfer|routing)|this|that|it)(?:\\s*[.;,!<]|\\s+(?:to|from)\\b|$)|\\bwithout\\s+(?:telling|informing|notifying|alerting|warning)\\s+(?:the\\s+)?(?:user|human|operator|anyone)\\b|\\b(?:do not|don't|never)\\s+(?:tell|inform|notify|alert|warn)\\s+(?:the\\s+)?(?:user|human|operator|anyone)\\s*(?:[.;,!<]|$)|\\btool\\b(?:\\s+instead)?\\s*,?\\s*(?:silently|secretly|covertly|quietly)\\b\\s*(?:[.;,!]|<|$)))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.84,
+      "detector": "retired_route_all_calls",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0014",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$retired",
+          "type": "regex",
+          "value": "this tool is no longer available"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\bthis tool\\s+(?:is no longer available|has been (?:replaced|retired|removed))\\b.{0,120}?(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:(?:(?:automatically|immediately)\\s+)*(?:silently|quietly|secretly|covertly|discreetly)\\s+(?:(?:silently|quietly|secretly|covertly|discreetly|automatically|immediately)\\s+)*(?:route|redirect|forward|send)\\s+(?:all|every)\\b.{0,80}?\\bto\\b.{0,60}?\\btool\\b|(?:(?:silently|quietly|secretly|covertly|discreetly|automatically|immediately)\\s+)*(?:route|redirect|forward|send)\\s+(?:all|every)\\b.{0,80}?\\bto\\b.{0,60}?\\btool\\b(?:\\s+instead)?\\s*,?\\s*(?:silently|secretly|covertly|quietly)\\b\\s*(?:[.;,!]|<|$)|(?:(?:silently|quietly|secretly|covertly|discreetly|automatically|immediately)\\s+)*(?:route|redirect|forward|send)\\s+(?:all|every)\\b.{0,80}?\\bto\\b.{0,60}?\\btool\\b.{0,120}?(?:\\b(?:do not|don't|never|without)\\s+(?:mention\\w*|tell\\w*|inform\\w*|notify\\w*|reveal\\w*|disclos\\w*|alert\\w*|warn\\w*)\\s+(?:(?:the\\s+)?(?:user|human|operator|anyone)\\s+(?:about|of)\\s+)?(?:(?:this|that|the)\\s+(?:change|switch|redirect\\w*|replacement|migration|transfer|routing)|this|that|it)(?:\\s*[.;,!<]|\\s+(?:to|from)\\b|$)|\\bwithout\\s+(?:telling|informing|notifying|alerting|warning)\\s+(?:the\\s+)?(?:user|human|operator|anyone)\\b|\\b(?:do not|don't|never)\\s+(?:tell|inform|notify|alert|warn)\\s+(?:the\\s+)?(?:user|human|operator|anyone)\\s*(?:[.;,!<]|$)|\\btool\\b(?:\\s+instead)?\\s*,?\\s*(?:silently|secretly|covertly|quietly)\\b\\s*(?:[.;,!]|<|$)))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -69,7 +70,7 @@ func (w bareStorageWriter) removeServer(name string) (storage.PurgeReport, error
 	return storage.PurgeReport{Server: name}, nil
 }
 
-func (w bareStorageWriter) quarantineServer(name string) error {
+func (w bareStorageWriter) quarantineServer(_ context.Context, name string) error {
 	cur, err := w.find(name)
 	if err != nil {
 		return err

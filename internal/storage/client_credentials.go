@@ -191,7 +191,7 @@ func (m *Manager) MintClientCredentialWith(clientID, rawToken string, hmacKey []
 			if existing.Kind != auth.KindClient {
 				return ErrClientCredentialConflict
 			}
-			if !existing.IsRevoked() && !existing.IsExpired() {
+			if !clientCredentialUnusable(existing) {
 				return ErrClientCredentialActive
 			}
 			// Soft-revoked/expired: replace in the same transaction. The name
@@ -259,7 +259,7 @@ func (m *Manager) UpdateClientCredentialBinding(clientID, pin, mode string) (bef
 		if existing.Kind != auth.KindClient {
 			return ErrClientCredentialConflict
 		}
-		if existing.IsRevoked() || existing.IsExpired() {
+		if clientCredentialUnusable(existing) {
 			return ErrClientCredentialNotActive
 		}
 		snapshot := *existing
@@ -320,7 +320,7 @@ func (m *Manager) StageClientCredentialRotation(clientID, newRawToken string, hm
 		if existing.Kind != auth.KindClient {
 			return ErrClientCredentialConflict
 		}
-		if existing.IsRevoked() || existing.IsExpired() {
+		if clientCredentialUnusable(existing) {
 			return ErrClientCredentialNotActive
 		}
 
@@ -578,4 +578,12 @@ func (m *Manager) forgetClientCredential(clientID string, restorePrior bool) (*a
 		return nil, err
 	}
 	return revoked, nil
+}
+
+// clientCredentialUnusable reports whether a kind=client record can no longer
+// authenticate: revoked, past its expiry, or with no expiry at all. A client
+// credential must carry an expiry (auth.ValidateTokenInvariants), so a zero
+// ExpiresAt is not "never expires" here, unlike on a regular agent token.
+func clientCredentialUnusable(t *auth.AgentToken) bool {
+	return t.IsRevoked() || t.IsExpired() || t.ExpiresAt.IsZero()
 }

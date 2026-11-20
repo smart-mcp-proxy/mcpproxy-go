@@ -1,0 +1,88 @@
+name: Install Inno Setup
+description: >
+  Install a pinned, SHA-256 verified Inno Setup release on a Windows runner.
+  Chocolatey is deliberately not used: its latest package was 6.7.1, which leaks
+  the RedirectionGuard process mitigation into [Run] postinstall children
+  (issue #1844, fixed in Inno Setup 6.7.4).
+
+inputs:
+  version:
+    description: Inno Setup version to install (also the minimum version asserted afterwards).
+    required: false
+    default: "6.7.4"
+  sha256:
+    description: Expected SHA-256 of innosetup-<version>.exe. Must be updated together with version.
+    required: false
+    default: "a549929319f9120716677c685535ca4671e4b937b5fdc87e2585f32d8eb30e8c"
+
+runs:
+  using: composite
+  steps:
+    - name: Download, verify and install Inno Setup
+      shell: pwsh
+      env:
+        INNO_VERSION: ${{ inputs.version }}
+        INNO_SHA256: ${{ inputs.sha256 }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $tag = 'is-' + ($env:INNO_VERSION -replace '\.', '_')
+        $url = "https://github.com/jrsoftware/issrc/releases/download/$tag/innosetup-$($env:INNO_VERSION).exe"
+        $installer = Join-Path $env:RUNNER_TEMP "innosetup-$($env:INNO_VERSION).exe"
+
+        Write-Host "Downloading $url"
+        Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+
+        $actual = (Get-FileHash -Path $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $env:INNO_SHA256.ToLowerInvariant()) {
+          Write-Host "::error::SHA-256 mismatch for $url (expected $($env:INNO_SHA256), got $actual)"
+          exit 1
+        }
+        Write-Host "SHA-256 verified: $actual"
+
+        $proc = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList @(
+          '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/ALLUSERS', '/NOICONS'
+        )
+        if ($proc.ExitCode -ne 0) {
+          Write-Host "::error::Inno Setup installer exited with code $($proc.ExitCode)"
+          exit 1
+        }
+
+    - name: Verify ISCC version
+      shell: pwsh
+      env:
+        INNO_VERSION: ${{ inputs.version }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+        if (-not (Test-Path $iscc)) {
+          Write-Host "::error::ISCC.exe not found at $iscc"
+          exit 1
+        }
+        # ISCC with no arguments never prints a version (only the banner and
+        # usage) and exits 1, so ask the compiler itself: compile a throwaway
+        # script whose preprocessor aborts when Ver < the required version.
+        $v = [version]$env:INNO_VERSION
+        $dir = Join-Path $env:RUNNER_TEMP 'iscc-version-check'
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $script = Join-Path $dir 'check.iss'
+        @(
+          "#if Ver < EncodeVer($($v.Major), $($v.Minor), $($v.Build))"
+          "  #error Inno Setup is older than $($env:INNO_VERSION)"
+          "#endif"
+          "[Setup]"
+          "AppName=VersionCheck"
+          "AppVersion=1.0"
+          "DefaultDirName={autopf}\VersionCheck"
+          "OutputDir=$dir"
+          "OutputBaseFilename=check"
+        ) | Set-Content -Path $script -Encoding ASCII
+        $out = (& $iscc $script 2>&1 | Out-String)
+        $code = $LASTEXITCODE
+        Write-Host $out
+        if ($code -ne 0) {
+          Write-Host "::error::ISCC failed the minimum-version check for Inno Setup $($env:INNO_VERSION) (exit code $code)"
+          exit 1
+        }
+        Write-Host "Inno Setup >= $($env:INNO_VERSION) installed"
+        # Do not leak a stale native exit code into the step result.
+        exit 0

@@ -53,6 +53,9 @@ type SessionWorkSessionResolver func(sessionID string) string
 type ActivityService struct {
 	storage *storage.Manager
 	logger  *zap.Logger
+	// createdAt is when this process's service was built: every row it
+	// records is later, which tells its sessions from the previous process's.
+	createdAt time.Time
 
 	// clientResolver stamps the MCP client onto each activity record at WRITE
 	// time. Read-time joining against the sessions API is not viable: the core
@@ -102,10 +105,16 @@ type ActivityService struct {
 	stopped   bool
 
 	// Retention configuration
-	maxAge        time.Duration
-	maxRecords    int
-	maxSizeBytes  int64 // total activity-log size cap in bytes (0 = disabled)
-	checkInterval time.Duration
+	maxAge       time.Duration
+	maxRecords   int
+	maxSizeBytes int64 // total activity-log size cap in bytes (0 = disabled)
+	// sessionWindow is how long a work session is kept whole (Spec 124).
+	sessionWindow time.Duration
+
+	// upstreamEvents collapses upstream events into a bounded number of rows
+	// (Spec 124 FR-022).
+	upstreamEvents *upstreamEventCollapser
+	checkInterval  time.Duration
 
 	// maxResponseSize bounds the response text persisted on a single activity
 	// record (activity_max_response_size). Applied to every record type on the
@@ -131,6 +140,7 @@ func NewActivityService(storage *storage.Manager, logger *zap.Logger) *ActivityS
 	s := &ActivityService{
 		storage:       storage,
 		logger:        logger,
+		createdAt:     time.Now().UTC(),
 		eventCh:       make(chan Event, 100), // Buffer for non-blocking event delivery
 		done:          make(chan struct{}),
 		maxAge:        DefaultRetentionMaxAge,
@@ -141,6 +151,7 @@ func NewActivityService(storage *storage.Manager, logger *zap.Logger) *ActivityS
 		maxResponseSize: DefaultActivityMaxResponseSize,
 		detector:        nil, // Detector is optional, set via SetDetector
 		usage:           newUsageStore(),
+		upstreamEvents:  newUpstreamEventCollapser(),
 	}
 	s.usagePersistIntervalNs.Store(int64(DefaultUsagePersistInterval))
 	return s
@@ -236,6 +247,29 @@ func (s *ActivityService) SetRetentionConfig(maxAge time.Duration, maxRecords in
 	if maxSizeBytes >= 0 {
 		s.maxSizeBytes = maxSizeBytes
 	}
+}
+
+// DefaultSessionWindow is the work-session retention window when none is set.
+const DefaultSessionWindow = 7 * 24 * time.Hour
+
+// SetSessionWindow sets how long a work session is listed and kept whole
+// (Spec 124 FR-031). Values <= 0 are ignored.
+func (s *ActivityService) SetSessionWindow(d time.Duration) {
+	if d > 0 {
+		s.sessionWindow = d
+	}
+}
+
+// RetentionShortfall returns the current shortfall record and the settings
+// that produced it, for `mcpproxy doctor` (Spec 124 FR-035). The record is nil
+// when the caps hold the whole window.
+func (s *ActivityService) RetentionShortfall() (shortfall *storage.RetentionShortfall, window time.Duration, err error) {
+	window = s.sessionWindow
+	if window <= 0 {
+		window = DefaultSessionWindow
+	}
+	shortfall, err = s.storage.GetRetentionShortfall()
+	return shortfall, window, err
 }
 
 // SetMaxResponseSize sets the per-record response size cap in bytes.
@@ -337,6 +371,14 @@ func (s *ActivityService) Start(ctx context.Context, rt *Runtime) {
 
 // runRetentionLoop periodically cleans up old activity records.
 func (s *ActivityService) runRetentionLoop(ctx context.Context) {
+	s.prepareWorkSessions(ctx)
+	if ctx.Err() != nil {
+		// Stopped during preparation: the backfill may be half done, and a
+		// cleanup over half-indexed sessions could remove the indexed part
+		// of one and leave the rest to be rebuilt as a different session.
+		return
+	}
+
 	// Run initial cleanup
 	s.runRetentionCleanup()
 
@@ -371,47 +413,86 @@ func (s *ActivityService) reapWorkSessions() {
 	}
 }
 
+// prepareWorkSessions runs once at start, before the first cleanup, on the
+// retention goroutine so it never delays the core from serving (FR-014).
+//
+//   - Work-session ids do not survive a restart, so every summary still open
+//     gets its last activity as its end.
+//   - A summary that is missing while its index entries remain is rebuilt
+//     (FR-013).
+//   - Rows written before Spec 124 are indexed and summarised, once.
+func (s *ActivityService) prepareWorkSessions(ctx context.Context) {
+	// Only sessions of the previous process: writers are already admitted,
+	// and a session this process opened meanwhile must stay open.
+	if _, err := s.storage.CloseOpenWorkSessionsAtStart(s.createdAt); err != nil {
+		s.logger.Warn("Failed to close open work sessions at start", zap.Error(err))
+	}
+	// A session removal that a crash interrupted is finished first, so that
+	// no half-removed session is repaired or shown.
+	if n, err := s.storage.ResumeSessionRemovals(); err != nil {
+		s.logger.Warn("Failed to finish interrupted work-session removals", zap.Error(err))
+	} else if n > 0 {
+		s.logger.Info("Finished interrupted work-session removals", zap.Int("count", n))
+	}
+	if n, err := s.storage.RepairWorkSessionSummaries(); err != nil {
+		s.logger.Warn("Failed to repair work-session summaries", zap.Error(err))
+	} else if n > 0 {
+		s.logger.Info("Rebuilt missing work-session summaries", zap.Int("count", n))
+	}
+	if _, err := s.storage.BackfillWorkSessions(ctx.Done()); err != nil {
+		s.logger.Warn("Failed to build work-session summaries for existing rows", zap.Error(err))
+	}
+	// The summaries the repair and the backfill just built belong to the
+	// previous process too, and were not there for the first closing.
+	if _, err := s.storage.CloseOpenWorkSessionsAtStart(s.createdAt); err != nil {
+		s.logger.Warn("Failed to close rebuilt work sessions at start", zap.Error(err))
+	}
+}
+
 // runRetentionCleanup performs the actual retention cleanup.
+//
+// Spec 124 D4: one session-aware pass replaces the three independent prunes.
+// The caps are the same; the pass decides what to remove so that a work
+// session inside the retention window stays whole for as long as they allow.
 func (s *ActivityService) runRetentionCleanup() {
+	window := s.sessionWindow
+	if window <= 0 {
+		window = DefaultSessionWindow
+	}
 	s.logger.Debug("Running activity retention cleanup",
 		zap.Duration("max_age", s.maxAge),
-		zap.Int("max_records", s.maxRecords))
+		zap.Int("max_records", s.maxRecords),
+		zap.Duration("session_window", window))
 
-	// Prune by age
-	if s.maxAge > 0 {
-		deleted, err := s.storage.PruneOldActivities(s.maxAge)
-		if err != nil {
-			s.logger.Error("Failed to prune old activities", zap.Error(err))
-		} else if deleted > 0 {
-			s.logger.Info("Pruned old activity records",
-				zap.Int("deleted", deleted),
-				zap.Duration("max_age", s.maxAge))
-		}
+	// A session is over once its idle window has closed (FR-015).
+	if _, err := s.storage.MarkWorkSessionsEnded(time.Now().UTC().Add(-DefaultWorkSessionIdleWindow)); err != nil {
+		s.logger.Warn("Failed to record ended work sessions", zap.Error(err))
 	}
 
-	// Prune by count
-	if s.maxRecords > 0 {
-		deleted, err := s.storage.PruneExcessActivities(s.maxRecords, 0.9)
-		if err != nil {
-			s.logger.Error("Failed to prune excess activities", zap.Error(err))
-		} else if deleted > 0 {
-			s.logger.Info("Pruned excess activity records",
-				zap.Int("deleted", deleted),
-				zap.Int("max_records", s.maxRecords))
-		}
+	res, err := s.storage.RunActivityRetention(storage.RetentionPolicy{
+		Now:           time.Now().UTC(),
+		MaxAge:        s.maxAge,
+		MaxRecords:    s.maxRecords,
+		MaxBytes:      s.maxSizeBytes,
+		SessionWindow: window,
+	})
+	if err != nil {
+		s.logger.Error("Activity retention cleanup failed", zap.Error(err))
+		return
 	}
-
-	// Prune by total size (runs after age+count; 0 disables). Bounds config.db
-	// growth from large per-record payloads that stay under the count/age caps.
-	if s.maxSizeBytes > 0 {
-		deleted, err := s.storage.PruneActivitiesToSize(s.maxSizeBytes)
-		if err != nil {
-			s.logger.Error("Failed to prune activities to size budget", zap.Error(err))
-		} else if deleted > 0 {
-			s.logger.Info("Pruned activity records to size budget",
-				zap.Int("deleted", deleted),
-				zap.Int64("max_size_mb", s.maxSizeBytes/(1024*1024)))
-		}
+	if res.RowsAged+res.BodiesStripped+res.RowsOutsideWindow+res.SessionsRemoved+res.RowsTrimmed+res.SummariesExpired > 0 {
+		s.logger.Info("Activity retention cleanup",
+			zap.Int("rows_aged", res.RowsAged),
+			zap.Int("bodies_removed", res.BodiesStripped),
+			zap.Int("rows_outside_window", res.RowsOutsideWindow),
+			zap.Int("sessions_removed", res.SessionsRemoved),
+			zap.Int("rows_trimmed", res.RowsTrimmed),
+			zap.Int("summaries_expired", res.SummariesExpired))
+	}
+	if res.ShortfallCause != "" {
+		s.logger.Warn("The activity caps cannot hold the whole work-session retention window; a session inside it lost rows. Run `mcpproxy doctor` for the settings to raise.",
+			zap.String("cause", res.ShortfallCause),
+			zap.Duration("session_window", window))
 	}
 }
 
@@ -452,6 +533,14 @@ func (s *ActivityService) Stop() {
 	// passed the stopped check above is already registered here; one arriving
 	// later is turned away, so this returns only when the DB has no writer left.
 	s.workersWG.Wait()
+
+	// FR-015: the end of every session still open is recorded when the core
+	// stops. No writer is left, so nothing can reopen one after this.
+	if s.storage != nil {
+		if _, err := s.storage.CloseOpenWorkSessions(); err != nil {
+			s.logger.Warn("Failed to record work-session ends at stop", zap.Error(err))
+		}
+	}
 }
 
 // handleEvent processes an activity event and persists it to storage.
@@ -488,6 +577,10 @@ func (s *ActivityService) handleEvent(evt Event) {
 	// Spec 032: Tool-level quarantine events
 	case EventTypeActivityToolQuarantineChange:
 		s.handleToolQuarantineChange(evt)
+	case EventTypeActivitySkillQuarantineChange:
+		s.handleSkillQuarantineChange(evt)
+	case EventTypeActivitySkillAccess:
+		s.handleSkillAccess(evt)
 	// Spec 077 US4: one settled activity record per server per scan replaces the
 	// former per-scanner started/completed/failed storm (Spec 039).
 	case EventTypeSecurityScanSettled:
@@ -823,15 +916,19 @@ func (s *ActivityService) handleQuarantineChange(evt Event) {
 		status = "quarantined"
 	}
 
+	metadata := map[string]interface{}{
+		"quarantined": quarantined,
+		"reason":      reason,
+	}
+	copyActorMetadata(evt.Payload, metadata)
+
 	record := &storage.ActivityRecord{
 		Type:       storage.ActivityTypeQuarantineChange,
 		ServerName: serverName,
 		Status:     status,
-		Metadata: map[string]interface{}{
-			"quarantined": quarantined,
-			"reason":      reason,
-		},
-		Timestamp: evt.Timestamp,
+		Metadata:   metadata,
+		Timestamp:  evt.Timestamp,
+		RequestID:  getStringPayload(evt.Payload, "request_id"),
 	}
 
 	if err := s.storage.SaveActivity(record); err != nil {
@@ -1171,6 +1268,7 @@ func (s *ActivityService) handleConfigChange(evt Event) {
 	if purged := getMapPayload(evt.Payload, "purged"); purged != nil {
 		metadata["purged"] = purged
 	}
+	copyActorMetadata(evt.Payload, metadata)
 
 	record := &storage.ActivityRecord{
 		Type:       storage.ActivityTypeConfigChange,
@@ -1179,6 +1277,7 @@ func (s *ActivityService) handleConfigChange(evt Event) {
 		Status:     "success",
 		Metadata:   metadata,
 		Timestamp:  evt.Timestamp,
+		RequestID:  getStringPayload(evt.Payload, "request_id"),
 	}
 
 	if err := s.storage.SaveActivity(record); err != nil {
@@ -1191,6 +1290,19 @@ func (s *ActivityService) handleConfigChange(evt Event) {
 			zap.String("id", record.ID),
 			zap.String("action", action),
 			zap.String("affected_entity", affectedEntity))
+	}
+}
+
+// copyActorMetadata copies the caller identity an administrative event carries
+// (issue #1698; stamped by stampActor) into the record's metadata under the
+// profile_change keys. A payload without an actor leaves the metadata as it
+// was, so rows written before this change and rows for changes with no caller
+// (file reload, admission gate) keep their shape.
+func copyActorMetadata(payload, metadata map[string]interface{}) {
+	for _, key := range []string{"actor_kind", "actor_name", "surface"} {
+		if v := getStringPayload(payload, key); v != "" {
+			metadata[key] = v
+		}
 	}
 }
 
@@ -1429,6 +1541,38 @@ func (s *ActivityService) handleToolQuarantineChange(evt Event) {
 			zap.Error(err),
 			zap.String("server_name", serverName),
 			zap.String("tool_name", toolName),
+			zap.String("action", action))
+	}
+}
+
+// handleSkillQuarantineChange persists a skill approval state change (Spec 125).
+func (s *ActivityService) handleSkillQuarantineChange(evt Event) {
+	serverName := getStringPayload(evt.Payload, "server_name")
+	action := getStringPayload(evt.Payload, "action")
+	metadata := map[string]interface{}{
+		"action":        action,
+		"skill":         getStringPayload(evt.Payload, "skill"),
+		"skill_uri":     getStringPayload(evt.Payload, "skill_uri"),
+		"previous_hash": getStringPayload(evt.Payload, "previous_hash"),
+		"current_hash":  getStringPayload(evt.Payload, "current_hash"),
+		"reason":        getStringPayload(evt.Payload, "reason"),
+		"approved_by":   getStringPayload(evt.Payload, "approved_by"),
+	}
+	copyActorMetadata(evt.Payload, metadata)
+
+	record := &storage.ActivityRecord{
+		Type:       storage.ActivityTypeSkillQuarantineChange,
+		ServerName: serverName,
+		Status:     action,
+		Metadata:   metadata,
+		Timestamp:  evt.Timestamp,
+		RequestID:  getStringPayload(evt.Payload, "request_id"),
+	}
+	if err := s.storage.SaveActivity(record); err != nil {
+		s.logger.Error("Failed to save skill quarantine activity",
+			zap.Error(err),
+			zap.String("server_name", serverName),
+			zap.String("skill", getStringPayload(evt.Payload, "skill")),
 			zap.String("action", action))
 	}
 }

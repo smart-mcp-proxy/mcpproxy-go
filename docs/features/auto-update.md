@@ -44,6 +44,15 @@ Self-update refuses a downgrade unless you pass **both** an explicit
 `--version` and `--force`; it never escalates privileges, and it never writes
 inside `MCPProxy.app`.
 
+The CLI verifies the signed `checksums.txt` manifest with Cosign before a
+self-update. If the signature bundle is missing, verification fails, or
+`cosign` is unavailable, the update stops by default. The explicit
+`--allow-unverified-signature` option proceeds with checksum-only verification
+and prints a warning: the archive hash is still checked, but without the
+manifest signature a compromised checksum file would not be detected. This
+option applies to the CLI self-update; it does not change the macOS tray
+updater's signature and code-signature checks.
+
 ## The macOS one-click flow
 
 1. A background check reads the update feed (an *appcast*) at most every four

@@ -1220,6 +1220,63 @@ test_api "GET /api/v1/activity with pagination" "GET" "${API_BASE}/activity?limi
 test_api "GET /api/v1/activity limit capped at 100" "GET" "${API_BASE}/activity?limit=500" "200" "" \
     "jq -e '.success == true and .data.limit <= 100' < '$TEST_RESULTS_FILE' >/dev/null"
 
+# ===========================================
+# Work sessions and the failure timeline (Spec 124)
+# ===========================================
+# The morning-after case: a script calls tools over REST under a run name, one
+# call fails, and the operator finds the session and what led to the failure.
+WS_RUN="e2e-124-$$"
+ws_call() {
+    curl -s --max-time 30 $CURL_CA_OPTS -o /dev/null \
+        -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" -H "X-MCPProxy-Run: $WS_RUN" \
+        -X POST -d "$1" "${API_BASE}/tools/call"
+}
+ws_call '{"tool_name":"call_tool_read","arguments":{"name":"everything:echo","args":{"message":"spec 124 first"}}}'
+ws_call '{"tool_name":"call_tool_read","arguments":{"name":"everything:echo","args":{"message":"spec 124 second"}}}'
+ws_call '{"tool_name":"call_tool_read","arguments":{"name":"everything:no_such_tool_spec_124","args":{}}}'
+
+log_test "Work session: a named REST run is listed as failed"
+WS_ID=""
+for _ in $(seq 1 40); do
+    curl -s --max-time 10 $CURL_CA_OPTS -H "X-API-Key: $API_KEY" \
+        "${API_BASE}/work-sessions?run=${WS_RUN}&failed=true" > "$TEST_RESULTS_FILE"
+    WS_ID=$(jq -r '.data.sessions[0].id // empty' < "$TEST_RESULTS_FILE" 2>/dev/null)
+    [ -n "$WS_ID" ] && break
+    sleep 0.25
+done
+if [ -n "$WS_ID" ] && jq -e --arg run "$WS_RUN" '
+        .data.total == 1 and (.data.sessions[0]
+            | .run_name == $run and .surface == "rest" and .attempts >= 3 and .failures >= 1
+              and .last_failure != null and (.last_failure.reason | length) > 0)' < "$TEST_RESULTS_FILE" >/dev/null; then
+    log_pass "Work session: a named REST run is listed as failed"
+else
+    log_fail "Work session: a named REST run is listed as failed"
+    echo "Response: $(cat "$TEST_RESULTS_FILE")"
+fi
+
+if [ -n "$WS_ID" ]; then
+    test_api "GET /api/v1/work-sessions/{id}" "GET" "${API_BASE}/work-sessions/${WS_ID}" "200" "" \
+        "jq -e '.success == true and .data.id == \"${WS_ID}\" and .data.failures >= 1' < '$TEST_RESULTS_FILE' >/dev/null"
+
+    # Positioned at the first failure, with the calls that led to it before it,
+    # and no bodies unless asked for.
+    test_api "GET /api/v1/work-sessions/{id}/timeline opens at the failure" "GET" "${API_BASE}/work-sessions/${WS_ID}/timeline" "200" "" \
+        "jq -e '.data as \$d | \$d.failure_index == 1 and \$d.failure_total >= 1
+            and (\$d.rows | map(select(.index == \$d.position)) | .[0].failed == true)
+            and (\$d.rows | map(select(.index < \$d.position)) | length >= 2)
+            and (\$d.rows | all(.activity.response == null or .activity.response == \"\"))' < '$TEST_RESULTS_FILE' >/dev/null"
+
+    test_api "GET /api/v1/work-sessions/{id}/timeline?include_bodies=true" "GET" "${API_BASE}/work-sessions/${WS_ID}/timeline?include_bodies=true&at=end" "200" "" \
+        "jq -e '.data.rows | any(.activity.response != null and .activity.response != \"\")' < '$TEST_RESULTS_FILE' >/dev/null"
+
+    test_api "GET /api/v1/work-sessions/{id}/timeline rejects an unknown position" "GET" "${API_BASE}/work-sessions/${WS_ID}/timeline?at=sideways" "400" ""
+fi
+
+test_api "GET /api/v1/work-sessions" "GET" "${API_BASE}/work-sessions?limit=5" "200" "" \
+    "jq -e '.success == true and (.data.sessions | type) == \"array\" and .data.limit == 5' < '$TEST_RESULTS_FILE' >/dev/null"
+
+test_api "GET /api/v1/work-sessions/{id} not found" "GET" "${API_BASE}/work-sessions/ws-does-not-exist" "404" ""
+
 # Test: List activity with multiple filters
 test_api "GET /api/v1/activity with multiple filters" "GET" "${API_BASE}/activity?type=tool_call&status=success&limit=5" "200" "" \
     "jq -e '.success == true and .data.activities != null' < '$TEST_RESULTS_FILE' >/dev/null"

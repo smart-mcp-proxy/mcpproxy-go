@@ -23,11 +23,12 @@ friendly, prioritized form sections instead of raw JSON:
 
 ## How saving works
 
-Each section saves **only the fields you changed** via `PATCH /api/v1/config`, a
-partial deep-merge that routes through the normal validate → persist → hot-reload
-pipeline. Because the merge starts from the live config and overlays just your
-changes, unrelated values and masked secrets (API key, secret headers) are never
-overwritten.
+Each section sends a partial update via `PATCH /api/v1/config`. When you change
+an `audit_log.*` field, the form also includes its current `audit_log.enabled`
+and `audit_log.stdout` values so the backend can validate the complete audit-log
+block. The partial deep-merge routes through the normal validate → persist →
+hot-reload pipeline. It leaves unrelated values and masked secrets (API key,
+secret headers) out of the update.
 
 Fields that need a restart (`listen`, `api_key`, `routing_mode`, `tls.*`,
 `code_execution_pool_size`, and most of `server_edition` — `enabled`, `oauth.*`,

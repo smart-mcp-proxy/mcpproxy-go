@@ -46,6 +46,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/redirectionguard"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
@@ -241,6 +242,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(tuiCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(attentionCmd)
+	rootCmd.AddCommand(GetSkillsCommand()) // Spec 125: skills over MCP (administrator view)
 	rootCmd.AddCommand(tokenCmd)
 	rootCmd.AddCommand(telemetryCmd)
 	rootCmd.AddCommand(dbCmd)
@@ -522,6 +524,13 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		zap.String("edition", Edition),
 		zap.String("log_level", cmdLogLevel),
 		zap.Bool("log_to_file", cmdLogToFile))
+
+	// #1844: warn once when this process inherited the Windows RedirectionGuard
+	// mitigation (e.g. started by an Inno Setup 6.7.0-6.7.3 postinstall entry).
+	// No-op off Windows.
+	if msg, ok := redirectionguard.Check(); ok {
+		logger.Warn(msg)
+	}
 
 	// MCP-2751: when launched from a macOS GUI/launchd context (Launchpad, the
 	// SMAppService login item, or the tray spawning the core), the process

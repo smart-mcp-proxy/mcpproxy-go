@@ -8,17 +8,17 @@ keywords: [security, scanner, sarif, quarantine, mcp, tool-poisoning, supply-cha
 
 # Security Scanner Plugin System
 
-MCPProxy integrates external security scanners as Docker-based plugins. Scanners analyze quarantined servers before approval, detecting tool poisoning attacks, prompt injection, malware, secrets leakage, and supply chain risks.
+MCPProxy combines an always-on, in-process baseline scanner with optional Docker-based plugin scanners. Docker scanners analyze quarantined servers before approval, detecting tool poisoning attacks, prompt injection, malware, secrets leakage, and supply chain risks.
 
 > **CLI reference**: for the full breakdown of every `mcpproxy security` subcommand, flags, and examples see [Security Commands](/cli/security-commands).
 
 ## Overview
 
-Every scanner is a plugin — there is no built-in scanner. MCPProxy exposes a universal plugin interface that scanner authors implement by shipping a Docker image that reads from `/scan/source` and writes SARIF to `/scan/report/results.sarif`. Users browse a bundled scanner registry, enable scanners with one command, configure API keys if needed, and start scanning.
+Docker-based scanners use a plugin interface: each scanner image reads from `/scan/source` and writes SARIF to `/scan/report/results.sarif`. The bundled registry also includes the built-in, Docker-less `tpa-descriptions` baseline scanner. Users enable Docker scanners with one command, configure API keys if needed, and start scanning.
 
 ### Key features
 
-- **Plugin-only architecture** — every scanner is a Docker-based plugin.
+- **Docker scanner plugins** — external scanners run as Docker images; built-in `tpa-descriptions` runs in-process.
 - **Universal scanner interface** — source filesystem input, SARIF output.
 - **Parallel scanning** — multiple scanners run concurrently; per-scanner failures are isolated.
 - **Source resolver** — detects the right thing to scan for npx/uvx/pipx/bunx package-runner commands, falls back to working dir or tool definitions for HTTP/SSE servers.
@@ -142,7 +142,7 @@ curl -X POST http://localhost:8080/api/v1/security/scanners/my-custom-scanner/en
   -H "X-API-Key: $API_KEY"
 ```
 
-Remote scanner registries (not just the bundled one) are planned but currently opt-in via the `security.scanner_registry_url` config field.
+Remote registry fetching is not implemented. Although `security.scanner_registry_url` is present in the config model, the scanner registry does not read it; it loads bundled scanners and user overrides from `scanner-registry.json` in its data directory.
 
 ## CLI commands
 
@@ -300,7 +300,6 @@ MCPProxy also augments each finding with a user-facing `threat_type` (`tool_pois
     "scan_timeout_default": "60s",
     "integrity_check_interval": "1h",
     "integrity_check_on_restart": false,
-    "scanner_registry_url": "",
     "runtime_read_only": false,
     "runtime_tmpfs_size": "100M",
     "deep_scan": {
@@ -318,7 +317,7 @@ MCPProxy also augments each finding with a user-facing `threat_type` (`tool_pois
 | `scan_timeout_default` | `60s` | Per-scanner timeout. The blocking CLI `security scan` computes a hard ceiling as `scan_timeout_default × scanner_count + 30s`, clamped between 15 and 30 minutes. |
 | `integrity_check_interval` | `1h` | Periodic integrity check interval (when running as a daemon with integrity checks enabled). |
 | `integrity_check_on_restart` | `false` | Re-verify integrity baseline every time an approved server is restarted. |
-| `scanner_registry_url` | `""` | Remote scanner registry URL (opt-in). When empty, only the bundled registry is used. |
+| `scanner_registry_url` | `""` | Currently unused; setting this value does not load remote scanners. |
 | `runtime_read_only` | `false` | Run approved server containers with `--read-only` and a tmpfs overlay. (P2 feature, requires Docker isolation.) |
 | `runtime_tmpfs_size` | `100M` | Tmpfs size for read-only runtime containers. |
 

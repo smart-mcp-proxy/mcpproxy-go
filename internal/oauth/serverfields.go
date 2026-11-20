@@ -254,6 +254,7 @@ var ServerFieldMaskDecisions = map[string]MaskDecision{
 	"updated":                    MaskDecisionNotSecret,
 	"reconnect_on_use":           MaskDecisionNotSecret,
 	"expose_prompts":             MaskDecisionNotSecret,
+	"expose_skills":              MaskDecisionNotSecret,
 	"forward_headers":            MaskDecisionNotSecret, // Spec 112: header NAMES only, never values
 	"launcher_wait_timeout":      MaskDecisionNotSecret,
 	"health_check_interval":      MaskDecisionNotSecret,

@@ -173,6 +173,10 @@ func (c *EmbeddedSecret) Inspect(tool detect.ToolView, _ detect.RegistryView) []
 		if shannonEntropy(m) < entropyThreshold || isKnownExampleAny(patternList, m) {
 			continue
 		}
+		// A readable multi-segment path is not an opaque token (#1845).
+		if readablePath(m) {
+			continue
+		}
 		consider(highEntropyConfidence, "high_entropy", m)
 	}
 
@@ -188,6 +192,84 @@ func (c *EmbeddedSecret) Inspect(tool detect.ToolView, _ detect.RegistryView) []
 		Evidence:   detect.CapEvidence(maskSecret(bestMatch)),
 		Detail:     fmt.Sprintf("Description embeds a likely %s — a credential should never be hardcoded into tool metadata.", bestCategory),
 	}}
+}
+
+// readablePath reports whether a slash-containing entropy candidate is a
+// readable path rather than an opaque token: at least three non-empty segments,
+// none of which is itself an opaque run (>=16 chars at or above the entropy
+// threshold), and every one all digits or made of word-shaped parts (lowercase,
+// Capitalized or UPPERCASE letters joined by + - _). A base64 blob has mixed-case
+// alphanumeric segments, so it never qualifies.
+func readablePath(s string) bool {
+	if !strings.Contains(s, "/") {
+		return false
+	}
+	var segs []string
+	for _, seg := range strings.Split(s, "/") {
+		if seg != "" {
+			segs = append(segs, seg)
+		}
+	}
+	if len(segs) < 3 {
+		return false
+	}
+	for _, seg := range segs {
+		if len(seg) >= 16 && shannonEntropy(seg) >= entropyThreshold {
+			return false
+		}
+		if !readableSegment(seg) {
+			return false
+		}
+	}
+	return true
+}
+
+// readableSegment reports whether seg is all digits or a +/-/_-joined run of
+// word-shaped parts (all lowercase, Capitalized, or all UPPERCASE letters).
+func readableSegment(seg string) bool {
+	if isAllDigits(seg) {
+		return true
+	}
+	for _, part := range strings.FieldsFunc(seg, func(r rune) bool { return r == '+' || r == '-' || r == '_' }) {
+		if isAllDigits(part) {
+			continue
+		}
+		if !wordShaped(part) {
+			return false
+		}
+	}
+	return true
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// wordShaped matches ^[a-z]+$, ^[A-Z][a-z]*$ or ^[A-Z]+$ (ASCII letters only).
+func wordShaped(s string) bool {
+	if s == "" {
+		return false
+	}
+	lower, upper := 0, 0
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] >= 'a' && s[i] <= 'z':
+			lower++
+		case s[i] >= 'A' && s[i] <= 'Z':
+			upper++
+		default:
+			return false
+		}
+	}
+	return upper == 0 || lower == 0 || (upper == 1 && s[0] >= 'A' && s[0] <= 'Z')
 }
 
 // isKnownExampleAny reports whether any credential pattern recognises match as a

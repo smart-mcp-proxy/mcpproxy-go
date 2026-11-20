@@ -170,6 +170,8 @@ MCPProxy validates agent intent against server-provided annotations:
 | `call_tool_write` | No annotation | ALLOW |
 | `call_tool_destructive` | Any | ALLOW (most permissive) |
 
+These rows describe only server-annotation validation. Passing this check does not bypass authorization, quarantine, approval, or other dispatch gates.
+
 ### Strict Mode
 
 By default, strict validation is enabled. Configure via `mcp_config.json`:
@@ -357,5 +359,5 @@ The legacy `call_tool` has been removed. Update your integrations:
 Intent parameters are optional - `operation_type` is automatically inferred from the tool variant. You can add `intent_data_sensitivity` and `intent_reason` for audit purposes.
 
 :::tip Choosing the Right Variant
-When unsure, use `call_tool_destructive` - it's the most permissive and will always succeed validation. Then refine based on `retrieve_tools` guidance.
+Use the exact variant in each result's `call_with` field. That route is derived from upstream annotations and is authoritative over tool names, descriptions, command wording, and apparent intent. If the route is unclear, call `retrieve_tools` again; do not choose `call_tool_destructive` as a fallback. It skips only the server-annotation mismatch check and does not bypass authorization, quarantine, approval, or other dispatch gates.
 :::

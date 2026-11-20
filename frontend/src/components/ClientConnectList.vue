@@ -762,7 +762,9 @@ function clientIcon(client: ClientStatus): string {
     'continue': '\u27A1\uFE0F',
     'zcode': '\u{1F9BE}',
   }
-  return iconMap[client.id] || client.icon || '\u{1F527}'
+  // client.icon is the id of the glyph to reuse (Copilot reuses VS Code's), never
+  // a glyph itself: resolve it through the table rather than printing it.
+  return iconMap[client.id] || (client.icon && iconMap[client.icon]) || '\u{1F527}'
 }
 
 async function fetchClients() {

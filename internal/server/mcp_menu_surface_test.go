@@ -349,6 +349,13 @@ func assertUpstreamServersDelta(t *testing.T, surface string, preM, curM map[str
 		assert.NotContains(t, requiredParams(curM), spec112Param, "surface %s: forward_headers_json is optional", surface)
 	}
 	assertArgumentErrorModeSchema(t, surface, curM)
+	// Spec 125 adds the optional boolean expose_skills.
+	if assert.Contains(t, curProps, "expose_skills",
+		"surface %s: upstream_servers must expose the spec 125 expose_skills parameter", surface) {
+		prop, _ := curProps["expose_skills"].(map[string]interface{})
+		assert.Equal(t, "boolean", prop["type"], "surface %s: expose_skills is a boolean", surface)
+		assert.NotContains(t, requiredParams(curM), "expose_skills", "surface %s: expose_skills is optional", surface)
+	}
 	// Compare the two schemas with only the validated additions removed from the
 	// current side; everything else must be identical apart from the description.
 	curWithout := schemaWithout(curM, "description")
@@ -360,7 +367,7 @@ func assertUpstreamServersDelta(t *testing.T, surface string, preM, curM map[str
 		if props, ok := schema["properties"].(map[string]interface{}); ok {
 			np := make(map[string]interface{}, len(props))
 			for k, v := range props {
-				if k != spec112Param && k != "tool_argument_error_mode" {
+				if k != spec112Param && k != "tool_argument_error_mode" && k != "expose_skills" {
 					np[k] = v
 				}
 			}
@@ -369,7 +376,7 @@ func assertUpstreamServersDelta(t *testing.T, surface string, preM, curM map[str
 		curWithout["inputSchema"] = trimmed
 	}
 	assert.Equal(t, schemaWithout(preM, "description"), curWithout,
-		"surface %s: only upstream_servers' description, forward_headers_json and tool_argument_error_mode may move", surface)
+		"surface %s: only upstream_servers' description, forward_headers_json, tool_argument_error_mode and expose_skills may move", surface)
 
 	assert.Contains(t, curM["description"], upstreamServersRedactionMarker,
 		"surface %s: upstream_servers must document that update/patch mask secret values in the diff", surface)

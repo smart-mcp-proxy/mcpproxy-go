@@ -149,4 +149,43 @@ describe('OnboardingWizard Clients step paths/icons (Spec 109-b FR-037)', () => 
     expect(icon.exists()).toBe(true)
     expect(icon.text().length).toBeGreaterThan(0)
   })
+
+  // The server sends `icon` as the id of the glyph to reuse, not as a glyph.
+  // The Copilot client (id "copilot") reuses the VS Code one, so a row whose id
+  // has no glyph of its own must resolve `icon` through the same table and
+  // never print the id as text.
+  it('resolves the server-supplied icon id to a glyph instead of printing it', async () => {
+    const row = (id: string, name: string) => ({
+      id,
+      name,
+      config_path: `/Users/test/${id}.json`,
+      exists: true,
+      connected: false,
+      supported: true,
+      icon: 'vscode',
+    })
+    const wrapper = await mountOnClients([row('vscode', 'VS Code'), row('copilot', 'GitHub Copilot')])
+
+    const vscodeGlyph = wrapper.find('[data-test="client-icon-vscode"]').text()
+    const inlineRows = wrapper.findComponent(ClientConnectList)
+    for (const scope of [wrapper, inlineRows]) {
+      const copilot = scope.findAll('[data-test="client-icon-copilot"]')
+      expect(copilot.length).toBeGreaterThan(0)
+      for (const icon of copilot) {
+        expect(icon.text()).not.toContain('vscode')
+        expect(icon.text()).toBe(vscodeGlyph)
+      }
+    }
+  })
+
+  it('shows the generic glyph for a client whose icon id is unknown', async () => {
+    const wrapper = await mountOnClients([
+      { id: 'brand-new', name: 'Brand New', config_path: '/x.json', exists: true, supported: true, icon: 'brand-new' },
+    ])
+    const icons = wrapper.findAll('[data-test="client-icon-brand-new"]')
+    expect(icons.length).toBeGreaterThan(0)
+    for (const icon of icons) {
+      expect(icon.text()).toBe('\u{1F527}')
+    }
+  })
 })

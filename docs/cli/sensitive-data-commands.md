@@ -15,6 +15,8 @@ MCPProxy activity logs include sensitive data detection capabilities. When tool 
 
 Sensitive data detection is automatically applied to all tool call arguments and responses. The CLI provides filtering and display options to help you identify and audit activities involving sensitive data.
 
+The `--sensitive-data`, `--detection-type` and `--severity` filters below belong to `activity list`. The CLI's `activity export` and `activity watch` commands do not expose these filters. The REST export endpoint accepts the same detector filters as query parameters; examples below distinguish the CLI and REST surfaces.
+
 ---
 
 ## Activity List with Sensitive Data Filter
@@ -303,7 +305,9 @@ Showing 4 of 4 records (page 1)
 
 ---
 
-## Filtering Options Reference
+## `activity list` Filtering Options Reference
+
+These options apply to `mcpproxy activity list`.
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
@@ -360,10 +364,10 @@ mcpproxy activity list \
   --start-time "$(date -u -v-24H +%Y-%m-%dT%H:%M:%SZ)" \
   -o json
 
-# Export for compliance review
-mcpproxy activity export \
-  --sensitive-data \
-  --output sensitive-data-audit.jsonl
+# The CLI export command does not expose sensitive-data filters. For a
+# detector-filtered JSONL export, use GET /api/v1/activity/export with the
+# supported query parameters and your usual API authentication:
+# /api/v1/activity/export?format=json&sensitive_data=true&detection_type=aws_access_key&severity=critical
 ```
 
 ### Investigate Specific Detection
@@ -379,22 +383,21 @@ mcpproxy activity show 01JGXYZ789ABC --include-response
 ### Monitor in Real-Time
 
 ```bash
-# Watch for sensitive data in real-time
+# Watch activity events (watch has no sensitive-data filter)
 mcpproxy activity watch --type tool_call
-
-# Filter output with jq for sensitive data
-mcpproxy activity watch -o json | jq 'select(.sensitive_data.detected == true)'
 ```
+
+Use `activity list --sensitive-data` to query persisted detector results. `activity watch` has no sensitive-data filter flag.
 
 ### Export for SIEM
 
 ```bash
-# Export sensitive data activities for SIEM ingestion
+# Export all activity records for SIEM ingestion. This CLI command does not
+# filter on sensitive-data detections; use the REST export endpoint when a
+# detector-filtered export is required.
 mcpproxy activity export \
-  --sensitive-data \
   --format json \
-  --include-bodies \
-  --output /var/log/mcpproxy/sensitive-data.jsonl
+  --output /var/log/mcpproxy/activity.jsonl
 ```
 
 ---

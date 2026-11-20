@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect/checks"
@@ -197,25 +200,12 @@ func selfCheckEvaluate(corpus []byte, checkList []detect.Check) (selfCheckMetric
 	}
 
 	engine := detect.NewEngine(detect.Options{Checks: checkList})
+	scored := selfCheckScoreEntries(engine, doc.Entries)
 	m := selfCheckMetrics{Flagged: make(map[string]bool, len(doc.Entries))}
 	for i := range doc.Entries {
 		e := &doc.Entries[i]
-		views := make([]detect.ToolView, 0, 1+len(e.Peers))
-		views = append(views, selfCheckView(e.Server, e.Tool))
-		for _, p := range e.Peers {
-			views = append(views, selfCheckView(p.Server, p.Tool))
-		}
-		res := engine.Scan(detect.NewRegistryView(views))
-		m.ChecksFailed += res.Coverage.ChecksFailed
-
-		want := e.Server + ":" + e.Tool.Name
-		flagged := false
-		for _, f := range res.Findings {
-			if f.Location == want && f.ThreatLevel == detect.ThreatLevelDangerous {
-				flagged = true
-				break
-			}
-		}
+		flagged := scored[i].flagged
+		m.ChecksFailed += scored[i].checksFailed
 		m.Flagged[e.ID] = flagged
 
 		switch e.Label {
@@ -241,6 +231,72 @@ func selfCheckEvaluate(corpus []byte, checkList []detect.Check) (selfCheckMetric
 	m.Recall = selfCheckRatio(m.GatedDetected, m.GatedMalicious)
 	m.FPRate = selfCheckRatio(m.HardNegFP, m.HardNegatives)
 	return m, nil
+}
+
+// selfCheckEntryScore is one corpus entry's scan outcome.
+type selfCheckEntryScore struct {
+	flagged      bool // the checks HARD-flagged the entry's own tool
+	checksFailed int
+}
+
+// selfCheckWorkers bounds the scoring fan-out; a var so a test can force the
+// sequential path.
+var selfCheckWorkers = runtime.GOMAXPROCS(0)
+
+// selfCheckScoreEntry scans one entry in a RegistryView of its own tool plus
+// its declared peers (the gate's scanEntryFlagged).
+func selfCheckScoreEntry(engine *detect.Engine, e *selfCheckEntry) selfCheckEntryScore {
+	views := make([]detect.ToolView, 0, 1+len(e.Peers))
+	views = append(views, selfCheckView(e.Server, e.Tool))
+	for _, p := range e.Peers {
+		views = append(views, selfCheckView(p.Server, p.Tool))
+	}
+	res := engine.Scan(detect.NewRegistryView(views))
+	want := e.Server + ":" + e.Tool.Name
+	for _, f := range res.Findings {
+		if f.Location == want && f.ThreatLevel == detect.ThreatLevelDangerous {
+			return selfCheckEntryScore{flagged: true, checksFailed: res.Coverage.ChecksFailed}
+		}
+	}
+	return selfCheckEntryScore{checksFailed: res.Coverage.ChecksFailed}
+}
+
+// selfCheckScoreEntries scores every entry, fanning the scans out over at most
+// selfCheckWorkers goroutines. Each entry is scanned independently by a
+// stateless engine over pure checks (the detect.Check contract), and results
+// land at the entry's own index, so the tally the caller builds in corpus
+// order is identical to a sequential run. The fan-out matters because the
+// corpus is ~1.2k entries: one sequential scoring costs seconds while
+// bundleRT.mu is held, and over a minute under -race.
+func selfCheckScoreEntries(engine *detect.Engine, entries []selfCheckEntry) []selfCheckEntryScore {
+	out := make([]selfCheckEntryScore, len(entries))
+	workers := selfCheckWorkers
+	if workers > len(entries) {
+		workers = len(entries)
+	}
+	if workers <= 1 {
+		for i := range entries {
+			out[i] = selfCheckScoreEntry(engine, &entries[i])
+		}
+		return out
+	}
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(entries) {
+					return
+				}
+				out[i] = selfCheckScoreEntry(engine, &entries[i])
+			}
+		}()
+	}
+	wg.Wait()
+	return out
 }
 
 // selfCheckListIDs renders at most selfCheckMaxListedIDs corpus ids.

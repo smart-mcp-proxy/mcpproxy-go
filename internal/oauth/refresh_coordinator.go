@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 )
@@ -114,10 +115,21 @@ type refreshKeyState struct {
 	latchErr error
 
 	// Transient cooldown for reactive callers (FR-004).
-	cooldownGen       string
-	cooldownUntil     time.Time
-	cooldownErr       error
+	cooldownGen   string
+	cooldownUntil time.Time
+	cooldownErr   error
+	// transientPending: the last flight failed transiently and none has
+	// succeeded since. Unlike the cooldown it survives ClearTransientCooldown,
+	// so the connectivity watcher still knows the credential needs a refresh.
+	transientPending  bool
 	transientFailures int
+	// savesInProgress counts token responses being written for this key
+	// (BeginTokenSaveFor). A successful token response settles the
+	// transient state, but the write commits before NoteTokenSavedFor runs
+	// and other goroutines can already use the new token; while a save is
+	// in progress the credential is not reported as transiently failing
+	// (GH #1929 Windows CI: a slow bbolt fsync held that window open).
+	savesInProgress int
 
 	// dcrCleared is set when the DCR registration was cleared after
 	// invalid_client and no successful token response has been seen since
@@ -155,6 +167,7 @@ type RefreshCoordinator struct {
 	mu     sync.Mutex
 	keys   map[flightKey]*refreshKeyState
 	hook   func(RefreshOutcome)
+	audit  func(RefreshAttemptFailure)
 	now    func() time.Time
 	logger *zap.Logger
 }
@@ -178,6 +191,88 @@ func DefaultRefreshCoordinator() *RefreshCoordinator { return defaultRefreshCoor
 func (c *RefreshCoordinator) SetCompletionHook(hook func(RefreshOutcome)) {
 	c.mu.Lock()
 	c.hook = hook
+	c.mu.Unlock()
+}
+
+// RefreshAttemptFailure is one token refresh that was sent and failed
+// (Spec 124 D5).
+type RefreshAttemptFailure struct {
+	ServerName string
+	Class      RefreshErrorClass
+	Trigger    RefreshTrigger
+	// At is when the failure was observed.
+	At time.Time
+	// Code is the diagnostics code (MCPX_*) of the failure when the error
+	// classifies to one in the catalogue, else empty. Only the code crosses
+	// this boundary, never the error text.
+	Code string
+}
+
+// refreshFailureCode classifies a refresh error to a catalogue code.
+func refreshFailureCode(serverName string, err error) string {
+	code := diagnostics.Classify(err, diagnostics.ClassifierHints{ServerID: serverName, Transport: "http"})
+	if code == "" || code == diagnostics.UnknownUnclassified {
+		return ""
+	}
+	if _, ok := diagnostics.Get(code); !ok {
+		return ""
+	}
+	return string(code)
+}
+
+// auditAttempt reports one failed token request to the audit observer. A
+// failure before anything was sent (no client id, no token endpoint, a
+// retired instance) is not a failed token request and is not reported.
+func (c *RefreshCoordinator) auditAttempt(req RefreshRequest, err error, at time.Time) {
+	if err == nil || RefreshWasNotSent(err) || dialgate.IsRetired(err) {
+		return
+	}
+	c.mu.Lock()
+	audit := c.audit
+	c.mu.Unlock()
+	if audit == nil {
+		return
+	}
+	cls, _ := ClassifyRefreshError(err)
+	audit(RefreshAttemptFailure{
+		ServerName: req.ServerName, Class: cls, Trigger: req.Trigger, At: at,
+		Code: refreshFailureCode(req.ServerName, err),
+	})
+}
+
+type attemptFailureReporterKey struct{}
+
+// WithAttemptFailureReporter returns a context whose refresh function can
+// report a failed token request that it follows with another one. The
+// coordinator installs it for every flight.
+func WithAttemptFailureReporter(ctx context.Context, report func(error, time.Time)) context.Context {
+	return context.WithValue(ctx, attemptFailureReporterKey{}, report)
+}
+
+// ReportRefreshAttemptFailure records a token request that was sent and
+// failed and that the refresh function is about to follow with another one
+// (Spec 124 D5). The failure a refresh function RETURNS is recorded by the
+// coordinator and must not be reported here as well. at is when the request
+// failed. Outside a coordinator flight it does nothing.
+func ReportRefreshAttemptFailure(ctx context.Context, err error, at time.Time) {
+	if report, ok := ctx.Value(attemptFailureReporterKey{}).(func(error, time.Time)); ok && report != nil {
+		report(err, at)
+	}
+}
+
+// SetAuditObserver installs the function called once for every refresh that
+// was actually sent and failed. nil removes it.
+//
+// It is separate from the completion hook, which reports only terminal
+// outcomes that still apply to the stored record. An activity log needs every
+// failed attempt, including a transient one that the next retry repairs, and
+// needs none of the returns that sent nothing: a fresh record, a latched
+// terminal error, a cooldown, a retired instance. Waiters on the same flight
+// and a caller that stopped waiting report nothing, because the observer is
+// called by the flight itself.
+func (c *RefreshCoordinator) SetAuditObserver(observer func(RefreshAttemptFailure)) {
+	c.mu.Lock()
+	c.audit = observer
 	c.mu.Unlock()
 }
 
@@ -244,6 +339,84 @@ func (c *RefreshCoordinator) ForgetServer(serverKey string) {
 		}
 	}
 	c.mu.Unlock()
+}
+
+// ClearTransientCooldown lifts the transient-failure cooldown of one
+// credential binding of serverKey and restarts its backoff, reporting whether
+// one was set. The upstream manager's connectivity watcher calls it when the
+// network demonstrably came back (GH #1929): refreshes that failed while the
+// machine was offline must not make the reconnect wait up to five minutes for
+// a refresh that would now succeed. The terminal latch (a revoked grant) is
+// left alone, so a rejected credential is still not retried.
+func (c *RefreshCoordinator) ClearTransientCooldown(serverKey string, b commitview.CredentialBinding) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.keys[flightKey{serverKey, b}]
+	if st == nil || (st.cooldownUntil.IsZero() && st.transientFailures == 0) {
+		return false
+	}
+	st.cooldownGen, st.cooldownUntil, st.cooldownErr = "", time.Time{}, nil
+	st.transientFailures = 0
+	return true
+}
+
+// TransientlyFailing reports whether the last refresh of one credential
+// binding of serverKey failed transiently (network, timeout, 5xx) and none has
+// succeeded since, with no terminal latch (a revoked grant). The connectivity
+// watcher uses it to find a CONNECTED server whose expired token cannot be
+// refreshed only because the network or the provider was briefly unavailable
+// (GH #1929).
+func (c *RefreshCoordinator) TransientlyFailing(serverKey string, b commitview.CredentialBinding) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.keys[flightKey{serverKey, b}]
+	return st != nil && st.transientPending && st.savesInProgress == 0 && st.latchErr == nil
+}
+
+// BeginTokenSaveFor marks that a successful token response for one credential
+// binding of key is being persisted; the returned function ends it and must be
+// called once the save finished (after NoteTokenSavedFor on success). Until
+// then TransientlyFailing and TransientRefreshStatus report no transient
+// failure, so no reader that already sees the new token is told the refresh
+// is still failing. A save that fails or is discarded leaves the earlier
+// transient state in place once it ends.
+func (c *RefreshCoordinator) BeginTokenSaveFor(key string, b commitview.CredentialBinding) (end func()) {
+	c.mu.Lock()
+	st := c.stateLocked(flightKey{key, b})
+	st.savesInProgress++
+	c.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.mu.Lock()
+			st.savesInProgress--
+			c.mu.Unlock()
+		})
+	}
+}
+
+// TransientRefreshInfo describes a refresh that is failing transiently.
+type TransientRefreshInfo struct {
+	Failures  int       // transient failures in a row (0 after ClearTransientCooldown)
+	RetryAt   time.Time // end of the reactive cooldown; zero when none
+	LastError string
+}
+
+// TransientRefreshStatus is TransientlyFailing with the details health
+// reporting shows: a connected server whose expired token is being refreshed
+// again is "Token refresh pending", not "sign in" (GH #1929).
+func (c *RefreshCoordinator) TransientRefreshStatus(serverKey string, b commitview.CredentialBinding) (TransientRefreshInfo, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.keys[flightKey{serverKey, b}]
+	if st == nil || !st.transientPending || st.savesInProgress > 0 || st.latchErr != nil {
+		return TransientRefreshInfo{}, false
+	}
+	info := TransientRefreshInfo{Failures: st.transientFailures, RetryAt: st.cooldownUntil}
+	if st.cooldownErr != nil {
+		info.LastError = LogSafeErrorText(st.cooldownErr)
+	}
+	return info, true
 }
 
 // Do runs at most one refresh flight per key. A caller arriving while a flight
@@ -383,7 +556,16 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 	c.mu.Unlock()
 
 	saved := &atomic.Uint64{}
-	tok, refreshErr := req.Refresh(withFlightSavedRevision(withFlightGeneration(ctx, gen), saved), rec)
+	// A refresh function that sends more than one token request (the replay
+	// of a lost response) reports each failed request that is followed by
+	// another through this context; the flight reports the last one itself.
+	refreshCtx := WithAttemptFailureReporter(ctx, func(attemptErr error, at time.Time) {
+		c.auditAttempt(req, attemptErr, at)
+	})
+	tok, refreshErr := req.Refresh(withFlightSavedRevision(withFlightGeneration(refreshCtx, gen), saved), rec)
+	// The time of the outcome, before the storage reads below: an audit row
+	// must not be placed after calls that only waited for those reads.
+	refreshedAt := c.now()
 	cur, loadErr := req.Load()
 	if loadErr != nil {
 		cur = nil
@@ -425,6 +607,11 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 	}
 
 	cls, _ := ClassifyRefreshError(refreshErr)
+
+	// Spec 124 D5: a token request was sent and failed. Reported here, past
+	// the returns that sent nothing, and before supersession can turn this
+	// flight's failure into a successful return of a newer grant.
+	c.auditAttempt(req, refreshErr, refreshedAt)
 
 	// FR-006a: a login or another writer superseded this flight's generation.
 	// Its failure has no side effects; a newer grant is handed out.
@@ -507,6 +694,7 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 
 	c.mu.Lock()
 	st.transientFailures++
+	st.transientPending = true
 	st.cooldownGen = gen
 	st.cooldownUntil = c.now().Add(refreshBackoff(st.transientFailures - 1))
 	st.cooldownErr = refreshErr
@@ -645,6 +833,7 @@ func (c *RefreshCoordinator) resetLocked(st *refreshKeyState) {
 	st.latchGen, st.latchErr = "", nil
 	st.cooldownGen, st.cooldownUntil, st.cooldownErr = "", time.Time{}, nil
 	st.transientFailures = 0
+	st.transientPending = false
 	st.dcrCleared = false
 	st.clearedClientID = ""
 }

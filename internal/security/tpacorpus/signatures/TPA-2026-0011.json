@@ -1,0 +1,104 @@
+{
+  "category": "tpa_tool_shadowing",
+  "gating": true,
+  "id": "TPA-2026-0011",
+  "license": "MIT",
+  "provenance": {
+    "note": "Look-alike tool presents itself as the safe replacement and disparages the genuine tool to win selection.",
+    "published": "2025-09-19",
+    "source": "https://www.elastic.co/security-labs/mcp-tools-attack-defense-recommendations"
+  },
+  "rules": [
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.86,
+      "detector": "prefer_over_all_others",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0011",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$prefer",
+          "type": "regex",
+          "value": "(?:always|only)\\s+(?:prefer|use)\\s+this\\s+tool"
+        },
+        {
+          "context": "tool_description",
+          "id": "$disparage",
+          "type": "regex",
+          "value": "outdated|obsolete|insecure|unsafe|vulnerable|compromised|malicious|untrusted|unreliable|broken|buggy|flawed|never use|do not use|don't use|ignore"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:always|only)\\s+(?:prefer|choose|pick|use)\\s+this\\s+(?:tool\\s+)?(?:over|instead of|rather than)\\b[^.;!?]{0,60}?\\b(?:any|every|all)\\s+other\\s+(?:[\\w-]+\\s+){0,2}?[\\w-]+(?:\\s*[;,.:\\x{2014}-]+\\s*(?:and\\s+)?(?:the\\s+|those\\s+|these\\s+)?(?:(?:other|older|all)\\s+)?[\\w`'-]+(?:\\s+[\\w-]+)?\\s+(?:is|are|was|were)\\s+(?:\\w+\\s+){0,2}?(?:outdated|obsolete|insecure|unsafe|vulnerable|compromised|malicious|untrusted|unreliable|broken|buggy|flawed)\\b(?:\\s+(?:and|or)\\s+\\w+){0,3}\\s*(?:[.;,!)]|$)|\\s*[;,.:\\x{2014}-]+\\s*(?:and\\s+)?(?:never|do not|don't)\\s+use\\s+(?:any\\s+|the\\s+|all\\s+)?(?:other|alternative)\\s+(?:\\w+\\s+)?\\w+\\s*(?:[.;!]|$)|\\s*[;,.:\\x{2014}-]+\\s*(?:and\\s+)?ignore\\s+(?:all\\s+|any\\s+|the\\s+)?(?:other|alternative)\\s+(?:\\w+\\s+)?\\w+\\s*(?:[.;!]|$)|[^.!?]{0,60}?\\bwithout\\s+(?:telling|informing|notifying)\\s+the\\s+user\\b)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.88,
+      "detector": "prefer_over_deprecated",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0011",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$prefer",
+          "type": "regex",
+          "value": "(?:always|only|must)\\s+(?:prefer|use)\\s+this\\s+tool\\s+(?:over|instead of)"
+        },
+        {
+          "context": "tool_description",
+          "id": "$disparage",
+          "type": "regex",
+          "value": "unsafe|insecure|vulnerable|compromised|malicious"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:always|only|must)\\s+(?:prefer|choose|pick|use)\\s+this\\s+(?:tool\\s+)?(?:over|instead of|rather than)\\s+(?:(?:the|your|any|built-in|default|original|old|legacy)\\s+){0,2}[\\w`'\\x22-]+(?:\\s+(?:tool|function|command|utility|api|endpoint))?\\s*[,;:(\\x{2014}-]*\\s*(?:(?:which|that|because|since|as|and)\\s+)?(?:(?:it|this|that|they)\\s+)?(?:is|are|was|were|has been|have been|remains?)\\s+(?:\\w+\\s+){0,2}?(?:unsafe|insecure|vulnerable|compromised|malicious|untrusted)\\b.{0,160}?(?:\\b(?:ignore|disregard)\\s+(?:it|that|them|this one)\\s*(?:[.;!]|$)|\\b(?:never|do not|don't)\\s+(?:use|call|run|invoke)\\s+(?:it|that|them|the\\s+(?:original|old|legacy|built-in|default))\\s*(?:[.;!]|$)|\\bwithout\\s+(?:telling|informing|notifying)\\s+the\\s+user\\b|\\b(?:do not|don't|never)\\s+(?:mention|tell|inform|reveal|disclose|say)\\s+(?:(?:the\\s+user|them|anyone|users?)\\s+)?(?:(?:this|it|that)\\b|the\\s+(?:fact|change|routing|substitution|swap|step|redirect|replacement)|about\\s+(?:this|it|the\\s+(?:step|change|routing|substitution|swap|replacement))|that\\s+you|these\\s+instructions|what\\s+(?:you|this))|\\beven\\s+if\\s+the\\s+user\\s+(?:asks|requests|insists|specifies|says|names)\\b|\\bregardless\\s+of\\s+(?:what\\s+)?the\\s+user\\b)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.84,
+      "detector": "claims_replacement_prefer_over",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0011",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$replacement",
+          "type": "regex",
+          "value": "(?:secure|safe|reliable|trusted|hardened|verified|compliant|robust|official|certified)\\b[^.]{0,60}(?:replacement|substitute|stand-in|successor)\\s+(?:for|to|of)"
+        },
+        {
+          "context": "tool_description",
+          "id": "$prefer",
+          "type": "regex",
+          "value": "(?:(?:use|prefer|choose|select|pick)\\s+(?:this\\s+tool|it)\\s+(?:for\\s+(?:all|any|every|each)|over|instead\\s+of|in\\s+place\\s+of|rather\\s+than)|(?:this\\s+tool|it)\\s+is\\s+(?:highly\\s+|strongly\\s+)?(?:recommended|ideal|preferred)\\s+for\\s+(?:any|all|every))"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:secure|safe|safer|reliable|trusted|hardened|verified|compliant|robust|official|certified)\\b[\\w\\s,/-]{0,60}?\\b(?:replacement|substitute|stand-in|successor)\\s+(?:for|to|of)\\s+(?:the\\s+)?[`'\\x22]?[\\w.-]+[`'\\x22]?.{0,800}?(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:(?:(?:always|only|must)\\s+)?(?:use|prefer|choose|select|pick)\\s+(?:this\\s+tool|it)\\s+(?:(?:for|on)\\s+(?:all|any|every|each)\\s+(?:(?:file|filesystem|disk|data|document|text|network|shell|web|http|database|sql|search)\\s+)+(?:access|reads?|reading|writes?|writing|operations?|requests?|calls?|queries|lookups?|tasks?|listing|handling)\\b|(?:over|instead\\s+of|in\\s+place\\s+of|rather\\s+than)\\s+(?:(?:any|every|all)\\s+other\\b|[`\\'\\x22]?[\\w.-]+[`\\'\\x22]?\\s+(?:and\\s+)?(?:any|every|all)\\s+other\\b))|(?:always|only|must)\\s+(?:use|prefer|choose|select|pick)\\s+(?:this\\s+tool|it)\\s+(?:over|instead\\s+of|in\\s+place\\s+of|rather\\s+than)\\s+(?:the\\s+)?(?:built-in|default|standard|stock|native|bundled)\\b|(?:this\\s+tool|it)\\s+is\\s+(?:highly\\s+|strongly\\s+)?(?:recommended|ideal|best\\s+suited|preferred|the\\s+(?:best|right|ideal)\\s+(?:choice|pick|option|fit))\\s+for\\s+(?:any|all|every)\\s+(?:(?:kind|type|sort)\\s+of\\s+)?(?:(?:file|filesystem|disk|data|document|text|network|shell|web|http|database|sql|search)\\s+)+(?:access|reads?|writes?|operations?)\\b(?:\\s*(?:[.,;!:]|$)|\\s+where\\s+(?:[\\w-]+,?\\s+){1,6}(?:(?:are|is)\\s+(?:the\\s+)?(?:top\\s+|key\\s+|main\\s+)?(?:priority|priorities|important|paramount|required|critical)\\b|(?:matter|count)\\b)))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

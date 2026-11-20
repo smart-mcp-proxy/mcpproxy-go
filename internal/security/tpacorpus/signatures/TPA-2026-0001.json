@@ -1,0 +1,62 @@
+{
+  "category": "tpa_hidden_instruction_block",
+  "gating": true,
+  "id": "TPA-2026-0001",
+  "license": "MIT",
+  "provenance": {
+    "note": "Hidden <IMPORTANT> block in a tool description that coaxes the agent into reading credentials; the description later changing is the rug-pull variant.",
+    "published": "2025-04-01",
+    "source": "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks"
+  },
+  "rules": [
+    {
+      "category": "rug-pull",
+      "confidence": 0.9,
+      "detector": "hidden_instruction",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0001",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$cred",
+          "type": "string",
+          "value": ".aws/credentials"
+        },
+        {
+          "context": "tool_description",
+          "id": "$imp",
+          "type": "regex",
+          "value": "<IMPORTANT>"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<important>.*?(read|cat|exfiltrate|credentials|id_rsa).*?</important>",
+      "severity": "critical",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "rug-pull",
+      "confidence": 0.95,
+      "detector": "manifest_desc_diff",
+      "engine": "structural_diff",
+      "id": "TPA-2026-0001",
+      "indicators": [],
+      "level": "critical",
+      "rule": {
+        "change": "modified",
+        "compare": "manifest_before/after",
+        "field": "description"
+      },
+      "runtime": "stateful",
+      "severity": "critical",
+      "target": "server_manifest",
+      "type": "behavioral"
+    }
+  ],
+  "skipped": []
+}

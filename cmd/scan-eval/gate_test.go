@@ -65,7 +65,7 @@ func gateFixture() *gateCorpus {
 }
 
 func TestEvaluateGateCorpus_DetectsAndExcludesUngated(t *testing.T) {
-	m := evaluateGateCorpus(gateFixture(), gateChecks())
+	m := evaluateGateCorpus(gateFixture(), gateChecks(nil))
 
 	byCat := map[string]categoryMetric{}
 	for _, c := range m.Categories {
@@ -143,7 +143,7 @@ func TestGateFP_HardNegativeDenominatorOnly(t *testing.T) {
 		hardNeg("hn_fp", "Looks benign but smuggles."+zeroWidthSpace+" oops."),
 	}}
 
-	m1 := evaluateGateCorpus(base, gateChecks())
+	m1 := evaluateGateCorpus(base, gateChecks(nil))
 	if m1.HardNegatives != 3 {
 		t.Fatalf("hard_negatives = %d, want 3", m1.HardNegatives)
 	}
@@ -161,7 +161,7 @@ func TestGateFP_HardNegativeDenominatorOnly(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		withBenign.Entries = append(withBenign.Entries, benign(fmt.Sprintf("bn_%d", i)))
 	}
-	m2 := evaluateGateCorpus(withBenign, gateChecks())
+	m2 := evaluateGateCorpus(withBenign, gateChecks(nil))
 	if m2.HardNegatives != 3 {
 		t.Errorf("hard_negatives changed to %d after benign growth, want 3", m2.HardNegatives)
 	}
@@ -180,7 +180,7 @@ func TestGateMetrics_PerCategoryShapeAndFPAttribution(t *testing.T) {
 		{ID: "u_hn_fp", Label: "benign", Category: "hard_negative", Resembles: "unicode_smuggling", Server: "ok",
 			Tool: gateTool{Name: "list_things", Description: "Lists things." + zeroWidthSpace + " benign."}},
 	}}
-	m := evaluateGateCorpus(c, gateChecks())
+	m := evaluateGateCorpus(c, gateChecks(nil))
 
 	var uni *categoryMetric
 	for i := range m.Categories {
@@ -242,7 +242,11 @@ func TestGate_CommittedCorpusPasses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load committed corpus: %v", err)
 	}
-	m := evaluateGateCorpus(c, gateChecks())
+	gb, err := loadGateBundle("")
+	if err != nil {
+		t.Fatalf("load embedded bundle: %v", err)
+	}
+	m := evaluateGateCorpus(c, gateChecks(gb.check))
 	if ok, reasons := m.decide(0.90, 0.05); !ok {
 		t.Fatalf("committed corpus fails the CI gate (recall=%.4f fp=%.4f): %v", m.OverallRecall, m.FPRate, reasons)
 	}

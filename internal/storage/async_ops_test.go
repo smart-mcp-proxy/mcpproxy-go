@@ -378,6 +378,7 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		// the operator stated anything.
 		"quarantineExplicitlySet": true,
 		"ExposePrompts":           true, // persisted to BBolt so the per-server override survives restarts
+		"ExposeSkills":            true, // Spec 125: persisted to BBolt so excluding a server from skills survives restarts
 		"ForwardHeaders":          true, // Spec 112: persisted to BBolt so the header-forwarding allowlist survives restarts and SaveConfiguration rebuilds
 	}
 
