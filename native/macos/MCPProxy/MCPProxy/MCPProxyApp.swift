@@ -407,6 +407,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             self, selector: #selector(openWebUI),
             name: .openWebUI, object: nil
         )
+        // Spec 125: a Web UI route with no native screen (a server's Skills tab).
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(openWebUIPath(_:)),
+            name: .openWebUIPath, object: nil
+        )
 
         // Spec 091: the one route into the native Connect Client form. Presented
         // directly from here — no delayed notification chains, which is what
@@ -2106,6 +2111,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 ? "\(baseURL)/ui/"
                 : "\(baseURL)/ui/?apikey=\(apiKey)"
             if let url = URL(string: urlString) {
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+
+    /// Opens one Web UI route (`note.object`, e.g. `/servers/hf?tab=skills`)
+    /// in the browser, with the API key as "Open Web UI in Browser" sends it.
+    @objc private func openWebUIPath(_ note: Notification) {
+        guard let path = note.object as? String else { return }
+        Task {
+            let apiKey = await coreManager?.currentAPIKey ?? ""
+            let baseURL = await MainActor.run { appState.webUIBaseURL }
+            if let url = WebUILink.url(base: baseURL, path: path, apiKey: apiKey) {
                 NSWorkspace.shared.open(url)
             }
         }

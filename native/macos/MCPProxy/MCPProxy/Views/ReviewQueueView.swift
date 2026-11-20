@@ -18,14 +18,22 @@ struct ReviewQueueView: View {
                     .id(server)
             } else {
                 List(queue.servers) { row in
-                    Button { selected = row.server } label: {
+                    Button {
+                        // Spec 125: a skill-only row is reviewed on the Web
+                        // UI's Skills tab; the app has none.
+                        if let path = ReviewQueuePresentation.webUIPath(row) {
+                            NotificationCenter.default.post(name: .openWebUIPath, object: path)
+                        } else {
+                            selected = row.server
+                        }
+                    } label: {
                         HStack {
                             VStack(alignment: .leading) {
                                 Text(row.server)
-                                Text(row.kind == "server_review" ? "Server awaiting review" : "\(row.pending ?? 0) new · \(row.changed ?? 0) changed")
+                                Text(ReviewQueuePresentation.subtitle(row))
                                     .font(.caption).foregroundStyle(.secondary)
                             }
-                            Spacer(); Image(systemName: "chevron.right")
+                            Spacer(); Image(systemName: ReviewQueuePresentation.webUIPath(row) == nil ? "chevron.right" : "arrow.up.forward.square")
                         }
                     }.buttonStyle(.plain)
                 }.overlay {
