@@ -122,6 +122,10 @@ func (p *MCPProxyServer) singleServerSurfaceFor(name string) *singleServerSurfac
 	p.singleServersMu.Unlock()
 	shutdownSingleServerTransport(stale)
 
+	// Registered first so it runs after both locks are released.
+	var staleAfterWait *mcpserver.StreamableHTTPServer
+	defer func() { shutdownSingleServerTransport(staleAfterWait) }()
+
 	// Lock order: directRefreshMu, then singleServersMu (the rebuild path
 	// holds the first and takes the second). Holding directRefreshMu while
 	// populating means a rebuild cannot publish a newer catalog between this
@@ -131,8 +135,14 @@ func (p *MCPProxyServer) singleServerSurfaceFor(name string) *singleServerSurfac
 	p.singleServersMu.Lock()
 	defer p.singleServersMu.Unlock()
 
+	// The switch may have moved while this request waited for the locks (and
+	// a refresh that ran meanwhile found nothing to retire): decide again.
+	wantNative = p.singleServerWantsNative(name)
 	if s, ok := p.singleServers[name]; ok {
-		return s
+		if s.native == wantNative {
+			return s
+		}
+		staleAfterWait = p.retireSingleServerLocked(name)
 	}
 	opts := p.singleServerOpts
 	if wantNative {
