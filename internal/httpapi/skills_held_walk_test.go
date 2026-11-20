@@ -213,8 +213,10 @@ func TestSSE_AttentionChangedSkillReviewNeverReachesAScopedSubscriber(t *testing
 
 	adminBody, adminClose := sseSubscribe(t, ts.URL, scopeAdminAPIKey)
 	defer adminClose()
+	readSSEUntil(t, adminBody, "attention.changed", time.Now().Add(5*time.Second))
 	agentBody, agentClose := sseSubscribe(t, ts.URL, token)
 	defer agentClose()
+	readSSEUntil(t, agentBody, "attention.changed", time.Now().Add(5*time.Second))
 	require.Eventually(t, func() bool { return ctrl.subscriberCount() == 2 }, 5*time.Second, 20*time.Millisecond)
 
 	evt := internalRuntime.Event{Type: internalRuntime.EventTypeAttentionChanged, Timestamp: time.Now(),
@@ -252,8 +254,11 @@ func TestSSE_AttentionChangedFromAHeldSkillAloneSendsAScopedSubscriberNothing(t 
 
 	adminBody, adminClose := sseSubscribe(t, ts.URL, scopeAdminAPIKey)
 	defer adminClose()
+	readSSEUntil(t, adminBody, "attention.changed", time.Now().Add(5*time.Second))
 	agentBody, agentClose := sseSubscribe(t, ts.URL, token)
 	defer agentClose()
+	baseline := readSSEUntil(t, agentBody, "attention.changed", time.Now().Add(5*time.Second))
+	require.Equal(t, []interface{}{signIn.ID}, baseline.Data["payload"].(map[string]interface{})["ids"], "the subscriber receives its current visible ids before duplicates are suppressed")
 	require.Eventually(t, func() bool { return ctrl.subscriberCount() == 2 }, 5*time.Second, 20*time.Millisecond)
 
 	held := internalRuntime.Event{Type: internalRuntime.EventTypeAttentionChanged, Timestamp: time.Now(),

@@ -4624,12 +4624,8 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warnw("Closing SSE stream after caller revalidation failed", "error", err)
 		return
 	}
-	// Spec 125 FR-019a (review round 1): seed the suppression with the
-	// caller's narrowed attention set as it is now. Left nil, the first
-	// attention.changed always reached the subscriber, so a scoped caller
-	// connected before a skill became held got a frame (its own ids
-	// unchanged) exactly when it was held. Every caller class is seeded the
-	// same way; a subscriber still gets the first frame that moves its set.
+	// Send the same scoped snapshot used for duplicate suppression. An update
+	// queued during setup may already be reflected in this snapshot.
 	lastAttentionIDs = attentionIDSetFor(callerCtx, s.controller.Attention())
 	initialLiveStats := filterUpstreamStatsServers(callerCtx, s.controller.GetUpstreamStats())
 	initialStatus := map[string]interface{}{
@@ -4648,6 +4644,20 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logger.Debug("Initial SSE status event sent successfully")
+
+	initialIDs := make([]string, 0, len(lastAttentionIDs))
+	for id := range lastAttentionIDs {
+		initialIDs = append(initialIDs, id)
+	}
+	sort.Strings(initialIDs)
+	initialAttention := map[string]interface{}{
+		"payload":   map[string]interface{}{"count": len(initialIDs), "ids": initialIDs},
+		"timestamp": time.Now().Unix(),
+	}
+	if err := s.writeSSEEvent(w, flusher, canFlush, string(internalRuntime.EventTypeAttentionChanged), initialAttention); err != nil {
+		s.logger.Errorw("Failed to write initial SSE attention event", "error", err)
+		return
+	}
 
 	// Stream updates
 	for {
