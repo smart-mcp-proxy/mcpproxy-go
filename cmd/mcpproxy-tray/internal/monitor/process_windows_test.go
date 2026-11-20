@@ -3,8 +3,10 @@
 package monitor
 
 import (
+	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +20,7 @@ func TestHelperWaitForInterrupt(t *testing.T) {
 	}
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, os.Interrupt)
+	fmt.Println("ready")
 	select {
 	case <-ch:
 		os.Exit(0)
@@ -29,14 +32,23 @@ func TestHelperWaitForInterrupt(t *testing.T) {
 // Stop must reach a windowless child gracefully instead of waiting out the force-kill timeout.
 func TestStopIsGracefulForWindowlessProcess(t *testing.T) {
 	pm := NewProcessMonitor(&ProcessConfig{
-		Binary: os.Args[0],
-		Args:   []string{"-test.run=^TestHelperWaitForInterrupt$"},
-		Env:    append(os.Environ(), "MONITOR_HELPER=1"),
+		Binary:        os.Args[0],
+		Args:          []string{"-test.run=^TestHelperWaitForInterrupt$"},
+		Env:           append(os.Environ(), "MONITOR_HELPER=1"),
+		CaptureOutput: true,
 	}, zap.NewNop().Sugar(), nil)
 	if err := pm.Start(); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(time.Second) // let the child install its signal handler
+	// A CTRL_BREAK that lands before the child's handler kills it outright.
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if out, _ := pm.GetOutput(); strings.Contains(out, "ready") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("child never reported ready")
+		}
+	}
 
 	started := time.Now()
 	if err := pm.Stop(); err != nil {

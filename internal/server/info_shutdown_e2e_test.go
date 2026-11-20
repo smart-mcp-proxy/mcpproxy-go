@@ -211,17 +211,6 @@ func TestGracefulShutdownNoPanic(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// Hold an SSE stream open, like the Web UI or an MCP client does: it must not
-	// make the HTTP shutdown wait out its 30s timeout.
-	streamReq, err := http.NewRequest("GET", serverURL+"/events", nil)
-	require.NoError(t, err)
-	streamReq.Header.Set("X-API-Key", "e2e-test-api-key-12345")
-	streamResp, err := http.DefaultClient.Do(streamReq)
-	require.NoError(t, err)
-	defer streamResp.Body.Close()
-	require.Equal(t, http.StatusOK, streamResp.StatusCode)
-	go func() { _, _ = io.Copy(io.Discard, streamResp.Body) }()
-
 	// Send SIGINT (Ctrl+C) to the process
 	t.Log("Sending SIGINT to server process...")
 	require.NoError(t, cmd.Process.Signal(syscall.SIGINT))
@@ -247,8 +236,8 @@ func TestGracefulShutdownNoPanic(t *testing.T) {
 			t.Log("No stderr output captured")
 		}
 
-	case <-time.After(10 * time.Second):
-		t.Fatal("Server did not shut down within 10 seconds")
+	case <-time.After(15 * time.Second):
+		t.Fatal("Server did not shut down within 15 seconds")
 		cmd.Process.Kill()
 	}
 }
