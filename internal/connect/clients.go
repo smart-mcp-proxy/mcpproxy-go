@@ -118,7 +118,9 @@ var allClients = []ClientDef{
 		// and not from Code/User/mcp.json. That file belongs to the older
 		// Local harness, which the "vscode" client above still serves (#1896).
 		//
-		// VS Code's agent host sends "vscode-agent-host" (#1959).
+		// Presence is matched exactly against clientInfo.name: the Copilot CLI
+		// sends "copilot-cli", VS Code's agent host "vscode-agent-host" (#1959),
+		// other Copilot hosts "github-copilot-developer".
 		ClientInfoNames: []string{"copilot-cli", "vscode-agent-host", "github-copilot-developer", "copilot"},
 		ReloadHint:      "Reload the VS Code window (or restart Copilot CLI) to load MCPProxy",
 	},
