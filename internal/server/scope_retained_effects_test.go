@@ -18,7 +18,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 // Spec 105 PR H1, T108a: the retained-effect mode of the differential oracle
@@ -280,8 +279,7 @@ func connectPromptUpstream(t *testing.T, proxy *MCPProxyServer, servers map[stri
 	qOff := false
 	proxy.config.QuarantineEnabled = &qOff
 
-	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
-	t.Cleanup(func() { um.DisconnectAll() })
+	um := newTestUpstreamManager(t, zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
 	for name, prompts := range servers {
 		mcpSrv := mcpserver.NewMCPServer(name, "1.0.0-test", mcpserver.WithPromptCapabilities(true))
 		for _, p := range prompts {
@@ -294,6 +292,7 @@ func connectPromptUpstream(t *testing.T, proxy *MCPProxyServer, servers map[stri
 		}
 		testServer := servertest.NewTestStreamableHTTPServer(mcpSrv)
 		t.Cleanup(func() { closeHTTPFixture(testServer) })
+		stopUpstreamBeforeFixtureClose(t, um, name)
 		require.NoError(t, um.AddServerConfig(name, &config.ServerConfig{
 			Name: name, Protocol: "streamable-http", URL: testServer.URL, Enabled: true,
 		}))

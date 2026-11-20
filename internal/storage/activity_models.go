@@ -73,6 +73,11 @@ const (
 	// actor_kind, actor_name, surface, change, profile, previous_profile,
 	// client_id, token_name, diff.
 	ActivityTypeProfileChange ActivityType = "profile_change"
+	// ActivityTypeUpstreamEvent records a change in an upstream server's
+	// availability: connection lost or restored, process exited, OAuth refresh
+	// failed, login required (Spec 124 FR-020). It carries the server, the
+	// kind, the diagnostic code and its fixed message, never a raw error.
+	ActivityTypeUpstreamEvent ActivityType = "upstream_event"
 )
 
 // ValidActivityTypes is the list of all valid activity types for filtering (Spec 024)
@@ -93,6 +98,7 @@ var ValidActivityTypes = []string{
 	string(ActivityTypePreflight),
 	string(ActivityTypePromptGet),
 	string(ActivityTypeProfileChange),
+	string(ActivityTypeUpstreamEvent),
 }
 
 // IsAdminOnlyActivityType reports whether rows of the type may be read by
@@ -272,6 +278,29 @@ type ActivityRecord struct {
 	// unattributed.
 	WorkSessionID string `json:"work_session_id,omitempty"`
 
+	// RunName is the validated X-MCPProxy-Run label the caller sent with the
+	// request (Spec 124 FR-003). A label only, never a credential.
+	RunName string `json:"run_name,omitempty"`
+	// Surface is the REST client surface of a request that had no MCP
+	// connection (webui, tray, cli, rest). It names the session's origin in
+	// the work-session summary; Source stays the coarse "api".
+	Surface string `json:"surface,omitempty"`
+
+	// ProjectName is the display name of the project the client works in (the
+	// basename of its workspace root), when the client disclosed one. Never
+	// the path (Spec 124 FR-040).
+	ProjectName string `json:"project_name,omitempty"`
+
+	// Companion marks a blocking policy_decision that is NOT the counted row
+	// of its attempt, because a tool_call row records the same attempt
+	// (Spec 124 D2). Set by the emit site.
+	Companion bool `json:"companion,omitempty"`
+
+	// BodiesRemoved is set when retention stripped Arguments and Response from
+	// this row to stay under the size cap while keeping the row (Spec 124
+	// FR-032).
+	BodiesRemoved bool `json:"bodies_removed,omitempty"`
+
 	// Scope attribution (Spec 108 FR-029): the profile, client and token IN
 	// EFFECT when the call ran, stamped once at write time and never rewritten
 	// (a later reassignment does not touch history). First-class rather than
@@ -343,6 +372,30 @@ const (
 type ActivityIdentityOwner struct {
 	TokenName   string
 	TokenPrefix string
+}
+
+// ActivityEventViewer restricts OWNED upstream events (Spec 124 FR-025) to
+// their owner. A nil viewer on a filter means no restriction (an
+// administrator, or an internal reader).
+type ActivityEventViewer struct {
+	// UserID is the caller's own user id; empty for a caller that is no user
+	// (an agent token in the personal edition), who then sees no owned event.
+	UserID string
+}
+
+// MaySee reports whether the viewer may read the record. Every record that is
+// not an owned upstream event passes.
+func (v *ActivityEventViewer) MaySee(r *ActivityRecord) bool {
+	if v == nil || r == nil || !r.OwnedUpstreamEvent() {
+		return true
+	}
+	return v.UserID != "" && r.UserID == v.UserID
+}
+
+// OwnedUpstreamEvent reports whether the record is an upstream event about
+// one user's upstream credential.
+func (r *ActivityRecord) OwnedUpstreamEvent() bool {
+	return r.Type == ActivityTypeUpstreamEvent && r.UserID != ""
 }
 
 // Owns reports whether the record was made by this caller.
@@ -459,6 +512,10 @@ type ActivityFilter struct {
 	// project, across reconnects. This is what the UI's "Session" filter means;
 	// SessionID above is the raw transport connection.
 	WorkSessionID string
+
+	// EventViewer limits owned upstream events to their owner (Spec 124
+	// FR-025). nil = no restriction.
+	EventViewer *ActivityEventViewer
 
 	// Sensitive data detection filters (Spec 026)
 	SensitiveData *bool  // Filter by sensitive data detection (nil=no filter, true=has detections, false=no detections)
@@ -606,6 +663,12 @@ func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 		return false
 	}
 	if f.UserID != "" && record.UserID != f.UserID {
+		return false
+	}
+	// Spec 124 FR-025: an upstream event about one user's credential is
+	// visible only to that user and to administrators. Part of the
+	// authorization block, so it applies before counting and paging.
+	if f.EventViewer != nil && !f.EventViewer.MaySee(record) {
 		return false
 	}
 

@@ -144,7 +144,7 @@ MCPPROXY_KEYRING_WRITE=1 mcpproxy secrets set my-api-key
 
 Without it the command stops before asking for the value and prints this command. See [macOS: storing a secret from a terminal](#macos-storing-a-secret-from-a-terminal) for the reason. Linux and Windows need no opt-in, and neither does reading a secret.
 
-Avoid putting a literal secret in the command arguments: shells may keep it in history and processes may expose their arguments. The interactive prompt avoids a secret command argument, but the current CLI echoes typed characters in the terminal. Use `--from-stdin` with a trusted secret source when terminal echo is unsuitable.
+Avoid putting a literal secret in the command arguments: shells may keep it in history and processes may expose their arguments. When stdin is a terminal, the prompt reads the secret without echoing typed characters. Otherwise, the CLI reads the secret from stdin; `--from-stdin` explicitly selects that input mode for a trusted secret source.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -443,7 +443,7 @@ mcpproxy doctor
 
 ```bash
 mcpproxy secrets set my-api-key
-# Enter secret value: (typed characters are echoed in the terminal)
+# Enter secret value: (input is hidden)
 ```
 
 On macOS, run it as `MCPPROXY_KEYRING_WRITE=1 mcpproxy secrets set my-api-key` ([why](#macos-storing-a-secret-from-a-terminal)).

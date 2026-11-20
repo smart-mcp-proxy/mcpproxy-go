@@ -87,6 +87,9 @@ var getRouteScopes = map[string]routeScope{
 	"/api/v1/info":                          {scopeFiltered, "admin api key withheld; TestInfo_ScopedCallerNeverReceivesTheAdminAPIKey"},
 	"/api/v1/annotations/coverage":          {scopeFiltered, "one row per server, canSeeServer gate (#1166)"},
 	"/api/v1/activity":                      {scopeFiltered, "scopeAllowedServers; TestListActivity_ScopedToAllowedServers"},
+	"/api/v1/work-sessions":                 {scopeFiltered, "own sessions, facts recomputed from servers in reach; TestWorkSessions_Authorization"},
+	"/api/v1/work-sessions/{id}":            {scopeFiltered, "own session in reach or not found; TestWorkSessions_Authorization"},
+	"/api/v1/work-sessions/{id}/timeline":   {scopeFiltered, "rows narrowed by the index server before load; TestWorkSessionTimeline_ScopedToReach"},
 	"/api/v1/activity/summary":              {scopeFiltered, "scopeAllowedServers; TestActivitySummary_ScopedToAllowedServers"},
 	"/api/v1/activity/usage":                {scopeFiltered, "scopeAllowedServers; TestActivityUsage_ScopedToAllowedServers"},
 	"/api/v1/activity/export":               {scopeFiltered, "scopeAllowedServers; TestActivityExport_ScopedToAllowedServers"},
@@ -185,6 +188,8 @@ var shortCircuitCodes = map[string]int{
 	"/api/v1/review":                          http.StatusServiceUnavailable, // review service not wired in the fixture
 	"/api/v1/servers/{id}/skills/content":     http.StatusNotFound,           // synthetic skill absent from the fixture → the one skill-not-found answer
 	"/api/v1/profiles/{name}":                 http.StatusNotFound,           // synthetic profile "alpha" is unknown, which reads the same as unreachable
+	"/api/v1/work-sessions/{id}":              http.StatusNotFound,           // synthetic id is no work session, which reads the same as one out of reach
+	"/api/v1/work-sessions/{id}/timeline":     http.StatusNotFound,           // same uniform 404
 	"/api/v1/profiles/{name}/effective-tools": http.StatusNotFound,           // same uniform 404
 	"/api/v1/servers/{id}/review":             http.StatusServiceUnavailable, // review service not wired in the fixture
 }

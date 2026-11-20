@@ -146,12 +146,7 @@ func newLimitedManager(t *testing.T, up *slowUpstream, maxConcurrent, queueSize 
 	// legal configuration (FR-023).
 	require.Empty(t, cfg.ValidateDetailed(), "concurrency limits must pass config validation")
 
-	um := upstream.NewManager(zap.NewNop(), cfg, nil, secret.NewResolver(), nil)
-	t.Cleanup(func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = um.ShutdownAll(shutdownCtx)
-	})
+	um := newTestUpstreamManager(t, zap.NewNop(), cfg, nil, secret.NewResolver(), nil)
 
 	require.NoError(t, um.AddServerConfig(slowUpstreamName, serverCfg))
 	require.NoError(t, um.ConnectAll(context.Background()))

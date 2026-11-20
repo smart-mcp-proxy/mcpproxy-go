@@ -528,8 +528,9 @@ Activity logging is enabled by default. Configure via `mcp_config.json`:
 ```json
 {
   "activity_retention_days": 90,
-  "activity_max_records": 100000,
+  "activity_max_records": 400000,
   "activity_max_size_mb": 256,
+  "session_retention_days": 7,
   "activity_max_response_size": 65536,
   "activity_cleanup_interval_min": 60
 }
@@ -538,12 +539,70 @@ Activity logging is enabled by default. Configure via `mcp_config.json`:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `activity_retention_days` | 90 | Days to retain activity records |
-| `activity_max_records` | 100000 | Maximum records before pruning oldest |
+| `activity_max_records` | 400000 | Maximum records before pruning. The default was 100000 in earlier releases; a config file that already holds an explicit `100000` keeps it. |
+| `session_retention_days` | 7 | How long a [work session](#work-sessions-and-the-failure-timeline) is listed and kept whole. Read at start. Independent of `activity_retention_days`. |
 | `activity_max_size_mb` | 256 | Maximum total activity-log size in MB before pruning oldest (`0` disables). Runs alongside the age and count caps to bound `config.db` growth when records carry large payloads. An explicit `0` now survives a config save — before #1175 it was silently deleted on the next write and the 256MB cap came back. |
 | `activity_max_response_size` | 65536 | Max response text stored per record (bytes). Applies to `tool_call`, `internal_tool_call` and `prompt_get`; `0` or absent falls back to 65536 and it cannot be disabled. Read at startup only, like its retention siblings. Truncated text keeps a `...[truncated]` suffix. Already-stored records are not rewritten, and (as with pruning) the BBolt file does not shrink on disk. Sensitive-data detection still scans the untruncated response, under its own `sensitive_data_detection.max_payload_size_kb` cap. |
 | `activity_cleanup_interval_min` | 60 | Background cleanup interval (minutes) |
 
-> **Why the size cap?** The age and count caps alone do not bound disk: with large per-record payloads the log can reach hundreds of MB while still under 100k records / 90 days. `activity_max_size_mb` removes the oldest records (always keeping the newest) until the log is within the byte budget. Note: pruning frees pages for reuse but does not shrink the database file on disk (BBolt does not return freed pages to the OS).
+> **Why the size cap?** The age and count caps alone do not bound disk: with large per-record payloads the log can reach hundreds of MB while still under the record cap and 90 days. `activity_max_size_mb` brings the log back within the byte budget (always keeping the newest record). Note: pruning frees pages for reuse but does not shrink the database file on disk (BBolt does not return freed pages to the OS).
+
+### What is removed when a cap is reached
+
+The caps are unchanged; what they remove is chosen so that a work session inside the retention window stays whole for as long as possible:
+
+1. **Summaries older than `session_retention_days`** are dropped. Their rows stay readable through the ordinary activity filters until the log prunes them.
+2. **The age cap** (`activity_retention_days`) removes old rows as before. A session that loses rows this way is marked as truncated and keeps its lifetime counts.
+3. **Over the size or record cap**, in this order:
+   1. the argument and response **bodies of the oldest rows** are removed and the rows are kept, so the time, result, error class and order of every call survive (`bodies_removed: true` on the row);
+   2. rows that belong to **no session inside the window** are removed, oldest first;
+   3. **whole sessions** inside the window are removed, the one with the oldest last activity first. A session is removed whole or not at all;
+   4. if a single session is all that is left and it alone exceeds the caps, it is **trimmed from its oldest end**.
+
+The size cap counts the activity rows together with the session summaries and their indexes.
+
+When step 2 or 3 removes rows of a session inside the window, MCPProxy records a **retention shortfall**. `mcpproxy doctor` and `GET /api/v1/diagnostics` (`activity_retention`) then say which cap was reached, where complete history starts, and which setting to raise. The warning stays until a full window has passed without further loss.
+
+## Work sessions and the failure timeline
+
+A **work session** is one agent's run of work: one credential, one client, one project, until it has been idle for 30 minutes. Every tool call belongs to one, including calls that have no MCP connection behind them:
+
+| Call | How its work session is derived |
+|------|---------------------------------|
+| MCP connection (legacy revisions) | The connection's credential, client name and project. The session survives reconnects. Two tokens that share one connection get two sessions. |
+| MCP request on the 2026-07-28 revision | The credential and the client name the request carries. |
+| REST `POST /api/v1/tools/call` | The credential and the calling surface (`cli`, `webui`, `tray`, or `rest` for a script). |
+
+A regenerated token, and a rotated client credential, start a new work session: a session never spans two secrets.
+
+**Naming a run.** Two agents that share one token and report the same client name cannot be told apart, and their calls form one work session. Give each agent its own token, or send a run name with each request:
+
+```bash
+curl -X POST -H "X-API-Key: $TOKEN" -H "X-MCPProxy-Run: nightly-2026-11-15" \
+  http://127.0.0.1:8080/api/v1/tools/call -d '{"tool_name":"github:list_issues","arguments":{}}'
+```
+
+`X-MCPProxy-Run` is accepted on REST tool calls and on MCP over HTTP. It is a label of 1 to 128 printable characters, combined with the credential, so it can never join two tokens' work. An invalid value is ignored and never fails the call. It is not forwarded to upstream servers. One credential can open at most 1,000 named sessions a day; past that the name is ignored.
+
+**What a session records.** Each session keeps the number of attempts, failures and policy blocks, the time of its first and last failure, and the error class, server, tool and a short reason of the last one. A call that MCPProxy itself refused (quarantine, a profile, a rate limit) is a failure counted apart as a *policy block*, so that a flood of blocks cannot bury a real failure. These are lifetime facts: they stay exact after retention has removed rows.
+
+**Upstream events.** A failed call says "connection refused". The reason one level up is recorded as an activity row of type `upstream_event`, at the time it happened:
+
+| `metadata.kind` | Meaning |
+|-----------------|---------|
+| `connection_lost` | The server's connection was lost or closed |
+| `process_exited` | A stdio server's process exited |
+| `oauth_refresh_failed` | A token refresh was sent and failed |
+| `login_required` | The server needs a new login, including after `mcpproxy auth logout` and after a restart that finds no usable token |
+| `connection_restored` | The connection came back after a recorded loss |
+
+A row carries the server, the kind, the diagnostic code (`MCPX_*`) and its fixed message, never the raw error text. Repeats within a minute are one row with `metadata.count`, `first_at` and `last_at`; one server adds at most 120 rows an hour. The rows appear in the System view (`--type upstream_event`) and in the timeline of every session that called the server while the event happened. A session in which a call to a server failed because the server could not be reached (`network`), and which started while that server was already down, also shows the cause from before its start, marked `precedes_session`: one row per server, the server's latest `connection_lost` or `process_exited` row, when no `connection_restored` came after it before the session started and it was recorded since MCPProxy last started. A row stands for its repeats, so a loss repeated during the session counts at its last repeat, and a recovery repeated after the session started does not count as one before it. A call that waited for a login is not given an earlier row: its own row says the server needs a login.
+
+**Why a call to a server that is not connected failed.** Such a call is never sent. When the server waits for a login (logged out, parked for sign-in, or its last connect failed on OAuth) the call is recorded with error class `auth` and the reason "The upstream server needs a login."; otherwise it is `network`, "The upstream server could not be reached." A network failure, and an HTTP answer that says nothing about credentials (5xx, 429, 404), is never read as a login requirement.
+
+**Reading a session.** `GET /api/v1/work-sessions` lists sessions (`?failed=true` for the ones that failed), and `GET /api/v1/work-sessions/{id}/timeline` returns one session's rows and upstream events in time order, positioned at its first failure with the 20 rows before it. See the [REST API reference](../api/rest-api.md#work-sessions).
+
+Sessions do not continue across a restart of MCPProxy: a long run that spans one shows as two sessions.
 
 ## Tool-call history
 

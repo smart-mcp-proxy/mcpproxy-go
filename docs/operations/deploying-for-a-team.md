@@ -54,8 +54,9 @@ storage) or accepting the gap.
 
 ## Persistent volume: `--config` and `--data-dir`
 
-The container's `ENTRYPOINT` is
-`mcpproxy serve --listen 0.0.0.0:8080` (see the repository `Dockerfile`); a
+The container's `ENTRYPOINT` is `mcpproxy serve` and the image sets
+`MCPPROXY_LISTEN=0.0.0.0:8080` (see the repository `Dockerfile`), so `args`
+holds only flags — a `--listen` there wins over the variable; a
 Kubernetes `args` override adds `--config` and `--data-dir` explicitly rather
 than relying on the image's defaults, because both must point inside the
 **same** mounted volume:
@@ -285,7 +286,6 @@ spec:
       - name: mcpproxy
         image: ghcr.io/smart-mcp-proxy/mcpproxy-server:latest
         args:
-        - "serve"
         - "--listen=0.0.0.0:8080"
         - "--config=/data/mcp_config.json"
         - "--data-dir=/data"

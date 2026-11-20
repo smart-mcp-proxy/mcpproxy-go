@@ -402,6 +402,7 @@ func (m *Manager) newWiredClientLocked(id string, cfg *config.ServerConfig, gen 
 			notifierCallback(oldState, newState, info)
 		})
 	}
+	m.wireTransitionObserverLocked(client, cfg.Name, serverTransport(cfg))
 	// Tool discovery callback for notifications/tools/list_changed.
 	if m.toolDiscoveryCallback != nil {
 		client.SetToolDiscoveryCallback(m.toolDiscoveryCallback)

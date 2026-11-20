@@ -768,6 +768,9 @@ func selectablePinnedCtx(pin string, allowed ...string) context.Context {
 // retries a full reading of the three cases, with a real sleep between
 // attempts, until one attempt finds them all equal.
 func TestSelectableProfileNames_PinOutcomesDoSameWork(t *testing.T) {
+	if runInFreshProcess(t) {
+		return
+	}
 	const n = 64
 	alive := selectableProbeConfig(n)
 	deleted := selectableProbeConfig(n)

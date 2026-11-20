@@ -32,12 +32,16 @@ const (
 
 // AuthContext carries authentication identity through request context.
 type AuthContext struct {
-	Type           string   // "admin", "agent", "user", or "admin_user"
-	AgentName      string   // Name of the agent token (empty for admin)
-	TokenPrefix    string   // First 12 chars of raw token (empty for admin)
-	AllowedServers []string // Servers this token can access (nil = all for admin)
-	Permissions    []string // Permission tiers (nil = all for admin)
-	ProfilePin     string   // Profile this agent token is pinned to (Profiles v2 T3; empty if unpinned)
+	Type        string // "admin", "agent", "user", or "admin_user"
+	AgentName   string // Name of the agent token (empty for admin)
+	TokenPrefix string // First 12 chars of raw token (empty for admin)
+	// TokenGeneration identifies the authenticated secret itself (a prefix of
+	// its hash). Internal: it keys a work session on the credential's
+	// generation (Spec 124 FR-009) and is never returned or logged.
+	TokenGeneration string
+	AllowedServers  []string // Servers this token can access (nil = all for admin)
+	Permissions     []string // Permission tiers (nil = all for admin)
+	ProfilePin      string   // Profile this agent token is pinned to (Profiles v2 T3; empty if unpinned)
 
 	// TokenKind, ClientID and ProfileMode are the Spec 108-c client-
 	// credential identity, copied from AgentToken at authentication

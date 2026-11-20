@@ -159,6 +159,9 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 // both live in the same Matches() call and the authorization term is evaluated
 // first.
 func applyActivityScope(ctx context.Context, filter *storage.ActivityFilter) {
+	// Spec 124 FR-025: every non-administrator reads owned upstream events
+	// through this predicate, whether or not its servers are restricted.
+	filter.EventViewer = activityEventViewer(ctx)
 	if allowed, scoped := scopeAllowedServers(ctx); scoped {
 		filter.AllowedServers = allowed
 		// Spec 125 FR-019a: skill approval rows are administrator-only.
@@ -171,13 +174,26 @@ func applyActivityScope(ctx context.Context, filter *storage.ActivityFilter) {
 	}
 }
 
+// activityEventViewer is the caller's view of owned upstream events (Spec 124
+// FR-025): nil for an administrator, who sees them all; otherwise the caller's
+// own user id, so a user sees the events about its own upstream credentials
+// and nobody else's. One predicate for the list, the summary, the export, the
+// detail and the session timeline.
+func activityEventViewer(ctx context.Context) *storage.ActivityEventViewer {
+	ac := auth.AuthContextFromContext(ctx)
+	if ac == nil || ac.IsAdmin() {
+		return nil
+	}
+	return &storage.ActivityEventViewer{UserID: ac.UserID}
+}
+
 // handleListActivity handles GET /api/v1/activity
 // @Summary List activity records
 // @Description Returns paginated list of activity records with optional filtering
 // @Tags Activity
 // @Accept json
 // @Produce json
-// @Param type query string false "Filter by activity type(s), comma-separated for multiple (Spec 024)" Enums(tool_call, policy_decision, quarantine_change, server_change, system_start, system_stop, internal_tool_call, config_change, preflight, prompt_get, profile_change)
+// @Param type query string false "Filter by activity type(s), comma-separated for multiple (Spec 024)" Enums(tool_call, policy_decision, quarantine_change, server_change, system_start, system_stop, internal_tool_call, config_change, preflight, prompt_get, profile_change, upstream_event)
 // @Param server query string false "Filter by server name"
 // @Param tool query string false "Filter by tool name"
 // @Param session_id query string false "Filter by MCP transport session ID"
@@ -302,7 +318,7 @@ func (s *Server) handleGetActivityDetail(w http.ResponseWriter, r *http.Request)
 	// oracle is status parity with an absent id, not "the body omits the server
 	// name": this route's 404 body carries no echo of the caller's input, so an
 	// absence assertion would pass vacuously.
-	if activity == nil || !canSeeServer(r.Context(), activity.ServerName) ||
+	if activity == nil || !canSeeServer(r.Context(), activity.ServerName) || !activityEventViewer(r.Context()).MaySee(activity) ||
 		(auth.IsScopedCaller(r.Context()) && storage.IsAdminOnlyActivityType(activity.Type)) {
 		s.writeError(w, r, http.StatusNotFound, "Activity not found")
 		return
@@ -965,6 +981,19 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 			if isError {
 				callErrorCount++
 			}
+		}
+
+		// Spec 124: an upstream event stores "error"/"success" in Status for a
+		// lost or restored connection. That is not the outcome of a call and
+		// not traffic to the server, and Usage never counts it, so it stays out
+		// of the call tiles and the top lists (Usage errors = errors + blocked
+		// here, F1). The administrator-only skill rows (Spec 125) are not
+		// tool calls either: a skill access stores the outcome of a search,
+		// load or read, and a skill approval change stores its action
+		// ("blocked" when an administrator blocks a skill).
+		if a.Type == storage.ActivityTypeUpstreamEvent || storage.IsAdminOnlyActivityType(a.Type) {
+			otherCount++
+			continue
 		}
 
 		switch a.Status {

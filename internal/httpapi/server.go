@@ -325,7 +325,11 @@ type ServerController interface {
 
 // Server provides HTTP API endpoints with chi router
 type Server struct {
-	controller ServerController
+	// eventsSince is when this core process started (processStart); upstream
+	// events from before it are no evidence about a server's state now
+	// (Spec 124, release QA F2). A field so tests can move it.
+	eventsSince time.Time
+	controller  ServerController
 	// patchAfterParse is a Spec 116 test seam (nil in production): it runs in
 	// PATCH /api/v1/servers/{id} after the body was parsed and validated.
 	patchAfterParse   func(serverName string)
@@ -479,6 +483,7 @@ func NewServer(controller ServerController, logger *zap.SugaredLogger, obs *obse
 	}
 
 	s := &Server{
+		eventsSince:      processStart,
 		controller:       controller,
 		logger:           logger,
 		httpLogger:       httpLogger,
@@ -865,6 +870,12 @@ func (s *Server) correlationIDMiddleware() func(http.Handler) http.Handler {
 			// Inject correlation ID and request source into context
 			ctx := reqcontext.WithCorrelationID(r.Context(), correlationID)
 			ctx = reqcontext.WithRequestSource(ctx, reqcontext.SourceRESTAPI)
+
+			// Spec 124 FR-002/FR-003: a REST call has no MCP connection, so
+			// its work session is derived from the request. The surface names
+			// the client, and the optional run name splits the caller's work.
+			ctx = reqcontext.WithClientSurface(ctx, restClientSurface(r))
+			ctx = reqcontext.WithRunHeader(ctx, r.Header.Get(reqcontext.RunNameHeader))
 
 			// Add correlation ID to response headers for client tracking
 			w.Header().Set("X-Correlation-ID", correlationID)
@@ -1253,6 +1264,13 @@ func (s *Server) setupRoutes() {
 		// Session management
 		r.Get("/sessions", s.handleGetSessions)
 		r.Get("/sessions/{id}", s.handleGetSessionDetail)
+
+		// Spec 124: work sessions and their failure timeline. Scoped, unlike
+		// /sessions above: the caller sees its own sessions, narrowed to the
+		// servers in its reach.
+		r.Get("/work-sessions", s.handleListWorkSessions)
+		r.Get("/work-sessions/{id}", s.handleGetWorkSession)
+		r.Get("/work-sessions/{id}/timeline", s.handleWorkSessionTimeline)
 
 		// Tool execution
 		r.Post("/tools/call", s.handleCallTool)

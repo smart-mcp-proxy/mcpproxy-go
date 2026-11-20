@@ -145,6 +145,15 @@ type Server struct {
 	statusCh chan interface{}
 	eventsCh chan runtime.Event
 
+	// routingEventsCh is listenForRoutingModeRefresh's event subscription.
+	// Shutdown unsubscribes it, which closes it and ends the listener.
+	routingEventsCh chan runtime.Event
+	// listenersDone is closed by Shutdown to stop forwardRuntimeStatus. The
+	// runtime's status channel is never closed (its senders outlive no
+	// shutdown step that could close it safely), so the forwarder cannot end
+	// by ranging over it.
+	listenersDone chan struct{}
+
 	// serveErrCh delivers a fatal serve failure (startup bind error or
 	// serve-loop death) out of the async StartServer goroutine so the
 	// process can exit instead of lingering unreachable. Buffered (cap 1)
@@ -383,6 +392,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		statusCh:            make(chan interface{}, 10),
 		eventsCh:            rt.SubscribeEvents(),
 		serveErrCh:          make(chan error, 1),
+		listenersDone:       make(chan struct{}),
 		observability:       obsManager,
 		admissionScanKicked: make(map[string]bool),
 
@@ -435,6 +445,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// start below, so no removal can commit without forgetting its scan state.
 	server.forgetInformationalScansOnPurge()
 	server.registerToolChangeRescan()
+	server.registerTokenSavedDirectRebuild()
 	// Spec 101 US3 (B17, B19, B21): the refresher nudge, the refresh-cycle
 	// telemetry and the post-activation re-protection sweep. Registered here,
 	// at construction, so no activation can slip in before the observer; the
@@ -499,8 +510,8 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// servers.changed leaves the filters denying against an empty catalog and the
 	// direct surface stays blank until an unrelated reconcile. Subscribing here
 	// closes the window rather than depending on goroutine scheduling.
-	routingEvents := server.runtime.SubscribeEvents()
-	go server.listenForRoutingModeRefresh(routingEvents)
+	server.routingEventsCh = server.runtime.SubscribeEvents()
+	go server.listenForRoutingModeRefresh(server.routingEventsCh)
 
 	// Spec 105 FR-004: index every config snapshot before it is published —
 	// the observer runs on the exact *Config about to be stored — and the
@@ -605,6 +616,8 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 	// Harmless on every endpoint but /mcp/all, whose filters are the only
 	// consumers.
 	next = directRequestKindMiddleware(next)
+	// Spec 124 FR-003: the run name header, for MCP over HTTP.
+	next = runNameMiddleware(next)
 	// Spec 058 US3 (R1): drop a modern client's separately posted
 	// notifications/cancelled before mcp-go can match it against another
 	// client's in-flight request — every modern request shares session id "".
@@ -886,8 +899,17 @@ func (s *Server) forwardRuntimeStatus() {
 	// Emit initial snapshot so SSE clients have data immediately.
 	s.enqueueStatusSnapshot()
 
-	for range s.runtime.StatusChannel() {
-		s.enqueueStatusSnapshot()
+	statusCh := s.runtime.StatusChannel()
+	for {
+		select {
+		case <-s.listenersDone:
+			return
+		case _, ok := <-statusCh:
+			if !ok {
+				return
+			}
+			s.enqueueStatusSnapshot()
+		}
 	}
 }
 
@@ -907,6 +929,14 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 			s.warmProfileIndex()
 		}
 		switch evt.Type {
+		case runtime.EventTypeOAuthTokenRefreshed:
+			// A server that could not list its tools because its token refresh
+			// was failing can list again now; republish the direct and
+			// single-server surfaces at once instead of on the retry timer
+			// (GH #1929 release QA).
+			if s.mcpProxy != nil {
+				s.mcpProxy.RetryPendingDirectRebuild()
+			}
 		case runtime.EventTypeServersChanged:
 			s.logger.Debug("servers changed, refreshing routing mode tools",
 				zap.String("event_type", string(evt.Type)))
@@ -1514,6 +1544,16 @@ func (s *Server) Shutdown() error {
 	if s.eventsCh != nil {
 		s.runtime.UnsubscribeEvents(s.eventsCh)
 	}
+	// Stop the two goroutines NewServer started. Unsubscribing closes the
+	// routing listener's channel, which ends its range loop; its own deferred
+	// UnsubscribeEvents then finds the channel gone and does nothing. The
+	// shutdown flag above makes this run once, so listenersDone is closed once.
+	if s.routingEventsCh != nil {
+		s.runtime.UnsubscribeEvents(s.routingEventsCh)
+	}
+	if s.listenersDone != nil {
+		close(s.listenersDone)
+	}
 
 	// MCP-32: flush and shut down the OTLP tracer provider so buffered spans
 	// are exported before exit.
@@ -1974,6 +2014,7 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 				um.CallStats(serverStatus.Name)
 		}
 
+		healthInput.NetworkFailure, healthInput.NetworkGaveUp, healthInput.NextRetryAt = s.runtime.NetworkRetryState(serverStatus.Name)
 		// T032: Wire refresh state into health calculation (Spec 023).
 		// Read through the runtime seam so a stale schedule for a server that
 		// no longer uses OAuth is not reported here either (GH #1172).
@@ -4845,6 +4886,40 @@ func (s *Server) ListActivities(filter storage.ActivityFilter) ([]*storage.Activ
 // GetActivity returns a single activity record by ID.
 func (s *Server) GetActivity(id string) (*storage.ActivityRecord, error) {
 	return s.runtime.GetActivity(id)
+}
+
+// Work-session reads (Spec 124).
+
+// ListWorkSessionSummaries returns every work-session summary.
+func (s *Server) ListWorkSessionSummaries() ([]*storage.WorkSessionSummary, error) {
+	return s.runtime.ListWorkSessionSummaries()
+}
+
+// GetWorkSessionSummary returns one work-session summary, or nil.
+func (s *Server) GetWorkSessionSummary(id string) (*storage.WorkSessionSummary, error) {
+	return s.runtime.GetWorkSessionSummary(id)
+}
+
+// WorkSessionRowRefs returns a work session's index entries in time order.
+func (s *Server) WorkSessionRowRefs(id string) ([]storage.WorkSessionRowRef, error) {
+	return s.runtime.WorkSessionRowRefs(id)
+}
+
+// WalkWorkSessionTimeline visits a work session's index entries merged with
+// the upstream events of the given servers, in time order.
+func (s *Server) WalkWorkSessionTimeline(id string, servers []string, from, to time.Time, fn func(storage.WorkSessionRowRef) bool) error {
+	return s.runtime.WalkWorkSessionTimeline(id, servers, from, to, fn)
+}
+
+// OpenUpstreamEventsBefore returns the latest unresolved upstream event of
+// each server before a time (release QA F2).
+func (s *Server) OpenUpstreamEventsBefore(kinds map[string][]string, before, until, notBefore time.Time, visible func(owner string) bool) ([]storage.WorkSessionRowRef, error) {
+	return s.runtime.OpenUpstreamEventsBefore(kinds, before, until, notBefore, visible)
+}
+
+// GetActivitiesByKeys loads activity rows by key.
+func (s *Server) GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error) {
+	return s.runtime.GetActivitiesByKeys(keys)
 }
 
 // StreamActivities returns a channel that yields activity records matching the filter.

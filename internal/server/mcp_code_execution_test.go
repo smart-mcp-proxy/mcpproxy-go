@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -21,6 +22,16 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
+
+// shutdownUpstreamManager stops a fixture's upstream manager the way the
+// runtime does on exit. A manager left running keeps its network-recovery
+// watcher and clients alive for the rest of the package run. Deferred (or
+// registered as a cleanup) after the storage it uses, so it runs first.
+func shutdownUpstreamManager(m *upstream.Manager) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_ = m.ShutdownAll(ctx)
+}
 
 // TestCodeExecution_WithNilMainServer tests that code execution works when mainServer is nil (CLI mode)
 func TestCodeExecution_WithNilMainServer(t *testing.T) {
@@ -46,6 +57,7 @@ func TestCodeExecution_WithNilMainServer(t *testing.T) {
 
 	secretResolver := secret.NewResolver()
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
+	defer shutdownUpstreamManager(upstreamManager)
 
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
 	require.NoError(t, err)
@@ -112,6 +124,7 @@ func newCodeExecProxy(t *testing.T) *server.MCPProxyServer {
 
 	secretResolver := secret.NewResolver()
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
+	t.Cleanup(func() { shutdownUpstreamManager(upstreamManager) })
 
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
 	require.NoError(t, err)
@@ -245,6 +258,7 @@ func TestCodeExecution_TypeScript(t *testing.T) {
 
 	secretResolver := secret.NewResolver()
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
+	defer shutdownUpstreamManager(upstreamManager)
 
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
 	require.NoError(t, err)
@@ -307,6 +321,7 @@ func TestCodeExecution_JavaScriptBackwardCompat(t *testing.T) {
 
 	secretResolver := secret.NewResolver()
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
+	defer shutdownUpstreamManager(upstreamManager)
 
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
 	require.NoError(t, err)
@@ -369,6 +384,7 @@ func TestCodeExecution_InvalidLanguage(t *testing.T) {
 
 	secretResolver := secret.NewResolver()
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
+	defer shutdownUpstreamManager(upstreamManager)
 
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
 	require.NoError(t, err)

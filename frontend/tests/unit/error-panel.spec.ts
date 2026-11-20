@@ -57,6 +57,30 @@ describe('ErrorPanel (spec 044)', () => {
       .toContain('configured command was not found')
   })
 
+  // GH #1929: a network outage mcpproxy is still retrying on its own is a
+  // temporary state, not a red "Server Error".
+  it('shows a self-resolving outage as reconnecting, with the retry detail', () => {
+    const detail = 'MCPProxy could not reach the server and retries automatically; it reconnects as soon as the network is back. Next scheduled attempt in about 4m.'
+    const diag = makeDiag({ code: 'MCPX_HTTP_CONN_REFUSED', user_message: 'Connection refused by the server at the configured URL.' })
+    const wrapper = mount(ErrorPanel, {
+      props: { diagnostic: diag, serverName: 'remote', reconnecting: true, reconnectingDetail: detail },
+      global: { plugins: [pinia] },
+    })
+    expect(wrapper.find('h3').text()).toBe('Reconnecting automatically')
+    expect(wrapper.find('[role="alert"]').classes()).toContain('alert-warning')
+    expect(wrapper.find('[role="alert"]').classes()).not.toContain('alert-error')
+    expect(wrapper.find('[data-testid="error-panel-reconnecting"]').text()).toContain('Next scheduled attempt in about 4m')
+    expect(wrapper.find('[data-testid="error-panel-code"]').text()).toBe('MCPX_HTTP_CONN_REFUSED')
+    expect(wrapper.find('[data-testid="error-panel-severity"]').text()).toBe('temporary')
+
+    const plain = mount(ErrorPanel, {
+      props: { diagnostic: diag, serverName: 'remote' },
+      global: { plugins: [pinia] },
+    })
+    expect(plain.find('h3').text()).toBe('Server Error')
+    expect(plain.find('[data-testid="error-panel-reconnecting"]').exists()).toBe(false)
+  })
+
   it('non-destructive fix: Execute button runs fixer with mode=execute (no Preview button)', async () => {
     ;(api.invokeDiagnosticFix as any).mockResolvedValue({
       success: true,

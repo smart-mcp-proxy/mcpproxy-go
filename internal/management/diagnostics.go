@@ -43,6 +43,19 @@ func extractHealthFromMap(srvRaw map[string]interface{}) (action, detail string)
 	return "", ""
 }
 
+// healthStatusFromMap returns health.status ("ready", "connecting", "error", …).
+func healthStatusFromMap(srvRaw map[string]interface{}) string {
+	switch h := srvRaw["health"].(type) {
+	case *contracts.HealthStatus:
+		if h != nil {
+			return h.Status
+		}
+	case map[string]interface{}:
+		return getStringFromMap(h, "status")
+	}
+	return ""
+}
+
 // oauthSignInState reports whether a server needs the user to sign in, and
 // which OAuthRequirement.State that is ("unauthenticated" for a first-time
 // login, "expired" for a session that expired or was revoked).
@@ -176,6 +189,13 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 
 		// Aggregate based on Health.Action
 		switch {
+		case healthAction == health.ActionRestart && !needsSignIn && healthStatusFromMap(srvRaw) == health.StatusConnecting:
+			// GH #1929: a network outage the client is still retrying on its
+			// own (health status "connecting", amber "Reconnecting: …") is not
+			// a connection error to report — like the attention list, doctor
+			// leaves it out. It becomes one again once retries give up. Only
+			// this bucket is skipped; the rest of the loop still runs.
+
 		case healthAction == health.ActionRestart && !needsSignIn:
 			errorTime := time.Now()
 			if errorTimeStr := getStringFromMap(srvRaw, "error_time"); errorTimeStr != "" {
@@ -303,6 +323,20 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 			diag.OAuthTokenStorage = section
 			for _, srv := range section.Servers {
 				diag.RuntimeWarnings = append(diag.RuntimeWarnings, oauthTokenStorageWarningLine(srv, admin))
+			}
+		}
+	}
+
+	// Spec 124 FR-035: the activity retention section, and one runtime warning
+	// when the caps cannot hold the work-session window. Administrators only:
+	// which sessions lost rows is not a scoped caller's to learn.
+	if src, ok := s.runtime.(ActivityRetentionOperations); ok && !auth.IsScopedCaller(ctx) {
+		if shortfall, window, err := src.ActivityRetentionState(); err != nil {
+			s.logger.Warnw("Failed to read activity retention state for diagnostics", "error", err)
+		} else {
+			diag.ActivityRetention = BuildActivityRetentionReport(shortfall, window)
+			if diag.ActivityRetention.Shortfall {
+				diag.RuntimeWarnings = append(diag.RuntimeWarnings, activityRetentionWarningLine(diag.ActivityRetention))
 			}
 		}
 	}

@@ -136,6 +136,22 @@ type AgentToken struct {
 	PendingPrefix     string     `json:"pending_prefix,omitempty"`
 	RotationStartedAt *time.Time `json:"rotation_started_at,omitempty"`
 
+	// MatchedPrefix is the display prefix of the secret that authenticated
+	// this request. It is set by validation, never stored. It differs from
+	// TokenPrefix only while a staged rotation is open and the PENDING secret
+	// was presented: the record's TokenPrefix is still the old secret's until
+	// finalize promotes PendingPrefix. Spec 124 FR-009 keys a work session on
+	// the credential generation, so the request must carry the prefix of the
+	// secret it actually used, and the same value before and after finalize.
+	MatchedPrefix string `json:"-"`
+
+	// MatchedGeneration identifies the secret that authenticated this request
+	// with enough entropy to tell two secrets of one credential apart: the
+	// display prefix has four random characters, so a regenerated token can
+	// repeat it. Set by validation from the secret's hash, never stored and
+	// never shown. Empty for a token that did not come from validation.
+	MatchedGeneration string `json:"-"`
+
 	// ConnectedAt is when connect/add minted this credential.
 	ConnectedAt *time.Time `json:"connected_at,omitempty"`
 
@@ -311,25 +327,35 @@ func ParseTokenExpiry(expiresIn string, now time.Time) (time.Time, error) {
 // OwnerRole that storage stamped on the validated token value into
 // Email/Provider/Role, so an owned token's request carries its owner's live
 // identity without a second store read. CredentialKind is always agent_token.
+// authenticatedPrefix is the prefix of the secret that authenticated, falling
+// back to the record's own for a token that did not come from validation.
+func (t *AgentToken) authenticatedPrefix() string {
+	if t.MatchedPrefix != "" {
+		return t.MatchedPrefix
+	}
+	return t.TokenPrefix
+}
+
 func (t *AgentToken) AuthContext() *AuthContext {
 	if t == nil {
 		return nil
 	}
 	return &AuthContext{
-		Type:           AuthTypeAgent,
-		AgentName:      t.Name,
-		TokenPrefix:    t.TokenPrefix,
-		AllowedServers: t.AllowedServers,
-		Permissions:    t.Permissions,
-		ProfilePin:     t.ProfilePin,
-		Email:          t.OwnerEmail,
-		Provider:       t.OwnerProvider,
-		Role:           t.OwnerRole,
-		CredentialKind: CredentialKindAgentToken,
-		TokenKind:      normalizeKind(t.Kind),
-		ClientID:       t.ClientID,
-		ProfileMode:    t.ProfileMode,
-		RateLimit:      t.RateLimit.clone(),
+		Type:            AuthTypeAgent,
+		AgentName:       t.Name,
+		TokenPrefix:     t.authenticatedPrefix(),
+		TokenGeneration: t.MatchedGeneration,
+		AllowedServers:  t.AllowedServers,
+		Permissions:     t.Permissions,
+		ProfilePin:      t.ProfilePin,
+		Email:           t.OwnerEmail,
+		Provider:        t.OwnerProvider,
+		Role:            t.OwnerRole,
+		CredentialKind:  CredentialKindAgentToken,
+		TokenKind:       normalizeKind(t.Kind),
+		ClientID:        t.ClientID,
+		ProfileMode:     t.ProfileMode,
+		RateLimit:       t.RateLimit.clone(),
 		// UserID carries the owning tenant (server edition). Without it an
 		// agent-token request had no tenant identity at all, so its activity
 		// could not be attributed or scoped. It does NOT confer the user tier:

@@ -66,6 +66,8 @@ func pinRestartGated(live, desired *config.Config) *config.Config {
 	// Spec 123 FR-023: the OAuth token key is resolved once, before config.db
 	// is opened, and kept for the life of the process.
 	pinned.OAuthTokenEncryptionKey = live.OAuthTokenEncryptionKey
+	// Spec 124: the work-session window is set once at startup.
+	pinned.SessionRetentionDays = live.SessionRetentionDays
 	// server_edition's restart-pinned subset (enabled, oauth.*, public_url,
 	// session_cookie_secure, session_ttl, bearer_token_ttl,
 	// credential_encryption_key — Spec 107 FR-039 part 2) is bound at login

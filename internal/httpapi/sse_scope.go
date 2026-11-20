@@ -432,7 +432,11 @@ func renderActivityAttributionForCaller(ctx context.Context, eventType internalR
 	if keep {
 		view := make(map[string]any, len(attr))
 		for k, v := range attr {
-			if k != "_token_prefix" {
+			// Keys that start with an underscore are internal to the
+			// activity service (the token prefix, the owning user id, the
+			// work-session id and the counting marks); no subscriber gets
+			// them.
+			if !strings.HasPrefix(k, "_") {
 				view[k] = v
 			}
 		}

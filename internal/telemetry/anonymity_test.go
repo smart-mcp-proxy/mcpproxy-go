@@ -342,13 +342,13 @@ func TestScanForPII_TPARefreshCountersAcceptedAsNonNegativeInts(t *testing.T) {
 	withoutBlockedValues(t)
 	for _, key := range tpaRefreshCounterKeys {
 		for _, val := range []string{"0", "1", "9007199254740991"} {
-			js := `{"anonymous_id":"abc","schema_version":16,"tpa_scanner":{"` + key + `":` + val + `}}`
+			js := `{"anonymous_id":"abc","schema_version":17,"tpa_scanner":{"` + key + `":` + val + `}}`
 			if err := ScanForPII([]byte(js)); err != nil {
 				t.Errorf("%s=%s rejected: %v", key, val, err)
 			}
 		}
 	}
-	all := `{"anonymous_id":"abc","schema_version":16,"tpa_scanner":{` +
+	all := `{"anonymous_id":"abc","schema_version":17,"tpa_scanner":{` +
 		`"scans_completed":1,"bundle_refresh_cycles":3,"bundle_refresh_activations":1,` +
 		`"bundle_refresh_rejections":1,"bundle_refresh_unavailable":1,"bundle_reprotect_hits":2,` +
 		`"bundle_source":"fetch","bundle_signature_verified":true,"bundle_version":"other"}}`
@@ -364,7 +364,7 @@ func TestScanForPII_TPARefreshCountersRejectNonIntegers(t *testing.T) {
 	withoutBlockedValues(t)
 	for _, key := range tpaRefreshCounterKeys {
 		for _, val := range []string{`"3"`, `"https://example.test/x"`, `-1`, `1.5`, `2.0`, `null`, `true`, `{}`, `[]`} {
-			js := `{"anonymous_id":"abc","schema_version":16,"tpa_scanner":{"` + key + `":` + val + `}}`
+			js := `{"anonymous_id":"abc","schema_version":17,"tpa_scanner":{"` + key + `":` + val + `}}`
 			err := ScanForPII([]byte(js))
 			if err == nil {
 				t.Errorf("%s=%s accepted, want an anonymity violation", key, val)

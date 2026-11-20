@@ -28,7 +28,7 @@ Environment variables are useful for CI/CD environments or temporary overrides d
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `MCPPROXY_LISTEN` | Override listen address | `127.0.0.1:8080` or `:8080` |
+| `MCPPROXY_LISTEN` | Override listen address. `--listen` wins when both are set; an empty value leaves the config file's `listen`. The server Docker image sets it to `0.0.0.0:8080` | `127.0.0.1:8080` or `:8080` |
 | `MCPPROXY_API_KEY` | Set API key for authentication | `my-secret-key` |
 | `MCPPROXY_API_KEY_FILE` | Read the API key from a file (absolute path). Set it or `MCPPROXY_API_KEY`, not both; see [API key from a file](#api-key-from-a-file) | `/run/secrets/mcpproxy_api_key` |
 | `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY` | Key that encrypts the upstream OAuth tokens in `config.db` (base64, 32 bytes). Overrides `oauth_token_encryption_key`. Set it or the `_FILE` form, not both. See [OAuth Token Encryption](../features/oauth-token-encryption.md) | `bXkta2V5...` |
@@ -122,6 +122,12 @@ file-only — reference secrets with `${env:NAME}` inside the config file instea
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MCPPROXY_KEYRING_WRITE` | macOS only: `1`, `true` or `yes` allows storing secrets in the Keychain (`mcpproxy secrets set`, the Web UI and REST secret endpoints). The tray app sets it for the core it launches; a terminal command or a hand-started `mcpproxy serve` must set it itself. Reading secrets never needs it, and Linux and Windows ignore it. See [macOS: storing a secret from a terminal](../features/keyring-integration.md#macos-storing-a-secret-from-a-terminal) | unset (writes refused) |
+
+### Upstream Reconnection
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCPPROXY_NETWORK_RECOVERY` | `off`, `false`, `0` or `no` turns off the watcher that reconnects remote servers as soon as the network returns after an outage or sleep. Servers then wait for their normal backoff. See [Reconnecting after a failure](upstream-servers.md#reconnecting-after-a-failure) | on |
 
 ### Browser Detection
 
