@@ -286,12 +286,14 @@ func fixCommand(f runtime.Fix, tool string) string {
 	case profile.FixApproveTool:
 		// A tool-approval target is "server:tool": approve only that tool (a bare
 		// `approve <server>` approves every pending tool of the server). A
-		// quarantined-server target is the server name alone, where approving
-		// the whole server is the intended action.
+		// quarantined-server target is the server name alone, where admitting
+		// the whole server is the intended action: that is `review approve`,
+		// because `upstream approve` only approves pending tools and leaves a
+		// quarantined server quarantined.
 		if server, tool, ok := strings.Cut(f.Target, ":"); ok && server != "" && tool != "" {
 			return "mcpproxy upstream approve " + server + " " + tool
 		}
-		return "mcpproxy upstream approve " + f.Target
+		return "mcpproxy review approve " + f.Target
 	case profile.FixChangeSetting:
 		if f.Target == "require_mcp_auth" {
 			return "set require_mcp_auth: true (config or Settings → Security)"

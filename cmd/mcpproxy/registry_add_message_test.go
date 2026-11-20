@@ -17,6 +17,18 @@ func TestRegistryAddMessage(t *testing.T) {
 		t.Fatalf("expected quarantined message to say %q, got %q", "quarantined for review", quarantined)
 	}
 
+	// The quarantined hint must name the step that actually admits the
+	// server. `mcpproxy upstream approve` only approves pending tools: on a
+	// quarantined server it prints "Approved 0 tools" and the server stays
+	// quarantined, which left first-run users stuck.
+	if !strings.Contains(quarantined, "mcpproxy review show github-server") ||
+		!strings.Contains(quarantined, "mcpproxy review approve github-server --yes") {
+		t.Fatalf("quarantined message must name review show / review approve --yes, got %q", quarantined)
+	}
+	if strings.Contains(quarantined, "upstream approve") {
+		t.Fatalf("quarantined message must not point at upstream approve, got %q", quarantined)
+	}
+
 	notQuarantined := registryAddMessage("github-server", false)
 	if !strings.Contains(notQuarantined, "Added github-server to MCPProxy") {
 		t.Fatalf("expected message to contain %q, got %q", "Added github-server to MCPProxy", notQuarantined)

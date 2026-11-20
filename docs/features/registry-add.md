@@ -54,8 +54,11 @@ tool is `search_servers`.
 - **Quarantined by default.** A freshly added server is quarantined until you
   approve it:
   ```bash
-  mcpproxy upstream approve <name>
+  mcpproxy review show <name>            # inspect the captured tools and scan
+  mcpproxy review approve <name> --yes   # admit the server
   ```
+  (`mcpproxy upstream approve` approves pending tools only; it does not admit a
+  quarantined server.)
 - **Required inputs are explicit.** If a registry entry declares required inputs
   (e.g. `${GITHUB_TOKEN}`) and you don't supply them, the add fails with the
   stable code `missing_required_input` and the exact input names — no partially
@@ -93,7 +96,7 @@ Example:
 ```bash
 mcpproxy secrets set github-token
 mcpproxy registry add official io.github.example/github-mcp --env 'GITHUB_TOKEN=${keyring:github-token}'
-# ✅ Added 'github-mcp' (quarantined — approve with: mcpproxy upstream approve github-mcp)
+# ✅ Added github-mcp to MCPProxy (quarantined for review — inspect with: mcpproxy review show github-mcp, then approve with: mcpproxy review approve github-mcp --yes)
 ```
 
 For credentials, avoid putting a literal value in `--env`: it is a command-line argument and may be retained in shell history or exposed in process listings. Store the value with `mcpproxy secrets set github-token`, then use a quoted keyring reference such as `--env 'GITHUB_TOKEN=${keyring:github-token}'`. When stdin is a terminal, typed characters are not echoed. When stdin is not a terminal, the CLI reads the secret from stdin; use `--from-stdin` to make that mode explicit with a trusted secret source.
