@@ -103,7 +103,10 @@ var allClients = []ClientDef{
 		ServerKey:       "servers",
 		Supported:       true,
 		Icon:            "vscode",
-		ClientInfoNames: []string{"Visual Studio Code", "visual-studio-code", "vscode"},
+		// The Local harness sends productService.nameLong (mcpServerRequestHandler.ts).
+		// "vscode" is not here: it is what Copilot CLI sessions inside VS Code send,
+		// and those read the Copilot config (see the "copilot" client below).
+		ClientInfoNames: []string{"Visual Studio Code", "Visual Studio Code - Insiders", "visual-studio-code"},
 		ReloadHint:      "Run \"MCP: List Servers\" → Restart (or reload the window) in VS Code to load MCPProxy",
 	},
 	{
@@ -118,9 +121,12 @@ var allClients = []ClientDef{
 		// and not from Code/User/mcp.json. That file belongs to the older
 		// Local harness, which the "vscode" client above still serves (#1896).
 		//
-		// Presence is matched exactly against clientInfo.name: the Copilot CLI
-		// sends "copilot-cli", other Copilot hosts "github-copilot-developer".
-		ClientInfoNames: []string{"copilot-cli", "github-copilot-developer", "copilot"},
+		// Presence is matched exactly against clientInfo.name, which the Copilot
+		// SDK sets from its host's clientName: VS Code's agent host sends
+		// "vscode-agent-host" (#1959), VS Code's Copilot CLI sessions with the
+		// agent host off send "vscode"; the Copilot CLI itself sends "copilot-cli"
+		// or "github-copilot-developer".
+		ClientInfoNames: []string{"copilot-cli", "vscode-agent-host", "vscode", "github-copilot-developer", "copilot"},
 		ReloadHint:      "Reload the VS Code window (or restart Copilot CLI) to load MCPProxy",
 	},
 	{

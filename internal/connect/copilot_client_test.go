@@ -47,21 +47,29 @@ func TestConnectCopilotWritesTheCopilotUserConfig(t *testing.T) {
 }
 
 // Presence ("seen", calls in the last 24h) is matched exactly against the
-// clientInfo.name of the MCP initialize request. The Copilot CLI sends
-// "copilot-cli" and other Copilot hosts send "github-copilot-developer", so
-// both have to be aliases of this client or it never shows as connected.
-func TestCopilotClientInfoNamesMatchWhatCopilotSends(t *testing.T) {
-	def := FindClient("copilot")
-	if def == nil {
-		t.Fatal("copilot client is not registered")
-	}
-	have := make(map[string]bool, len(def.ClientInfoNames))
-	for _, name := range def.ClientInfoNames {
-		have[name] = true
-	}
-	for _, want := range []string{"copilot-cli", "github-copilot-developer"} {
-		if !have[want] {
-			t.Errorf("ClientInfoNames = %v, missing %q", def.ClientInfoNames, want)
+// clientInfo.name of the MCP initialize request, so each name a host sends has
+// to be an alias of the client whose config that host reads (#1959). Copilot
+// hosts read ~/.copilot/mcp-config.json: the Copilot CLI ("copilot-cli",
+// "github-copilot-developer"), VS Code's agent host ("vscode-agent-host") and
+// VS Code's Copilot CLI sessions with the agent host off ("vscode"). VS Code's
+// Local harness reads Code/User/mcp.json and sends the product's long name.
+func TestClientInfoNamesMatchWhatEachHostSends(t *testing.T) {
+	for id, wants := range map[string][]string{
+		"copilot": {"copilot-cli", "github-copilot-developer", "vscode-agent-host", "vscode"},
+		"vscode":  {"Visual Studio Code", "Visual Studio Code - Insiders"},
+	} {
+		def := FindClient(id)
+		if def == nil {
+			t.Fatalf("%s client is not registered", id)
+		}
+		have := make(map[string]bool, len(def.ClientInfoNames))
+		for _, name := range def.ClientInfoNames {
+			have[name] = true
+		}
+		for _, want := range wants {
+			if !have[want] {
+				t.Errorf("%s: ClientInfoNames = %v, missing %q", id, def.ClientInfoNames, want)
+			}
 		}
 	}
 }
