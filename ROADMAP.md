@@ -1427,3 +1427,5 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [123-oauth-token-encryption](./specs/123-oauth-token-encryption/) | `drafted` | 0/56 (0%) |
 | [124-session-failure-timeline](./specs/124-session-failure-timeline/) | `drafted` | 0/74 (0%) |
 | [125-skills-over-mcp](./specs/125-skills-over-mcp/) | `in-flight` | 41/51 (80%) |
+| [128-server-list-outcomes](./specs/128-server-list-outcomes/) | — | — |
+| [129-per-user-upstream-credentials](./specs/129-per-user-upstream-credentials/) | — | — |
