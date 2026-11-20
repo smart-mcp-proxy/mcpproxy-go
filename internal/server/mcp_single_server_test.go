@@ -23,8 +23,9 @@ func newSingleServerSurfaceForTest(t *testing.T, p *MCPProxyServer, name string)
 	t.Helper()
 	require.NotNil(t, p.singleServerOpts, "initRoutingModeServers must prepare the single-server options")
 	s := &singleServerSurface{
-		name:   name,
-		server: mcpserver.NewMCPServer("mcpproxy-go", mcpServerVersion(), p.singleServerOpts...),
+		name:    name,
+		server:  mcpserver.NewMCPServer("mcpproxy-go", mcpServerVersion(), p.singleServerOpts...),
+		retired: make(chan struct{}),
 	}
 	p.directRefreshMu.Lock()
 	defer p.directRefreshMu.Unlock()
@@ -191,11 +192,11 @@ func TestSingleServerNameFor(t *testing.T) {
 	p := newDirectDescribeProxy(t)
 	s := newSingleServerSurfaceForTest(t, p, "github")
 
-	name, ok := p.singleServerNameFor(s.server)
+	name, ok := p.singleServerNameFor(context.Background(), s.server)
 	assert.True(t, ok)
 	assert.Equal(t, "github", name)
 
-	_, ok = p.singleServerNameFor(p.directServer)
+	_, ok = p.singleServerNameFor(context.Background(), p.directServer)
 	assert.False(t, ok, "the direct server is not a single-server surface")
 }
 

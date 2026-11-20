@@ -112,11 +112,11 @@ description: "Task list for Skills over MCP (spec 125)"
 
 ## PR-5: Native surface on the single-server endpoint (US5)
 
-- [ ] T047 [P] [US5] Tests with a raw client against `/mcp/s/<server>`: extension announced only when the feature is on and the server not excluded; listing and single entry contain exactly the available skills with upstream addresses; file read byte-exact against the listed digest; held skill absent and not found; aggregated endpoints never announce; activity rows for list, get and read including not-found
-- [ ] T048 [P] [US5] Parity tests: each extension method with a missing session id, a foreign one and an unsupported protocol version gets the refusal `tools/call` gets
-- [ ] T049 [US5] Extract the transport's method, protocol-version and session checks for reuse; implement the interceptor inside `serveSingleServer` and the resource template in `internal/server/skills_native.go` (plan D14)
-- [ ] T050 [US5] Endpoint lifecycle: per-endpoint lock, combined acquisition of instance, transport and generation, retirement, generation in session ids, upstream name bound to the instance; tests for off → on → off (old session refused, old stream closed, transports do not accumulate), the acquisition-versus-retirement race and the paused `initialize`
-- [ ] T051 [US5] Manual check with a client that consumes the extension; docs section "Native skills on single-server endpoints"
+- [x] T047 [P] [US5] Tests with a raw client against `/mcp/s/<server>`: extension announced only when the feature is on and the server not excluded; listing and single entry contain exactly the available skills with upstream addresses; file read byte-exact against the listed digest; held skill absent and not found; aggregated endpoints never announce; activity rows for list, get and read including not-found
+- [x] T048 [P] [US5] Parity tests: each extension method with a missing session id, a foreign one and an unsupported protocol version gets the refusal `tools/call` gets
+- [x] T049 [US5] Extract the transport's method, protocol-version and session checks for reuse; implement the interceptor inside `serveSingleServer` and the resource template in `internal/server/skills_native.go` (plan D14)
+- [x] T050 [US5] Endpoint lifecycle: per-endpoint lock, combined acquisition of instance, transport and generation, retirement, generation in session ids, upstream name bound to the instance; tests for off → on → off (old session refused, old stream closed, transports do not accumulate), the acquisition-versus-retirement race and the paused `initialize`
+- [x] T051 [US5] Manual check with a client that consumes the extension; docs section "Native skills on single-server endpoints"
 
 ---
 
