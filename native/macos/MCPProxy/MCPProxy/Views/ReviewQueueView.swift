@@ -405,7 +405,8 @@ struct ReviewSheet: View {
             }
         }
         .task(id: serverName) { await load() }
-        .onReceive(NotificationCenter.default.publisher(for: .reviewChanged)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .reviewChanged)) { note in
+            if let change = note.object as? ReviewChange, !change.affectsTools(on: serverName) { return }
             scanning = false
             rescanning = false
             Task { await load() }

@@ -2,6 +2,18 @@ import XCTest
 @testable import MCPProxy
 
 final class ReviewQueueMenuTests: XCTestCase {
+    func testReviewEventsOnlyRefreshTheAffectedToolSheet() throws {
+        for (frame, expected) in [
+            (#"{"payload":{"server":"hf","skills":true}}"#, false),
+            (#"{"payload":{"server":"other"}}"#, false),
+            (#"{"payload":{"server":"hf"}}"#, true),
+            (#"{"server":"other"}"#, false),
+            (#"{}"#, true)
+        ] {
+            XCTAssertEqual(try XCTUnwrap(ReviewChange.decode(frame)).affectsTools(on: "hf"), expected)
+        }
+    }
+
     func testAttentionAndServerReviewRoutesOpenTheReviewSheet() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         let home = try String(contentsOf: root.appendingPathComponent("MCPProxy/State/HomeAttentionAction.swift"))
