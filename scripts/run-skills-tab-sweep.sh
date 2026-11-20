@@ -181,7 +181,13 @@ const extra = (e.SWEEP_REDACT_EXTRA || "").split("\n")
   .filter(p => p.length > 1 && p.startsWith("/") && !known.some(k => p === k || p.startsWith(k + "/")))
   .sort((a, b) => b.length - a.length)
 for (const p of extra) t = t.split(p).join("<path>/" + base(p))
-for (const [p, r] of paths) t = t.split(p).join(r)
+// macOS tools can print the same temporary directory with or without /private.
+for (const [p, r] of paths) {
+  t = t.split(p).join(r)
+  if (process.platform === "darwin" && /^\/private\/(tmp|var)\//.test(p)) {
+    t = t.split(p.slice("/private".length)).join(r)
+  }
+}
 // Any other absolute filesystem path, whatever its root (/data, /work, /opt,
 // ...), is reduced to <path>/basename: a path that starts the text or follows
 // a space, a quote, a bracket, "=", ",", ":", ";", an ANSI colour code or a
@@ -724,7 +730,7 @@ if (r.checked_commit !== "0123456789abcdef0123456789abcdef01234567" || r.working
     mkdir -p "$ext"
     ext_real=$(cd "$ext" && pwd -P)
     # shellcheck disable=SC2016 # expanded by the stand-in's own shell
-    printf '#!/bin/sh\necho "stand-in browser $0 args: $*" >&2\nenv >&2\nexit 1\n' >"$ext/chromium"
+    printf '#!/bin/sh\necho "stand-in browser $0 args: $*" >&2\necho "MCPPROXY_API_KEY=$MCPPROXY_API_KEY" >&2\nexit 1\n' >"$ext/chromium"
     chmod +x "$ext/chromium"
     rm -f "$probe_key"
     set +e
