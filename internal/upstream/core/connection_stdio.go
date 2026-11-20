@@ -246,7 +246,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	// Spec 116 PR4 (FR-023a): the mcp-go transport is wrapped by the
 	// instance's gate, so a retired instance sends no request or
 	// notification on the child's stdin.
-	c.client = client.NewClient(dialgate.WrapTransport(c.Gate(), stdioTransport))
+	c.client = client.NewClient(dialgate.WrapTransport(c.Gate(), stdioTransport), c.relayOptions()...)
 
 	// Log final stdio configuration for debugging
 	c.logger.Debug("Initialized stdio transport",

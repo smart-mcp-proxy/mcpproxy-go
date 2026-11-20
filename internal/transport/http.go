@@ -166,6 +166,11 @@ type HTTPTransportConfig struct {
 	// returned client's mcp-go transport is wrapped by dialgate.WrapTransport.
 	// nil keeps the ungated transports (tests, tools outside the daemon).
 	Gate *dialgate.Gate
+
+	// ClientOptions are applied to the returned mcp-go client when its
+	// transport can receive requests from the server (streamable HTTP, not
+	// SSE): the handlers that relay them to the calling client (#1964).
+	ClientOptions []client.ClientOption
 }
 
 // baseTransport returns the http.RoundTripper a branch builds on: the
@@ -197,13 +202,22 @@ func (cfg *HTTPTransportConfig) oauthConfigForGate() client.OAuthConfig {
 }
 
 // wrapClient re-creates the mcp-go client over the gated transport wrapper
-// (FR-023a). mcp-go's constructors used here pass no client option, so the
-// rebuilt client is equivalent apart from the gate.
+// (FR-023a), with ClientOptions when the transport is bidirectional. mcp-go's
+// constructors used here pass no client option, so the rebuilt client is
+// equivalent apart from the gate and those options.
 func (cfg *HTTPTransportConfig) wrapClient(c *client.Client) *client.Client {
-	if cfg.Gate == nil || c == nil {
+	if c == nil {
 		return c
 	}
-	return client.NewClient(dialgate.WrapTransport(cfg.Gate, c.GetTransport()))
+	t := c.GetTransport()
+	var opts []client.ClientOption
+	if _, ok := t.(transport.BidirectionalInterface); ok {
+		opts = cfg.ClientOptions
+	}
+	if cfg.Gate == nil && len(opts) == 0 {
+		return c
+	}
+	return client.NewClient(dialgate.WrapTransport(cfg.Gate, t), opts...)
 }
 
 // upstreamRoundTripper composes the outbound transport wrappers for an upstream
