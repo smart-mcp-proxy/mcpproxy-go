@@ -1098,7 +1098,7 @@ epics:
     priority: P1
     spec: specs/125-skills-over-mcp
     depends_on: [scan-structural-gate]
-    note: "Spec and PR-1..3 shipped 2026-11-17..11-18; PR-4 Web UI and the rest of T031 remain."
+    note: "The catalog, approval gate and agent tools have shipped. Native discovery, the Web Skills tab and held-skill review are in review."
     tasks:
       - id: skills-over-mcp-spec
         title: "Spec 125 Skills over MCP"
@@ -1125,10 +1125,23 @@ epics:
         pr: "#1928"
         depends_on: [skills-over-mcp-gate]
       - id: skills-over-mcp-web
-        title: "PR-4: Web UI for reviewing and browsing skills (+ remainder of T031)"
-        status: todo
+        title: "Web Skills tab for reviewing and browsing skills"
+        status: in_review
         priority: P1
+        pr: "#1950"
         depends_on: [skills-over-mcp-agent-tools]
+      - id: skills-over-mcp-native
+        title: "Native Skills discovery and reads on single-server endpoints"
+        status: in_review
+        priority: P1
+        pr: "#1949"
+        depends_on: [skills-over-mcp-agent-tools]
+      - id: skills-over-mcp-review-queue
+        title: "Review held skills from Home, the review queue and the macOS tray"
+        status: in_review
+        priority: P1
+        pr: "#1951"
+        depends_on: [skills-over-mcp-web]
   - id: profile-argument-rules
     title: "Spec 127 argument rules in profiles (deny a value, narrow values, path prefix, forbid)"
     status: in_review
@@ -1139,17 +1152,29 @@ epics:
     note: "Spec-only PR. Idea 1 of the 2026-11-19 LiteLLM MCP Gateway comparison (LiteLLM allowed_params)."
   - id: server-list-outcomes
     title: "Spec 128 server outcomes on retrieve_tools and tools/list (unavailable servers in reach, fixed vocabulary)"
-    status: in_review
+    status: todo
     priority: P1
     spec: specs/128-server-list-outcomes
-    pr: "#1944"
     depends_on: [pin-visibility-boundary]
     note: "Spec-only PR. Idea 3 of the 2026-11-19 LiteLLM MCP Gateway comparison."
+    tasks:
+      - id: server-list-outcomes-spec
+        title: "Agree on the specification"
+        status: done
+        priority: P1
+        pr: "#1944"
+        depends_on: []
   - id: per-user-upstream-credentials
     title: "Spec 129 per-user upstream credentials (server edition): user slots, RFC 8693 / Entra OBO, injected oauth_connect"
-    status: in_review
+    status: todo
     priority: P1
     spec: specs/129-per-user-upstream-credentials
-    pr: "#1945"
     depends_on: [sso]
     note: "Spec-only PR. Idea 5 of the 2026-11-19 LiteLLM MCP Gateway comparison; the Spec 107 FR-034 Phase 2 trigger (Gcore central-proxy request). Builds on the Spec 112 per-request header seam."
+    tasks:
+      - id: per-user-upstream-credentials-spec
+        title: "Agree on the specification"
+        status: done
+        priority: P1
+        pr: "#1945"
+        depends_on: []

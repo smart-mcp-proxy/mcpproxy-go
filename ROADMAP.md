@@ -101,8 +101,8 @@ graph LR
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
   class sandbox_isolation,scanner_v2,analytics_dashboard,scanner_simplification,schema_deferred,agent_scope_hardening,sso,upstream_resilience,mcp_credential_lifecycle,config_commit_consistency,review_bound_approvals,quarantine_approval_pilot,auto_rescan_on_change,pin_visibility_boundary,scan_default_trust,scan_structural_gate done;
   class ux_audit,action_log_transparency,tpa_db,token_bench,telemetry_identity,telemetry_v7_churn,profiles_v3,skills_over_mcp in_progress;
-  class pending_call_outcome,profile_argument_rules,server_list_outcomes,per_user_upstream_credentials in_review;
-  class remote_access_tunnel,auto_routing_mode,tool_graph todo;
+  class pending_call_outcome,profile_argument_rules in_review;
+  class remote_access_tunnel,auto_routing_mode,tool_graph,server_list_outcomes,per_user_upstream_credentials todo;
 ```
 
 **Independent epics** (19) — no cross-epic prerequisites; each stands alone:
@@ -489,7 +489,7 @@ graph LR
 <details>
 <summary>🔵 Spec 125 Skills over MCP: catalog, approval gate, read-only agent tools — In progress · P1</summary>
 
-> Spec and PR-1..3 shipped 2026-11-17..11-18; PR-4 Web UI and the rest of T031 remain.
+> The catalog, approval gate and agent tools have shipped. Native discovery, the Web Skills tab and held-skill review are in review.
 
 Spec: [125-skills-over-mcp](./specs/125-skills-over-mcp/)
 
@@ -499,17 +499,21 @@ graph LR
   skills_over_mcp_catalog["PR-1: administrator-only skills catalog (skil…"]
   skills_over_mcp_gate["PR-2: hold, scan, approve and block upstream…"]
   skills_over_mcp_agent_tools["PR-3: retrieve_skills / load_skill / read_ski…"]
-  skills_over_mcp_web["PR-4: Web UI for reviewing and browsing skill…"]
+  skills_over_mcp_web["Web Skills tab for reviewing and browsing ski…"]
+  skills_over_mcp_native["Native Skills discovery and reads on single-s…"]
+  skills_over_mcp_review_queue["Review held skills from Home, the review queu…"]
 
   skills_over_mcp_spec --> skills_over_mcp_catalog
   skills_over_mcp_catalog --> skills_over_mcp_gate
   skills_over_mcp_gate --> skills_over_mcp_agent_tools
   skills_over_mcp_agent_tools --> skills_over_mcp_web
+  skills_over_mcp_agent_tools --> skills_over_mcp_native
+  skills_over_mcp_web --> skills_over_mcp_review_queue
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
   class skills_over_mcp_spec,skills_over_mcp_catalog,skills_over_mcp_gate,skills_over_mcp_agent_tools done;
-  class skills_over_mcp_web todo;
+  class skills_over_mcp_web,skills_over_mcp_native,skills_over_mcp_review_queue in_review;
 ```
 
 | Task | Status | Refs |
@@ -518,7 +522,9 @@ graph LR
 | PR-1: administrator-only skills catalog (skills/list, skills/get, bbolt buckets, REST + CLI) | 🟢 Done | #1921 |
 | PR-2: hold, scan, approve and block upstream skills | 🟢 Done | #1923 |
 | PR-3: retrieve_skills / load_skill / read_skill_file for agents | 🟢 Done | #1928 |
-| PR-4: Web UI for reviewing and browsing skills (+ remainder of T031) | ⚪ Todo | — |
+| Web Skills tab for reviewing and browsing skills | 🟡 In review | #1950 |
+| Native Skills discovery and reads on single-server endpoints | 🟡 In review | #1949 |
+| Review held skills from Home, the review queue and the macOS tray | 🟡 In review | #1951 |
 
 </details>
 
@@ -587,24 +593,6 @@ Spec: [127-profile-argument-rules](./specs/127-profile-argument-rules/) · PR: #
 </details>
 
 <details>
-<summary>🟡 Spec 128 server outcomes on retrieve_tools and tools/list (unavailable servers in reach, fixed vocabulary) — In review · P1</summary>
-
-> Spec-only PR. Idea 3 of the 2026-11-19 LiteLLM MCP Gateway comparison.
-
-Spec: [128-server-list-outcomes](./specs/128-server-list-outcomes/) · PR: #1944
-
-</details>
-
-<details>
-<summary>🟡 Spec 129 per-user upstream credentials (server edition): user slots, RFC 8693 / Entra OBO, injected oauth_connect — In review · P1</summary>
-
-> Spec-only PR. Idea 5 of the 2026-11-19 LiteLLM MCP Gateway comparison; the Spec 107 FR-034 Phase 2 trigger (Gcore central-proxy request). Builds on the Spec 112 per-request header seam.
-
-Spec: [129-per-user-upstream-credentials](./specs/129-per-user-upstream-credentials/) · PR: #1945
-
-</details>
-
-<details>
 <summary>🟡 Spec 114 typed pending-call outcome + call correlation for long-running stdio tool calls — In review · P2</summary>
 
 > Spec-only PR #1536 open; implementation follows the spec review. Tracks issue #1321 (follow-up to #1317).
@@ -644,6 +632,50 @@ graph LR
 | --- | --- | --- |
 | P1 (US1-4): per-session measurement of the three candidates on the scoped catalog, rung selection under the budget, stable sessions, decision record in routing API + doctor | ⚪ Todo | — |
 | P2 (US5-6): hysteresis reporting on catalog change, tray + Web UI rendering of the decision, telemetry counters | ⚪ Todo | — |
+
+</details>
+
+<details>
+<summary>⚪ Spec 128 server outcomes on retrieve_tools and tools/list (unavailable servers in reach, fixed vocabulary) — Todo · P1</summary>
+
+> Spec-only PR. Idea 3 of the 2026-11-19 LiteLLM MCP Gateway comparison.
+
+Spec: [128-server-list-outcomes](./specs/128-server-list-outcomes/)
+
+```mermaid
+graph LR
+  server_list_outcomes_spec["Agree on the specification"]
+
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  class server_list_outcomes_spec done;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Agree on the specification | 🟢 Done | #1944 |
+
+</details>
+
+<details>
+<summary>⚪ Spec 129 per-user upstream credentials (server edition): user slots, RFC 8693 / Entra OBO, injected oauth_connect — Todo · P1</summary>
+
+> Spec-only PR. Idea 5 of the 2026-11-19 LiteLLM MCP Gateway comparison; the Spec 107 FR-034 Phase 2 trigger (Gcore central-proxy request). Builds on the Spec 112 per-request header seam.
+
+Spec: [129-per-user-upstream-credentials](./specs/129-per-user-upstream-credentials/)
+
+```mermaid
+graph LR
+  per_user_upstream_credentials_spec["Agree on the specification"]
+
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  class per_user_upstream_credentials_spec done;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Agree on the specification | 🟢 Done | #1945 |
 
 </details>
 
@@ -1221,11 +1253,11 @@ graph LR
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 | Spec 127 argument rules in profiles (deny a value, narrow values, path prefix, forbid) | In review | P1 | — | [127-profile-argument-rules](./specs/127-profile-argument-rules/) | #1943 |
-| Spec 128 server outcomes on retrieve_tools and tools/list (unavailable servers in reach, fixed vocabulary) | In review | P1 | — | [128-server-list-outcomes](./specs/128-server-list-outcomes/) | #1944 |
-| Spec 129 per-user upstream credentials (server edition): user slots, RFC 8693 / Entra OBO, injected oauth_connect | In review | P1 | — | [129-per-user-upstream-credentials](./specs/129-per-user-upstream-credentials/) | #1945 |
 | Spec 114 typed pending-call outcome + call correlation for long-running stdio tool calls | In review | P2 | — |  | #1536 |
 | Spec 121 install surfaces: registry packages, winget/scoop, agent install prompt, install-channel telemetry (E7) | In review | P2 | — |  | #1711 |
 | Auto routing mode: budget-fitted tool surface per session (spec 104) | Todo | P1 | — | [104-auto-routing-mode](./specs/104-auto-routing-mode/) |  |
+| Spec 128 server outcomes on retrieve_tools and tools/list (unavailable servers in reach, fixed vocabulary) | Todo | P1 | — | [128-server-list-outcomes](./specs/128-server-list-outcomes/) |  |
+| Spec 129 per-user upstream credentials (server edition): user slots, RFC 8693 / Entra OBO, injected oauth_connect | Todo | P1 | — | [129-per-user-upstream-credentials](./specs/129-per-user-upstream-credentials/) |  |
 | Windows native tray app `MCP-43` | Todo | P2 | — |  |  |
 | Remote access tunnel (feature-flagged MVP, spec 089) | Todo | P2 | — | [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) |  |
 | Tool co-occurrence graph (experimental, feature-flagged) | Todo | P2 | — |  |  |
