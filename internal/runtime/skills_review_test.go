@@ -416,7 +416,7 @@ func TestSkillsExposureChangeAnnouncesAReviewChange(t *testing.T) {
 			skills, reviews := skillsAnnouncements(t, ch, time.Second)
 			wantSkills := append([]string{}, tc.want...)
 			if tc.name == "enable_skills on" || tc.name == "enable_skills off" {
-				wantSkills = append(wantSkills, "settled")
+				wantSkills = append(wantSkills, "settled", "excluded", "parked", "quarantined")
 			}
 			assert.ElementsMatch(t, wantSkills, skills, "skills.changed")
 			require.Len(t, reviews, 1, "one skills-marked review.changed per commit")
@@ -452,4 +452,22 @@ func TestSkillsExposureChangeWithNothingHeldRefreshesTabsOnly(t *testing.T) {
 		assert.ElementsMatch(t, wantSkills, skills)
 		assert.Emptyf(t, reviews, "enable_skills=%v: skills-marked review.changed", enable)
 	}
+}
+
+func TestSkillsExposureBadgeChangesOnDisabledServer(t *testing.T) {
+	rt := heldSkillsRuntime(t, true)
+	rt.skills.noAutoTrigger.Store(true)
+	ch := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(ch)
+	_, err := rt.Commit("test", func(tx *CommitTx) error {
+		return tx.UpdateServer("parked", func(sc *config.ServerConfig) error {
+			off := false
+			sc.ExposeSkills = &off
+			return nil
+		})
+	})
+	require.NoError(t, err)
+	skills, reviews := skillsAnnouncements(t, ch, time.Second)
+	assert.ElementsMatch(t, []string{"parked"}, skills)
+	assert.Empty(t, reviews)
 }

@@ -1278,10 +1278,15 @@ func (r *Runtime) announceSkillsExposureChanges(oldCfg, newCfg *config.Config) {
 			seen[sc.Name] = true
 			oldSc, newSc := skillsServerConfig(oldCfg, sc.Name), skillsServerConfig(newCfg, sc.Name)
 			wasRead, isRead := skillsServerExposed(oldCfg, oldSc), skillsServerExposed(newCfg, newSc)
+			// The admin tab can display retained records even on an ineligible server.
+			oldIncluded := oldSc != nil && (oldSc.ExposeSkills == nil || *oldSc.ExposeSkills)
+			newIncluded := newSc != nil && (newSc.ExposeSkills == nil || *newSc.ExposeSkills)
+			if wasRead != isRead || oldCfg.EnableSkills != newCfg.EnableSkills || oldIncluded != newIncluded || (oldSc == nil) != (newSc == nil) {
+				names = append(names, sc.Name)
+			}
 			if wasRead == isRead {
 				continue
 			}
-			names = append(names, sc.Name)
 			readCfg, readSc := newCfg, newSc
 			if wasRead {
 				readCfg, readSc = oldCfg, oldSc
