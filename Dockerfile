@@ -33,4 +33,12 @@ COPY --from=builder /mcpproxy /usr/local/bin/mcpproxy
 
 EXPOSE 8080
 
-ENTRYPOINT ["mcpproxy", "serve", "--listen", "0.0.0.0:8080"]
+# The container default listen address comes from the environment, not from a
+# hardcoded --listen flag: a flag outranks MCPPROXY_LISTEN, so baking one into
+# the ENTRYPOINT made `-e MCPPROXY_LISTEN=...` a silent no-op (#1942).
+# Precedence is unchanged otherwise: `--listen` passed as container args still
+# wins over MCPPROXY_LISTEN, which wins over the config file's `listen`. Set
+# MCPPROXY_LISTEN to an empty value to fall back to the config file.
+ENV MCPPROXY_LISTEN=0.0.0.0:8080
+
+ENTRYPOINT ["mcpproxy", "serve"]

@@ -35,7 +35,7 @@ services:
     # Pinned by digest (v0.73.0). ${file:} references and MCPPROXY_API_KEY_FILE
     # need v0.72.0 or newer. Bump tag and digest together.
     image: ghcr.io/smart-mcp-proxy/mcpproxy-server:v0.73.0@sha256:0f6cd65a3bc63f117d7f0fff7c539836c076f1834db620bf5fa9bbdd62578919
-    command: ["serve", "--listen=0.0.0.0:8080", "--config=/config/mcp_config.json", "--data-dir=/data"]
+    command: ["--listen=0.0.0.0:8080", "--config=/config/mcp_config.json", "--data-dir=/data"]
     environment:
       MCPPROXY_API_KEY_FILE: /run/secrets/mcpproxy_api_key
     secrets: [mcpproxy_api_key, sidecar_api_key]
