@@ -113,7 +113,7 @@ func newArgumentPrivacyUpstream(t *testing.T) *argumentPrivacyUpstream {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(response)
 	}))
-	t.Cleanup(hs.Close)
+	t.Cleanup(func() { closeHTTPFixture(hs) })
 	u.url = hs.URL
 	return u
 }
@@ -192,7 +192,7 @@ func newArgumentPrivacyEnv(t *testing.T) *argumentPrivacyEnv {
 		require.NoError(t, p.index.IndexTool(meta))
 	}
 	hs := httptest.NewServer(mcpserver.NewStreamableHTTPServer(p.GetMCPServer()))
-	t.Cleanup(hs.Close)
+	t.Cleanup(func() { closeHTTPFixture(hs) })
 	tr, err := clienttransport.NewStreamableHTTP(hs.URL)
 	require.NoError(t, err)
 	c := client.NewClient(tr)

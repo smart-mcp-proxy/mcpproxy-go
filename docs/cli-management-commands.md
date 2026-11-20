@@ -512,7 +512,10 @@ catalog with associated fix steps and fixer keys.
 ### `mcpproxy connect <client>`
 
 Register MCPProxy in an AI client's MCP configuration (Claude Code, Cursor,
-Windsurf, VS Code, Codex, Gemini, OpenCode, ZCode). Connect **never writes the
+Windsurf, VS Code, GitHub Copilot, Codex, Gemini, OpenCode, ZCode). For VS Code
+there are two clients, `vscode` and `copilot`: see
+[VS Code and GitHub Copilot](/features/connect-clients#vs-code-and-github-copilot).
+Connect **never writes the
 instance admin API key**: every write carries a per-client credential
 (`mcp_cli_...`) that identifies the client and binds it to a profile. The
 credential is valid on MCP endpoints only, so it cannot open the REST API.
@@ -563,6 +566,29 @@ mcpproxy connect cursor --profile ro           # Bind Cursor to "ro" (locked)
 mcpproxy connect cursor --profile work --switchable
 mcpproxy connect --all --profile all           # Every supported client, all servers
 ```
+
+### `mcpproxy skills`
+
+Inspect and approve the agent skills that upstream servers serve through the MCP skills extension (Spec 125). Daemon-only and administrator-only. Off unless `enable_skills: true` is set; in this release skills are not offered to agents. See [Skills over MCP](features/skills.md).
+
+```bash
+mcpproxy skills list [--server <name>]                      # SERVER, SKILL, STATUS, FILES, SIZE, SCAN
+mcpproxy skills show <server>:<skill> [--file <relpath>] [--approved]
+mcpproxy skills show <server>:<skill> --diff                # what changed since the last approval
+mcpproxy skills refresh <server>                            # read and verify the server's skills again
+mcpproxy skills approve <server>:<skill> [<server>:<skill>...] [--expect-hash sk1-...] [--yes]
+mcpproxy skills approve --server <name> --all [--yes]
+mcpproxy skills block <server>:<skill> [<server>:<skill>...]
+mcpproxy skills unblock <server>:<skill> [<server>:<skill>...]
+```
+
+`list` without `--server` covers every server and adds a line for a server that has an error or a truncated listing. The SCAN column is the scan verdict of the skill's current content, `scan incomplete (<reason>)` when the scan did not cover everything, or `not scanned`, with the number of findings. `show` prints the skill's metadata, who approved it and when, the scan result with each finding (file and byte offset), the file table, then the text of one file. `list`, `show`, `refresh`, `approve`, `block` and `unblock` accept `-o json|yaml`.
+
+`show --diff` compares the approved copy with the current copy: it names the files that were added, removed or changed (binary files are named, not compared) and prints a unified diff with three lines of context for every text file that changed. Each file is read up to 1 MiB and the output says when it was cut. A skill that was never approved has no approved version, and the command says so. `--diff` cannot be combined with `--file` or `--approved`.
+
+`approve` is bound to what you saw. It reads the server's skill list, prints one line per skill it is about to approve (id, status, content hash, scan result and number of findings), and sends the approval with exactly those content hashes and the server incarnation of that list. If a skill changed after the list was read, or the server was removed or replaced, the daemon refuses, nothing is approved, the command names the skills that changed and exits with status 1. All skills of one command must belong to one server. `--all` with `--server` takes every pending or changed skill of that server that is listed and can be approved. `--expect-hash` (one skill only) binds to a hash you read earlier in `skills show`; if the current hash is different the command refuses without asking the daemon to approve anything. Without `--yes` the command asks `Approve N skill(s)? [y/N]` on a terminal, and without a terminal it refuses and names `--yes`. With `-o json|yaml` the review lines go to stderr and stdout carries the response (`{"approved": n}`).
+
+`block` marks skills as blocked: a blocked skill is never offered to an agent, and a refresh, a content change or an automatic approval does not clear the mark. `unblock` clears it and does not approve anything. Both print the number of skills whose mark changed.
 
 ### Profiles, clients, access explanations and token profiles (Spec 108)
 

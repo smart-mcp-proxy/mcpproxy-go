@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Surface identifies which client surface originated a request.
@@ -156,6 +157,14 @@ type CounterRegistry struct {
 	tpaBundleRefreshRejections  int64
 	tpaBundleRefreshUnavailable int64
 	tpaBundleReprotectHits      int64
+
+	// Schema v17 (Spec 126 FR-035, FR-036): the completion window. It has
+	// its own small mutex (see outcomeWindow in upstream_outcomes.go), never
+	// held across network I/O, and is read before mu is taken.
+	outcomes outcomeWindow
+
+	// now is the registry clock (time.Now; tests replace it).
+	now func() time.Time
 }
 
 // NewCounterRegistry creates an empty registry. All counters start at zero.
@@ -166,6 +175,8 @@ func NewCounterRegistry() *CounterRegistry {
 		errorCategories: make(map[ErrorCategory]int64),
 		doctorChecks:    make(map[string]*DoctorCounts),
 		tpaFindings:     make(map[string]int64),
+		now:             time.Now,
+		outcomes:        outcomeWindow{openedAt: time.Now().UTC()},
 	}
 }
 
@@ -460,6 +471,10 @@ type RegistrySnapshot struct {
 	TPABundleRefreshRejections  int64 `json:"tpa_bundle_refresh_rejections"`
 	TPABundleRefreshUnavailable int64 `json:"tpa_bundle_refresh_unavailable"`
 	TPABundleReprotectHits      int64 `json:"tpa_bundle_reprotect_hits"`
+
+	// Schema v17 (Spec 126 FR-035, FR-036): the completion window, bucketed,
+	// with the window's own coverage flag and opening age.
+	UpstreamOutcomes UpstreamOutcomes `json:"upstream_outcomes"`
 }
 
 // TPAScannerStats projects the schema-v8 scanner counters out of the snapshot,
@@ -517,6 +532,8 @@ func (r *CounterRegistry) Snapshot() RegistrySnapshot {
 		snap.SurfaceCounts[s.String()] = r.surfaceCounts[s].Load()
 	}
 
+	outcomes := r.outcomes.view()
+
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -548,6 +565,7 @@ func (r *CounterRegistry) Snapshot() RegistrySnapshot {
 	snap.TPABundleRefreshRejections = r.tpaBundleRefreshRejections
 	snap.TPABundleRefreshUnavailable = r.tpaBundleRefreshUnavailable
 	snap.TPABundleReprotectHits = r.tpaBundleReprotectHits
+	snap.UpstreamOutcomes = outcomes
 	for k, v := range r.tpaFindings {
 		snap.TPAFindings[k] = v
 	}
@@ -577,6 +595,9 @@ func (r *CounterRegistry) Drain() RegistrySnapshot {
 	}
 	upstream := r.upstreamTotal.Swap(0)
 	snap.UpstreamToolCallCountBucket = bucketUpstream(upstream)
+	// Schema v17: swap the completion window atomically under its own
+	// mutex; the next window opens now (window_age).
+	snap.UpstreamOutcomes = r.outcomes.drain(r.now().UTC())
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -653,6 +674,12 @@ func (r *CounterRegistry) HasPendingCounters() bool {
 	if r.upstreamTotal.Load() > 0 {
 		return true
 	}
+	// Schema v17: an outcome alone is unsent usage data (a window can hold
+	// outcomes with a zero dispatch count only in theory, but the shutdown
+	// flush must never skip one).
+	if r.outcomes.pending() {
+		return true
+	}
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -692,6 +719,7 @@ func (r *CounterRegistry) Reset() {
 		r.surfaceCounts[i].Store(0)
 	}
 	r.upstreamTotal.Store(0)
+	r.outcomes.reset(r.now().UTC())
 
 	r.mu.Lock()
 	defer r.mu.Unlock()

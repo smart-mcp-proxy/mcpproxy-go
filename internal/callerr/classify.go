@@ -106,6 +106,18 @@ func UnavailableOutcome() Outcome {
 	return Outcome{Class: ClassNetwork, Domain: DomainUpstream, audit: audit.ErrorClassUpstreamUnavailable}
 }
 
+// NotConnectedOutcome is the outcome of a call that could not be made because
+// the upstream is not connected. A server that waits for a login (logged
+// out, parked for sign-in, failed with an OAuth error; managed.SignInRequired)
+// is an authentication failure; any other is unreachable. Either way the call
+// was not made, so the audit class is upstream_unavailable.
+func NotConnectedOutcome(signInRequired bool) Outcome {
+	if signInRequired {
+		return Outcome{Class: ClassAuth, Domain: DomainUpstream, audit: audit.ErrorClassUpstreamUnavailable}
+	}
+	return UnavailableOutcome()
+}
+
 // InternalOutcome is the catch-all for a proxy-side failure.
 func InternalOutcome() Outcome {
 	return Outcome{Class: ClassProxyInternal, Domain: DomainProxy}

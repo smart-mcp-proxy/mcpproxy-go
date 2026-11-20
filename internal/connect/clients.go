@@ -107,6 +107,23 @@ var allClients = []ClientDef{
 		ReloadHint:      "Run \"MCP: List Servers\" → Restart (or reload the window) in VS Code to load MCPProxy",
 	},
 	{
+		ID:        "copilot",
+		Name:      "GitHub Copilot (VS Code, Copilot CLI)",
+		Format:    "json",
+		ServerKey: "mcpServers",
+		Supported: true,
+		Icon:      "vscode",
+		// VS Code's Copilot agent harness reads its MCP servers from
+		// ~/.copilot/mcp-config.json, the file the Copilot CLI reads as well,
+		// and not from Code/User/mcp.json. That file belongs to the older
+		// Local harness, which the "vscode" client above still serves (#1896).
+		//
+		// Presence is matched exactly against clientInfo.name: the Copilot CLI
+		// sends "copilot-cli", other Copilot hosts "github-copilot-developer".
+		ClientInfoNames: []string{"copilot-cli", "github-copilot-developer", "copilot"},
+		ReloadHint:      "Reload the VS Code window (or restart Copilot CLI) to load MCPProxy",
+	},
+	{
 		ID:        "codex",
 		Name:      "Codex CLI",
 		Format:    "toml",
@@ -189,10 +206,30 @@ func FindClient(clientID string) *ClientDef {
 	return nil
 }
 
+// copilotHomeOverride returns the directory COPILOT_HOME names, or "" when the
+// default ~/.copilot applies. Copilot CLI and VS Code read their user config
+// from $COPILOT_HOME/mcp-config.json when the variable is set and do not also
+// check ~/.copilot, so an entry written to the default would be ignored.
+//
+// A relative value is not followed: it resolves against the working directory
+// of the process reading it, and the core does not share the client's.
+func copilotHomeOverride() string {
+	dir := strings.TrimSpace(os.Getenv("COPILOT_HOME"))
+	if dir == "" || !filepath.IsAbs(dir) {
+		return ""
+	}
+	return filepath.Clean(dir)
+}
+
 // ConfigPath returns the expected configuration file path for the given client
 // on the current operating system. homeDir overrides os.UserHomeDir when non-empty
 // (useful for testing).
 func ConfigPath(clientID, homeDir string) string {
+	if clientID == "copilot" && homeDir == "" {
+		if dir := copilotHomeOverride(); dir != "" {
+			return filepath.Join(dir, "mcp-config.json")
+		}
+	}
 	if homeDir == "" {
 		var err error
 		homeDir, err = os.UserHomeDir()
@@ -238,6 +275,12 @@ func ConfigPath(clientID, homeDir string) string {
 		default: // linux
 			return filepath.Join(homeDir, ".config", "Code", "User", "mcp.json")
 		}
+
+	case "copilot":
+		// The Copilot user config, read by VS Code's Copilot harness and by the
+		// Copilot CLI: a dotfile under $HOME on every OS, unless COPILOT_HOME
+		// moves it (handled above, before the home directory is resolved).
+		return filepath.Join(homeDir, ".copilot", "mcp-config.json")
 
 	case "codex":
 		return filepath.Join(homeDir, ".codex", "config.toml")
@@ -522,10 +565,10 @@ func (s *Service) checkedPaths(clientID string) []string {
 // (the default), a clean, keyless entry is written.
 func buildServerEntry(clientID string, p serverEntryParams) map[string]interface{} {
 	switch clientID {
-	case "claude-code", "vscode", "zcode":
-		// Claude Code (~/.claude.json), VS Code (mcp.json) and ZCode
-		// (~/.zcode/cli/config.json, mcp.servers) "type":"http" entries all
-		// support a "headers" object.
+	case "claude-code", "vscode", "copilot", "zcode":
+		// Claude Code (~/.claude.json), VS Code (mcp.json), its Copilot config
+		// (~/.copilot/mcp-config.json) and ZCode (~/.zcode/cli/config.json,
+		// mcp.servers) "type":"http" entries all support a "headers" object.
 		return withAPIKeyHeader(map[string]interface{}{
 			"type": "http",
 			"url":  p.baseURL,

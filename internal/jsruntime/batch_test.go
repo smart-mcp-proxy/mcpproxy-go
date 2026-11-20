@@ -175,31 +175,61 @@ func TestCallToolsReturnsOrderedSlots(t *testing.T) {
 	}
 }
 
-// TestCallToolsRunsInParallel (SC-001 shape): a fan-out of independent calls
-// costs roughly the slowest element, not their sum.
+// TestCallToolsRunsInParallel is SC-001 as written (specs/096-batched-call-tools
+// spec.md): 10 independent calls to a stub with a fixed 300ms latency, at the
+// default max_parallel, complete in under 35% of the time the same 10 calls
+// take as a serial call_tool() loop measured in the same process.
+//
+// Both sides are measured, so a stall on a loaded runner (scheduling, GC under
+// -race) lands in the comparison rather than eating a fixed headroom; a batch
+// that dispatched serially, or with fewer than four workers, still fails, and
+// the default is pinned to the spec's 8 below.
 func TestCallToolsRunsInParallel(t *testing.T) {
 	const (
 		elements = 10
-		latency  = 50 * time.Millisecond
+		latency  = 300 * time.Millisecond
 	)
 	stub := newBatchStub()
 	stub.latency = latency
+	opts := ExecutionOptions{TimeoutMs: 30000} // no MaxParallel: the default
 
-	code := `
+	// Warm up once, so one-time initialisation is charged to neither side.
+	if warm, _ := execute(context.Background(), stub, `1`, opts); !warm.Ok {
+		t.Fatalf("warm-up failed: %v", warm.Error)
+	}
+
+	serialStart := time.Now()
+	loop, _ := execute(context.Background(), stub, `
+		for (var i = 0; i < 10; i++) { call_tool("s", "t" + i, {}); }
+		1
+	`, opts)
+	serial := time.Since(serialStart)
+	if !loop.Ok {
+		t.Fatalf("serial loop failed: %v", loop.Error)
+	}
+
+	batchStart := time.Now()
+	slots, _ := batchSlots(t, stub, `
 		var reqs = [];
 		for (var i = 0; i < 10; i++) { reqs.push({server: "s", tool: "t" + i, args: {}}); }
 		call_tools(reqs)
-	`
-	start := time.Now()
-	slots, _ := batchSlots(t, stub, code, ExecutionOptions{TimeoutMs: 30000})
-	elapsed := time.Since(start)
+	`, opts)
+	batch := time.Since(batchStart)
 
 	if len(slots) != elements {
 		t.Fatalf("got %d slots, want %d", len(slots), elements)
 	}
-	serial := time.Duration(elements) * latency
-	if budget := serial * 35 / 100; elapsed >= budget {
-		t.Errorf("batch took %v, want < %v (35%% of the %v serial equivalent)", elapsed, budget, serial)
+	// SC-001 is stated at the default, which the spec and config fix at 8; the
+	// timing alone would accept as few as four workers.
+	if batchDefaultParallel != 8 {
+		t.Fatalf("batchDefaultParallel is %d, want 8 (spec 096 default max_parallel)", batchDefaultParallel)
+	}
+	if dispatched, highWater, _ := stub.stats(); dispatched != 2*elements || highWater > batchDefaultParallel {
+		t.Fatalf("dispatched %d calls with %d in flight at most, want %d with at most %d",
+			dispatched, highWater, 2*elements, batchDefaultParallel)
+	}
+	if budget := serial * 35 / 100; batch >= budget {
+		t.Errorf("batch took %v, want < %v (35%% of the measured %v serial call_tool loop)", batch, budget, serial)
 	}
 }
 
@@ -686,6 +716,13 @@ func TestCallToolsMalformedCallsAreWholeCallErrors(t *testing.T) {
 		{name: "args is null", code: `call_tools([{server: "s", tool: "t", args: null}])`, wantMessage: "element 0: args"},
 		{name: "first offending element is named", code: `call_tools([{server: "s", tool: "t"}, {server: "s"}, 7])`, wantMessage: "element 1"},
 		{name: "options is not an object", code: `call_tools([{server: "s", tool: "t"}], 4)`, wantMessage: "options must be an object"},
+		{name: "options is an array", code: `call_tools([{server: "s", tool: "t"}], [4])`, wantMessage: "options must be an object"},
+		{name: "options is a Map", code: `call_tools([{server: "s", tool: "t"}], new Map([["max_parallel", 4]]))`, wantMessage: "options must be an object"},
+		{name: "options is a proxy", code: `call_tools([{server: "s", tool: "t"}], new Proxy({max_parallel: 4}, {}))`, wantMessage: "options must be an object"},
+		{name: "options is a function", code: `call_tools([{server: "s", tool: "t"}], function(){})`, wantMessage: "options must be an object"},
+		{name: "options is a Date", code: `call_tools([{server: "s", tool: "t"}], new Date(0))`, wantMessage: "options must be an object"},
+		{name: "max_parallel as a Number object", code: `call_tools([{server: "s", tool: "t"}], {max_parallel: new Number(0)})`, wantMessage: "between 1 and 32"},
+		{name: "max_parallel from a getter", code: `call_tools([{server: "s", tool: "t"}], {get max_parallel(){ return 40 }})`, wantMessage: "between 1 and 32"},
 		{name: "fractional max_parallel", code: `call_tools([{server: "s", tool: "t"}], {max_parallel: 2.5})`, wantMessage: "max_parallel must be an integer"},
 		{name: "non-numeric max_parallel", code: `call_tools([{server: "s", tool: "t"}], {max_parallel: "4"})`, wantMessage: "max_parallel must be an integer"},
 		{name: "max_parallel below range", code: `call_tools([{server: "s", tool: "t"}], {max_parallel: 0})`, wantMessage: "between 1 and 32"},
@@ -722,6 +759,25 @@ func TestCallToolsMalformedCallsAreWholeCallErrors(t *testing.T) {
 				t.Errorf("recorded %d tool calls for a malformed batch", len(ec.ToolCalls))
 			}
 		})
+	}
+}
+
+// TestCallToolsOptionsReadOnlyMaxParallel: only an own enumerable
+// max_parallel is read; inherited and non-enumerable ones, and every other
+// key, are ignored without being read.
+func TestCallToolsOptionsReadOnlyMaxParallel(t *testing.T) {
+	for _, code := range []string{
+		`call_tools([{server: "s", tool: "t"}], Object.create({max_parallel: 0}))`,
+		`var o = {}; Object.defineProperty(o, "max_parallel", {value: 0, enumerable: false}); call_tools([{server: "s", tool: "t"}], o)`,
+		`call_tools([{server: "s", tool: "t"}], {get other(){ throw new Error("read an ignored option") }, max_parallel: 2})`,
+	} {
+		slots, _ := batchSlots(t, newBatchStub(), code, ExecutionOptions{TimeoutMs: 10000})
+		if len(slots) != 1 {
+			t.Fatalf("%s: got %d slots, want 1", code, len(slots))
+		}
+		if ok, _ := slots[0].(map[string]interface{})["ok"].(bool); !ok {
+			t.Errorf("%s: slot 0 failed: %#v", code, slots[0])
+		}
 	}
 }
 

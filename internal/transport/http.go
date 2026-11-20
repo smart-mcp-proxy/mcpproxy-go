@@ -230,7 +230,11 @@ func (cfg *HTTPTransportConfig) upstreamRoundTripper(base http.RoundTripper, log
 	//
 	// Next in: strips forwarded headers from everything but the tools/call
 	// request itself (Spec 112 FR-008), before tracing sees the request.
-	return NewCallRecorderTransport(newForwardGateTransport(rt))
+	//
+	// The response limit (skills, Spec 125 D2) is outermost of all: it wraps
+	// the body the caller reads, after tracing and Retry-After have seen it.
+	// A request without a limit in its ctx passes through untouched.
+	return newResponseLimitTransport(NewCallRecorderTransport(newForwardGateTransport(rt)))
 }
 
 // maxRedirects mirrors net/http's default redirect limit.
@@ -348,7 +352,7 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		logger.Debug("OAuth config details",
 			zap.String("client_id", cfg.OAuthConfig.ClientID),
 			zap.Bool("has_client_secret", cfg.OAuthConfig.ClientSecret != ""),
-			zap.Any("token_store", cfg.OAuthConfig.TokenStore))
+			zap.Bool("has_token_store", cfg.OAuthConfig.TokenStore != nil))
 
 		logger.Debug("🔧 About to create OAuth client with mcp-go library",
 			zap.String("url", cfg.logSafeURL()),
@@ -458,7 +462,7 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		logger.Debug("OAuth SSE config details",
 			zap.String("client_id", cfg.OAuthConfig.ClientID),
 			zap.Bool("has_client_secret", cfg.OAuthConfig.ClientSecret != ""),
-			zap.Any("token_store", cfg.OAuthConfig.TokenStore))
+			zap.Bool("has_token_store", cfg.OAuthConfig.TokenStore != nil))
 
 		logger.Info("Creating OAuth SSE client with context-based timeout",
 			zap.String("url", cfg.logSafeURL()),

@@ -173,15 +173,23 @@ func TestServersPayload_FR017_GenerationAndIncarnation(t *testing.T) {
 	srv, _ := newSpec116Server(t, pr2Manual("acme", false))
 	sg, ok := srv.runtime.ConfigSnapshot().ServerGeneration("acme")
 	require.True(t, ok)
-	servers, err := srv.runtime.GetAllServers()
-	require.NoError(t, err)
-	var found bool
-	for _, m := range servers {
-		if m["name"] == "acme" {
-			found = true
-			assert.EqualValues(t, sg.Gen, m["generation"])
-			assert.EqualValues(t, sg.Incarnation, m["incarnation"])
+	// GetAllServers reads the supervisor's StateView, which follows a commit
+	// asynchronously: wait for the server to show up there before reading
+	// its identity (on a loaded runner the view can still be empty here).
+	var row map[string]interface{}
+	require.Eventually(t, func() bool {
+		servers, err := srv.runtime.GetAllServers()
+		if err != nil {
+			return false
 		}
-	}
-	require.True(t, found)
+		for _, m := range servers {
+			if m["name"] == "acme" {
+				row = m
+				return true
+			}
+		}
+		return false
+	}, 20*time.Second, 5*time.Millisecond, "acme never reached the server view")
+	assert.EqualValues(t, sg.Gen, row["generation"])
+	assert.EqualValues(t, sg.Incarnation, row["incarnation"])
 }

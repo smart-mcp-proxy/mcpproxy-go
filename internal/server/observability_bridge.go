@@ -95,6 +95,13 @@ func applyMetricEvent(mm *observability.MetricsManager, evt runtime.Event) {
 		}
 		mm.RecordQuarantineEvent("tool", action)
 
+	case runtime.EventTypeActivitySkillQuarantineChange:
+		action, _ := evt.Payload["action"].(string)
+		if action == "" {
+			action = "unknown"
+		}
+		mm.RecordQuarantineEvent("skill", action)
+
 	}
 }
 

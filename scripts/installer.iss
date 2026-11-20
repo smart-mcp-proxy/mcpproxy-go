@@ -8,6 +8,15 @@
 #define AppExeName "mcpproxy-tray.exe"
 #define UpgradeCode "{{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}}"
 
+; Refuse to build with an Inno Setup compiler that leaks the RedirectionGuard
+; process mitigation into [Run] postinstall children (issue #1844). 6.7.0-6.7.3
+; are affected; 6.7.4 fixes the inheritance. CI installs a pinned 6.7.4 via
+; .github/actions/install-inno-setup. (Ver is the preprocessor version, which
+; tracks the Inno Setup release.) Not verified on macOS - ISCC is Windows-only.
+#if Ver < EncodeVer(6,7,4)
+  #error "Inno Setup 6.7.4 or newer is required (6.7.0-6.7.3 leak RedirectionGuard into postinstall children, issue #1844)"
+#endif
+
 ; Build variables (passed via command line)
 #ifndef Version
   #define Version "1.0.0"
@@ -97,6 +106,18 @@ Root: HKCU; Subkey: "SOFTWARE\{#AppPublisher}\{#AppName}"; \
 Root: HKCU; Subkey: "SOFTWARE\{#AppPublisher}\{#AppName}"; \
     ValueType: string; ValueName: "Architecture"; ValueData: "{#Arch}"
 
+; RedirectionGuard (issue #1844): Inno Setup 6.7.0+ enables this Windows process
+; mitigation on the Setup process by default, and we keep that default. In
+; 6.7.0-6.7.3 a "postinstall" entry below inherited it, so the tray, the core and
+; every upstream child started from "Launch MCPProxy" ran with
+; EnforceRedirectionTrust=1 and uv/uvx servers failed with "untrusted mount point
+; (os error 448)" (uv's Python links are junctions made by a standard user).
+; Inno Setup 6.7.4 stops the inheritance, hence the Ver check at the top of this
+; file. Residual caveat from the 6.7.4 release notes: if Setup did not have to
+; request elevation (for example it was started from an already elevated shell)
+; the mitigation is still inherited by the launched app. Workaround: quit
+; MCPProxy and start it from the Start menu. The core logs a WARN and
+; `mcpproxy doctor` reports it when the mitigation is active.
 [Run]
 ; Post-install launch option (FR-005, US3)
 ; Launch tray application after installation completes (optional checkbox)

@@ -208,6 +208,18 @@ Manage held prompts with the `quarantine_security` MCP tool:
 { "operation": "approve_all_prompts", "name": "github" }
 ```
 
+## Skills are held like tools (spec 125) {#skills}
+
+With `enable_skills` on, MCPProxy reads the agent skills that upstream servers serve through the MCP skills extension. A skill is instruction text an agent follows, so it goes through the same gate as a tool description, with one stricter rule: **a changed skill is always held for a person in `scan` mode**, even when the scan is clean. Only `auto` mode (or `quarantine_enabled: false`) approves a change by itself.
+
+| Trust mode | New skill | Changed skill |
+|------------|-----------|---------------|
+| `manual` | held | held |
+| `scan` (default) | approved after a clean and complete scan of every text file; otherwise held | held |
+| `auto` | approved | approved |
+
+An approval is bound to the skill's content hash (every file's address, digest and size, plus the `SKILL.md` frontmatter) and to the server it was given for. It is removed with the server. A blocked skill stays blocked through refreshes, changes and automatic approvals. A quarantined server's skills are unavailable in every mode. Review commands, the scan result and the activity rows are described in [Skills over MCP: Reviewing skills](./skills.md#reviewing-skills).
+
 ## What quarantine does and does not cover {#what-quarantine-does-and-does-not-cover}
 
 What it does, with quarantine enabled (the default):
@@ -906,6 +918,22 @@ The first start after the upgrade logs one `WARN` naming every such enabled
 server (persisted marker in `config.db`; a fresh install with no servers logs
 nothing), and `mcpproxy doctor` names them on every run. Set `trust_mode:
 "manual"` on a server whose tool changes a person should review.
+
+### Replay honours the same gate
+
+`POST /api/v1/tool-calls/{id}/replay` re-dispatches a recorded call, so it is
+a dispatch path like `call_tool_*`: it evaluates the same per-tool gate and
+refuses (`403`, zero upstream calls) a tool that is pending or changed, denied
+by `enabled_tools` / `disabled_tools`, on a quarantined or disabled server, or
+not certified on the live connection. This applies to administrators too; a
+normally approved tool on a connected server replays as before.
+
+Replay is stricter than the agent call path in one respect: it dispatches only
+onto a connected server whose tool is certified on the SAME connection
+generation the gate evaluated, and pins the call to it. A server that is not
+connected, or one that reconnected while the replay was being checked, is
+refused (`403`, zero upstream calls); retry and the next replay evaluates the
+new generation from scratch.
 
 ### Block (approve + disable)
 

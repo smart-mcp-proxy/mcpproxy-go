@@ -117,6 +117,21 @@ func mcpServerVersion() string {
 
 // MCPProxyServer implements an MCP server that acts as a proxy
 type MCPProxyServer struct {
+	// skillsCatalogOverride replaces the runtime as the source of skills for
+	// the three agent tools (Spec 125 PR-3). Unit tests inject a fake; nil in
+	// production, where skills() resolves to the runtime.
+	skillsCatalogOverride skillsCatalog
+	// skillAccessEmit, when set, receives skill_access activity instead of the
+	// runtime (tests).
+	skillAccessEmit func(runtime.SkillAccessActivity)
+	// skillServedCache remembers skill files as the output sanitisation
+	// policy lets them out (mcp_skills_output.go).
+	skillServedMu    sync.Mutex
+	skillServedCache map[string]*skillServed
+	skillServedTick  uint64
+	// skillDetector is the secret detector skills use, built from the live
+	// detection settings (see skillSecretDetector).
+	skillDetector *security.Detector
 	// inventoryMu guards lastInventoryKey, the reachable-server set last
 	// announced via tools/list_changed (NotifyUpstreamInventoryChanged).
 	inventoryMu      sync.Mutex
@@ -153,6 +168,23 @@ type MCPProxyServer struct {
 	// nil, and the runtime's tracker is used; tests inject a stub so they do not
 	// have to stand up a whole Runtime to exercise session attribution.
 	workSessionResolver func(runtime.WorkSessionIdentity) string
+
+	// workSessionResolverEffective replaces the runtime's tracker in tests
+	// that need the effective identity (a dropped run name). Nil in
+	// production.
+	workSessionResolverEffective func(runtime.WorkSessionIdentity) (string, runtime.WorkSessionIdentity)
+
+	// workSessionEffectiveIdentity replaces the runtime's tracker peek in
+	// tests. Nil in production.
+	workSessionEffectiveIdentity func(runtime.WorkSessionIdentity) runtime.WorkSessionIdentity
+
+	// workSessionToucher replaces the runtime's idle-clock refresh in tests
+	// (Spec 124 FR-019). Nil in production.
+	workSessionToucher func(string, runtime.WorkSessionIdentity)
+	// workSessionAdopter replaces the runtime's AdoptWorkSession in tests.
+	workSessionAdopter func(string, runtime.WorkSessionIdentity)
+	// workSessionIDToucher is the same for a refresh by id alone.
+	workSessionIDToucher func(string)
 
 	// telemetryRegOverride lets tests observe telemetry counters without
 	// standing up a whole Runtime (mirrors workSessionResolver). Nil in
@@ -260,9 +292,41 @@ type MCPProxyServer struct {
 
 	directCatalogGeneration atomic.Uint64
 
+	// Single-server surfaces (/mcp/s/<server>, mcp_single_server.go): one MCP
+	// server per upstream that lists only that upstream's tools, under their
+	// own names. They are projections of the published direct catalog and are
+	// re-registered under directRefreshMu, after the direct surface. The lock
+	// order is directRefreshMu, then singleServersMu.
+	singleServerOpts []mcpserver.ServerOption
+	singleServersMu  sync.Mutex
+	singleServers    map[string]*singleServerSurface
+
 	// directRefreshMu serializes whole rebuilds so SetTools and the matching
 	// publishDirectCatalog cannot interleave with another rebuild's pair.
 	directRefreshMu sync.Mutex
+
+	// Direct rebuild retry (GH #1929 release QA). A rebuild that ran while a
+	// connected server's tools/list failed transiently published the catalog
+	// without that server's tools, and the server can recover on the same
+	// connection without any servers.changed event — leaving /mcp/s/<server>
+	// and the direct surface stale. While a rebuild sees such a server, it is
+	// retried: base delay, doubling, capped, at most directRetryLimit times
+	// (each retry lists every connected server, so a server whose listing
+	// fails for good must not keep the fleet polled). After the last retry
+	// directUnlisted stays set, so an OAuth token refresh — the usual moment
+	// such a server lists again — still rebuilds; otherwise the next
+	// servers.changed does. All fields are guarded by directRefreshMu.
+	// directDiscovery replaces the upstream manager's discovery in tests;
+	// nil uses DiscoverToolsWithFailures.
+	directDiscovery     func(ctx context.Context) ([]*config.ToolMetadata, []string, error)
+	directRetryTimer    *time.Timer
+	directRetryDelay    time.Duration
+	directRetryBase     time.Duration
+	directRetryMax      time.Duration
+	directRetryLimit    int
+	directRetryAttempts int
+	directUnlisted      bool
+	directClosed        bool
 
 	// directRebuildPause, when non-nil, is invoked BETWEEN SetTools and the
 	// catalog publish. Nil in production; the only writer is a test.
@@ -308,6 +372,12 @@ type MCPProxyServer struct {
 	// remove and re-add landing after the record read must leave the gate
 	// bound to the removed incarnation).
 	toolGateAfterRecordRead func(serverName string)
+
+	// replayAfterGate, when non-nil, runs in Server.ReplayToolCall after the
+	// shared gate answered and before the live identity check. Nil in
+	// production; the only writer is a test (a connection that drops or
+	// changes generation in exactly that window).
+	replayAfterGate func()
 
 	// Spec 049: in-memory only counter of retrieve_tools calls that opted into
 	// include_disabled. Never persisted (privacy, consistent with Spec 042).
@@ -922,11 +992,23 @@ func NewMCPProxyServer(
 	proxy.initRoutingModeServers()
 	proxy.seedInventoryKey()
 
+	// Spec 124: rows the runtime writes itself (limiter sheds) take their work
+	// session from the request, through the same resolution the dispatch uses.
+	if mainServer != nil && mainServer.runtime != nil {
+		mainServer.runtime.SetRequestSessionFacts(proxy.requestSessionFacts)
+	}
+
+	// Spec 125 PR-3: advertise the skill tools on the default surface and the
+	// direct surface when enable_skills is on at start. The routing-mode
+	// builders above already carry them; this call is a no-op for those.
+	proxy.RefreshSkillsAvailability()
+
 	return proxy
 }
 
 // Close gracefully shuts down the MCP proxy server and releases resources
 func (p *MCPProxyServer) Close() error {
+	p.stopDirectRebuildRetry()
 	if p.profileNotifier != nil {
 		p.profileNotifier.close()
 	}
@@ -1181,6 +1263,41 @@ func (p *MCPProxyServer) emitActivityPolicyDecision(ctx context.Context, serverN
 	p.emitActivityPolicyDecisionWithBlockReason(ctx, serverName, toolName, sessionID, requestID, decision, reason, reasonKey, "")
 }
 
+// emitRefusedBeforeDispatch records a tool call that answered an error before
+// any gate or dispatch ran, because the request itself was unusable: no tool
+// name, a name that is not server:tool, arguments that do not parse. These
+// exits used to leave no activity row at all, so the attempt and its failure
+// were missing from the work session (Spec 124 D2: every attempt has exactly
+// one counted row).
+//
+// The row is a blocking policy decision, the sole row of its attempt: MCPProxy
+// refused the call. It is written straight to the activity log and NOT through
+// emitActivityPolicyDecision, because that funnel also writes the audit line,
+// and the audit contract for these exits is already settled by their callers
+// (Spec 107: malformed args_json is exactly one `authz deny` and no
+// `tool_call`; the name exits write no line). The unusable arguments are not
+// recorded.
+func (p *MCPProxyServer) emitRefusedBeforeDispatch(ctx context.Context, serverName, toolName, requestID, msg string) {
+	if p.mainServer == nil || p.mainServer.runtime == nil {
+		return
+	}
+	sessionID := sessionIDFromContext(ctx)
+	p.mainServer.runtime.EmitActivityPolicyDecisionAttributed(serverName, toolName, sessionID, requestID,
+		"blocked", msg, "", p.activityAttribution(ctx, sessionID))
+}
+
+// emitActivityCompanionDecision is emitActivityPolicyDecision for a blocking
+// decision that is emitted NEXT TO a tool_call row of the same attempt: the
+// generation-change and review-not-recorded refusals, and an output
+// sanitisation block, which every caller closes with a completion row. The
+// tool_call row is the attempt's counted row; this decision explains it and is
+// marked so the work-session summary does not count the attempt twice
+// (Spec 124 D2). A site that blocks and returns WITHOUT a tool_call row uses
+// emitActivityPolicyDecision, whose row is then the counted one.
+func (p *MCPProxyServer) emitActivityCompanionDecision(ctx context.Context, serverName, toolName, sessionID, requestID, decision, reason, reasonKey string) {
+	p.emitActivityPolicyDecisionWithBlockReason(withCompanionDecision(ctx), serverName, toolName, sessionID, requestID, decision, reason, reasonKey, "")
+}
+
 func (p *MCPProxyServer) emitActivityPolicyDecisionWithBlockReason(ctx context.Context, serverName, toolName, sessionID, requestID, decision, reason, reasonKey, blockReason string) {
 	if decision == "blocked" {
 		if isPostDispatchBlockKey(reasonKey) {
@@ -1190,7 +1307,9 @@ func (p *MCPProxyServer) emitActivityPolicyDecisionWithBlockReason(ctx context.C
 		}
 	}
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityPolicyDecisionAttributed(serverName, toolName, sessionID, requestID, decision, reason, blockReason, p.activityAttribution(ctx, sessionID))
+		attr := p.activityAttribution(ctx, sessionID)
+		attr.Companion = isCompanionDecision(ctx)
+		p.mainServer.runtime.EmitActivityPolicyDecisionAttributed(serverName, toolName, sessionID, requestID, decision, reason, blockReason, attr)
 	}
 	// Issue #969 (Phase 0): availability baseline. Only outright blocks count —
 	// a warning or a redaction still delivered the call.
@@ -1704,6 +1823,9 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 			),
 			mcp.WithBoolean("expose_prompts",
 				mcp.Description("Per-server prompt-aggregation override (F9): true = include this server's MCP prompts in mcpproxy's aggregated prompts/list; false = exclude them regardless of capability. Omit to leave unchanged (patch) / inherit the default (aggregate if advertised). Only meaningful when aggregate_upstream_prompts is enabled globally. Used with add/update/patch."),
+			),
+			mcp.WithBoolean("expose_skills",
+				mcp.Description("Per-server skills override: true = read this server's skills (MCP skills extension) when enable_skills is on globally; false = exclude it. Omit to leave unchanged (patch) / inherit the default. Used with add/update/patch."),
 			),
 			mcp.WithString("forward_headers_json",
 				mcp.Description("Client header forwarding allowlist (Spec 112) as a JSON array of inbound MCP client header NAMES to copy into this server's tools/call requests, e.g. [\"X-User-Id\",\"X-Tenant-Id\"]. Names only, never values; exact names, case-insensitive, at most 32, no wildcards. Authorization, Host, Cookie, X-API-Key, hop-by-hop and proxy headers are never forwarded. Only HTTP-based upstreams forward. Patch: omit to leave unchanged, '[]' to clear (the array replaces entirely). Used with add/update/patch."),
@@ -3030,7 +3152,9 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 	toolName, err := request.RequireString("name")
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'name': %v", err)), nil
+		msg := fmt.Sprintf("Missing required parameter 'name': %v", err)
+		p.emitRefusedBeforeDispatch(ctx, "", "", mintActivityRequestID("", ""), msg)
+		return mcp.NewToolResultError(msg), nil
 	}
 	// Whitespace is never significant in a canonical id; case is (every gate
 	// below keys on the exact name), so padding is trimmed and nothing else.
@@ -3063,6 +3187,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// actualToolName may still be empty for a malformed tool name; the
 	// timestamp alone keeps the id unique.
 	requestID := mintActivityRequestID(serverName, actualToolName)
+	ctx = reqcontext.WithAttemptID(ctx, requestID)
 
 	// Get optional args parameter - handle both new JSON string format and
 	// legacy object format. Parsed HERE, above the first gate, because the
@@ -3199,17 +3324,22 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// reason: malformed args_json is not one of FR-012's named gates.
 	if argsErrMsg != "" {
 		p.auditAuthz(ctx, "deny", telemetry.BlockReasonOther)
+		p.emitRefusedBeforeDispatch(ctx, serverName, actualToolName, requestID, argsErrMsg)
 		return mcp.NewToolResultError(argsErrMsg), nil
 	}
 
 	// Handle upstream tools via upstream manager (requires server:tool format)
 	if !strings.Contains(toolName, ":") {
-		return mcp.NewToolResultError(fmt.Sprintf("Invalid tool name format: %s (expected server:tool)", toolName)), nil
+		msg := fmt.Sprintf("Invalid tool name format: %s (expected server:tool)", toolName)
+		p.emitRefusedBeforeDispatch(ctx, serverName, actualToolName, requestID, msg)
+		return mcp.NewToolResultError(msg), nil
 	}
 
 	// Validate tool name was parsed correctly
 	if serverName == "" || actualToolName == "" {
-		return mcp.NewToolResultError(fmt.Sprintf("Invalid tool name format: %s", toolName)), nil
+		msg := fmt.Sprintf("Invalid tool name format: %s", toolName)
+		p.emitRefusedBeforeDispatch(ctx, serverName, actualToolName, requestID, msg)
+		return mcp.NewToolResultError(msg), nil
 	}
 
 	// Spec 057 / Profiles v2: profile filter — runs independently of agent-scope
@@ -3538,7 +3668,8 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 				intentMap = intent.ToMap()
 			}
 			auditNoteErrorClass(ctx, audit.ErrorClassUpstreamUnavailable)
-			callerr.NoteOutcome(ctx, callerr.UnavailableOutcome())
+			// Release QA F1: a server that waits for a login is not unreachable.
+			callerr.NoteOutcome(ctx, callerr.NotConnectedOutcome(client.NeedsSignIn()))
 			p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
 			p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
 			return mcp.NewToolResultError(errMsg), nil
@@ -3638,6 +3769,8 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	dispatchCtx = p.withReviewDirtyRecheck(dispatchCtx, serverName)
 	result, err := p.dispatchOnEpoch(dispatchCtx, certified, toolName, args)
 	p.noteUpstreamDispatched(dispatchCtx) // one attempt per request that reached the transport
+	outcome := p.beginUpstreamOutcome(dispatchCtx, serverName, callInc)
+	defer outcome.record() // Spec 126 FR-035: one outcome on every exit below
 	callerr.Observe(ctx, result, err)
 	fwdOut := fwdSink.Outbound()
 	duration := time.Since(startTime)
@@ -3766,7 +3899,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			}
 			auditNoteErrorClass(ctx, audit.ErrorClassUpstreamUnavailable)
 			p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, duration.Milliseconds(), activityArgs, "", false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
-			p.emitActivityPolicyDecision(ctx, serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
+			p.emitActivityCompanionDecision(ctx, serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 
@@ -3857,6 +3990,10 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// forwardContentResult truncates/caches it, so the read_cache store never
 	// holds an unredacted secret and a blocked response is never cached. A
 	// non-nil result means the call was blocked.
+	// Issue #1932: tool_response_limit bounds structuredContent too. An oversize
+	// structured result becomes a text block here, before sanitisation, so it
+	// is redacted, scanned, truncated and cached like any other text block.
+	structuredWithheld := withholdOversizeStructured(result, p.currentTruncator().Limit(), p.logger, toolName)
 	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, requestID, contentTrust, result); blockResult != nil {
 		// The upstream ran, so the started record is closed: history and the
 		// tool_call completion carry the block message, never the response.
@@ -3879,7 +4016,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	}
 
 	// Spec 069 A1: measure raw sizes before truncation.
-	activityResponseBytes := rawByteSize(result)
+	activityResponseBytes := rawByteSize(upstreamSizeView(result, structuredWithheld))
 	activityRequestBytes := rawByteSize(activityArgs)
 
 	// Spec 084: adaptive TOON encoding of result text blocks. Positioned AFTER
@@ -3901,7 +4038,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
 	// policy_decision. No-op when disabled / no schema / error result.
-	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, forwarded, fwdOut); blockResult != nil {
+	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, outputValidationView(forwarded, structuredWithheld), fwdOut); blockResult != nil {
 		return blockResult, nil
 	}
 
@@ -3958,6 +4095,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// policy gates (sanitisation, output validation) above.
 	if activityStatus == "success" {
 		p.recordRealToolCallSuccess()
+		outcome.markUsable(forwarded, nil)
 	}
 
 	return forwarded, nil
@@ -3983,7 +4121,9 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	toolName, err := request.RequireString("name")
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'name': %v", err)), nil
+		msg := fmt.Sprintf("Missing required parameter 'name': %v", err)
+		p.emitRefusedBeforeDispatch(ctx, "", "", mintActivityRequestID("", ""), msg)
+		return mcp.NewToolResultError(msg), nil
 	}
 
 	// Get optional args parameter - handle both new JSON string format and legacy object format
@@ -4094,6 +4234,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Generate requestID for activity tracking
 	requestID := mintActivityRequestID(serverName, actualToolName)
+	ctx = reqcontext.WithAttemptID(ctx, requestID)
 
 	// Spec 028: Inject auth identity into activity metadata (separate copy for logging only)
 	activityArgs := injectAuthMetadata(ctx, args)
@@ -4153,8 +4294,9 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			} else {
 				errMsg = fmt.Sprintf("Server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())
 			}
-			// Log the early failure to activity (Spec 024)
-			callerr.NoteOutcome(ctx, callerr.UnavailableOutcome())
+			// Log the early failure to activity (Spec 024). Release QA F1: a
+			// server that waits for a login is not unreachable.
+			callerr.NoteOutcome(ctx, callerr.NotConnectedOutcome(client.NeedsSignIn()))
 			p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
 			p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", "", 0, 0, "", nil, "")
 			return mcp.NewToolResultError(errMsg), nil
@@ -4357,6 +4499,10 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// forwardContentResult truncates/caches it, so the read_cache store never
 	// holds an unredacted secret and a blocked response is never cached. A
 	// non-nil result means the call was blocked.
+	// Issue #1932: tool_response_limit bounds structuredContent too. An oversize
+	// structured result becomes a text block here, before sanitisation, so it
+	// is redacted, scanned, truncated and cached like any other text block.
+	structuredWithheld := withholdOversizeStructured(result, p.currentTruncator().Limit(), p.logger, toolName)
 	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, requestID, contentTrust, result); blockResult != nil {
 		// The upstream ran: close the started record (see handleCallToolVariant).
 		blockMsg := p.recordOutputBlocked(ctx, toolCallRecord, callInc, blockResult)
@@ -4372,7 +4518,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	}
 
 	// Spec 069 A1: measure raw sizes before truncation.
-	legacyResponseBytes := rawByteSize(result)
+	legacyResponseBytes := rawByteSize(upstreamSizeView(result, structuredWithheld))
 	legacyRequestBytes := rawByteSize(activityArgs)
 
 	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheStoreAsForwarded(producer, fwdOut, serverName), p.logger, toolName, args)
@@ -4380,7 +4526,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
 	// policy_decision. No-op when disabled / no schema / error result.
-	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, forwarded, fwdOut); blockResult != nil {
+	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, outputValidationView(forwarded, structuredWithheld), fwdOut); blockResult != nil {
 		return blockResult, nil
 	}
 
@@ -4651,13 +4797,13 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	// Security checks
 	if p.config.ReadOnlyMode {
 		if operation != operationList {
-			p.emitActivityInternalToolCall(ctx, "upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Operation not allowed in read-only mode", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+			p.emitActivityInternalToolCall(withPolicyRefusal(ctx), "upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Operation not allowed in read-only mode", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 			return mcp.NewToolResultError("Operation not allowed in read-only mode"), nil
 		}
 	}
 
 	if p.config.DisableManagement {
-		p.emitActivityInternalToolCall(ctx, "upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Server management is disabled for security", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall(withPolicyRefusal(ctx), "upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Server management is disabled for security", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError("Server management is disabled for security"), nil
 	}
 
@@ -4668,12 +4814,12 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 		// must honor the same AllowServerAdd gate — otherwise the "Let agents add
 		// servers" setting is bypassable by registry reference (MCP-800 finding 1).
 		if !p.config.AllowServerAdd {
-			p.emitActivityInternalToolCall(ctx, "upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Adding servers is not allowed", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+			p.emitActivityInternalToolCall(withPolicyRefusal(ctx), "upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Adding servers is not allowed", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 			return mcp.NewToolResultError("Adding servers is not allowed"), nil
 		}
 	case operationRemove:
 		if !p.config.AllowServerRemove {
-			p.emitActivityInternalToolCall(ctx, "upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Removing servers is not allowed", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+			p.emitActivityInternalToolCall(withPolicyRefusal(ctx), "upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Removing servers is not allowed", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 			return mcp.NewToolResultError("Removing servers is not allowed"), nil
 		}
 	}
@@ -4687,7 +4833,7 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	authCtx := auth.ScopedView(requestAuth, profileResolution.anonymousConfinementActive() && (requestAuth == nil || requestAuth.Anonymous))
 	if !auth.AuthorizeServerOp(authCtx, operation) {
 		errMsg := fmt.Sprintf("Agent tokens cannot perform '%s' operations on upstream servers", operation)
-		p.emitActivityInternalToolCall(ctx, "upstream_servers", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall(withPolicyRefusal(ctx), "upstream_servers", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -4801,21 +4947,23 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 	// hand-rolled builder never recorded.
 	args := activityArgsFromRequest(request)
 
+	// The three refusals below are MCPProxy's own policy, so their rows count
+	// as policy blocks (Spec 124 D2), as in handleUpstreamServers.
 	// Spec 028: Agent tokens cannot perform quarantine operations
 	if auth.IsNonAdmin(auth.AuthContextFromContext(ctx)) {
 		errMsg := "Agent tokens cannot perform quarantine security operations"
-		p.emitActivityInternalToolCall(ctx, "quarantine_security", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall(withPolicyRefusal(ctx), "quarantine_security", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
 	// Security checks
 	if p.config.ReadOnlyMode {
-		p.emitActivityInternalToolCall(ctx, "quarantine_security", targetServer, "", "", sessionID, requestID, "error", "Quarantine operations not allowed in read-only mode", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall(withPolicyRefusal(ctx), "quarantine_security", targetServer, "", "", sessionID, requestID, "error", "Quarantine operations not allowed in read-only mode", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError("Quarantine operations not allowed in read-only mode"), nil
 	}
 
 	if p.config.DisableManagement {
-		p.emitActivityInternalToolCall(ctx, "quarantine_security", targetServer, "", "", sessionID, requestID, "error", "Server management is disabled for security", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall(withPolicyRefusal(ctx), "quarantine_security", targetServer, "", "", sessionID, requestID, "error", "Server management is disabled for security", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError("Server management is disabled for security"), nil
 	}
 
@@ -5337,6 +5485,7 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 		// Read through the runtime seam so a stale schedule for a server that
 		// no longer uses OAuth is not reported here either (GH #1172).
 		if p.mainServer != nil && p.mainServer.runtime != nil {
+			healthInput.NetworkFailure, healthInput.NetworkGaveUp, healthInput.NextRetryAt = p.mainServer.runtime.NetworkRetryState(server.Name)
 			if refreshState := p.mainServer.runtime.HealthRefreshState(server.Name, server); refreshState != nil {
 				healthInput.RefreshState = health.RefreshState(refreshState.State)
 				healthInput.RefreshRetryCount = refreshState.RetryCount
@@ -6300,6 +6449,11 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 				serverConfig.ExposePrompts = &b
 			}
 		}
+		if raw, ok := rawArgs["expose_skills"]; ok {
+			if b, ok := raw.(bool); ok {
+				serverConfig.ExposeSkills = &b
+			}
+		}
 	}
 
 	// Spec 112: optional forward_headers allowlist on add, validated at write time.
@@ -6851,6 +7005,13 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 				return nil, opts, fmt.Errorf("invalid expose_prompts: must be a boolean, got %T", raw)
 			}
 			patch.ExposePrompts = &b
+		}
+		if raw, ok := args["expose_skills"]; ok {
+			b, ok := raw.(bool)
+			if !ok {
+				return nil, opts, fmt.Errorf("invalid expose_skills: must be a boolean, got %T", raw)
+			}
+			patch.ExposeSkills = &b
 		}
 	}
 
@@ -7670,6 +7831,20 @@ func (p *MCPProxyServer) callToolDirect(ctx context.Context, request mcp.CallToo
 		// tool that answers "unknown tool: read_cache" (HTTP 500) and the
 		// parked payload is unreachable outside an MCP session.
 		result, err = p.handleReadCache(ctx, request)
+	case toolRetrieveSkills, toolLoadSkill, toolReadSkillFile:
+		// Spec 125 PR-3: routable here exactly while the switch is on, like the
+		// other read built-ins. The handlers apply the caller's reach.
+		if !p.skillsEnabled() {
+			return nil, fmt.Errorf("unknown tool: %s", toolName)
+		}
+		switch toolName {
+		case toolRetrieveSkills:
+			result, err = p.handleRetrieveSkills(ctx, request)
+		case toolLoadSkill:
+			result, err = p.handleLoadSkill(ctx, request)
+		default:
+			result, err = p.handleReadSkillFile(ctx, request)
+		}
 	case "quarantine_security":
 		result, err = p.handleQuarantineSecurity(ctx, request)
 	case "code_execution":

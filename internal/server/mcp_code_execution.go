@@ -119,7 +119,20 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	// no config at all means nothing to disable.
 	if cfg := p.currentConfig(); cfg != nil && !cfg.EnableCodeExecution {
 		recordCodeExecRefusal(ctx, config.ErrCodeExecutionDisabled)
+		p.emitCodeExecutionRefused(withPolicyRefusal(ctx), config.CodeExecutionDisabledMessage)
 		return mcp.NewToolResultError(config.CodeExecutionDisabledMessage), nil
+	}
+
+	// Spec 124 FR-005: the work session is resolved once, here, and rides in
+	// the context, so the execution's own row and every sub-call's row carry
+	// it. A sub-call that finishes long after the script (an upstream that
+	// ignored the cancellation) would otherwise resolve again, after the
+	// idle window, and start a session of its own.
+	if attr, _ := activityAttributionFromContext(ctx); attr.WorkSessionID == "" {
+		attr.WorkSessionID, attr.RunName = p.requestWorkSessionRun(ctx, "")
+		if attr.WorkSessionID != "" {
+			ctx = withActivityAttribution(ctx, attr)
+		}
 	}
 
 	// Parse arguments. MaxToolCalls starts at the unset sentinel so an explicit
@@ -133,6 +146,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	// Extract language (optional, default: "javascript")
 	explicitLanguage, errMsg := codeExecStringArg(args, "language")
 	if errMsg != "" {
+		p.emitCodeExecutionRefused(ctx, errMsg)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 	if explicitLanguage != "" {
@@ -145,6 +159,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	// and both CLI modes send the NAME, never the content).
 	code, scriptName, errMsg := p.resolveCodeExecutionSource(ctx, args, &options)
 	if errMsg != "" {
+		p.emitCodeExecutionRefused(ctx, errMsg)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -158,6 +173,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	// Extract options object (optional)
 	if optionsObj, ok := args["options"].(map[string]interface{}); ok && optionsObj != nil {
 		if errMsg := applyCodeExecutionOptions(optionsObj, &options); errMsg != "" {
+			p.emitCodeExecutionRefused(ctx, errMsg)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 	}
@@ -233,7 +249,9 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 				zap.String("execution_id", options.ExecutionID),
 				zap.Error(err),
 			)
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to acquire JavaScript runtime: %v", err)), nil
+			msg := fmt.Sprintf("Failed to acquire JavaScript runtime: %v", err)
+			p.emitCodeExecutionRefused(ctx, msg)
+			return mcp.NewToolResultError(msg), nil
 		}
 
 		acquireDuration := time.Since(acquireStart)
@@ -898,6 +916,9 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	// the activity record must carry the same id, and mintCorrelationIDAt
 	// bumps a sequence on every call, so minting twice would never match.
 	requestID := mintCorrelationIDAt(startTime, serverName, toolName)
+	// Spec 124 D2: every row of this child's attempt carries this id,
+	// including a limiter rejection written below the dispatch layer.
+	ctx = reqcontext.WithAttemptID(ctx, requestID)
 
 	// Spec 093 FR-012: a call issued by a sandboxed script is an INTERNAL origin,
 	// whatever surface asked for the code_execution around it. Without this the
@@ -1049,7 +1070,20 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 		result, err = client.CallTool(dispatchCtx, toolName, args)
 	}
 	u.proxy.noteUpstreamDispatched(dispatchCtx) // each JS sub-call counts its own requests; nil-safe
+	outcome := u.proxy.beginUpstreamOutcome(dispatchCtx, serverName, callInc)
+	defer outcome.record() // Spec 126 FR-035: one outcome on every exit below; nil-safe
 	callerr.Observe(ctx, result, err)
+	// Release QA F1: this path has no not-connected check before the call,
+	// and the managed client's "client not connected" error classifies as a
+	// proxy failure. A server that is not connected failed for its own
+	// reason: it needs a login or it is unreachable, as on the direct path.
+	// Only the not-connected refusal itself: a retired instance or a moved
+	// generation keeps its own class.
+	if errors.Is(err, managed.ErrClientNotConnected) {
+		if o, ok := callerr.OutcomeFrom(ctx); ok && o.Class == callerr.ClassProxyInternal {
+			callerr.NoteOutcome(ctx, callerr.NotConnectedOutcome(client.NeedsSignIn()))
+		}
+	}
 	fwdOut := fwdSink.Outbound()
 	parentFwdSink.Merge(fwdOut)
 	// Spec 113-d FR-062: this path calls the managed client directly, bypassing
@@ -1094,6 +1128,7 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	}
 	// Activation: only after the output policy above let the result through.
 	u.proxy.noteUpstreamSuccess(result, err)
+	outcome.markUsable(result, err)
 	duration := time.Since(startTime)
 
 	// Record the tool call with timing and result. Issue #935: code_execution
@@ -1788,4 +1823,17 @@ func tierForAnnotations(annotations *config.ToolAnnotations, found bool) string 
 		return perm
 	}
 	return contracts.OperationTypeRead
+}
+
+// emitCodeExecutionRefused records a code_execution call that answered an
+// error before the script ran: the feature is disabled, the source could not
+// be resolved (no such stored script, both or neither of code and script), no
+// runtime could be acquired. These exits used to leave no activity row, so
+// the attempt and its failure were missing from the work session (Spec 124
+// D2). The row is the wrapper's own failed internal_tool_call, with no
+// arguments recorded. The profile refusal above is NOT routed here: its
+// blocking policy decision is already the one counted row of that attempt.
+func (p *MCPProxyServer) emitCodeExecutionRefused(ctx context.Context, msg string) {
+	p.emitActivityInternalToolCall(ctx, "code_execution", "", "", "", sessionIDFromContext(ctx),
+		mintActivityRequestID("", "code_execution"), "error", msg, 0, nil, nil, nil, "")
 }

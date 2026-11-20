@@ -56,26 +56,28 @@ type routeScope struct {
 // an unclassified new route fails, and a stale entry for a removed route fails.
 var getRouteScopes = map[string]routeScope{
 	// --- Refused: deployment-wide documents an agent token cannot read ---
-	"/api/v1/config":                   {scopeRefused, "whole config document; TestGetConfig_AgentTokenForbidden_AdminUnaffected"},
-	"/api/v1/code/scripts":             {scopeRefused, "stored-script listing is admin-only (scriptsListingDenialMessage)"},
-	"/api/v1/onboarding/state":         {scopeRefused, "inventory size + client ids; TestOnboardingState_DeniedToScopedCaller"},
-	"/api/v1/secrets/refs":             {scopeRefused, "credential inventory; TestSecretsInventory_DeniedToScopedCaller"},
-	"/api/v1/secrets/config":           {scopeRefused, "credential inventory; TestSecretsInventory_DeniedToScopedCaller"},
-	"/api/v1/security/overview":        {scopeRefused, "fleet scan/finding counts; TestSecurityFleetDoors_DeniedToScopedCaller"},
-	"/api/v1/security/queue":           {scopeRefused, "names every queued server; TestSecurityFleetDoors_DeniedToScopedCaller"},
-	"/api/v1/security/bundle":          {scopeRefused, "TPA bundle digests + last rejection; TestSecurityBundle_AgentTokenRefusedOnEveryRoute"},
-	"/api/v1/security/bundle/history":  {scopeRefused, "TPA bundle activation history (rollback digests); TestSecurityBundle_AgentTokenRefusedOnEveryRoute"},
-	"/api/v1/sessions":                 {scopeRefused, "MCP client/session history; TestSessions_DeniedToAgentTokens"},
-	"/api/v1/sessions/{id}":            {scopeRefused, "MCP client/session history; TestSessions_DeniedToAgentTokens"},
-	"/api/v1/stats/tokens":             {scopeRefused, "deployment-wide token stats; TestTokenStats_DeniedToAgentTokens"},
-	"/api/v1/telemetry/payload":        {scopeRefused, "fleet heartbeat counts; TestTelemetryPayload_DeniedToScopedCaller"},
-	"/api/v1/tokens/":                  {scopeRefused, "agent tokens cannot manage tokens (requireManageTokens)"},
-	"/api/v1/tokens/{name}/":           {scopeRefused, "agent tokens cannot manage tokens (requireManageTokens)"},
-	"/api/v1/connect":                  {scopeRefused, "MCP client connection status is admin-only"},
-	"/api/v1/connect/{client}":         {scopeRefused, "MCP client connection status is admin-only"},
-	"/api/v1/connect/{client}/preview": {scopeRefused, "MCP client configuration preview is admin-only"},
-	"/api/v1/access/explain":           {scopeRefused, "access explainer names other credentials' bindings and every gate; requireServerOp(ConfigWrite); TestAccessExplainRoute_ScopedCallerIs403"},
-	"/api/v1/access/suggest":           {scopeRefused, "access suggest names other credentials' tokens, profiles and servers out of scope; requireServerOp(ConfigWrite); TestAccessSuggestRoute_ScopedCallerIs403"},
+	"/api/v1/config":                      {scopeRefused, "whole config document; TestGetConfig_AgentTokenForbidden_AdminUnaffected"},
+	"/api/v1/code/scripts":                {scopeRefused, "stored-script listing is admin-only (scriptsListingDenialMessage)"},
+	"/api/v1/onboarding/state":            {scopeRefused, "inventory size + client ids; TestOnboardingState_DeniedToScopedCaller"},
+	"/api/v1/secrets/refs":                {scopeRefused, "credential inventory; TestSecretsInventory_DeniedToScopedCaller"},
+	"/api/v1/secrets/config":              {scopeRefused, "credential inventory; TestSecretsInventory_DeniedToScopedCaller"},
+	"/api/v1/security/overview":           {scopeRefused, "fleet scan/finding counts; TestSecurityFleetDoors_DeniedToScopedCaller"},
+	"/api/v1/security/queue":              {scopeRefused, "names every queued server; TestSecurityFleetDoors_DeniedToScopedCaller"},
+	"/api/v1/security/bundle":             {scopeRefused, "TPA bundle digests + last rejection; TestSecurityBundle_AgentTokenRefusedOnEveryRoute"},
+	"/api/v1/security/bundle/history":     {scopeRefused, "TPA bundle activation history (rollback digests); TestSecurityBundle_AgentTokenRefusedOnEveryRoute"},
+	"/api/v1/sessions":                    {scopeRefused, "MCP client/session history; TestSessions_DeniedToAgentTokens"},
+	"/api/v1/sessions/{id}":               {scopeRefused, "MCP client/session history; TestSessions_DeniedToAgentTokens"},
+	"/api/v1/stats/tokens":                {scopeRefused, "deployment-wide token stats; TestTokenStats_DeniedToAgentTokens"},
+	"/api/v1/telemetry/payload":           {scopeRefused, "fleet heartbeat counts; TestTelemetryPayload_DeniedToScopedCaller"},
+	"/api/v1/tokens/":                     {scopeRefused, "agent tokens cannot manage tokens (requireManageTokens)"},
+	"/api/v1/tokens/{name}/":              {scopeRefused, "agent tokens cannot manage tokens (requireManageTokens)"},
+	"/api/v1/connect":                     {scopeRefused, "MCP client connection status is admin-only"},
+	"/api/v1/connect/{client}":            {scopeRefused, "MCP client connection status is admin-only"},
+	"/api/v1/connect/{client}/preview":    {scopeRefused, "MCP client configuration preview is admin-only"},
+	"/api/v1/servers/{id}/skills":         {scopeFiltered, "Spec 125 PR-3: available skills only, approved copy; TestSkillsList_ScopedCallerSeesOnlyAvailableApprovedCopies"},
+	"/api/v1/servers/{id}/skills/content": {scopeFiltered, "Spec 125 PR-3: approved text of available skills only; TestSkillContent_ScopedCallerGetsTheApprovedCopyOnly"},
+	"/api/v1/access/explain":              {scopeRefused, "access explainer names other credentials' bindings and every gate; requireServerOp(ConfigWrite); TestAccessExplainRoute_ScopedCallerIs403"},
+	"/api/v1/access/suggest":              {scopeRefused, "access suggest names other credentials' tokens, profiles and servers out of scope; requireServerOp(ConfigWrite); TestAccessSuggestRoute_ScopedCallerIs403"},
 
 	// --- Filtered: reachable, per-server content narrowed to the grant ---
 	"/api/v1/servers":                       {scopeFiltered, "visibleServers; TestGetServers_AgentTokenSeesOnlyAllowedSubset_ManagementPath"},
@@ -85,6 +87,9 @@ var getRouteScopes = map[string]routeScope{
 	"/api/v1/info":                          {scopeFiltered, "admin api key withheld; TestInfo_ScopedCallerNeverReceivesTheAdminAPIKey"},
 	"/api/v1/annotations/coverage":          {scopeFiltered, "one row per server, canSeeServer gate (#1166)"},
 	"/api/v1/activity":                      {scopeFiltered, "scopeAllowedServers; TestListActivity_ScopedToAllowedServers"},
+	"/api/v1/work-sessions":                 {scopeFiltered, "own sessions, facts recomputed from servers in reach; TestWorkSessions_Authorization"},
+	"/api/v1/work-sessions/{id}":            {scopeFiltered, "own session in reach or not found; TestWorkSessions_Authorization"},
+	"/api/v1/work-sessions/{id}/timeline":   {scopeFiltered, "rows narrowed by the index server before load; TestWorkSessionTimeline_ScopedToReach"},
 	"/api/v1/activity/summary":              {scopeFiltered, "scopeAllowedServers; TestActivitySummary_ScopedToAllowedServers"},
 	"/api/v1/activity/usage":                {scopeFiltered, "scopeAllowedServers; TestActivityUsage_ScopedToAllowedServers"},
 	"/api/v1/activity/export":               {scopeFiltered, "scopeAllowedServers; TestActivityExport_ScopedToAllowedServers"},
@@ -181,7 +186,10 @@ var shortCircuitCodes = map[string]int{
 	"/api/v1/servers/{id}/scan/files":         http.StatusNotFound,           // no scan record for alpha in the fixture
 	"/api/v1/security/scanners/{id}/status":   http.StatusNotFound,           // "alpha" is not a configured scanner plugin
 	"/api/v1/review":                          http.StatusServiceUnavailable, // review service not wired in the fixture
+	"/api/v1/servers/{id}/skills/content":     http.StatusNotFound,           // synthetic skill absent from the fixture → the one skill-not-found answer
 	"/api/v1/profiles/{name}":                 http.StatusNotFound,           // synthetic profile "alpha" is unknown, which reads the same as unreachable
+	"/api/v1/work-sessions/{id}":              http.StatusNotFound,           // synthetic id is no work session, which reads the same as one out of reach
+	"/api/v1/work-sessions/{id}/timeline":     http.StatusNotFound,           // same uniform 404
 	"/api/v1/profiles/{name}/effective-tools": http.StatusNotFound,           // same uniform 404
 	"/api/v1/servers/{id}/review":             http.StatusServiceUnavailable, // review service not wired in the fixture
 }

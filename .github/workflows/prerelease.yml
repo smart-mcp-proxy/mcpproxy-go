@@ -481,16 +481,7 @@ jobs:
 
       - name: Install Inno Setup (Windows)
         if: matrix.goos == 'windows'
-        shell: pwsh
-        run: |
-          choco install innosetup -y
-          # Verify installation
-          if (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe") {
-            Write-Host "✅ Inno Setup installed successfully"
-          } else {
-            Write-Host "❌ Inno Setup installation failed"
-            exit 1
-          }
+        uses: ./.github/actions/install-inno-setup
 
       - name: Create Windows installer (Windows - Prerelease)
         if: matrix.goos == 'windows'
@@ -1107,7 +1098,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
 
       - name: Sign checksums (keyless)
         # Same recipe as release.yml, with the identity naming THIS workflow.

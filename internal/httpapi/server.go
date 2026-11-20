@@ -25,6 +25,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpx"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/launch"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
@@ -289,6 +290,23 @@ type ServerController interface {
 	BlockAllTools(serverName string, blockedBy string) (int, error)
 	GetToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error)
 
+	// Skills over MCP (Spec 125, PR-1). Administrator-only reads of the skills
+	// catalog and a refresh trigger; nothing here is offered to agents yet.
+	SkillsStatus(serverName string) internalRuntime.SkillsServerStatus
+	ListSkillRecords(serverName string) ([]*storage.SkillApprovalRecord, error)
+	SkillFileText(serverName, skillPath, relPath string, approvedCopy bool) ([]byte, storage.SkillFile, error)
+	SkillAvailable(serverName string, rec *storage.SkillApprovalRecord) bool
+	// Scoped callers (PR-3): approved copies of available skills only.
+	ListAvailableSkills(serverName string) ([]*internalRuntime.AvailableSkill, error)
+	// EmitActivitySkillAccess records a scoped caller's read of skills (FR-024).
+	EmitActivitySkillAccess(a internalRuntime.SkillAccessActivity)
+	AvailableSkillFile(serverName, skillPath, relPath string) ([]byte, storage.SkillFile, *internalRuntime.AvailableSkill, error)
+	RefreshServerSkills(ctx context.Context, serverName string) error
+	// Spec 125 PR-2: the approval gate. Both are review- and
+	// incarnation-bound in the runtime; ctx carries the actor.
+	ApproveSkillsReviewedAt(ctx context.Context, serverName string, skillPaths []string, expected map[string]string, approvedBy string, expectedIncarnation int64) (int, error)
+	SetSkillsBlockedAt(ctx context.Context, serverName string, skillPaths []string, blocked bool, by string, expectedIncarnation int64) (int, error)
+
 	// Onboarding wizard (Spec 046)
 	GetOnboardingState() (*storage.OnboardingState, error)
 	SaveOnboardingState(state *storage.OnboardingState) error
@@ -307,7 +325,11 @@ type ServerController interface {
 
 // Server provides HTTP API endpoints with chi router
 type Server struct {
-	controller ServerController
+	// eventsSince is when this core process started (processStart); upstream
+	// events from before it are no evidence about a server's state now
+	// (Spec 124, release QA F2). A field so tests can move it.
+	eventsSince time.Time
+	controller  ServerController
 	// patchAfterParse is a Spec 116 test seam (nil in production): it runs in
 	// PATCH /api/v1/servers/{id} after the body was parsed and validated.
 	patchAfterParse   func(serverName string)
@@ -461,6 +483,7 @@ func NewServer(controller ServerController, logger *zap.SugaredLogger, obs *obse
 	}
 
 	s := &Server{
+		eventsSince:      processStart,
 		controller:       controller,
 		logger:           logger,
 		httpLogger:       httpLogger,
@@ -848,6 +871,12 @@ func (s *Server) correlationIDMiddleware() func(http.Handler) http.Handler {
 			ctx := reqcontext.WithCorrelationID(r.Context(), correlationID)
 			ctx = reqcontext.WithRequestSource(ctx, reqcontext.SourceRESTAPI)
 
+			// Spec 124 FR-002/FR-003: a REST call has no MCP connection, so
+			// its work session is derived from the request. The surface names
+			// the client, and the optional run name splits the caller's work.
+			ctx = reqcontext.WithClientSurface(ctx, restClientSurface(r))
+			ctx = reqcontext.WithRunHeader(ctx, r.Header.Get(reqcontext.RunNameHeader))
+
 			// Add correlation ID to response headers for client tracking
 			w.Header().Set("X-Correlation-ID", correlationID)
 
@@ -1145,6 +1174,14 @@ func (s *Server) setupRoutes() {
 			// operation (issue #873): pure rediscover + reindex, no state change.
 			r.Post("/refresh", s.requireServerOp(auth.ServerOpRefresh, s.handleRefreshServer))
 			r.Get("/tools", s.handleGetServerTools)
+			// Spec 125 PR-1: skills catalog, administrator-only.
+			r.Get("/skills", s.handleGetServerSkills)
+			r.Get("/skills/content", s.handleGetServerSkillContent)
+			r.Post("/skills/refresh", s.handleRefreshServerSkills)
+			// Spec 125 PR-2: the approval gate, administrator-only.
+			r.Post("/skills/approve", s.handleApproveServerSkills)
+			r.Post("/skills/block", s.handleBlockServerSkills)
+			r.Post("/skills/unblock", s.handleUnblockServerSkills)
 			r.Get("/review", s.handleGetServerReview)
 			r.Get("/logs", s.handleGetServerLogs)
 			// Spec 044: per-server diagnostics with stable error_code.
@@ -1228,6 +1265,13 @@ func (s *Server) setupRoutes() {
 		r.Get("/sessions", s.handleGetSessions)
 		r.Get("/sessions/{id}", s.handleGetSessionDetail)
 
+		// Spec 124: work sessions and their failure timeline. Scoped, unlike
+		// /sessions above: the caller sees its own sessions, narrowed to the
+		// servers in its reach.
+		r.Get("/work-sessions", s.handleListWorkSessions)
+		r.Get("/work-sessions/{id}", s.handleGetWorkSession)
+		r.Get("/work-sessions/{id}/timeline", s.handleWorkSessionTimeline)
+
 		// Tool execution
 		r.Post("/tools/call", s.handleCallTool)
 
@@ -1294,7 +1338,7 @@ func (s *Server) setupRoutes() {
 		})
 
 		// Feedback submission (Spec 036)
-		r.Post("/feedback", s.handleFeedback)
+		r.With(s.requireAdminReadMiddleware("Admin credentials required to submit feedback")).Post("/feedback", s.handleFeedback)
 
 		// Client connect/disconnect. Config reads disclose local paths and
 		// connection state; writes can modify user-owned client files or embed
@@ -2232,6 +2276,10 @@ type AddServerRequest struct {
 	// a nil pointer means "leave unchanged" on PATCH (and "inherit the default
 	// aggregate behavior" on create); a present value (including false) is applied.
 	ExposePrompts *bool `json:"expose_prompts,omitempty"`
+	// ExposeSkills is the per-server skills override (MCP skills extension).
+	// Tri-state *bool mirroring config.ServerConfig.ExposeSkills: nil means
+	// "leave unchanged" on PATCH and "inherit" on create.
+	ExposeSkills *bool `json:"expose_skills,omitempty"`
 	// ForwardHeaders is the per-server allowlist of inbound MCP client header
 	// NAMES forwarded to this server on tools/call (Spec 112). Names only, never
 	// values. On PATCH a nil slice (field omitted) leaves the stored allowlist
@@ -2596,6 +2644,9 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	if req.ExposePrompts != nil {
 		serverConfig.ExposePrompts = req.ExposePrompts
 	}
+	if req.ExposeSkills != nil {
+		serverConfig.ExposeSkills = req.ExposeSkills
+	}
 	// Spec 112: carry the forward_headers allowlist through on create, after
 	// validating the names (write-time layer of FR-005).
 	if len(req.ForwardHeaders) > 0 {
@@ -2896,6 +2947,13 @@ func resolveServerPatch(serverName string, req *AddServerRequest, existingSrv *c
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.ExposePrompts = existingSrv.ExposePrompts
+	}
+	// expose_skills: same tri-state preserve-the-existing-pointer rule.
+	if req.ExposeSkills != nil {
+		updates.ExposeSkills = req.ExposeSkills
+		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.ExposeSkills = existingSrv.ExposeSkills
 	}
 	// Spec 112: forward_headers preserves the existing allowlist when the
 	// request omits it (nil slice); a non-nil slice replaces it and an empty
@@ -3820,6 +3878,13 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 			if encErr := json.NewEncoder(w).Encode(oauthValidationErr); encErr != nil {
 				s.logger.Errorw("Failed to encode OAuth validation error response", "error", encErr)
 			}
+			return
+		}
+
+		// Spec 123: the stored OAuth row cannot be decrypted; no login can
+		// help until the key is restored or the row is deleted.
+		if oauth.IsTokenUndecryptable(err) {
+			s.writeError(w, r, http.StatusConflict, fmt.Sprintf("%s: %v", diagnostics.OAuthTokenUndecryptable, err))
 			return
 		}
 
@@ -5699,6 +5764,7 @@ func (s *Server) maskToolCallRecord(record *contracts.ToolCallRecord) {
 // @Success      200      {object}  contracts.ReplayToolCallResponse    "Tool call replayed successfully"
 // @Failure      400      {object}  contracts.ErrorResponse             "Tool call ID required or invalid JSON payload"
 // @Failure      401      {object}  contracts.ErrorResponse             "Unauthorized - missing or invalid API key"
+// @Failure      403      {object}  contracts.ErrorResponse             "Replay refused: tool quarantined or not callable, server quarantined, outside the profile policy, or the token lacks the tool's permission tier"
 // @Failure      405      {object}  contracts.ErrorResponse             "Method not allowed"
 // @Failure      429      {object}  contracts.ErrorResponse             "Shed by a concurrency limit or an agent token call rate limit (Retry-After header carries the wait hint)"
 // @Failure      500      {object}  contracts.ErrorResponse             "Failed to replay tool call"
@@ -5864,7 +5930,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	// one, so a client cannot widen its own read by staging the flag and
 	// re-reading before the restart, and (#1167) it is ANDed with the caller's
 	// identity so only an authenticated admin can exercise the opt-out.
-	published := cfg
+	var published *config.Config
 	if !s.revealSecrets(r.Context()) {
 		published = oauth.RedactedConfig(cfg)
 		if published == nil {
@@ -5874,6 +5940,11 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusInternalServerError, "Failed to get configuration")
 			return
 		}
+	} else if published = oauth.WithMaskedOAuthTokenKey(cfg); published == nil {
+		// reveal_secret_headers never reveals the OAuth token encryption key.
+		s.logger.Errorw("Failed to redact configuration for publication")
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to get configuration")
+		return
 	}
 
 	// Convert config to contracts type for consistent API response

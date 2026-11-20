@@ -111,6 +111,7 @@ func TestRedactServerConfigSecrets_PreservesNonSecretFields(t *testing.T) {
 		ReconnectOnUse:           true,
 		AutoApproveToolChanges:   &autoApprove,
 		ExposePrompts:            &exposePrompts,
+		ExposeSkills:             &exposePrompts,
 		MaxConcurrentRequests:    &maxConcurrent,
 		HealthCheckInterval:      &interval,
 		LauncherWaitTimeout:      config.Duration(45 * time.Second),
@@ -139,6 +140,8 @@ func TestRedactServerConfigSecrets_PreservesNonSecretFields(t *testing.T) {
 	assert.True(t, *masked.AutoApproveToolChanges)
 	require.NotNil(t, masked.ExposePrompts)
 	assert.False(t, *masked.ExposePrompts, "an explicit false must survive as an explicit false")
+	require.NotNil(t, masked.ExposeSkills)
+	assert.False(t, *masked.ExposeSkills, "an explicit false must survive as an explicit false")
 	require.NotNil(t, masked.MaxConcurrentRequests)
 	assert.Equal(t, maxConcurrent, *masked.MaxConcurrentRequests)
 	require.NotNil(t, masked.HealthCheckInterval)

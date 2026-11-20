@@ -66,6 +66,12 @@ type HealthCalculatorInput struct {
 	// Secret/config detection
 	MissingSecret  string // Secret name if unresolved (e.g., "GITHUB_TOKEN")
 	OAuthConfigErr string // OAuth config error (e.g., "requires 'resource' parameter")
+	// OAuthTokenUndecryptable is set when the server's stored OAuth row cannot
+	// be decrypted with the configured key (Spec 123 FR-031): the detail
+	// sentence ("stored OAuth token cannot be decrypted: <reason>"). The
+	// connection error carries the same sentence, so it is also derived from
+	// LastError (ExtractOAuthTokenUndecryptable). Never a login state.
+	OAuthTokenUndecryptable string
 
 	// Tool info
 	ToolCount int
@@ -83,6 +89,18 @@ type HealthCalculatorInput struct {
 	// RetryCount is the number of consecutive failed connection attempts, used
 	// only to say how many were made before giving up.
 	RetryCount int
+
+	// NetworkFailure reports that the server's current Error is a network
+	// failure (DNS, dial, refused, timeout before any upstream answered):
+	// mcpproxy retries it automatically and reconnects it as soon as the
+	// network is back (GH #1929). NextRetryAt is when the next automatic
+	// attempt is due, nil when unknown.
+	NetworkFailure bool
+	NextRetryAt    *time.Time
+	// NetworkGaveUp: the client stopped its regular retries (20 failures) and
+	// now probes every 30 minutes, besides reconnecting when the network is
+	// back. The outage then stays an attention item (status error).
+	NetworkGaveUp bool
 
 	// Refresh state (for health status integration - Spec 023)
 	RefreshState       RefreshState // Current refresh state from RefreshManager
@@ -133,7 +151,31 @@ func DefaultHealthConfig() *HealthCalculatorConfig {
 // outcome (disabled, quarantined, connecting, unhealthy, OAuth, refresh) takes
 // precedence and is returned untouched.
 func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *contracts.HealthStatus {
-	return applyCallFailureRate(calculateHealthBase(input, cfg), input)
+	return applyCallFailureRate(applyConnectedUndecryptable(calculateHealthBase(input, cfg), input), input)
+}
+
+// applyConnectedUndecryptable is Spec 123 FR-031 for a connected server: one
+// that connected anonymously (or on a still-valid session) and then needs a
+// sign-in meets the undecryptable stored OAuth row, so `login` (which could
+// not overwrite the row) is replaced by the unhealthy/configure outcome the
+// disconnected branches already return. Only the explicit input field counts
+// here (never LastError text), and only an outcome that was about to offer
+// `login` changes: a connected server that needs no sign-in stays as it was.
+func applyConnectedUndecryptable(status *contracts.HealthStatus, input HealthCalculatorInput) *contracts.HealthStatus {
+	if status == nil || !input.Connected || input.OAuthTokenUndecryptable == "" || status.Action != ActionLogin {
+		return status
+	}
+	status.Level = LevelUnhealthy
+	status.Summary = oauthTokenUndecryptableSummary
+	status.Detail = input.OAuthTokenUndecryptable
+	status.Action = ActionConfigure
+	status.Status = StatusNeedsConfig
+	status.Usable = false
+	status.Actions = []string{ActionConfigure}
+	if status.AdminState == StateQuarantined {
+		status.Actions = []string{ActionConfigure, ActionApprove}
+	}
+	return status
 }
 
 // applyCallFailureRate downgrades a ready, enabled, healthy result to degraded
@@ -180,8 +222,32 @@ func calculateHealthBase(input HealthCalculatorInput, cfg *HealthCalculatorConfi
 		}
 	}
 
+	// Spec 123 FR-031: an undecryptable stored OAuth row. Checked ahead of
+	// every OAuth/login branch: a login cannot overwrite the row, so "log in"
+	// is never the fix; the operator restores the key or discards the row.
+	undecryptable := ""
+	if !input.Connected {
+		undecryptable = input.OAuthTokenUndecryptable
+		if undecryptable == "" {
+			undecryptable = ExtractOAuthTokenUndecryptable(input.LastError)
+		}
+	}
+
 	if input.Quarantined {
 		state := strings.ToLower(input.State)
+
+		if undecryptable != "" {
+			return &contracts.HealthStatus{
+				Level:      LevelUnhealthy,
+				AdminState: StateQuarantined,
+				Summary:    oauthTokenUndecryptableSummary,
+				Detail:     undecryptable,
+				Action:     ActionConfigure,
+				Status:     StatusNeedsConfig,
+				Usable:     false,
+				Actions:    []string{ActionConfigure, ActionApprove},
+			}
+		}
 
 		// FR-010: a quarantined server that ALSO needs OAuth sign-in reports
 		// `login` (was `approve`) — the quarantined branch now checks the same
@@ -287,6 +353,21 @@ func calculateHealthBase(input HealthCalculatorInput, cfg *HealthCalculatorConfi
 		}
 	}
 
+	// 3a. Undecryptable stored OAuth row (Spec 123 FR-031), ahead of the park
+	// and connection-state branches, which would offer restart or login.
+	if undecryptable != "" {
+		return &contracts.HealthStatus{
+			Level:      LevelUnhealthy,
+			AdminState: StateEnabled,
+			Summary:    oauthTokenUndecryptableSummary,
+			Detail:     undecryptable,
+			Action:     ActionConfigure,
+			Status:     StatusNeedsConfig,
+			Usable:     false,
+			Actions:    []string{ActionConfigure},
+		}
+	}
+
 	// 3b. Automatic reconnection permanently given up (GH #1145). Checked before
 	// the connection-state switch because a parked server sits in "error" and
 	// would otherwise render as a generic "Connection error" that looks like it
@@ -332,15 +413,27 @@ func calculateHealthBase(input HealthCalculatorInput, cfg *HealthCalculatorConfi
 		if input.HasEndpointURL && isEndpointAddressError(input.LastError) {
 			action = ActionEditURL
 		}
+		detail := input.LastError
 		if oauthActionApplies(input) {
 			level, action, summary = oauthAttentionState(input.LastError)
+		} else if input.NetworkFailure {
+			// GH #1929: a network failure is temporary from mcpproxy's side —
+			// it retries on its own and reconnects as soon as the network is
+			// back — so it reads as amber "Reconnecting", with when the next
+			// attempt is due. Restart / Edit URL stay offered.
+			level, summary, detail = networkFailureState(summary, input)
 		}
 		statusVal, usable, actions := connectionErrorStatus(action)
+		if input.NetworkFailure && !input.NetworkGaveUp && action == ActionRestart && !oauthActionApplies(input) {
+			// Still retrying on its own: "Connecting" (CLI STATUS, tray, Web
+			// UI), not an attention item. After give-up it stays "error".
+			statusVal = StatusConnecting
+		}
 		return &contracts.HealthStatus{
 			Level:      level,
 			AdminState: StateEnabled,
 			Summary:    summary,
-			Detail:     input.LastError,
+			Detail:     detail,
 			Action:     action,
 			Status:     statusVal,
 			Usable:     usable,
@@ -436,6 +529,25 @@ func calculateHealthBase(input HealthCalculatorInput, cfg *HealthCalculatorConfi
 
 		// Token expired
 		if input.OAuthStatus == "expired" {
+			// GH #1929: an expired token whose refresh is being retried after a
+			// temporary failure (offline, provider 5xx) needs no sign-in — the
+			// refresh succeeds once the network or provider is back. Offering
+			// "Sign in" here sent operators through a browser login for an
+			// outage. A refresh that failed for good (invalid_grant) is
+			// RefreshStateFailed and keeps the sign-in action below.
+			if input.HasRefreshToken && input.RefreshState == RefreshStateRetrying {
+				return &contracts.HealthStatus{
+					Level:      LevelDegraded,
+					AdminState: StateEnabled,
+					Summary:    "Token refresh pending",
+					Detail: "The access token expired and refreshing it failed temporarily; MCPProxy retries automatically. " +
+						formatRefreshRetryDetail(input.RefreshRetryCount, input.RefreshNextAttempt, input.RefreshLastError),
+					Action:  ActionViewLogs,
+					Status:  StatusConnecting,
+					Usable:  false,
+					Actions: []string{ActionViewLogs},
+				}
+			}
 			return &contracts.HealthStatus{
 				Level:      LevelUnhealthy,
 				AdminState: StateEnabled,
@@ -717,6 +829,8 @@ func formatErrorSummary(lastError string) string {
 		// Specific patterns first
 		{"no such host", "Host not found"},
 		{"connection refused", "Connection refused"},
+		{"actively refused", "Connection refused"},
+		{"forcibly closed by the remote host", "Connection reset"},
 		{"connection reset", "Connection reset"},
 		{"timeout", "Connection timeout"},
 		{"EOF", "Connection closed"},
@@ -760,6 +874,39 @@ func formatExpiringTokenSummary(timeUntilExpiry time.Duration) string {
 		return "Token expiring in 1h"
 	}
 	return fmt.Sprintf("Token expiring in %dh", hours)
+}
+
+// networkFailureState renders a network failure as temporary: amber, a
+// "Reconnecting" summary naming the cause, and a detail saying that mcpproxy
+// retries on its own, when the next attempt is due, and the last error.
+func networkFailureState(cause string, input HealthCalculatorInput) (level, summary, detail string) {
+	if cause == "" {
+		cause = "Network unreachable"
+	}
+	summary = "Reconnecting: " + strings.ToLower(cause[:1]) + cause[1:]
+	detail = "MCPProxy could not reach the server and retries automatically; it reconnects as soon as the network is back."
+	if input.NextRetryAt != nil && !input.NextRetryAt.IsZero() {
+		if until := time.Until(*input.NextRetryAt); until > 0 {
+			detail += fmt.Sprintf(" Next scheduled attempt in about %s (%s).", formatRetryWait(until), input.NextRetryAt.Format(time.RFC3339))
+		} else {
+			detail += " Next attempt: at the next health check."
+		}
+	}
+	if input.NetworkGaveUp {
+		detail += " Regular retries stopped after repeated failures; it is probed every 30 minutes and reconnected at once when the network changes or comes back."
+	}
+	if input.LastError != "" {
+		detail += " Last error: " + input.LastError
+	}
+	return LevelDegraded, summary, detail
+}
+
+// formatRetryWait renders a wait as whole seconds or minutes.
+func formatRetryWait(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Round(time.Second)/time.Second))
+	}
+	return fmt.Sprintf("%dm", int(d.Round(time.Minute)/time.Minute))
 }
 
 // formatRefreshRetryDetail formats the detail message for a refresh retry state.
@@ -835,6 +982,10 @@ func isOAuthRelatedError(err string) bool {
 		"i/o timeout",
 		"context deadline exceeded",
 		"no route to host",
+		// Windows wordings (GH #1929 CI)
+		"actively refused",
+		"forcibly closed by the remote host",
+		"aborted by the software in your host machine",
 	}
 	for _, pattern := range connectionPatterns {
 		if stringutil.ContainsIgnoreCase(err, pattern) {
@@ -1000,6 +1151,20 @@ func ExtractMissingSecret(lastError string) string {
 		return ""
 	}
 
+	// Pattern: "unresolved secret reference ${keyring:NAME} in Headers[...]"
+	// (core.UnresolvedSecretError, release QA F9): the connection was refused
+	// before any request, for any secret type.
+	const unresolvedPrefix = "unresolved secret reference ${"
+	if idx := findSubstring(lastError, unresolvedPrefix); idx >= 0 {
+		start := idx + len(unresolvedPrefix)
+		if end := findChar(lastError[start:], '}'); end > 0 {
+			ref := lastError[start : start+end]
+			if colon := findChar(ref, ':'); colon >= 0 && colon+1 < len(ref) {
+				return ref[colon+1:]
+			}
+		}
+	}
+
 	// Pattern: "environment variable VARNAME not found or empty"
 	const prefix = "environment variable "
 	const suffix = " not found or empty"
@@ -1020,6 +1185,35 @@ func ExtractMissingSecret(lastError string) string {
 	}
 
 	return ""
+}
+
+// oauthTokenUndecryptableSummary is the health summary of a server whose
+// stored OAuth row cannot be decrypted (Spec 123).
+const oauthTokenUndecryptableSummary = "Stored sign-in cannot be decrypted"
+
+// IsOAuthTokenUndecryptable reports whether hs is the undecryptable-row outcome.
+func IsOAuthTokenUndecryptable(hs *contracts.HealthStatus) bool {
+	return hs != nil && hs.Summary == oauthTokenUndecryptableSummary
+}
+
+// oauthTokenUndecryptableMarker starts the detail sentence the OAuth layer
+// writes for an undecryptable row (oauth.TokenUndecryptableError).
+const oauthTokenUndecryptableMarker = "stored OAuth token cannot be decrypted:"
+
+// ExtractOAuthTokenUndecryptable returns the "stored OAuth token cannot be
+// decrypted: <reason>" sentence from a connection error, or "" when the error
+// is about something else. The sentence ends at the first ';' or newline (the
+// producer appends the ways out after it).
+func ExtractOAuthTokenUndecryptable(lastError string) string {
+	i := strings.Index(lastError, oauthTokenUndecryptableMarker)
+	if i < 0 {
+		return ""
+	}
+	detail := lastError[i:]
+	if j := strings.IndexAny(detail, ";\n"); j >= 0 {
+		detail = detail[:j]
+	}
+	return strings.TrimSpace(detail)
 }
 
 // ExtractOAuthConfigError extracts an OAuth configuration error from the error message.

@@ -113,6 +113,11 @@ type directCatalogEntry struct {
 	// catalog from read- and write-scoped tokens and disagreeing with dispatch
 	// (D10 / D13 rule 3).
 	RequiredPermission string
+
+	// OutputSchemaListed records whether the registered listing of this entry
+	// carries an outputSchema (set at render time, like RenderedDescription).
+	// Only then must a call keep an oversize structuredContent (issue #1932).
+	OutputSchemaListed bool
 }
 
 // toolMetadata projects an entry back onto the shape the shared entry builder

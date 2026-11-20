@@ -73,11 +73,21 @@ func (r *Runtime) StartBackgroundInitialization() {
 		}
 		r.mu.RUnlock()
 
-		if deleted, err := r.storageManager.CleanupOrphanedOAuthTokens(validServerNames); err != nil {
+		// Spec 123 FR-015: a row the cleanup cannot decode is never deleted;
+		// it is kept and reported, and one that names no configured server
+		// is listed as an undecryptable orphan for the operator to discard.
+		if rep, err := r.storageManager.CleanupOrphanedOAuthTokensReport(validServerNames); err != nil {
 			r.logger.Warn("Failed to cleanup orphaned OAuth tokens", zap.Error(err))
-		} else if deleted > 0 {
-			r.logger.Info("Cleaned up orphaned OAuth tokens during startup",
-				zap.Int("deleted", deleted))
+		} else {
+			if rep.Deleted > 0 {
+				r.logger.Info("Cleaned up orphaned OAuth tokens during startup",
+					zap.Int("deleted", rep.Deleted))
+			}
+			if len(rep.UndecryptableKept) > 0 {
+				r.logger.Warn("Kept OAuth token rows that cannot be decrypted with the configured key",
+					zap.Strings("rows", rep.UndecryptableKept),
+					zap.Strings("orphans", rep.UndecryptableOrphans))
+			}
 		}
 	}
 
@@ -101,6 +111,7 @@ func (r *Runtime) StartBackgroundInitialization() {
 				zap.Duration("valid_for", time.Until(expiresAt)),
 				zap.String("binding", binding.String()))
 			r.refreshManager.OnTokenSavedFor(serverName, expiresAt, binding)
+			r.notifyTokenSaved(serverName)
 		})
 		r.logger.Info("Token saved callback registered for proactive refresh")
 	}
@@ -314,6 +325,9 @@ func (r *Runtime) backgroundToolIndexing(ctx context.Context) {
 		case <-timer.C:
 			if sweep {
 				_ = r.discoverAndIndexTools(ctx, true)
+				// Spec 125 D6: the periodic sweep also re-reads skills, after and
+				// apart from tool discovery.
+				r.triggerSkillsRefreshAll()
 			}
 		case <-ctx.Done():
 			timer.Stop()
@@ -694,6 +708,9 @@ func (r *Runtime) onUpstreamToolsListChanged(ctx context.Context, serverName str
 // Close replaces the app context with context.Background(), so a follow-up
 // that starts after shutdown would otherwise run uncancelled (Sol r7 P2).
 func (r *Runtime) onServerConnectedDiscovery(serverName string) {
+	// Spec 125 D6: skills are read on their own goroutine, never inside tool
+	// discovery; with enable_skills off this does nothing.
+	r.triggerSkillsRefresh(serverName)
 	r.runCoalescedDiscovery(serverName, func(followUp bool) error {
 		ctx, cancel := context.WithTimeout(r.lifetimeContext(), discoveryRunTimeout)
 		defer cancel()

@@ -88,7 +88,7 @@ References can be used in:
 - **Server arguments** (`args` field)
 - **Server headers** (`headers` field)
 
-> **Note:** The `url` field does not support secret references. If your server URL contains credentials, use environment variables or headers instead.
+> **Note:** Secret references are resolved in the `url` field along with `env`, `args`, and `headers`. For HTTP credentials, prefer `headers` so the URL stays free of credentials.
 
 ### Configuration Example
 
@@ -135,6 +135,14 @@ mcpproxy secrets set my-api-key --from-env=MY_API_KEY
 # From stdin
 mcpproxy secrets set my-api-key --from-stdin < secret.txt
 ```
+
+**macOS:** writing to the Keychain from a terminal needs an explicit opt-in. Prefix the command with `MCPPROXY_KEYRING_WRITE=1`:
+
+```bash
+MCPPROXY_KEYRING_WRITE=1 mcpproxy secrets set my-api-key
+```
+
+Without it the command stops before asking for the value and prints this command. See [macOS: storing a secret from a terminal](#macos-storing-a-secret-from-a-terminal) for the reason. Linux and Windows need no opt-in, and neither does reading a secret.
 
 Avoid putting a literal secret in the command arguments: shells may keep it in history and processes may expose their arguments. When stdin is a terminal, the prompt reads the secret without echoing typed characters. Otherwise, the CLI reads the secret from stdin; `--from-stdin` explicitly selects that input mode for a trusted secret source.
 
@@ -435,8 +443,10 @@ mcpproxy doctor
 
 ```bash
 mcpproxy secrets set my-api-key
-# Enter secret value: (typed characters are not echoed when stdin is a terminal)
+# Enter secret value: (input is hidden)
 ```
+
+On macOS, run it as `MCPPROXY_KEYRING_WRITE=1 mcpproxy secrets set my-api-key` ([why](#macos-storing-a-secret-from-a-terminal)).
 
 Or use the Web UI: click **Add Value** next to the missing secret.
 
@@ -450,7 +460,7 @@ MCPProxy detects the change and restarts `my-server` with the resolved environme
 
 **Symptoms:** Error message "keyring is not available on this system" or "provider for keyring is not available."
 
-**macOS:** Keychain Access should work out of the box. If MCPProxy runs as a background daemon (e.g., via launchd), ensure it has access to the login keychain. You may need to unlock the keychain first:
+**macOS:** Reading secrets from the Keychain works out of the box. Storing one from a terminal needs an opt-in — see [macOS: storing a secret from a terminal](#macos-storing-a-secret-from-a-terminal). If MCPProxy runs as a background daemon (e.g., via launchd), ensure it has access to the login keychain. You may need to unlock the keychain first:
 
 ```bash
 security unlock-keychain ~/Library/Keychains/login.keychain-db
@@ -490,6 +500,30 @@ For headless Linux servers without a desktop environment, consider using environ
    mcpproxy serve --log-level=debug
    ```
    Look for log entries containing "Failed to resolve secret" or "CRITICAL: Failed to resolve secret."
+
+### macOS: storing a secret from a terminal
+
+**Symptoms:** `mcpproxy secrets set <name>` stops with "storing a secret in the macOS Keychain from a terminal requires an explicit opt-in". Versions up to v0.73.0 asked for the value first and then failed with "keyring unavailable (backend not usable on this system …)".
+
+Nothing is wrong with the Keychain; it was not consulted. On macOS, MCPProxy does not write to the Keychain unless it is told to: when the default keychain is missing or locked, macOS answers a write with a system dialog that the calling program cannot cancel, and one of those dialogs offers to reset the keychain. A program that may be running unattended must not trigger that.
+
+To store a secret from a terminal, opt in for that one command:
+
+```bash
+MCPPROXY_KEYRING_WRITE=1 mcpproxy secrets set my-api-key
+```
+
+`1`, `true` and `yes` are accepted. macOS may then show a Keychain prompt; answer it as you would for any other application.
+
+| How MCPProxy runs | Keychain writes |
+|-------------------|-----------------|
+| Core launched by the tray app | Enabled — the tray sets the opt-in for the core it starts |
+| `mcpproxy` commands in a terminal | Opt in per command with `MCPPROXY_KEYRING_WRITE=1` |
+| `mcpproxy serve` started by hand, launchd or another supervisor | Set `MCPPROXY_KEYRING_WRITE=1` in its environment if the Web UI or REST API should store secrets |
+
+The opt-in concerns storing only. Reading (`secrets get`, `${keyring:name}` references in the config) never needs it. A terminal does not inherit the tray's setting: each `mcpproxy` command is its own process.
+
+Other reasons the same command can refuse are reported as such: a CI environment or a root shell has no user keychain, and a keychain that does not answer a probe is reported as unresponsive.
 
 ### macOS Keychain Access Prompts
 

@@ -127,6 +127,17 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 		zap.String("server_key", p.serverKey))
 
 	record, err := p.storage.GetOAuthTokenBound(p.serverKey, p.cb)
+	if IsTokenUndecryptable(err) {
+		// Spec 123 FR-031: not ErrNoToken. mcp-go starts its authorization
+		// flow on ErrNoToken and passes any other error through, so the
+		// connection reports MCPX_OAUTH_TOKEN_UNDECRYPTABLE instead of
+		// offering a login that could not overwrite the row.
+		p.logger.Warn("Stored OAuth token cannot be decrypted",
+			zap.String("server_name", p.serverName),
+			zap.String("server_key", p.serverKey),
+			zap.Error(err))
+		return nil, TokenUndecryptableError(p.serverName, err)
+	}
 	if err != nil {
 		p.logger.Debug("❌ No stored OAuth token found",
 			zap.String("server_name", p.serverName),
@@ -323,6 +334,10 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 	flightGen, inFlight := FlightGeneration(ctx)
 	login, isLogin := loginClientFrom(ctx)
 	discarded := false
+	// A successful token response is being stored: from here until the
+	// coordinator has been told (NoteTokenSavedFor below), it must not report
+	// the credential as transiently failing (GH #1929).
+	defer DefaultRefreshCoordinator().BeginTokenSaveFor(p.serverKey, p.cb)()
 	if hook := oauthBeforePersistHook; hook != nil {
 		hook(p.serverName, p.cb)
 	}
@@ -359,6 +374,11 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 			zap.String("server", p.serverName),
 			zap.String("server_key", p.serverKey),
 			zap.Error(err))
+		if IsTokenUndecryptable(err) {
+			// Spec 123 FR-013: the bound writer refused to replace a row it
+			// cannot read; the stored bytes are unchanged.
+			return fmt.Errorf("failed to save OAuth token: %w", TokenUndecryptableError(p.serverName, err))
+		}
 		return fmt.Errorf("failed to save OAuth token: %w", err)
 	}
 	if discarded {
@@ -639,6 +659,7 @@ func (m *coordinatedMemoryTokenStore) SaveToken(ctx context.Context, token *clie
 			return nil // superseded by a newer grant (FR-006a)
 		}
 	}
+	defer DefaultRefreshCoordinator().BeginTokenSaveFor(m.key(), commitview.CredentialBinding{})()
 	err := m.inner.SaveToken(ctx, token)
 	if err == nil {
 		m.savedAt.Store(time.Now().UnixNano())

@@ -112,7 +112,7 @@ func (s *Server) handleGetConnectStatus(w http.ResponseWriter, r *http.Request) 
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       client path   string true "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
+// @Param       client path   string true "Client ID (claude-code, claude-desktop, copilot, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Success     200    {object} contracts.APIResponse "ClientStatus"
 // @Failure     403    {object} contracts.ErrorResponse "Administrator credentials required"
 // @Failure     404    {object} contracts.ErrorResponse "Unknown client"
@@ -170,7 +170,7 @@ func (s *Server) handleGetConnectClientStatus(w http.ResponseWriter, r *http.Req
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       client      path  string true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
+// @Param       client      path  string true  "Client ID (claude-code, claude-desktop, copilot, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Param       server_name query string false "Entry name to preview (defaults to mcpproxy); mirror the value passed to POST connect"
 // @Param       profile     query string false "Profile the client credential would bind to (empty = All servers); mirror POST connect"
 // @Param       mode        query string false "locked|switchable; mirror POST connect" Enums(locked, switchable)
@@ -244,7 +244,7 @@ func (s *Server) handleConnectClientPreview(w http.ResponseWriter, r *http.Reque
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       client path   string         true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
+// @Param       client path   string         true  "Client ID (claude-code, claude-desktop, copilot, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Param       body   body   ConnectRequest false "Optional connection parameters (server_name, force, precondition_token, profile, mode, keyless)"
 // @Success     200    {object} contracts.APIResponse "ConnectResult (credential is the masked mcp_cli_ value, with token_name, profile, mode, keyless and rotation)"
 // @Failure     400    {object} ClientBindingErrorResponse "Bad request; field names the offending input (profile, mode, keyless)"
@@ -378,7 +378,7 @@ func applyClientConnected(state *storage.OnboardingState, clientID string, now t
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       client path   string         true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
+// @Param       client path   string         true  "Client ID (claude-code, claude-desktop, copilot, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Param       body   body   ConnectRequest false "Optional parameters (server_name)"
 // @Success     200    {object} contracts.APIResponse "ConnectResult"
 // @Failure     400    {object} contracts.ErrorResponse "Bad request"
@@ -534,7 +534,7 @@ type UndoConnectRequest struct {
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       client path   string             true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
+// @Param       client path   string             true  "Client ID (claude-code, claude-desktop, copilot, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Param       body   body   UndoConnectRequest false "Undo parameters (server_name, backup_name = the bare filename of the backup the preceding connect returned)"
 // @Success     200    {object} contracts.APIResponse "ConnectResult (action restored|deleted)"
 // @Failure     400    {object} contracts.ErrorResponse "Bad request (e.g. backup_name is a path, or not a backup of this client's config)"

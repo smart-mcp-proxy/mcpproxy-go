@@ -88,6 +88,7 @@ Examples:
   mcpproxy token create --name ci --profile work-readonly
   mcpproxy token create --name deploy-bot --servers github,gitlab --permissions read,write
   mcpproxy token create --name ci-agent --servers "*" --permissions read --expires 7d
+  mcpproxy token create --name keychain-claude --profile work-readonly --expires never
   mcpproxy token create --name loop-guard --profile work-readonly --rate-limit 60 --rate-burst 10
 
 --rate-limit caps how many upstream tool calls the token may make: that many a
@@ -102,7 +103,7 @@ default in the config; leave the flag out to follow that default.`,
 	cmd.Flags().StringVar(&tokenProfile, "profile", "", "Pin the token to a profile: its scope comes from the profile and it cannot switch (recommended)")
 	cmd.Flags().StringVar(&tokenServers, "servers", "", "Legacy scope: comma-separated allowed server names, or \"*\" for all (use --profile instead)")
 	cmd.Flags().StringVar(&tokenPermissions, "permissions", "", "Legacy scope: comma-separated permission tiers read, write, destructive (use --profile instead)")
-	cmd.Flags().StringVar(&tokenExpires, "expires", "30d", "Token expiry duration (e.g., 7d, 30d, 90d, 365d)")
+	cmd.Flags().StringVar(&tokenExpires, "expires", "30d", "Token expiry duration (e.g., 7d, 30d, 90d, 365d), or \"never\" for a token that does not expire")
 	cmd.Flags().IntVar(&tokenRateLimit, "rate-limit", 0, "Limit this token to N upstream tool calls per minute (0 = no limit, overriding the config default)")
 	cmd.Flags().IntVar(&tokenRateBurst, "rate-burst", 0, "Calls this token may make at once after a quiet spell (default: the --rate-limit value)")
 	cmd.Flags().StringVar(&tokenProfilePin, "profile-pin", "", "Deprecated alias of --profile")
@@ -282,7 +283,7 @@ func runTokenCreate(cmd *cobra.Command, _ []string) error {
 	if pin := getMapString(result, "profile_pin"); pin != "" {
 		fmt.Printf("  Profile:     %s\n", pin)
 	}
-	printField("  Expires:     ", result, "expires_at")
+	printExpiryField("  Expires:     ", result)
 	if line := formatTokenRateLimit(result["rate_limit"]); line != "" {
 		fmt.Printf("  Rate limit:  %s\n", line)
 	}
@@ -416,12 +417,7 @@ func runTokenList(_ *cobra.Command, _ []string) error {
 			kind = "agent"
 		}
 
-		expiresAt := getMapString(tok, "expires_at")
-		if expiresAt != "" {
-			if t, parseErr := time.Parse(time.RFC3339, expiresAt); parseErr == nil {
-				expiresAt = t.Format("2006-01-02 15:04")
-			}
-		}
+		expiresAt := formatTokenExpiry(getMapString(tok, "expires_at"), "2006-01-02 15:04", kind)
 
 		rows = append(rows, []string{
 			getMapString(tok, "name"), getMapString(tok, "token_prefix"), kind,
@@ -503,7 +499,7 @@ func runTokenShow(_ *cobra.Command, args []string) error {
 		fmt.Printf("Rate limit:     %s\n", line)
 	}
 	printField("Created:        ", result, "created_at")
-	printField("Expires:        ", result, "expires_at")
+	printExpiryField("Expires:        ", result)
 	if lastUsed := getMapString(result, "last_used_at"); lastUsed != "" {
 		fmt.Printf("Last Used:      %s\n", lastUsed)
 	}
@@ -718,6 +714,36 @@ func getMapString(m map[string]interface{}, key string) string {
 
 func printField(label string, m map[string]interface{}, key string) {
 	if v := getMapString(m, key); v != "" {
+		fmt.Printf("%s%s\n", label, v)
+	}
+}
+
+// formatTokenExpiry renders an expires_at value for display. A token that never
+// expires carries Go's zero time ("0001-01-01T00:00:00Z") on the wire, which is
+// shown as "never" rather than as a date in year 1. A client credential must
+// carry an expiry, so a zero one is shown as invalid rather than "never".
+func formatTokenExpiry(raw, layout, kind string) string {
+	if raw == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return raw
+	}
+	if t.IsZero() {
+		if kind == "client" {
+			return "invalid (no expiry)"
+		}
+		return "never"
+	}
+	if layout == "" {
+		return raw
+	}
+	return t.Format(layout)
+}
+
+func printExpiryField(label string, m map[string]interface{}) {
+	if v := formatTokenExpiry(getMapString(m, "expires_at"), "", getMapString(m, "kind")); v != "" {
 		fmt.Printf("%s%s\n", label, v)
 	}
 }
