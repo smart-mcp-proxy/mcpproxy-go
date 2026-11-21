@@ -1,0 +1,299 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mcpproxy/telemetry/schema-17/day_two",
+  "title": "Heartbeat schema 17 additions (Spec 126 PR-A, instrumentation only)",
+  "description": "Schema 17 carries only the instrumentation slice (spec FR-033..FR-038). Onboarding fields (starter_*, second_client_*, clients_day0*, summary_views, activation.first_tool_indexed_*) ship with PR-B..PR-D at the next free schema version each; see later_versions. A field is measured only on heartbeats with schema_version >= its introducing version; absence means 'not measured'. Cross-field rules (enforced by the receiver too): a fresh install_origin requires install_age, an existing one forbids it, and upstream_outcomes.window_age is forbidden when day_two.install_origin is existing.",
+  "type": "object",
+  "properties": {
+    "upstream_outcomes": {
+      "description": "Reset-on-accept, both editions, same window as heartbeat_id, frozen at drain (retries byte-identical). One outcome per logical upstream call that dispatched at least one request. Copied by the receiver into heartbeat_events (FR-039). coverage is partial only when the persisted undelivered-window marker shows lost counts (FR-036).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "succeeded",
+        "unusable",
+        "succeeded_non_starter",
+        "coverage"
+      ],
+      "properties": {
+        "succeeded": {
+          "$ref": "#/$defs/bucket"
+        },
+        "unusable": {
+          "$ref": "#/$defs/bucket"
+        },
+        "succeeded_non_starter": {
+          "$ref": "#/$defs/bucket"
+        },
+        "coverage": {
+          "enum": [
+            "full",
+            "partial"
+          ]
+        },
+        "window_age": {
+          "description": "Install age (UTC calendar dates from the anchor) when the window opened; present only when day_two.install_origin = fresh (an anchor exists).",
+          "enum": [
+            "d0_6",
+            "d7_13",
+            "d14_plus"
+          ]
+        }
+      }
+    },
+    "day_two": {
+      "description": "Personal edition only; omitted on the server edition.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "install_origin",
+        "success_scope_ever"
+      ],
+      "properties": {
+        "install_origin": {
+          "enum": [
+            "fresh",
+            "existing"
+          ]
+        },
+        "install_age": {
+          "description": "Present only when install_origin = fresh. Difference in UTC calendar dates between the anchor and payload build time (constant within one UTC date).",
+          "enum": [
+            "d0_6",
+            "d7_13",
+            "d14_plus"
+          ]
+        },
+        "success_scope_ever": {
+          "enum": [
+            "none",
+            "starter_only",
+            "non_starter"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "install_origin": {
+                "const": "fresh"
+              }
+            },
+            "required": [
+              "install_origin"
+            ]
+          },
+          "then": {
+            "required": [
+              "install_age"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "install_origin": {
+                "const": "existing"
+              }
+            },
+            "required": [
+              "install_origin"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "install_age"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "bucket": {
+      "enum": [
+        "0",
+        "1-10",
+        "11-100",
+        "101-1000",
+        "1000+"
+      ]
+    }
+  },
+  "later_versions": {
+    "description": "Not part of schema 17. Each group takes the next free schema version when its PR merges.",
+    "PR-B": {
+      "activation": {
+        "first_tool_indexed_ever": {
+          "type": "boolean"
+        },
+        "first_tool_indexed_after": {
+          "enum": [
+            "",
+            "lt_10m",
+            "10m_1h",
+            "1h_24h",
+            "1d_7d",
+            "gt_7d"
+          ]
+        }
+      },
+      "day_two": {
+        "starter_eligibility": {
+          "enum": [
+            "",
+            "eligible",
+            "launcher_missing",
+            "name_taken",
+            "reference_overridden",
+            "already_configured",
+            "tools_present",
+            "held_tools",
+            "not_fresh"
+          ]
+        },
+        "starter_launcher": {
+          "enum": [
+            "",
+            "uvx",
+            "npx_only",
+            "none"
+          ]
+        },
+        "starter_offered": {
+          "type": "boolean"
+        },
+        "starter_added": {
+          "type": "boolean"
+        },
+        "starter_live": {
+          "type": "boolean"
+        },
+        "starter_declined": {
+          "type": "boolean"
+        },
+        "starter_last_failure": {
+          "enum": [
+            "",
+            "connect_failed",
+            "capture_timeout",
+            "approval_abandoned"
+          ]
+        },
+        "starter_kind": {
+          "enum": [
+            "",
+            "time",
+            "sequentialthinking"
+          ]
+        },
+        "starter_surface": {
+          "enum": [
+            "",
+            "wizard",
+            "home_web",
+            "home_native"
+          ]
+        }
+      }
+    },
+    "PR-C": {
+      "day_two": {
+        "second_client_offered": {
+          "type": "boolean"
+        },
+        "second_client_none_detected": {
+          "type": "boolean"
+        },
+        "second_client_skipped": {
+          "type": "boolean"
+        },
+        "second_client_connected": {
+          "type": "boolean"
+        },
+        "clients_day0": {
+          "enum": [
+            "",
+            "0",
+            "1",
+            "2",
+            "3_plus"
+          ]
+        },
+        "clients_day0_final": {
+          "type": "boolean"
+        }
+      }
+    },
+    "PR-D": {
+      "day_two": {
+        "summary_views": {
+          "description": "Reset-on-accept; the receiver copy (FR-039) is extended with it.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "web": {
+              "enum": [
+                "0",
+                "1",
+                "2_5",
+                "6_plus"
+              ]
+            },
+            "tray": {
+              "enum": [
+                "0",
+                "1",
+                "2_5",
+                "6_plus"
+              ]
+            },
+            "cli": {
+              "enum": [
+                "0",
+                "1",
+                "2_5",
+                "6_plus"
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "day_two": {
+            "properties": {
+              "install_origin": {
+                "const": "existing"
+              }
+            },
+            "required": [
+              "install_origin"
+            ]
+          }
+        },
+        "required": [
+          "day_two"
+        ]
+      },
+      "then": {
+        "properties": {
+          "upstream_outcomes": {
+            "not": {
+              "required": [
+                "window_age"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}
