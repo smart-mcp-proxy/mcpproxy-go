@@ -1842,6 +1842,11 @@ func (p *MCPProxyServer) RefreshSkillsAvailability() {
 		}
 		p.directRefreshMu.Unlock()
 	}
+
+	// Spec 125 D14: a single-server instance's capabilities are fixed when it
+	// is built, so an endpoint whose native skills surface no longer matches
+	// the switch is retired and rebuilt on its next request.
+	p.retireStaleNativeSurfaces()
 }
 
 // buildAggregatedServerPrompts combines built-in prompts with upstream

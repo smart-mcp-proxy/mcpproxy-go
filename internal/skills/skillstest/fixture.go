@@ -86,6 +86,8 @@ type Fixture struct {
 	requests []Request
 	failList bool
 	delay    time.Duration
+	// instructions is sent in the initialize result when not empty.
+	instructions string
 }
 
 // New starts the fixture and registers its shutdown with t.
@@ -194,6 +196,14 @@ func (f *Fixture) SetListFailure(fail bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failList = fail
+}
+
+// SetInstructions makes the initialize result carry instructions. Set it
+// before the consumer connects.
+func (f *Fixture) SetInstructions(text string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.instructions = text
 }
 
 // SetDelay makes every answer wait d first.
@@ -347,11 +357,17 @@ func (f *Fixture) handle(w http.ResponseWriter, r *http.Request) {
 			caps["extensions"] = map[string]any{skills.ExtensionKey: map[string]any{}}
 		}
 		w.Header().Set("Mcp-Session-Id", "skillstest-session")
-		writeResult(w, req.ID, map[string]any{
+		result := map[string]any{
 			"protocolVersion": "2025-11-25",
 			"capabilities":    caps,
 			"serverInfo":      map[string]any{"name": "skillstest", "version": "1.0.0"},
-		})
+		}
+		f.mu.Lock()
+		if f.instructions != "" {
+			result["instructions"] = f.instructions
+		}
+		f.mu.Unlock()
+		writeResult(w, req.ID, result)
 	case "tools/list":
 		writeResult(w, req.ID, map[string]any{"tools": []any{map[string]any{
 			"name":        "echo",

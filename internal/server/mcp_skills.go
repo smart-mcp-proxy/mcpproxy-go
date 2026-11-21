@@ -70,6 +70,7 @@ const (
 // it behind this interface so every handler test runs without the real catalog.
 type skillsCatalog interface {
 	AvailableSkill(serverName, skillPath string) (*runtime.AvailableSkill, error)
+	ListAvailableSkills(serverName string) ([]*runtime.AvailableSkill, error)
 	AvailableSkillFile(serverName, skillPath, relPath string) ([]byte, storage.SkillFile, *runtime.AvailableSkill, error)
 	SearchAvailableSkills(query string, limit int, reach runtime.SkillReach) ([]runtime.AvailableSkill, int, error)
 }
