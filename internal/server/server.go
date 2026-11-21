@@ -3804,6 +3804,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// /events) clear it per-request via streamingNoDeadline so slow tool calls
 	// and SSE streams survive without weakening the rest of the surface.
 	readTimeout, writeTimeout, idleTimeout := httpServerTimeouts(cfg)
+	requestsCtx, cancelRequests := context.WithCancel(context.Background())
 
 	s.mu.Lock()
 	s.httpServer = &http.Server{
@@ -3818,7 +3819,11 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		ConnState: s.logConnectionState,
 		// Tag connections with their source (TCP vs Tray)
 		ConnContext: taggedConnContext,
+		BaseContext: func(net.Listener) context.Context { return requestsCtx },
 	}
+	// Shutdown waits for every active request, and the SSE / MCP streams never end on their
+	// own: after a short grace for ordinary requests, cancel their context so they return.
+	s.httpServer.RegisterOnShutdown(func() { time.AfterFunc(2*time.Second, cancelRequests) })
 	s.running = true
 	s.runtime.SetRunning(true)
 	s.listenAddr = displayAddr
