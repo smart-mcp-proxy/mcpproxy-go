@@ -100,6 +100,42 @@ func isBashLikeShell(shell string) bool {
 	return strings.Contains(lower, "bash") || strings.Contains(lower, "sh")
 }
 
+// isCmdExeShell reports whether shell is the Windows command interpreter
+// (cmd.exe) rather than a POSIX shell or Git Bash.
+//
+// It is deliberately independent of goos: callers know from WrapWithUserShell
+// which dialect the command string was built for, and a test on any host can
+// name a cmd.exe path without pretending to be Windows.
+func isCmdExeShell(shell string) bool {
+	if i := strings.LastIndexAny(shell, "\\/"); i >= 0 {
+		shell = shell[i+1:]
+	}
+	return strings.TrimSuffix(strings.ToLower(shell), ".exe") == "cmd"
+}
+
+// cmdExeCommandLine builds the lpCommandLine that hands commandString to
+// cmd.exe untouched.
+//
+// cmd.exe's /S rule is "strip the first and last quote of the string after
+// /c, then interpret what is left", so the string is wrapped in one extra
+// pair of quotes: the shell-quoted command inside survives intact, whether or
+// not it starts with its own quote. This is the part os/exec cannot do for
+// us: passing the same string as one argv element makes Go escape every
+// embedded quote as \", and cmd.exe has no backslash escape, so it looks for
+// a program whose name starts with a backslash-quote (#1960).
+//
+// shell is prefixed only when it is a bare name or an unquoted path. A path
+// that itself needs quoting cannot be prefixed at all — cmd.exe would strip
+// the pair around the whole line — and does not need to be: os/exec passes
+// the executable separately as lpApplicationName.
+func cmdExeCommandLine(shell, commandString string) string {
+	line := "/s /c \"" + commandString + "\""
+	if shell != "" && !strings.ContainsAny(shell, " \t") {
+		line = shell + " " + line
+	}
+	return line
+}
+
 // resolveLoginShell returns the user's preferred login shell, respecting the
 // $SHELL environment variable and falling back to platform defaults.
 func resolveLoginShell() string {

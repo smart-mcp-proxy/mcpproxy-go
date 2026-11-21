@@ -15,6 +15,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/launcher"
 )
 
@@ -349,6 +350,10 @@ func (c *Client) buildLauncherCmd(_ context.Context, willUseDocker bool) (*exec.
 		zap.Strings("args", logSafeArgs(finalArgs)),
 		zap.String("working_dir", c.config.WorkingDir),
 		zap.Bool("docker", willUseDocker))
+
+	// Windows: cmd.exe cannot take the wrapped command string as one argv
+	// element; hand it over as the process command line instead (#1960).
+	shellwrap.ApplyCommandLine(cmd)
 
 	return cmd, willUseDocker, cidFile, nil
 }
