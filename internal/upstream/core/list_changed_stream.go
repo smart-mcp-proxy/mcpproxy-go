@@ -215,6 +215,7 @@ func (c *Client) newListChangedStream(cl *client.Client, info *mcp.InitializeRes
 	opts.ProtocolVersion = info.ProtocolVersion
 	opts.Logger = c.logger
 	opts.OnNotification = queue.push
+	opts.OnRequest = c.relayHandler().Answer
 	ls := cfg.NewListenStream(sh, opts)
 
 	ctx, cancel := context.WithCancel(c.Gate().Context())
