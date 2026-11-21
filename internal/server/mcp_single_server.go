@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -47,23 +48,83 @@ type singleServerSurface struct {
 	// stay byte-identical while it moves, and the stamp and handler close over
 	// it, so a re-registration is skipped only when BOTH fingerprints match.
 	routingFP string
+
+	// Spec 125 D14. native: the instance was built with the skills extension
+	// and resource capabilities (both are fixed when an instance is built).
+	// gen: the endpoint generation the instance belongs to. transport: its
+	// Streamable HTTP transport, created on first request under the lifecycle
+	// lock. retired is closed when the endpoint is retired.
+	native    bool
+	gen       uint64
+	transport *mcpserver.StreamableHTTPServer
+	retired   chan struct{}
+}
+
+// singleServerEndpoint is what one request on /mcp/s/<server> uses, taken as
+// one value under the lifecycle lock: nothing in it is looked up again while
+// the request runs.
+type singleServerEndpoint struct {
+	name      string
+	server    *mcpserver.MCPServer
+	transport *mcpserver.StreamableHTTPServer
+	gen       uint64
+	native    bool
+	retired   <-chan struct{}
+}
+
+type singleServerEndpointKey struct{}
+
+// withSingleServerEndpoint binds the acquired endpoint to the request, so
+// everything that serves it (the instructions hook included) knows which
+// upstream the instance stands in for without asking the live cache.
+func withSingleServerEndpoint(ctx context.Context, ep *singleServerEndpoint) context.Context {
+	return context.WithValue(ctx, singleServerEndpointKey{}, ep)
+}
+
+func singleServerEndpointFrom(ctx context.Context) *singleServerEndpoint {
+	ep, _ := ctx.Value(singleServerEndpointKey{}).(*singleServerEndpoint)
+	return ep
 }
 
 // SingleServerMCP returns the MCP server for /mcp/s/<name>, creating it on
 // first use, or nil when no upstream server with that name is configured.
-// The returned server is stable for the life of the process: later catalog
-// rebuilds re-register its tools in place.
+// The instance is kept until its endpoint is retired (the native skills
+// surface switched on or off, Spec 125 D14); catalog rebuilds re-register its
+// tools in place.
 func (p *MCPProxyServer) SingleServerMCP(name string) *mcpserver.MCPServer {
 	if name == "" || p.singleServerOpts == nil || !p.upstreamConfigured(name) {
 		return nil
 	}
+	s := p.singleServerSurfaceFor(name)
+	if s == nil {
+		return nil
+	}
+	return s.server
+}
+
+// singleServerSurfaceFor returns the live surface of name, building it (with
+// the native surface when it should have one) when there is none. A surface
+// whose native surface no longer matches the live configuration is retired
+// first, so the switch is followed even when no reload event reached
+// RefreshSkillsAvailability.
+func (p *MCPProxyServer) singleServerSurfaceFor(name string) *singleServerSurface {
+	wantNative := p.singleServerWantsNative(name)
+	var stale *mcpserver.StreamableHTTPServer
 
 	p.singleServersMu.Lock()
 	if s, ok := p.singleServers[name]; ok {
-		p.singleServersMu.Unlock()
-		return s.server
+		if s.native == wantNative {
+			p.singleServersMu.Unlock()
+			return s
+		}
+		stale = p.retireSingleServerLocked(name)
 	}
 	p.singleServersMu.Unlock()
+	shutdownSingleServerTransport(stale)
+
+	// Registered first so it runs after both locks are released.
+	var staleAfterWait *mcpserver.StreamableHTTPServer
+	defer func() { shutdownSingleServerTransport(staleAfterWait) }()
 
 	// Lock order: directRefreshMu, then singleServersMu (the rebuild path
 	// holds the first and takes the second). Holding directRefreshMu while
@@ -74,19 +135,137 @@ func (p *MCPProxyServer) SingleServerMCP(name string) *mcpserver.MCPServer {
 	p.singleServersMu.Lock()
 	defer p.singleServersMu.Unlock()
 
+	// The switch may have moved while this request waited for the locks (and
+	// a refresh that ran meanwhile found nothing to retire): decide again.
+	wantNative = p.singleServerWantsNative(name)
 	if s, ok := p.singleServers[name]; ok {
-		return s.server
+		if s.native == wantNative {
+			return s
+		}
+		staleAfterWait = p.retireSingleServerLocked(name)
+	}
+	opts := p.singleServerOpts
+	if wantNative {
+		opts = append(append([]mcpserver.ServerOption(nil), opts...), nativeSkillsServerOptions()...)
 	}
 	s := &singleServerSurface{
-		name:   name,
-		server: mcpserver.NewMCPServer("mcpproxy-go", mcpServerVersion(), p.singleServerOpts...),
+		name:    name,
+		server:  mcpserver.NewMCPServer("mcpproxy-go", mcpServerVersion(), opts...),
+		native:  wantNative,
+		gen:     p.singleServerGens[name],
+		retired: make(chan struct{}),
 	}
 	if p.singleServers == nil {
 		p.singleServers = map[string]*singleServerSurface{}
 	}
 	p.singleServers[name] = s
 	p.registerSingleServerTools(s, p.loadDirectCatalog())
-	return s.server
+	return s
+}
+
+// acquireSingleServerEndpoint returns the endpoint a request on /mcp/s/<name>
+// is served by: instance, transport and generation together, taken under the
+// lifecycle lock. newTransport builds the transport the first time the
+// instance is served. ok is false when no such server is configured.
+func (p *MCPProxyServer) acquireSingleServerEndpoint(name string, newTransport func(srv *mcpserver.MCPServer, gen uint64) *mcpserver.StreamableHTTPServer) (*singleServerEndpoint, bool) {
+	if name == "" || p.singleServerOpts == nil || !p.upstreamConfigured(name) {
+		return nil, false
+	}
+	// A retirement can land between building the surface and taking it below;
+	// then the next attempt builds the replacement. Two attempts are enough
+	// unless the switch flips again in between, which a third covers.
+	for attempt := 0; attempt < 3; attempt++ {
+		s := p.singleServerSurfaceFor(name)
+		if s == nil {
+			return nil, false
+		}
+		p.singleServersMu.Lock()
+		if cur, ok := p.singleServers[name]; !ok || cur != s {
+			p.singleServersMu.Unlock()
+			continue
+		}
+		if s.transport == nil {
+			s.transport = newTransport(s.server, s.gen)
+		}
+		ep := &singleServerEndpoint{
+			name: name, server: s.server, transport: s.transport,
+			gen: s.gen, native: s.native, retired: s.retired,
+		}
+		p.singleServersMu.Unlock()
+		return ep, true
+	}
+	return nil, false
+}
+
+// retireSingleServerLocked detaches the endpoint of name in one step: the
+// instance leaves the cache, its transport is returned for the caller to shut
+// down after releasing the lock, and the generation advances so a session id
+// issued before is refused. The caller holds singleServersMu.
+func (p *MCPProxyServer) retireSingleServerLocked(name string) *mcpserver.StreamableHTTPServer {
+	s, ok := p.singleServers[name]
+	if !ok {
+		return nil
+	}
+	delete(p.singleServers, name)
+	if p.singleServerGens == nil {
+		p.singleServerGens = map[string]uint64{}
+	}
+	if next := s.gen + 1; next > p.singleServerGens[name] {
+		p.singleServerGens[name] = next
+	}
+	close(s.retired)
+	return s.transport
+}
+
+// shutdownSingleServerTransport closes a detached transport's open streams.
+// The transport is used as an http.Handler, so Shutdown stops no listener; it
+// closes the sessions it holds.
+func shutdownSingleServerTransport(t *mcpserver.StreamableHTTPServer) {
+	if t == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = t.Shutdown(ctx)
+}
+
+// retireStaleNativeSurfaces retires every cached single-server endpoint whose
+// native skills surface differs from what the live configuration asks for
+// (Spec 125 D14, "Following the switch"). The next request builds a fresh
+// instance and transport.
+func (p *MCPProxyServer) retireStaleNativeSurfaces() {
+	p.singleServersMu.Lock()
+	names := make([]string, 0, len(p.singleServers))
+	for name := range p.singleServers {
+		names = append(names, name)
+	}
+	p.singleServersMu.Unlock()
+
+	for _, name := range names {
+		want := p.singleServerWantsNative(name)
+		p.singleServersMu.Lock()
+		var stale *mcpserver.StreamableHTTPServer
+		if s, ok := p.singleServers[name]; ok && s.native != want {
+			stale = p.retireSingleServerLocked(name)
+			p.logger.Info("retired single-server endpoint: native skills surface changed",
+				zap.String("server", name), zap.Bool("native", want))
+		}
+		p.singleServersMu.Unlock()
+		shutdownSingleServerTransport(stale)
+	}
+}
+
+// singleServerTransportCount is how many single-server transports are held.
+func (p *MCPProxyServer) singleServerTransportCount() int {
+	p.singleServersMu.Lock()
+	defer p.singleServersMu.Unlock()
+	n := 0
+	for _, s := range p.singleServers {
+		if s.transport != nil {
+			n++
+		}
+	}
+	return n
 }
 
 // refreshSingleServerSurfacesLocked re-registers every existing single-server
@@ -191,10 +370,17 @@ func singleServerRoutingFingerprint(name string, cat *directCatalog) string {
 }
 
 // singleServerNameFor reports whether srv is a single-server surface and, if
-// so, which upstream it stands in for.
-func (p *MCPProxyServer) singleServerNameFor(srv *mcpserver.MCPServer) (string, bool) {
+// so, which upstream it stands in for. A request served on /mcp/s/<server>
+// carries its endpoint, bound when it was acquired, and that binding answers:
+// an instance retired while the request runs is no longer in the cache, and
+// must still answer as the upstream it was built for. Without a binding (a
+// call from outside the HTTP route) the cache is asked.
+func (p *MCPProxyServer) singleServerNameFor(ctx context.Context, srv *mcpserver.MCPServer) (string, bool) {
 	if srv == nil {
 		return "", false
+	}
+	if ep := singleServerEndpointFrom(ctx); ep != nil && ep.server == srv {
+		return ep.name, true
 	}
 	p.singleServersMu.Lock()
 	defer p.singleServersMu.Unlock()
@@ -317,17 +503,25 @@ func describeConfinedServer(ctx context.Context) (string, bool) {
 // /mcp/s/<server> surface. mcp-go's default manager accepts any well-formed
 // "mcp-session-<uuid>", so a session id minted on one surface (and the client
 // identity attributed to it) would be accepted on every other. Each surface's
-// ids carry a tag derived from its server name, and a surface accepts only its
-// own. Like the default manager it tracks nothing, so ids stay valid across a
-// restart of the same surface.
+// ids carry a tag derived from its server name and its endpoint generation,
+// and a surface accepts only its own. Like the default manager it tracks
+// nothing, so ids stay valid across a restart of the same surface; a
+// retirement (Spec 125 D14) advances the generation, so ids issued before it
+// are refused and the client initializes again.
 type singleServerSessionIDs struct {
 	suffix string
 }
 
 const singleServerSessionPrefix = "mcp-session-"
 
-func newSingleServerSessionIDs(server string) *singleServerSessionIDs {
-	sum := sha256.Sum256([]byte("mcpproxy/single-server-session/" + server))
+// newSingleServerSessionIDs returns the ids of one endpoint generation.
+// Generation 0 keeps the tag ids had before generations existed.
+func newSingleServerSessionIDs(server string, gen uint64) *singleServerSessionIDs {
+	seed := "mcpproxy/single-server-session/" + server
+	if gen > 0 {
+		seed += fmt.Sprintf("/gen/%d", gen)
+	}
+	sum := sha256.Sum256([]byte(seed))
 	return &singleServerSessionIDs{suffix: "." + hex.EncodeToString(sum[:8])}
 }
 
@@ -359,8 +553,8 @@ func (m *singleServerSessionIDs) Terminate(string) (isNotAllowed bool, err error
 // on POST: its GET (the legacy standalone stream) and DELETE accept any id and
 // would register or close the session record another endpoint's session owns.
 // Unknown-session is a 404, as the transport answers for a terminated one.
-func singleServerSessionGuard(server string, next http.Handler) http.Handler {
-	ids := newSingleServerSessionIDs(server)
+func singleServerSessionGuard(server string, gen uint64, next http.Handler) http.Handler {
+	ids := newSingleServerSessionIDs(server, gen)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if sid := r.Header.Get("Mcp-Session-Id"); sid != "" {
 			if _, err := ids.Validate(sid); err != nil {
@@ -374,10 +568,10 @@ func singleServerSessionGuard(server string, next http.Handler) http.Handler {
 
 // singleServerStreamableOptions is the Streamable HTTP option set of a
 // /mcp/s/<server> transport: the shared client-facing options plus session ids
-// bound to that server.
-func singleServerStreamableOptions(cfgProvider func() *config.Config, server string) []mcpserver.StreamableHTTPOption {
+// bound to that server and endpoint generation.
+func singleServerStreamableOptions(cfgProvider func() *config.Config, server string, gen uint64) []mcpserver.StreamableHTTPOption {
 	return append(clientFacingStreamableOptions(cfgProvider),
-		mcpserver.WithSessionIdManager(newSingleServerSessionIDs(server)))
+		mcpserver.WithSessionIdManager(newSingleServerSessionIDs(server, gen)))
 }
 
 // singleServerDescribeTool is describe_tool with its tool_ids description

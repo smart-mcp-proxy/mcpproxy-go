@@ -35,8 +35,11 @@ type AvailableSkill struct {
 	Name         string
 	Description  string
 	ApprovedHash string
-	Files        []storage.SkillFile
-	TotalSize    int64
+	// Frontmatter is the approved copy's frontmatter as stored (JSON), for the
+	// native listing on /mcp/s/<server> (Spec 125 FR-029).
+	Frontmatter json.RawMessage
+	Files       []storage.SkillFile
+	TotalSize   int64
 }
 
 // publishSkillsChanged announces a change of a server's skills and moves the
@@ -96,6 +99,7 @@ func availableSkillOf(serverName string, rec *storage.SkillApprovalRecord) *Avai
 		Name:         name,
 		Description:  desc,
 		ApprovedHash: rec.ApprovedHash,
+		Frontmatter:  append(json.RawMessage(nil), rec.Approved.Frontmatter...),
 		Files:        append([]storage.SkillFile(nil), rec.Approved.Files...),
 	}
 	for _, f := range a.Files {
