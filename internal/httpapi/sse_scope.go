@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
@@ -289,6 +290,12 @@ func eventVisibleToCaller(ctx context.Context, evt internalRuntime.Event) bool {
 	if isSkillsReviewChange(evt) && !skillVisibleTo(ctx) {
 		return false
 	}
+	if evt.Type == internalRuntime.EventTypeReviewChanged {
+		if batch, ok := evt.Payload["servers"]; ok {
+			names, _ := batch.([]string)
+			return slices.ContainsFunc(names, func(name string) bool { return canSeeReviewServer(ctx, name) })
+		}
+	}
 	named := false
 	for _, key := range eventServerIdentityFields {
 		name, ok := evt.Payload[key].(string)
@@ -307,6 +314,10 @@ func eventVisibleToCaller(ctx context.Context, evt internalRuntime.Event) bool {
 		return false
 	}
 	return true
+}
+
+func canSeeReviewServer(ctx context.Context, name string) bool {
+	return name != "" && canSeeServer(ctx, name)
 }
 
 // serversChangedDeliverable decides whether a coalesced servers.changed frame

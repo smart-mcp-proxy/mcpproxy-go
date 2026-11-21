@@ -4803,10 +4803,9 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 // fields, and (b) be an unsynchronised concurrent map write, which Go turns
 // into a fatal error that takes the whole core down for every client.
 //
-// Three narrowings, all only for servers.changed — every OTHER event type that
-// names a server is dropped for a scoped caller before it reaches this
-// function, by eventVisibleToCaller (sse_scope.go), which also explains why
-// this one type is rendered instead of dropped:
+// review.changed batches keep only the server names visible to a scoped
+// subscriber. eventVisibleToCaller has already suppressed empty scoped batches.
+// For servers.changed, there are three further narrowings:
 //
 //   - #1166 - the coalescer extras that NAME a server ("server": "beta") are
 //     removed when the caller may not enumerate it. That extra survived the
@@ -4831,6 +4830,17 @@ func (s *Server) renderEventPayloadForCaller(ctx context.Context, evt internalRu
 	}
 	if evt.Type == internalRuntime.EventTypeActiveProfileChanged {
 		return s.renderActiveProfileChangedForCaller(ctx, payload)
+	}
+	if evt.Type == internalRuntime.EventTypeReviewChanged && auth.IsScopedCaller(ctx) {
+		if names, ok := payload["servers"].([]string); ok {
+			var visible []string
+			for _, name := range names {
+				if canSeeReviewServer(ctx, name) {
+					visible = append(visible, name)
+				}
+			}
+			return map[string]any{"servers": visible}
+		}
 	}
 	if evt.Type != internalRuntime.EventTypeServersChanged || len(payload) == 0 {
 		return payload

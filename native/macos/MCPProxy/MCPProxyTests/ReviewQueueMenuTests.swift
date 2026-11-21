@@ -7,6 +7,9 @@ final class ReviewQueueMenuTests: XCTestCase {
             (#"{"payload":{"server":"hf","skills":true}}"#, false),
             (#"{"payload":{"server":"other"}}"#, false),
             (#"{"payload":{"server":"hf"}}"#, true),
+            (#"{"payload":{"servers":["other","hf"]}}"#, true),
+            (#"{"payload":{"servers":["other","another"]}}"#, false),
+            (#"{"payload":{"servers":["hf"],"skills":true}}"#, false),
             (#"{"server":"other"}"#, false),
             (#"{}"#, true)
         ] {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/skills/skillstest"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // Spec 125: flipping enable_skills on a fleet larger than a subscriber's
@@ -95,4 +96,61 @@ func TestSkillsExposureFlipOnAFleetLargerThanTheEventBuffer(t *testing.T) {
 	assert.Equal(t, 2, reviews, "each commit's skills-marked review.changed survives")
 	assert.Equal(t, 2, lists, "one skills.changed list per commit")
 	assert.Zero(t, perServer, "the exposure path sends no per-server skills.changed")
+}
+
+func TestBulkQuarantinePreservesSkillsEventsOnAFleetLargerThanTheEventBuffer(t *testing.T) {
+	const fleet = 300
+	var servers []*config.ServerConfig
+	var names []string
+	for i := 0; i < fleet; i++ {
+		name := fmt.Sprintf("fleet-%03d", i)
+		names = append(names, name)
+		servers = append(servers, explicitServer(&config.ServerConfig{
+			Name: name, URL: "http://127.0.0.1:9/mcp", Protocol: "http", Enabled: true,
+		}))
+	}
+	rt, _ := newSpec116Runtime(t, func(c *config.Config) { c.EnableSkills = true }, servers...)
+	rt.skills.noAutoTrigger.Store(true)
+	for _, name := range names {
+		saveHeldSkill(t, rt, name, "pending", storage.SkillStatusPending)
+	}
+
+	ch := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(ch)
+	require.Greater(t, fleet, cap(ch))
+	res, err := rt.Commit("bulk_quarantine_test", func(tx *CommitTx) error {
+		// Isolate the commit's synchronous events from connection workers.
+		tx.noWorkers()
+		for _, name := range names {
+			if err := tx.SetQuarantined(name, true); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Changes, fleet)
+
+	// Subscribe before the bulk commit and drain only after it returns.
+	var toolReviews, skillReviews, skillChanges []any
+	var saved int
+	for len(ch) > 0 {
+		evt := <-ch
+		switch evt.Type {
+		case EventTypeConfigSaved:
+			saved++
+		case EventTypeReviewChanged:
+			if evt.Payload[ReviewChangedSkillsKey] == true {
+				skillReviews = append(skillReviews, evt.Payload["servers"])
+			} else {
+				toolReviews = append(toolReviews, evt.Payload["servers"])
+			}
+		case EventTypeSkillsChanged:
+			skillChanges = append(skillChanges, evt.Payload["servers"])
+		}
+	}
+	assert.Equal(t, 1, saved, "the commit's config.saved survives")
+	assert.Equal(t, []any{names}, skillReviews, "one held-skill review event survives with every affected server")
+	assert.Equal(t, []any{names}, skillChanges, "one Skills tab event survives with every affected server")
+	assert.Equal(t, []any{names}, toolReviews, "one ordinary review event names every affected server")
 }

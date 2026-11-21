@@ -404,8 +404,9 @@ async function blockTool(name: string) { const server = props.serverName; const 
 // `skills`), leaves the review and its scanning state alone. A frame with no
 // detail (an older core, a local dispatch) still reloads.
 function refreshAfterReviewChange(event: Event) {
-  const payload = (event as CustomEvent<{ payload?: { server?: string; skills?: boolean } }>).detail?.payload
+  const payload = (event as CustomEvent<{ payload?: { server?: string; servers?: string[]; skills?: boolean } }>).detail?.payload
   if (payload?.skills) return
+  if (payload?.servers && !payload.servers.includes(props.serverName)) return
   if (payload?.server && payload.server !== props.serverName) return
   scanning.value = false; rescanning.value = false; void load()
 }

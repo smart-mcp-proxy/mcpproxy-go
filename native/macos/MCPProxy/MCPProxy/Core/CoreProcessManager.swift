@@ -2383,6 +2383,7 @@ actor CoreProcessManager {
 
 struct ReviewChange: Decodable, Sendable {
     let server: String?
+    let servers: [String]?
     let skills: Bool?
 
     static func decode(_ data: String) -> ReviewChange? {
@@ -2394,6 +2395,8 @@ struct ReviewChange: Decodable, Sendable {
     }
 
     func affectsTools(on name: String) -> Bool {
-        skills != true && (server == nil || server == "" || server == name)
+        guard skills != true else { return false }
+        if let servers { return servers.contains(name) }
+        return server == nil || server == "" || server == name
     }
 }
