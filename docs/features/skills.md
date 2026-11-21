@@ -141,6 +141,18 @@ Every approval (by you, by the scan, or by `auto` mode), every hold of a changed
 mcpproxy activity list --type skill_quarantine_change
 ```
 
+### In the Web UI {#web-ui}
+
+The **Skills** tab of a server's page (`/ui/servers/<name>?tab=skills`) does the
+same review as the commands above: the list with one state chip per skill, the
+file list, a text viewer that pages through large files, a comparison of the
+approved copy with the current one (file by file, and line by line for one
+changed text file), the scan result with its findings, and the Approve, Block and
+Unblock buttons. Approve is bound to the hash and the server incarnation of the
+version you opened: a new version that arrives while you review is shown as a
+stale review with Approve off until you open it, and a skill that changed on the
+server before the page knew is refused with a notice and the list reloads. See [Server Detail page](../web-ui/server-detail.md#skills-tab).
+
 ### Where held skills show up {#held-skills-in-review}
 
 A skill that is pending or changed (not blocked, still listed, on an enabled server that is not quarantined and not excluded) is owed a review, and it shows up next to the tool reviews:

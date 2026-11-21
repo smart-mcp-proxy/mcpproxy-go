@@ -581,7 +581,7 @@ mcpproxy secrets set <key> [value] [flags]
 
 On macOS, storing from a terminal needs an explicit opt-in: run `MCPPROXY_KEYRING_WRITE=1 mcpproxy secrets set <key>`. Without it the command stops before asking for the value and prints that command; see [macOS: storing a secret from a terminal](../features/keyring-integration.md#macos-storing-a-secret-from-a-terminal). Linux and Windows need no opt-in.
 
-Omit `value` to enter it at the prompt. The current CLI prompt echoes typed characters in the terminal. A literal value argument may be retained in shell history or exposed in process listings; use `--from-stdin` with a trusted secret source when that matters.
+Omit `value` to enter it at the prompt. When stdin is a terminal, typed characters are not echoed. When stdin is not a terminal, the CLI reads the secret from stdin; use `--from-stdin` to make that input mode explicit. A literal value argument may be retained in shell history or exposed in process listings.
 
 | Flag | Description |
 |------|-------------|
