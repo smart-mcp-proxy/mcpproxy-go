@@ -382,3 +382,61 @@ func TestMarkdown_ContainsVerdictAndRows(t *testing.T) {
 		t.Error("unescaped pipe in markdown table reason")
 	}
 }
+
+// Spec 125: the Skills tab sweep (scripts/run-skills-tab-sweep.sh) runs in the
+// advisory web-ui-sweep job. It is its own ADVISORY manifest entry, so a red
+// skills sweep (or one that died before writing its fragment) is listed under
+// advisory_failures and never blocks the tag.
+func TestManifest_SkillsTabSweep_IsAdvisory(t *testing.T) {
+	if EntryAdvisorySkillsTabSweep != "advisory/skills-tab-sweep" {
+		t.Fatalf("entry name = %q, want advisory/skills-tab-sweep", EntryAdvisorySkillsTabSweep)
+	}
+	var found bool
+	for _, m := range Manifest() {
+		if m.Name != EntryAdvisorySkillsTabSweep {
+			continue
+		}
+		found = true
+		if m.Blocking || m.Reserved {
+			t.Errorf("%s must be advisory (Blocking:false) and not reserved, got %+v", m.Name, m)
+		}
+	}
+	if !found {
+		t.Fatalf("manifest is missing the %s entry", EntryAdvisorySkillsTabSweep)
+	}
+}
+
+func TestMerge_SkillsTabSweepFailureOrMissing_IsAdvisoryOnly(t *testing.T) {
+	for _, status := range []Status{StatusFail, StatusAdvisoryFail} {
+		frags := passAllBlocking()
+		for i := range frags {
+			if frags[i].Name == EntryAdvisorySkillsTabSweep {
+				frags[i].Status = status
+			}
+		}
+		r := Merge(frags)
+		if !r.Passed() {
+			t.Fatalf("skills tab sweep %s must not block the gate: %v", status, r.BlockingFailures)
+		}
+		if len(r.AdvisoryFailures) != 1 || !strings.Contains(r.AdvisoryFailures[0], EntryAdvisorySkillsTabSweep) {
+			t.Errorf("skills tab sweep %s must be an advisory failure, got %v", status, r.AdvisoryFailures)
+		}
+	}
+	var kept []Fragment
+	for _, f := range passAllBlocking() {
+		if f.Name != EntryAdvisorySkillsTabSweep {
+			kept = append(kept, f)
+		}
+	}
+	r := Merge(kept)
+	if !r.Passed() {
+		t.Fatalf("a missing skills sweep fragment must not block the gate: %v", r.BlockingFailures)
+	}
+	e := entryByName(t, r, EntryAdvisorySkillsTabSweep)
+	if e.Status != StatusFail || e.Reason != ReasonMissingFragment {
+		t.Errorf("got status=%s reason=%q, want fail/%q", e.Status, e.Reason, ReasonMissingFragment)
+	}
+	if len(r.AdvisoryFailures) != 1 || !strings.Contains(r.AdvisoryFailures[0], EntryAdvisorySkillsTabSweep) {
+		t.Errorf("missing skills sweep fragment must surface as an advisory failure, got %v", r.AdvisoryFailures)
+	}
+}

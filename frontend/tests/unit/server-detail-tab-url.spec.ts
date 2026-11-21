@@ -42,6 +42,7 @@ vi.mock('@/services/api', () => {
       patchServer: vi.fn(() => ok({ message: 'ok', restart_required: true })),
       getConfig: vi.fn(() => ok({ config: { server_edition: {} } })),
       getStatus: vi.fn(() => ok({})),
+      getServerSkills: vi.fn(() => ok({ enabled: true, supported: true, skills: [], incarnation: 1 })),
       validateConfig: vi.fn(),
       applyConfig: vi.fn(),
     },
@@ -114,6 +115,12 @@ describe('ServerDetail tab <-> ?tab= (Spec 109 FR-016)', () => {
   // `?tab=`, so a stale tab (e.g. Security, left over from the previous
   // server) kept showing for the new server even though its URL carries no
   // `?tab=` at all.
+  // Spec 125 PR-4a: 'skills' is a whitelisted tab value.
+  it('honors ?tab=skills on mount', async () => {
+    const { wrapper } = await mountServerDetail('/servers/alpha?tab=skills')
+    expect(wrapper.find('[data-test="skills-tab"]').classes()).toContain('tab-active')
+  })
+
   it('re-reads ?tab= on an in-place serverName change, resetting to the default when absent', async () => {
     const { wrapper, router } = await mountServerDetail('/servers/alpha?tab=security')
 
