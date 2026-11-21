@@ -429,7 +429,7 @@ func TestE2E_ToolDiscovery(t *testing.T) {
 	require.NoError(t, err)
 
 	// Update runtime config with the unquarantined server
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
@@ -538,7 +538,7 @@ func TestE2E_ToolCalling(t *testing.T) {
 	require.NoError(t, err)
 
 	// Update runtime config with the unquarantined server
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
@@ -1620,7 +1620,7 @@ func TestE2E_IntentDeclarationToolVariants(t *testing.T) {
 	// Reload configuration
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
@@ -2830,7 +2830,7 @@ func TestE2E_DisableServerRemovesToolsFromSearch(t *testing.T) {
 	// Reload configuration
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
@@ -3015,7 +3015,7 @@ func TestE2E_ServerDeleteReaddDifferentTools(t *testing.T) {
 	// Reload configuration
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
@@ -3140,7 +3140,7 @@ func TestE2E_ServerDeleteReaddDifferentTools(t *testing.T) {
 	// Reload configuration
 	serversB, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfgB := env.proxyServer.runtime.Config()
+	cfgB := copyLiveConfig(t, env)
 	cfgB.Servers = serversB
 	err = env.proxyServer.runtime.CommitConfig(cfgB)
 	require.NoError(t, err)
@@ -3321,7 +3321,7 @@ func TestE2E_RetrieveToolsAnnotationsAndCallWith(t *testing.T) {
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
 
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
@@ -3470,7 +3470,7 @@ func TestE2E_SelfHealingInvalidParams(t *testing.T) {
 
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	require.NoError(t, env.proxyServer.runtime.CommitConfig(cfg))
 
@@ -3919,7 +3919,7 @@ func startDirectFixtureUpstream(t *testing.T, env *TestEnvironment, serverName s
 
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	require.NoError(t, env.proxyServer.runtime.CommitConfig(cfg))
 
