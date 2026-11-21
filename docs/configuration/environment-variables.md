@@ -28,7 +28,7 @@ Environment variables are useful for CI/CD environments or temporary overrides d
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `MCPPROXY_LISTEN` | Override listen address | `127.0.0.1:8080` or `:8080` |
+| `MCPPROXY_LISTEN` | Override listen address. `--listen` wins when both are set; an empty value leaves the config file's `listen`. The server Docker image sets it to `0.0.0.0:8080` | `127.0.0.1:8080` or `:8080` |
 | `MCPPROXY_API_KEY` | Set API key for authentication | `my-secret-key` |
 | `MCPPROXY_API_KEY_FILE` | Read the API key from a file (absolute path). Set it or `MCPPROXY_API_KEY`, not both; see [API key from a file](#api-key-from-a-file) | `/run/secrets/mcpproxy_api_key` |
 | `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY` | Key that encrypts the upstream OAuth tokens in `config.db` (base64, 32 bytes). Overrides `oauth_token_encryption_key`. Set it or the `_FILE` form, not both. See [OAuth Token Encryption](../features/oauth-token-encryption.md) | `bXkta2V5...` |
