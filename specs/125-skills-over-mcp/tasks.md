@@ -103,10 +103,10 @@ description: "Task list for Skills over MCP (spec 125)"
 
 ## PR-4: Web UI (US1, US2 on the Web)
 
-- [ ] T043 [P] Vitest specs under `frontend/tests/unit/` for the Skills tab: list with state chips, file list, text viewer with paging, diff, findings, approve bound to the shown hash, block, 409 handling
-- [ ] T044 Implement the Skills tab in `frontend/src/views/ServerDetail.vue` and its components; API client methods; `skills.changed` SSE handling
-- [ ] T045 Review queue and Home attention rows for skills; terminology values in `internal/contracts/terminology.go` and fixtures
-- [ ] T046 Playwright sweep and HTML report per `docs/development/web-ui-verification.md`; `docs/web-ui/` page
+- [x] T043 [P] Vitest specs under `frontend/tests/unit/` for the Skills tab: list with state chips, file list, text viewer with paging, diff, findings, approve bound to the shown hash, block, 409 handling
+- [x] T044 Implement the Skills tab in `frontend/src/views/ServerDetail.vue` and its components; API client methods; `skills.changed` SSE handling
+- [ ] T045 Review queue and Home attention rows for skills; terminology values in `internal/contracts/terminology.go` and fixtures — **PR-4b**: PR-4 was split; PR-4a (T043, T044, T046: the Skills tab, `cmd/skillsfixture`, `e2e/web-ui-sweep/skills-tab.spec.ts`) is done, this task and the rest of T031 (review-queue and attention entries, `skillVisibleTo`, macOS activity labels) are the next PR
+- [x] T046 Playwright sweep and HTML report per `docs/development/web-ui-verification.md`; `docs/web-ui/` page
 
 ---
 

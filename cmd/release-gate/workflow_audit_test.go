@@ -77,6 +77,7 @@ type job struct {
 type step struct {
 	Uses string    `yaml:"uses"`
 	Run  string    `yaml:"run"`
+	If   string    `yaml:"if"`
 	With yaml.Node `yaml:"with"`
 }
 
