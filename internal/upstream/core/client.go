@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientrelay"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
@@ -128,6 +129,8 @@ type Client struct {
 	// not arrive on a call's own stream can be relayed to its client
 	// (client_relay.go).
 	calls inflightCalls
+	// urlElicitations routes the upstream's URL elicitation completions.
+	urlElicitations clientrelay.URLElicitations
 
 	// Transport type and stderr access (for stdio)
 	transportType string

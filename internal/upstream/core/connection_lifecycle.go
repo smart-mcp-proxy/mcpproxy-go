@@ -259,6 +259,8 @@ func (c *Client) dispatchNotification(notification mcp.JSONRPCNotification) {
 		c.handleToolsListChangedNotification()
 	case string(mcp.MethodNotificationPromptsListChanged):
 		c.handlePromptsListChangedNotification()
+	case string(mcp.MethodNotificationElicitationComplete):
+		c.urlElicitations.Complete(notification)
 	default:
 		// Ignore all other notifications (logging, resources, progress, ...).
 	}

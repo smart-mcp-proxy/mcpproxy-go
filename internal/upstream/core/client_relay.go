@@ -19,7 +19,7 @@ func (c *Client) relayOptions() []client.ClientOption {
 // relayHandler also answers the requests on the upstream's GET stream, which
 // mcpproxy reads itself (list_changed_stream.go).
 func (c *Client) relayHandler() clientrelay.Handler {
-	return clientrelay.Handler{Caller: c.callerContext, Logger: c.logger}
+	return clientrelay.Handler{Caller: c.callerContext, URLs: &c.urlElicitations, Logger: c.logger}
 }
 
 // callerContext returns the context of the call an upstream request belongs

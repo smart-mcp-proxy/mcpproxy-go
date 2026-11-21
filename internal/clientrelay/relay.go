@@ -46,6 +46,9 @@ type Handler struct {
 	// Caller maps the context mcp-go hands the handler to the context of the
 	// call the request belongs to, which carries the client's session.
 	Caller func(context.Context) context.Context
+	// URLs remembers where URL-mode elicitations went, for their completion
+	// notification. nil forwards none.
+	URLs   *URLElicitations
 	Logger *zap.Logger
 }
 
@@ -61,9 +64,18 @@ func (h Handler) Options() []client.ClientOption {
 }
 
 // Elicit forwards elicitation/create, or declines when no client can answer.
-func (h Handler) Elicit(ctx context.Context, req mcp.ElicitationRequest) (*mcp.ElicitationResult, error) {
+func (h Handler) Elicit(ctx context.Context, req mcp.ElicitationRequest) (res *mcp.ElicitationResult, err error) {
 	ctx = h.caller(ctx)
-	res, err := Elicit(ctx, req)
+	if req.Params.Mode == mcp.ElicitationModeURL && h.URLs != nil {
+		// Recorded before asking: the flow can finish as soon as the user opens the URL.
+		forget := h.URLs.add(req.Params.ElicitationID, mcpserver.ClientSessionFromContext(ctx))
+		defer func() {
+			if res == nil || res.Action != mcp.ElicitationResponseActionAccept {
+				forget() // declined or failed: no completion will follow
+			}
+		}()
+	}
+	res, err = Elicit(ctx, req)
 	if errors.Is(err, ErrNoClient) {
 		h.log(mcp.MethodElicitationCreate, err)
 		return &mcp.ElicitationResult{ElicitationResponse: mcp.ElicitationResponse{Action: mcp.ElicitationResponseActionDecline}}, nil

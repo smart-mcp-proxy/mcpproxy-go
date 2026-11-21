@@ -52,6 +52,17 @@ func relayUpstream() *mcpserver.MCPServer {
 		}
 		return text("roots:" + strings.Join(uris, ",")), nil
 	})
+	srv.AddTool(mcp.NewTool("login"), func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		session := mcpserver.ClientSessionFromContext(ctx)
+		res, err := srv.RequestURLElicitation(ctx, session, "login-1", "https://example.test/login", "log in")
+		if err != nil {
+			return text("error: " + err.Error()), nil
+		}
+		if res.Action == mcp.ElicitationResponseActionAccept {
+			_ = srv.SendElicitationComplete(ctx, session, "login-1")
+		}
+		return text(string(res.Action)), nil
+	})
 	srv.AddTool(mcp.NewTool("caps"), func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		info, _ := mcpserver.ClientSessionFromContext(ctx).(mcpserver.SessionWithClientInfo)
 		if info == nil {
@@ -67,10 +78,11 @@ func relayUpstream() *mcpserver.MCPServer {
 type downstreamSession struct {
 	mu    sync.Mutex
 	asked []string
+	notes chan mcp.JSONRPCNotification
 }
 
 func (s *downstreamSession) SessionID() string                                   { return "downstream" }
-func (s *downstreamSession) NotificationChannel() chan<- mcp.JSONRPCNotification { return nil }
+func (s *downstreamSession) NotificationChannel() chan<- mcp.JSONRPCNotification { return s.notes }
 func (s *downstreamSession) Initialize()                                         {}
 func (s *downstreamSession) Initialized() bool                                   { return true }
 func (s *downstreamSession) GetClientInfo() mcp.Implementation                   { return mcp.Implementation{} }
@@ -82,7 +94,7 @@ func (s *downstreamSession) GetClientCapabilities() mcp.ClientCapabilities {
 			ListChanged bool `json:"listChanged,omitempty"`
 		}{},
 		Sampling:    &mcp.SamplingCapability{},
-		Elicitation: &mcp.ElicitationCapability{},
+		Elicitation: &mcp.ElicitationCapability{Form: &struct{}{}, URL: &struct{}{}},
 	}
 }
 
@@ -124,12 +136,22 @@ func assertRelays(t *testing.T, c *Client) {
 	assert.Contains(t, caps, `"sampling":{}`)
 	assert.Contains(t, caps, `"roots":{}`)
 
-	down := &downstreamSession{}
+	down := &downstreamSession{notes: make(chan mcp.JSONRPCNotification, 4)}
 	ctx := mcpserver.NewMCPServer("down", "1").WithContext(context.Background(), down)
 	assert.Equal(t, "accept", callText(t, c, ctx, "confirm"))
 	assert.Equal(t, "client-model", callText(t, c, ctx, "sample"))
 	assert.Equal(t, "roots:file:///project", callText(t, c, ctx, "roots"))
-	assert.Equal(t, []string{"elicit", "sample", "roots"}, down.asked)
+	assert.Equal(t, "accept", callText(t, c, ctx, "login"))
+	assert.Equal(t, []string{"elicit", "sample", "roots", "elicit"}, down.asked)
+
+	// The URL elicitation's completion reaches the client that was asked.
+	select {
+	case n := <-down.notes:
+		assert.Equal(t, string(mcp.MethodNotificationElicitationComplete), n.Method)
+		assert.Equal(t, "login-1", n.Params.AdditionalFields["elicitationId"])
+	case <-time.After(5 * time.Second):
+		t.Fatal("the URL elicitation's completion did not reach the client")
+	}
 
 	// A call no MCP client made (REST, CLI) is answered without asking.
 	assert.Equal(t, "decline", callText(t, c, context.Background(), "confirm"))

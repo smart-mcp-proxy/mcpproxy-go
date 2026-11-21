@@ -31,6 +31,8 @@ One upstream connection is shared by every client of MCPProxy, so only the clien
 
 The client must have declared the capability (and, for elicitation, the requested mode). A client on protocol `2026-07-28` or later cannot receive these requests.
 
+For a URL-mode elicitation the user accepted, the upstream's `notifications/elicitation/complete` goes to the same client, even after the tool call has returned. MCPProxy waits up to an hour for it.
+
 ## When nobody can be asked
 
 The upstream gets an immediate answer instead of waiting:

@@ -16,10 +16,11 @@ type fakeSession struct {
 	caps     mcp.ClientCapabilities
 	protocol string
 	asked    []string
+	notes    chan mcp.JSONRPCNotification
 }
 
 func (s *fakeSession) SessionID() string                                   { return "fake" }
-func (s *fakeSession) NotificationChannel() chan<- mcp.JSONRPCNotification { return nil }
+func (s *fakeSession) NotificationChannel() chan<- mcp.JSONRPCNotification { return s.notes }
 func (s *fakeSession) Initialize()                                         {}
 func (s *fakeSession) Initialized() bool                                   { return true }
 func (s *fakeSession) GetClientInfo() mcp.Implementation                   { return mcp.Implementation{} }
