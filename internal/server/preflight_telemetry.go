@@ -137,14 +137,14 @@ type filterDiagNote struct {
 	// filters are the filter keys the block blamed (filterKeyReadOnlyOnly &c),
 	// sorted so comparisons are order-independent.
 	filters []string
-	// at is when the block was DELIVERED to the agent, not when the request
-	// that produced it started. Overlapping calls in one session can finish out
-	// of order, so start time is not a valid ordering key: the note that must
-	// win is the one for the response the agent saw last. Delivery time is also
-	// the honest origin for the TTL, and it makes the follow-up comparison a
-	// plain causality test — a reaction can only come from a call that started
-	// after the block reached the agent.
+	// at is when the block was delivered to the agent. It is the origin for the
+	// TTL; request sequence watermarks handle causal ordering independently of
+	// platform clock resolution.
 	at time.Time
+	// startedThrough is the latest retrieve_tools request sequence assigned
+	// when this note was recorded. A request at or below this watermark was
+	// already in flight and cannot react to this note.
+	startedThrough uint64
 }
 
 const (
@@ -174,6 +174,16 @@ func activeFilterKeys(readOnlyOnly, excludeDestructive, excludeOpenWorld bool) [
 	return keys
 }
 
+// beginFilterDiagRequest assigns a monotonic sequence at handler entry. The
+// note's request watermark distinguishes overlapping calls without relying on
+// the platform clock to order events that can receive equal timestamps.
+func (p *MCPProxyServer) beginFilterDiagRequest() uint64 {
+	p.filterDiagMu.Lock()
+	defer p.filterDiagMu.Unlock()
+	p.filterDiagRequestSeq++
+	return p.filterDiagRequestSeq
+}
+
 // noteFilterDiagnostics remembers that this session was just handed a
 // diagnostics block blaming `diag`'s filters. `at` is the DELIVERY time of the
 // response carrying the block. Sessions without an id (stdio transports that do
@@ -195,25 +205,26 @@ func (p *MCPProxyServer) noteFilterDiagnostics(sessionID string, diag *filterDia
 		p.filterDiagNotes = make(map[string]filterDiagNote)
 	}
 
-	// Two retrieve_tools calls of one session can be in flight at once. Because
-	// `at` is delivery time, the later write is by construction the block the
-	// agent saw last — but goroutine scheduling can still land the two writes
-	// here in either order, so the comparison is explicit. Letting an older
-	// delivery win would compare the next call against the wrong filter set and
-	// back-date the TTL, expiring the note early.
+	// Two retrieve_tools calls of one session can be in flight at once. An older
+	// delivery must not replace a newer note. Equal timestamps are ordered by
+	// this mutex: the later note write is the later completed response.
 	if prev, exists := p.filterDiagNotes[sessionID]; exists {
-		if !at.After(prev.at) {
+		if at.Before(prev.at) {
 			return
 		}
 		// Replacing an existing key cannot grow the map, so skip the prune —
 		// at capacity it would evict an unrelated session's still-eligible
 		// note to make room that is not needed.
-		p.filterDiagNotes[sessionID] = filterDiagNote{filters: filters, at: at}
+		p.filterDiagNotes[sessionID] = filterDiagNote{
+			filters: filters, at: at, startedThrough: p.filterDiagRequestSeq,
+		}
 		return
 	}
 
 	p.pruneFilterDiagNotesLocked(at)
-	p.filterDiagNotes[sessionID] = filterDiagNote{filters: filters, at: at}
+	p.filterDiagNotes[sessionID] = filterDiagNote{
+		filters: filters, at: at, startedThrough: p.filterDiagRequestSeq,
+	}
 }
 
 // consumeFilterDiagFollowUp reports whether THIS call is a follow-up that
@@ -221,7 +232,7 @@ func (p *MCPProxyServer) noteFilterDiagnostics(sessionID string, diag *filterDia
 // blamed. The note is consumed either way: a block gets exactly one chance to
 // be followed, so a session that keeps re-running the same filtered query can
 // never inflate the counter.
-func (p *MCPProxyServer) consumeFilterDiagFollowUp(sessionID string, activeKeys []string, at time.Time) bool {
+func (p *MCPProxyServer) consumeFilterDiagFollowUp(sessionID string, activeKeys []string, at time.Time, requestSeq uint64) bool {
 	if sessionID == "" {
 		return false
 	}
@@ -233,13 +244,10 @@ func (p *MCPProxyServer) consumeFilterDiagFollowUp(sessionID string, activeKeys 
 		return false
 	}
 
-	// Causality gate: `at` is when THIS call started and note.at is when the
-	// block was DELIVERED, so a call that started first cannot be reacting to
-	// it. Leave the note for the call that genuinely follows — consuming it
-	// here would both miscount this call and rob the real follow-up of its one
-	// chance. (A negative age also slips past the TTL check below, which
-	// compares it against a positive duration.)
-	if !at.After(note.at) {
+	// Causality gate: requestSeq was assigned at handler entry, while
+	// startedThrough captures requests already in flight when the note was
+	// recorded. A call that started earlier cannot be reacting to the note.
+	if requestSeq <= note.startedThrough {
 		return false
 	}
 

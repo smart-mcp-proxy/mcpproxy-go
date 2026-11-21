@@ -877,11 +877,22 @@ func TestE2E_CredentialsLifecycle_SecretSinks(t *testing.T) {
 		body := e.restGet("/api/v1/activity/export?format=json&include_bodies=true&type=internal_tool_call&limit=50000")
 		return strings.Count(body, `"tool_name":"credentials"`) >= wantCalls
 	}, 20*time.Second, 200*time.Millisecond, "every credentials call must be recorded before the sinks are read")
-	require.Eventually(t, func() bool {
+	sseDeadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(sseDeadline) {
 		snap := sse.snapshot()
-		return strings.Count(snap, "credentials.changed") >= wantChanged &&
-			strings.Count(snap, `"internal_tool_name":"credentials"`) >= wantCalls
-	}, 20*time.Second, 100*time.Millisecond, "the SSE capture must contain every credentials call frame and both issues and revokes")
+		if strings.Count(snap, "credentials.changed") >= wantChanged &&
+			strings.Count(snap, `"internal_tool_name":"credentials"`) >= wantCalls {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	snap := sse.snapshot()
+	gotChanged := strings.Count(snap, "credentials.changed")
+	gotCalls := strings.Count(snap, `"internal_tool_name":"credentials"`)
+	require.GreaterOrEqual(t, gotChanged, wantChanged,
+		"credentials.changed frames: got %d want %d; snapshot bytes=%d", gotChanged, wantChanged, len(snap))
+	require.GreaterOrEqual(t, gotCalls, wantCalls,
+		"credentials call frames: got %d want %d; snapshot bytes=%d", gotCalls, wantCalls, len(snap))
 
 	sinks := map[string]string{
 		"errors":          strings.Join(errorsSeen, "\n"),
