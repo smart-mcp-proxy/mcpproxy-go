@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/winjob"
 )
 
@@ -51,6 +52,9 @@ func createProcessGroupCommandFunc(client *Client, workingDir string, logger *za
 		// Object (assignProcessTree resumes it), so it cannot fork a
 		// descendant outside the Job (Spec 116 PR4, T093b).
 		winjob.MarkSuspended(cmd)
+		// cmd.exe needs the wrapped command string as an explicit command
+		// line; argv escaping turns its quotes into literal \" (#1960).
+		shellwrap.ApplyCommandLine(cmd)
 
 		if workingDir != "" {
 			cmd.Dir = workingDir
