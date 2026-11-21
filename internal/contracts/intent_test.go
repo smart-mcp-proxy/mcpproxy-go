@@ -197,6 +197,15 @@ func TestIntentDeclaration_Validate(t *testing.T) {
 			if tt.wantErr && err != nil && err.Code != tt.wantErrCode {
 				t.Errorf("Validate() error code = %v, wantErrCode %v", err.Code, tt.wantErrCode)
 			}
+			if err != nil && tt.wantErrCode == IntentErrorCodeInvalidSensitivity {
+				const wantMessage = "Invalid intent.data_sensitivity: must be public, internal, private, or unknown"
+				if err.Message != wantMessage {
+					t.Errorf("Validate() error message = %q, want %q", err.Message, wantMessage)
+				}
+				if got := err.Details["provided"]; got != tt.intent.DataSensitivity {
+					t.Errorf("Validate() provided sensitivity = %q, want %q", got, tt.intent.DataSensitivity)
+				}
+			}
 		})
 	}
 }

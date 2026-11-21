@@ -1068,7 +1068,7 @@ func injectAuthMetadata(ctx context.Context, args map[string]interface{}) map[st
 	if authMeta == nil {
 		return args
 	}
-	enriched := make(map[string]interface{}, len(args)+len(authMeta))
+	enriched := make(map[string]interface{}, len(args))
 	for k, v := range args {
 		enriched[k] = v
 	}
