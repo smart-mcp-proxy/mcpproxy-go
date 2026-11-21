@@ -166,7 +166,14 @@ mcpproxy review show context7
 # 3. approve (with no --tools/--all, only read-only tools with a clean scan are allowed)
 mcpproxy review approve context7 --yes
 
-# 4. one harmless read, then see it in the activity log
+# 4. check that context7 is Online and has discovered tools before calling it
+mcpproxy upstream list
+```
+
+If Context7 shows `Connecting` or lists zero tools, run `mcpproxy upstream list` again. Once it shows `Online` with discovered tools, make the first call.
+
+```bash
+# 5. one harmless read, then see it in the activity log
 mcpproxy call tool-read -t context7:resolve-library-id -j '{"libraryName":"vue-router","query":"routing"}'
 mcpproxy activity list --limit 3
 ```
