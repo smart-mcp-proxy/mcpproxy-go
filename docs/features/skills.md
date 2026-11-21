@@ -153,6 +153,17 @@ version you opened: a new version that arrives while you review is shown as a
 stale review with Approve off until you open it, and a skill that changed on the
 server before the page knew is refused with a notice and the list reloads. See [Server Detail page](../web-ui/server-detail.md#skills-tab).
 
+### Where held skills show up {#held-skills-in-review}
+
+A skill that is pending or changed (not blocked, still listed, on an enabled server that is not quarantined and not excluded) is owed a review, and it shows up next to the tool reviews:
+
+- **Review queue** (`GET /api/v1/review`, the Web UI Review queue, `mcpproxy review list`, the macOS Review Queue). A server with held tools keeps its row and gains `skills_pending` / `skills_changed`; a server with only held skills gets a row of kind `skill_review`, and `count` (the sidebar badge) includes it. In the Web UI that row's **Review** opens the server's Skills tab; a tool row with held skills also offers **Skills**. The macOS app has no Skills tab, so its row says "Review in the Web UI" and opens that page in the browser.
+- **Needs attention** (Home, the header pill, `mcpproxy attention`): one `skill_review` item per state, ranked right after the tool reviews (62 changed, 63 pending), fixed on the server's Skills tab.
+
+A quarantined server is only a server review: its skills are not read until it is approved.
+
+These entries are for **administrators only**. A scoped caller (an agent token, pinned or not, or a non-admin user session) gets no skill counts, no `skill_review` row or attention item, a queue `count` without them, and no `review.changed` frame caused by a skills change, even for a server it may see.
+
 ### Reasons a skill is unusable
 
 | Reason | Meaning |

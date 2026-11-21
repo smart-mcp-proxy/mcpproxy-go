@@ -36,6 +36,7 @@
    "server_error",
    "server_review",
    "tool_review",
+   "skill_review",
    "client_never_seen"
   ],
   "rank": {
@@ -51,6 +52,7 @@
    "server_error": 40,
    "server_review": 50,
    "sign_in_required": 10,
+   "skill_review": 62,
    "tool_review": 60
   }
  },

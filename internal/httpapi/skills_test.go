@@ -44,6 +44,22 @@ type skillsTestController struct {
 	incarnations map[string]int64
 	// onList runs on every read of the records.
 	onList func()
+	// queue answers GetReviewQueue (nil: an empty queue).
+	queue *internalRuntime.ReviewQueue
+}
+
+func (c *skillsTestController) GetReviewQueue(context.Context) (*internalRuntime.ReviewQueue, error) {
+	if c.queue == nil {
+		return &internalRuntime.ReviewQueue{Servers: []internalRuntime.ReviewQueueRow{}}, nil
+	}
+	// A copy, so a handler that narrows the rows cannot change the fixture.
+	out := *c.queue
+	out.Servers = append([]internalRuntime.ReviewQueueRow(nil), c.queue.Servers...)
+	return &out, nil
+}
+
+func (c *skillsTestController) GetServerReview(_ context.Context, name string) (*internalRuntime.ServerReview, error) {
+	return &internalRuntime.ServerReview{Server: internalRuntime.ReviewServer{Name: name}, Tools: []internalRuntime.ReviewTool{}}, nil
 }
 
 func (c *skillsTestController) ServerIncarnation(name string) (int64, bool) {

@@ -110,8 +110,10 @@ func TestSSE_IdentityBearingFrameWithNoServerNameIsDropped(t *testing.T) {
 
 	adminBody, adminClose := sseSubscribe(t, ts.URL, scopeAdminAPIKey)
 	defer adminClose()
+	readSSEUntil(t, adminBody, "attention.changed", time.Now().Add(5*time.Second))
 	agentBody, agentClose := sseSubscribe(t, ts.URL, token)
 	defer agentClose()
+	readSSEUntil(t, agentBody, "attention.changed", time.Now().Add(5*time.Second))
 
 	require.Eventually(t, func() bool { return ctrl.subscriberCount() == 2 }, 5*time.Second, 20*time.Millisecond)
 

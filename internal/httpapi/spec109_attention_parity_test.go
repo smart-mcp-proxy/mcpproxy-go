@@ -92,13 +92,19 @@ func TestAttentionParity_SSECarriesTheSameIDs(t *testing.T) {
 	f := p109LoadAttentionFixture(t)
 	items := internalRuntime.Compute(f.Input)
 
-	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: scopeFixtureServers(), withManagement: true}
+	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: scopeFixtureServers(), withManagement: true, attentionItemsOverride: items[:len(items)-1]}
 	srv, _ := scopedAgentServer(t, ctrl, []string{"alpha"})
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
 	body, closeFn := sseSubscribe(t, ts.URL, scopeAdminAPIKey)
 	defer closeFn()
+	baseline := readSSEUntil(t, body, "attention.changed", time.Now().Add(5*time.Second))
+	baselinePayload := baseline.Data["payload"].(map[string]interface{})
+	require.Equal(t, len(items)-1, int(baselinePayload["count"].(float64)))
+	for i, id := range baselinePayload["ids"].([]interface{}) {
+		require.Equal(t, f.ExpectedIDs[i], id, "initial snapshot preserves REST order")
+	}
 	require.Eventually(t, func() bool { return ctrl.subscriberCount() == 1 }, 5*time.Second, 20*time.Millisecond)
 
 	done := make(chan sseEvent, 1)

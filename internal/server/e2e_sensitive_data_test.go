@@ -115,7 +115,7 @@ func TestE2E_SensitiveData_AWSAccessKey(t *testing.T) {
 	// Reload configuration
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env.TestEnvironment)
 	cfg.Servers = servers
 	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
@@ -259,7 +259,7 @@ func TestE2E_SensitiveData_FilePath(t *testing.T) {
 
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env.TestEnvironment)
 	cfg.Servers = servers
 	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
@@ -652,7 +652,7 @@ func TestE2E_SensitiveData_CreditCard(t *testing.T) {
 
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env.TestEnvironment)
 	cfg.Servers = servers
 	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)

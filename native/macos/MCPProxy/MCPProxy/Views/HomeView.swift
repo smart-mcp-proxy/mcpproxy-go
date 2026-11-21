@@ -1290,6 +1290,7 @@ private struct AttentionRow: View {
         switch item.kind {
         case "sign_in_required": return "person.badge.key"
         case "server_review", "tool_review": return "checkmark.shield"
+        case "skill_review": return "books.vertical"
         case "server_error": return "exclamationmark.triangle"
         case "missing_secret": return "key"
         case "config_error": return "gearshape"

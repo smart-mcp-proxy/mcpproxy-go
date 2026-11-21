@@ -24,14 +24,51 @@ export function reviewQueueScopeText(s: ReviewQueueSummary): string {
   return `${s.total} ${noun}: ${blockers}, ${s.deferred} on disabled ${s.deferred === 1 ? 'server' : 'servers'}.`
 }
 
+// Spec 125: held skills. The core sends skills_pending / skills_changed and
+// skill_review rows to administrators only.
+export const REVIEW_KIND_SKILL_REVIEW = 'skill_review'
+
+export function heldSkillCount(row: ReviewQueueRow): number {
+  return (row.skills_pending ?? 0) + (row.skills_changed ?? 0)
+}
+
+function heldSkillsText(row: ReviewQueueRow): string {
+  const total = heldSkillCount(row)
+  if (total === 0) return ''
+  const changed = row.skills_changed ?? 0
+  const head = `${total} ${total === 1 ? 'skill' : 'skills'} awaiting review`
+  return changed > 0 ? `${head} · ${changed} changed` : head
+}
+
+// The one-line summary under a queue row's server name.
+export function reviewQueueRowSubtitle(row: ReviewQueueRow): string {
+  if (row.kind === 'server_review') return 'Server awaiting review'
+  const skills = heldSkillsText(row)
+  if (row.kind === REVIEW_KIND_SKILL_REVIEW) return skills
+  const tools = `${row.pending ?? 0} new · ${row.changed ?? 0} changed`
+  return skills ? `${tools} · ${skills}` : tools
+}
+
+// Where a held skill is reviewed: the server page's Skills tab.
+export function serverSkillsLink(server: string) {
+  return { path: `/servers/${encodeURIComponent(server)}`, query: { tab: 'skills' } }
+}
+
+// The row's Review link: a skill-only row opens the Skills tab, every other
+// row the tool review (keeping a ?change= filter).
+export function reviewQueueRowLink(row: ReviewQueueRow, change?: string) {
+  if (row.kind === REVIEW_KIND_SKILL_REVIEW) return serverSkillsLink(row.server)
+  return { path: `/review/${encodeURIComponent(row.server)}`, query: { ...(change ? { change } : {}) } }
+}
+
 export type ReviewSort = 'name' | 'impact' | 'age'
 
 export function sortReviewRows(rows: ReviewQueueRow[], sort: ReviewSort): ReviewQueueRow[] {
   const out = rows.slice()
   const byName = (a: ReviewQueueRow, b: ReviewQueueRow) => a.server.localeCompare(b.server)
   if (sort === 'impact') {
-    const impact = (r: ReviewQueueRow) => (r.pending ?? 0) + (r.changed ?? 0) + (r.kind === 'server_review' ? (r.tools_captured ?? 0) : 0)
-    // Active blockers first, then the most tools waiting.
+    const impact = (r: ReviewQueueRow) => (r.pending ?? 0) + (r.changed ?? 0) + heldSkillCount(r) + (r.kind === 'server_review' ? (r.tools_captured ?? 0) : 0)
+    // Active blockers first, then the most tools and skills waiting.
     out.sort((a, b) => Number(isActiveBlocker(b)) - Number(isActiveBlocker(a)) || impact(b) - impact(a) || byName(a, b))
   } else if (sort === 'age') {
     // Oldest waiting first; rows with no timestamp last.

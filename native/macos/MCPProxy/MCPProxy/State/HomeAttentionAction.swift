@@ -44,6 +44,7 @@ enum HomeAttentionAction {
         case "view_logs":
             navigateToServerDetail(item.subject.name, tab: .logs)
         case "review":
+            if openSkillReviewInWebUI(item) { return }
             NotificationCenter.default.post(name: .switchToSidebarTab, object: SidebarItem.review.rawValue)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                 NotificationCenter.default.post(name: .showReview, object: item.subject.name)
@@ -64,6 +65,16 @@ enum HomeAttentionAction {
                 appState.navigate(route)
             }
         }
+    }
+
+    /// Spec 125: held skills are reviewed on the Web UI's Skills tab (the app
+    /// has none), so a skill_review item opens its fix.target there instead of
+    /// the tool review sheet. Returns whether it handled the item.
+    @MainActor
+    private static func openSkillReviewInWebUI(_ item: AttentionItem) -> Bool {
+        guard item.kind == "skill_review" else { return false }
+        NotificationCenter.default.post(name: .openWebUIPath, object: item.fix.target)
+        return true
     }
 
     /// Reuses the same "switch sidebar, then select the server" route Home's

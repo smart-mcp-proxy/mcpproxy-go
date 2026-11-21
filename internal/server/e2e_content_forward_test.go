@@ -125,7 +125,7 @@ func TestE2E_ImageContentPreservation(t *testing.T) {
 
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)

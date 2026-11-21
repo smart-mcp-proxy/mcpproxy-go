@@ -214,7 +214,7 @@ func TestE2E_ToonOutputModeFlip(t *testing.T) {
 
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	require.NoError(t, env.proxyServer.runtime.CommitConfig(cfg))
 	time.Sleep(2 * time.Second)

@@ -862,6 +862,15 @@ func (s *Server) GetReviewQueue(ctx context.Context) (*runtime.ReviewQueue, erro
 	return s.runtime.GetReviewQueue(ctx)
 }
 
+// GetReviewQueueWithSkills forwards the caller-aware queue read (Spec 125
+// FR-019a: a caller that may not see held skills reads no skill approvals).
+func (s *Server) GetReviewQueueWithSkills(ctx context.Context, includeSkills bool) (*runtime.ReviewQueue, error) {
+	if s.runtime == nil {
+		return nil, fmt.Errorf("runtime unavailable")
+	}
+	return s.runtime.GetReviewQueueWithSkills(ctx, includeSkills)
+}
+
 // GetServerReview forwards the scoped REST review read to the runtime.
 func (s *Server) GetServerReview(ctx context.Context, serverName string) (*runtime.ServerReview, error) {
 	if s.runtime == nil {

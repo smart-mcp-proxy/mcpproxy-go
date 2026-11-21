@@ -25,8 +25,12 @@ type AttentionServer struct {
 	Health      contracts.HealthStatus
 	Pending     int
 	Changed     int
-	StateSince  time.Time
-	Detail      string // e.g. "OAuth · api.githubcopilot.com" — never a secret, path, query or header
+	// SkillsPending and SkillsChanged are the server's held skills (Spec 125,
+	// Runtime.heldSkills). They drive the administrator-only skill_review items.
+	SkillsPending int
+	SkillsChanged int
+	StateSince    time.Time
+	Detail        string // e.g. "OAuth · api.githubcopilot.com" — never a secret, path, query or header
 }
 
 // AttentionClient is the only client data Compute needs. 109-d defines it so
@@ -243,6 +247,33 @@ func computeServerItems(s AttentionServer, now time.Time, serverErrorThreshold t
 				Target: fmt.Sprintf("/review/%s?change=pending", encodedName),
 			},
 			Since: s.StateSince,
+		})
+	}
+
+	// Spec 125: held skills. Administrator-only (internal/httpapi drops the
+	// kind for every scoped caller). The macOS app has no Skills tab and the
+	// Web UI target is the server page's Skills tab.
+	skillsTarget := fmt.Sprintf("/servers/%s?tab=skills", encodedName)
+	if s.SkillsChanged > 0 {
+		out = append(out, contracts.AttentionItem{
+			ID:      fmt.Sprintf("%s:server:%s:changed", AttentionKindSkillReview, s.Name),
+			Kind:    AttentionKindSkillReview,
+			Rank:    AttentionRankSkillReviewChanged,
+			Subject: subject,
+			Summary: fmt.Sprintf("%s: %d skill(s) changed, needs review", s.Name, s.SkillsChanged),
+			Fix:     contracts.AttentionFix{Verb: AttentionFixReview, Label: "Review", Target: skillsTarget},
+			Since:   s.StateSince,
+		})
+	}
+	if s.SkillsPending > 0 {
+		out = append(out, contracts.AttentionItem{
+			ID:      fmt.Sprintf("%s:server:%s:pending", AttentionKindSkillReview, s.Name),
+			Kind:    AttentionKindSkillReview,
+			Rank:    AttentionRankSkillReviewPending,
+			Subject: subject,
+			Summary: fmt.Sprintf("%s: %d new skill(s), needs review", s.Name, s.SkillsPending),
+			Fix:     contracts.AttentionFix{Verb: AttentionFixReview, Label: "Review", Target: skillsTarget},
+			Since:   s.StateSince,
 		})
 	}
 
