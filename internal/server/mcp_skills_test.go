@@ -83,6 +83,25 @@ func (f *fakeSkillsCatalog) AvailableSkill(server, path string) (*runtime.Availa
 	return &cp, nil
 }
 
+func (f *fakeSkillsCatalog) ListAvailableSkills(server string) ([]*runtime.AvailableSkill, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	var all []runtime.AvailableSkill
+	for _, sk := range f.skills {
+		if sk.available && sk.skill.Server == server {
+			all = append(all, sk.skill)
+		}
+	}
+	sortSkills(all)
+	out := make([]*runtime.AvailableSkill, len(all))
+	for i := range all {
+		cp := all[i]
+		out[i] = &cp
+	}
+	return out, nil
+}
+
 func (f *fakeSkillsCatalog) AvailableSkillFile(server, path, rel string) ([]byte, storage.SkillFile, *runtime.AvailableSkill, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

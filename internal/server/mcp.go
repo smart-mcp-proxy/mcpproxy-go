@@ -297,9 +297,18 @@ type MCPProxyServer struct {
 	// own names. They are projections of the published direct catalog and are
 	// re-registered under directRefreshMu, after the direct surface. The lock
 	// order is directRefreshMu, then singleServersMu.
+	//
+	// singleServersMu is also each endpoint's lifecycle lock (Spec 125 D14): a
+	// request takes the instance, its transport and the endpoint generation
+	// together under it, and a retirement detaches all three under it. It is
+	// never held across serving a request or shutting a transport down.
 	singleServerOpts []mcpserver.ServerOption
 	singleServersMu  sync.Mutex
 	singleServers    map[string]*singleServerSurface
+	// singleServerGens is each endpoint's generation. It only grows within a
+	// process; a retirement advances it, so the session ids it issued earlier
+	// are refused.
+	singleServerGens map[string]uint64
 
 	// directRefreshMu serializes whole rebuilds so SetTools and the matching
 	// publishDirectCatalog cannot interleave with another rebuild's pair.
@@ -1059,7 +1068,7 @@ func injectAuthMetadata(ctx context.Context, args map[string]interface{}) map[st
 	if authMeta == nil {
 		return args
 	}
-	enriched := make(map[string]interface{}, len(args)+len(authMeta))
+	enriched := make(map[string]interface{}, len(args))
 	for k, v := range args {
 		enriched[k] = v
 	}
