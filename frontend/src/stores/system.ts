@@ -288,6 +288,16 @@ export const useSystemStore = defineStore('system', () => {
       }
     })
 
+    // Spec 125: an administrator-only invalidation of a server's skills
+    // ({server, counts}); the Skills tab reloads when the server is its own.
+    es.addEventListener('skills.changed', (event) => {
+      try {
+        window.dispatchEvent(new CustomEvent('mcpproxy:skills-changed', { detail: JSON.parse(event.data) }))
+      } catch (error) {
+        console.error('Failed to parse SSE skills.changed event:', error)
+      }
+    })
+
     // Spec 108-f FR-038: both are invalidations. The payload is not used; the
     // profiles store and the clients store refetch. Scoped subscribers never
     // receive either event, so nothing relies on them for correctness.

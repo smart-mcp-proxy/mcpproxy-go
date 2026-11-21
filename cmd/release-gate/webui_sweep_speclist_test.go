@@ -20,21 +20,28 @@ import (
 
 var playwrightTestLine = regexp.MustCompile(`"\$PLAYWRIGHT_BIN"\s+test\s+(.+)`)
 
-// sweepSpecsRun parses the spec names off the launcher's `playwright test` line.
+// sweepLaunchers are the scripts the web-ui-sweep job runs. run-web-smoke.sh
+// is the standing sweep; run-skills-tab-sweep.sh (spec 125) runs the spec that
+// needs a skills-capable upstream and enable_skills.
+var sweepLaunchers = []string{"run-web-smoke.sh", "run-skills-tab-sweep.sh"}
+
+// sweepSpecsRun parses the spec names off every launcher's `playwright test` line.
 func sweepSpecsRun(t *testing.T) []string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(repoRootFromTest, "scripts", "run-web-smoke.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	m := playwrightTestLine.FindStringSubmatch(string(b))
-	if m == nil {
-		t.Fatal(`scripts/run-web-smoke.sh has no "$PLAYWRIGHT_BIN" test <specs> line: the sweep runs nothing`)
-	}
 	var specs []string
-	for _, field := range strings.Fields(m[1]) {
-		if strings.HasSuffix(field, ".spec.ts") {
-			specs = append(specs, field)
+	for _, launcher := range sweepLaunchers {
+		b, err := os.ReadFile(filepath.Join(repoRootFromTest, "scripts", launcher))
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := playwrightTestLine.FindStringSubmatch(string(b))
+		if m == nil {
+			t.Fatalf(`scripts/%s has no "$PLAYWRIGHT_BIN" test <specs> line: it runs nothing`, launcher)
+		}
+		for _, field := range strings.Fields(m[1]) {
+			if strings.HasSuffix(field, ".spec.ts") {
+				specs = append(specs, field)
+			}
 		}
 	}
 	sort.Strings(specs)
@@ -70,7 +77,7 @@ func specListProblems(run, onDisk []string, docs map[string]string) []string {
 	}
 	for _, name := range onDisk {
 		if !has(run, name) {
-			problems = append(problems, name+" exists in e2e/web-ui-sweep but scripts/run-web-smoke.sh does not run it (an orphan spec never gates a release)")
+			problems = append(problems, name+" exists in e2e/web-ui-sweep but no sweep launcher (scripts/run-web-smoke.sh, scripts/run-skills-tab-sweep.sh) runs it (an orphan spec never gates a release)")
 		}
 	}
 	for _, name := range run {

@@ -34,7 +34,7 @@ fragments against a hardcoded manifest and exits per the verdict.
 | `suite-scan-eval` | `suite/scan-eval` | 10 min | `go run ./cmd/scan-eval --gate --min-recall 0.90 --max-fp 0.05` over the detect corpus — runs on **every** tag regardless of changed paths (FR-015). |
 | `matrix-invariants` | `matrix/{stdio,http,sse,docker,oauth}`, `invariant/{activity-request-id,counters,quarantine-flow,upgrade-in-place}` | 20 min | Boots the candidate against five local fixture upstreams (connect → list → call → kill/reconnect) and asserts the US2 invariants against the live instance. |
 | `surface-consistency` | `invariant/surface-consistency` (T4) | 20 min | Boots the same matrix, adds quarantined/disabled/unhealthy/live servers and asserts the CLI, MCP and rendered Web UI agree with the core on every server's state — see [Surface consistency](#surface-consistency-t4--blocking). |
-| `web-ui-sweep` | — (advisory `advisory/web-ui-sweep`, T2) | 20 min | Playwright sweep over the Web UI **served by the candidate binary**, with a live stdio fixture upstream. `continue-on-error: true` — see [Web UI sweep](#web-ui-sweep-t2--advisory). |
+| `web-ui-sweep` | — (advisory `advisory/web-ui-sweep`, T2, and `advisory/skills-tab-sweep`, spec 125) | 35 min | Playwright sweep over the Web UI **served by the candidate binary**, with a live stdio fixture upstream. `continue-on-error: true` — see [Web UI sweep](#web-ui-sweep-t2--advisory). |
 | `verdict` | (merges all) | 10 min | `release-gate report` → `gate-report.json` + `$GITHUB_STEP_SUMMARY`; its exit code **is** the gate verdict. |
 
 Every job uploads its fragment with `if: always()`, so a job that dies before
@@ -110,8 +110,8 @@ The `web-ui-sweep` job runs the Playwright sweep
 see [Web UI verification](web-ui-verification.md)) against the Web UI **served by
 the candidate binary** — embedded frontend, never a dev server — with a live
 `mcpfixture` stdio upstream so the servers/tools screens have real data. It
-runs six spec files (the launcher's `playwright test` line is the list, and
-`TestWebUISweepSpecListIsComplete` fails when it, `e2e/web-ui-sweep` and this
+runs the spec files below (the launchers' `playwright test` lines are the list, and
+`TestWebUISweepSpecListIsComplete` fails when they, `e2e/web-ui-sweep` and this
 page disagree):
 
 - `web-ui-sweep.spec.ts`: servers list, server detail (+ security tab), tools
@@ -138,6 +138,34 @@ page disagree):
   900 px: the header status pill names servers awaiting review, a secret-like
   Manual-add value is masked with a Show toggle, and profile Try it is readable
   and labels unsaved edits.
+- `skills-tab.spec.ts` (spec 125): the Skills tab of Server Detail, run by its
+  own launcher [`scripts/run-skills-tab-sweep.sh`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/scripts/run-skills-tab-sweep.sh)
+  as a second step of the same job (it needs `enable_skills` and a
+  skills-capable upstream, `cmd/skillsfixture`, which `build-candidate` builds
+  into `gate-candidate`). It lists, views and pages skills, approves one, shows
+  a change made while the skill is open as a stale review, then the diff, and
+  blocks and unblocks. It writes `skills-sweep-results.json` (checked commit,
+  fixture command line and port, each scenario's pass/fail, and the skill
+  records read back after the approve, block and unblock steps) under
+  `tmp/web-smoke-artifacts/skills-sweep/`, so it is uploaded with the
+  `web-ui-sweep-playwright-report` artifact. It runs with `--self-test-first`,
+  which first proves (no browser) that no ambient `MCPPROXY_*` variable
+  (decoys for `MCPPROXY_DATA_DIR` / `MCPPROXY_DATA`, `MCPPROXY_AUDIT_LOG_PATH`,
+  `MCPPROXY_TPA_BUNDLE_PATH`, `MCPPROXY_CERTS_DIR`) reaches the throwaway core,
+  that the results writer redacts the API key and local paths, and that a
+  `DEBUG=1` run never prints the key. The step runs even when the
+  standing sweep failed, through `release-gate run-suite --name
+  advisory/skills-tab-sweep --advisory`, so its outcome is its own
+  non-blocking manifest entry: a red run is recorded as `advisory-fail` and
+  listed in the verdict's `advisory_failures` (a run that died before writing
+  its fragment is a missing advisory entry, listed there too), and
+  `continue-on-error` keeps the job from blocking the tag. The Playwright
+  config retries a failed test once in CI, but the skills spec is one stateful
+  serial group and turns retries off for itself (a retry would replay against
+  state the first attempt already changed); the results file records the first
+  failed attempt's error. `TestEveryRunSuiteNameIsInTheManifest` fails when a
+  `run-suite --name` in the workflow is not a manifest entry, or an advisory
+  entry has no step.
 
 Setup is not duplicated in YAML: the job calls
 [`scripts/run-web-smoke.sh`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/scripts/run-web-smoke.sh),
@@ -168,7 +196,7 @@ It is **advisory**, on purpose while the sweep earns its flake record:
 > `TestPublishersDoNotShipSweepArtifacts` guards this.
 
 **Promotion to blocking** is a two-line change: set `Blocking: true` on the
-`advisory/web-ui-sweep` manifest entry and drop `continue-on-error` from the job
+`advisory/web-ui-sweep` (and/or `advisory/skills-tab-sweep`) manifest entry and drop `continue-on-error` from the job
 (the FR-016 end state). Do it once the sweep has passed on three consecutive
 release tags with no flaky or infrastructure failure — the same criterion T3
 uses (FR-021).
