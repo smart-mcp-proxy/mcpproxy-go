@@ -733,27 +733,49 @@ type sseCapture struct {
 func (e *credE2E) captureSSE() *sseCapture {
 	e.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
+	e.t.Cleanup(cancel)
 	c := &sseCapture{stop: cancel, done: make(chan struct{})}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.base+"/events", http.NoBody)
 	require.NoError(e.t, err)
 	req.Header.Set("X-API-Key", credE2EAPIKey)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(e.t, err)
+	ready := make(chan struct{})
 	go func() {
 		defer close(c.done)
 		defer resp.Body.Close()
 		sc := bufio.NewScanner(resp.Body)
 		sc.Buffer(make([]byte, 1<<20), 1<<22)
+		var markReady sync.Once
 		for sc.Scan() {
+			line := sc.Text()
 			c.mu.Lock()
-			c.buf.WriteString(sc.Text())
+			c.buf.WriteString(line)
 			c.buf.WriteByte('\n')
 			c.mu.Unlock()
+			if line == "event: status" {
+				markReady.Do(func() { close(ready) })
+			}
 		}
 		c.mu.Lock()
 		c.err = sc.Err()
 		c.mu.Unlock()
 	}()
+	e.t.Cleanup(func() {
+		c.stop()
+		<-c.done
+	})
+	require.Equal(e.t, http.StatusOK, resp.StatusCode)
+	// The server flushes its greeting before subscribing to runtime events.
+	// The initial status is sent after subscribing, so credential calls can
+	// start as soon as the capture sees it.
+	select {
+	case <-ready:
+	case <-c.done:
+		e.t.Fatalf("SSE stream ended before the initial status: %v", c.err)
+	case <-time.After(10 * time.Second):
+		e.t.Fatal("SSE stream did not send the initial status")
+	}
 	return c
 }
 
