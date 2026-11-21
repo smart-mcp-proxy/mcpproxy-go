@@ -603,15 +603,19 @@ func TestE2E_CredentialsLifecycle_WriteGates(t *testing.T) {
 	e := newCredE2E(t, nil)
 	e.createResearchProfiles()
 	e.adminOK("credentials", map[string]any{"operation": "create_token", "name": "pre", "profile": "daily-research", "expires_in": "1h"})
-	live := e.env.proxyServer.runtime.Config()
 	for _, gate := range []struct {
-		set  func(bool)
+		set  func(*config.Config, bool)
 		code string
 	}{
-		{func(v bool) { live.ReadOnlyMode = v }, "read_only_mode"},
-		{func(v bool) { live.DisableManagement = v }, "management_disabled"},
+		{func(cfg *config.Config, v bool) { cfg.ReadOnlyMode = v }, "read_only_mode"},
+		{func(cfg *config.Config, v bool) { cfg.DisableManagement = v }, "management_disabled"},
 	} {
-		gate.set(true)
+		setGate := func(enabled bool) {
+			cfg := copyLiveConfig(t, e.env)
+			gate.set(cfg, enabled)
+			require.NoError(t, e.env.proxyServer.runtime.CommitConfig(cfg))
+		}
+		setGate(true)
 		for _, args := range []map[string]any{
 			{"operation": "create_client", "client": "g", "profile": "daily-research", "expires_in": "1h"},
 			{"operation": "create_token", "name": "g", "profile": "daily-research", "expires_in": "1h"},
@@ -623,7 +627,7 @@ func TestE2E_CredentialsLifecycle_WriteGates(t *testing.T) {
 		}
 		e.adminOK("credentials", map[string]any{"operation": "list"})
 		e.adminOK("credentials", map[string]any{"operation": "get", "token": "pre"})
-		gate.set(false)
+		setGate(false)
 	}
 	got := e.adminOK("credentials", map[string]any{"operation": "get", "token": "pre"})
 	assert.Equal(t, "active", got["credential"].(map[string]any)["state"])

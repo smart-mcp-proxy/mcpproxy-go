@@ -1726,7 +1726,8 @@ actor CoreProcessManager {
             // The payload is a notification only; ReviewQueueView refetches the
             // authoritative one-row-per-server queue when it is visible.
             await refreshReviewQueue()
-            await MainActor.run { NotificationCenter.default.post(name: .reviewChanged, object: nil) }
+            let change = ReviewChange.decode(event.data)
+            await MainActor.run { NotificationCenter.default.post(name: .reviewChanged, object: change) }
 
         case "security.scan_settled":
             // Scan completion is separate from review changes: a clean scan
@@ -2376,5 +2377,26 @@ actor CoreProcessManager {
         var bytes = [UInt8](repeating: 0, count: 32)
         _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
         return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+
+struct ReviewChange: Decodable, Sendable {
+    let server: String?
+    let servers: [String]?
+    let skills: Bool?
+
+    static func decode(_ data: String) -> ReviewChange? {
+        struct Envelope: Decodable { let payload: ReviewChange }
+        let bytes = Data(data.utf8)
+        let decoder = JSONDecoder()
+        return (try? decoder.decode(Envelope.self, from: bytes).payload)
+            ?? (try? decoder.decode(ReviewChange.self, from: bytes))
+    }
+
+    func affectsTools(on name: String) -> Bool {
+        guard skills != true else { return false }
+        if let servers { return servers.contains(name) }
+        return server == nil || server == "" || server == name
     }
 }

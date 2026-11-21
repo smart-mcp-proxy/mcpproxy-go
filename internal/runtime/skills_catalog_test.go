@@ -352,6 +352,23 @@ func seedApprovedSkill(t *testing.T, g *skillsRig, uri string, listed bool) {
 	require.NoError(t, g.rt.storageManager.SaveSkillApproval(rec))
 }
 
+func TestSkillsRefresh_FirstEmptyListingAnnouncesSupport(t *testing.T) {
+	g := newSkillsRig(t, skillsRigOpts{enable: true})
+	ch := g.rt.SubscribeEvents()
+	defer g.rt.UnsubscribeEvents(ch)
+	for i := 0; i < 2; i++ {
+		require.NoError(t, g.refresh(t))
+		require.True(t, g.rt.SkillsStatus(skillsSrv).Supported)
+		names, reviews := skillsAnnouncements(t, ch, 300*time.Millisecond)
+		if i == 0 {
+			assert.Equal(t, []string{skillsSrv}, names)
+		} else {
+			assert.Empty(t, names)
+		}
+		assert.Empty(t, reviews)
+	}
+}
+
 func TestSkillsRefresh_EmptyListingKeepsRecordsUnlisted(t *testing.T) {
 	g := newSkillsRig(t, skillsRigOpts{enable: true})
 	seedApprovedSkill(t, g, "skill://gone/SKILL.md", true)

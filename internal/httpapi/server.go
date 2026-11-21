@@ -4604,12 +4604,13 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		"events_channel_nil", eventsCh == nil)
 
 	// FR-006: attention.changed is suppressed for THIS subscriber when its
-	// narrowed id set is unchanged since the last frame it received — a
-	// scoped caller's own view is what matters, not the shared event's raw
-	// id set (two scoped subscribers with different scopes must each get
-	// their own suppression decision). nil (not an empty set) so the very
-	// first frame is never suppressed.
-	var lastAttentionIDs map[string]struct{}
+	// narrowed id set did not move — a scoped caller's own view is what
+	// matters, not the shared event's raw id set (two scoped subscribers with
+	// different scopes must each get their own suppression decision).
+	// lastAttentionItems is the whole list as of the last event (seeded at
+	// connect, never sent); each event narrows it and the new list with the
+	// caller as it is then.
+	var lastAttentionItems []internalRuntime.AttentionEventItem
 
 	// Create heartbeat ticker to keep connection alive
 	heartbeat := time.NewTicker(sseHeartbeatInterval)
@@ -4641,6 +4642,33 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logger.Debug("Initial SSE status event sent successfully")
+
+	callerCtx, err = refreshCallerContext()
+	if err != nil {
+		s.logger.Warnw("Closing SSE stream before initial attention snapshot", "error", err)
+		return
+	}
+	// Send the same scoped snapshot used for duplicate suppression. An update
+	// queued during setup may already be reflected in this snapshot.
+	allAttention := s.controller.Attention()
+	lastAttentionItems = internalRuntime.AttentionEventItems(allAttention)
+	visibleAttention := filterAttentionItems(callerCtx, allAttention)
+	initialIDs := make([]string, 0, len(visibleAttention))
+	for _, item := range visibleAttention {
+		initialIDs = append(initialIDs, item.ID)
+	}
+	// Administrators also follow content changes with stable ids (a count in
+	// a summary; Spec 125 review round 2). For an administrator the visible
+	// list is the whole list, so this equals the runtime's fingerprint of it.
+	lastAttentionFingerprint := internalRuntime.AttentionFingerprint(visibleAttention)
+	initialAttention := map[string]interface{}{
+		"payload":   map[string]interface{}{"count": len(initialIDs), "ids": initialIDs},
+		"timestamp": time.Now().Unix(),
+	}
+	if err := s.writeSSEEvent(w, flusher, canFlush, string(internalRuntime.EventTypeAttentionChanged), initialAttention); err != nil {
+		s.logger.Errorw("Failed to write initial SSE attention event", "error", err)
+		return
+	}
 
 	// Stream updates
 	for {
@@ -4724,14 +4752,28 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 			// coalesced change is meaningful to show).
 			if evt.Type == internalRuntime.EventTypeAttentionChanged {
 				ids, _ := rendered["ids"].([]string)
-				current := make(map[string]struct{}, len(ids))
-				for _, id := range ids {
-					current[id] = struct{}{}
+				current := attentionIDSet(ids)
+				// Spec 125 review round 3: the previous list is narrowed with
+				// the caller as it is NOW, not as it was at the last frame. A
+				// reach change (re-pin, profile edit) publishes nothing, so a
+				// set remembered under the old reach would differ from any
+				// new narrowing and let the next unrelated event through.
+				previous := attentionIDSet(attentionEventIDsFor(callerCtx, lastAttentionItems))
+				items, _ := evt.Payload["items"].([]internalRuntime.AttentionEventItem)
+				lastAttentionItems = items
+				// An administrator also gets a frame when the content moved
+				// with the same ids; a scoped caller only when its own
+				// narrowed ids moved (FR-019a: the fingerprint covers items
+				// it cannot see).
+				admin := !auth.IsScopedCaller(callerCtx)
+				fingerprint, _ := evt.Payload[internalRuntime.AttentionFingerprintKey].(string)
+				contentMoved := admin && fingerprint != "" && fingerprint != lastAttentionFingerprint
+				if admin && fingerprint != "" {
+					lastAttentionFingerprint = fingerprint
 				}
-				if lastAttentionIDs != nil && attentionIDSetsEqual(lastAttentionIDs, current) {
+				if attentionIDSetsEqual(previous, current) && !contentMoved {
 					continue
 				}
-				lastAttentionIDs = current
 			}
 
 			eventPayload := map[string]interface{}{
@@ -4761,10 +4803,9 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 // fields, and (b) be an unsynchronised concurrent map write, which Go turns
 // into a fatal error that takes the whole core down for every client.
 //
-// Three narrowings, all only for servers.changed — every OTHER event type that
-// names a server is dropped for a scoped caller before it reaches this
-// function, by eventVisibleToCaller (sse_scope.go), which also explains why
-// this one type is rendered instead of dropped:
+// review.changed batches keep only the server names visible to a scoped
+// subscriber. eventVisibleToCaller has already suppressed empty scoped batches.
+// For servers.changed, there are three further narrowings:
 //
 //   - #1166 - the coalescer extras that NAME a server ("server": "beta") are
 //     removed when the caller may not enumerate it. That extra survived the
@@ -4789,6 +4830,17 @@ func (s *Server) renderEventPayloadForCaller(ctx context.Context, evt internalRu
 	}
 	if evt.Type == internalRuntime.EventTypeActiveProfileChanged {
 		return s.renderActiveProfileChangedForCaller(ctx, payload)
+	}
+	if evt.Type == internalRuntime.EventTypeReviewChanged && auth.IsScopedCaller(ctx) {
+		if names, ok := payload["servers"].([]string); ok {
+			var visible []string
+			for _, name := range names {
+				if canSeeReviewServer(ctx, name) {
+					visible = append(visible, name)
+				}
+			}
+			return map[string]any{"servers": visible}
+		}
 	}
 	if evt.Type != internalRuntime.EventTypeServersChanged || len(payload) == 0 {
 		return payload

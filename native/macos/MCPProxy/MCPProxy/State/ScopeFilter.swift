@@ -93,6 +93,8 @@ struct ScopeFilter: Equatable {
         "system_start", "system_stop", "internal_tool_call", "config_change",
         "tool_quarantine_change", "security_scan", "credential_broker",
         "preflight", "prompt_get", "profile_change", "upstream_event",
+        // Spec 125: administrator-only skill rows (the app is an administrator).
+        "skill_quarantine_change", "skill_access",
     ]
 
     static let systemTypes = knownTypes.filter { !callTypes.contains($0) }

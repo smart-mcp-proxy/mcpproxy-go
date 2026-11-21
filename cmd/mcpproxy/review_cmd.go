@@ -626,9 +626,9 @@ func formatReviewResponse(format string, raw []byte, full bool) error {
 			if v, ok := row["enabled"].(bool); ok {
 				enabled = fmt.Sprint(v)
 			}
-			rows = append(rows, []string{fmt.Sprint(row["server"]), fmt.Sprint(row["kind"]), fmt.Sprint(row["quarantined"]), enabled, fmt.Sprint(row["pending"]), fmt.Sprint(row["changed"]), fmt.Sprint(row["tier_counts"]), fmt.Sprint(row["scan"])})
+			rows = append(rows, []string{fmt.Sprint(row["server"]), fmt.Sprint(row["kind"]), fmt.Sprint(row["quarantined"]), enabled, fmt.Sprint(row["pending"]), fmt.Sprint(row["changed"]), reviewQueueSkillsCell(row), fmt.Sprint(row["tier_counts"]), fmt.Sprint(row["scan"])})
 		}
-		out, err := table.FormatTable([]string{"SERVER", "KIND", "QUARANTINED", "ENABLED", "PENDING", "CHANGED", "TIERS", "SCAN"}, rows)
+		out, err := table.FormatTable([]string{"SERVER", "KIND", "QUARANTINED", "ENABLED", "PENDING", "CHANGED", "SKILLS", "TIERS", "SCAN"}, rows)
 		if err != nil {
 			return err
 		}
@@ -668,6 +668,18 @@ func formatReviewResponse(format string, raw []byte, full bool) error {
 	fmt.Print(out)
 	printReviewChangedTools(os.Stdout, value)
 	return nil
+}
+
+// reviewQueueSkillsCell renders a queue row's held skills (Spec 125) as
+// "P pending, C changed", or "-" when it has none (the counts are
+// administrator-only, so a scoped caller always sees "-").
+func reviewQueueSkillsCell(row map[string]interface{}) string {
+	pending, _ := row["skills_pending"].(float64)
+	changed, _ := row["skills_changed"].(float64)
+	if pending+changed == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%d pending, %d changed", int(pending), int(changed))
 }
 
 // reviewDiffSections is the order and heading of the sections of a changed tool's diff.
