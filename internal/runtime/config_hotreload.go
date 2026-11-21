@@ -626,8 +626,9 @@ var undiffedHotConfigFields = []string{
 // OAuthTokenEncryptionKey (Spec 123 FR-023) is resolved once when config.db
 // is opened; adopting a new key mid-process would split oauth_tokens between
 // two keys. SessionRetentionDays (Spec 124) sets the work-session window once
-// in Runtime.New (ActivityService.SetSessionWindow).
-var restartGatedConfigFields = []string{"TrayEndpoint", "EnableSocket", "DebugSearch", "Tokenizer", "EnablePrompts", "Instructions", "OAuthTokenEncryptionKey", "SessionRetentionDays"}
+// in Runtime.New (ActivityService.SetSessionWindow). EnableClientFeatures is
+// declared to each upstream at initialize.
+var restartGatedConfigFields = []string{"TrayEndpoint", "EnableSocket", "DebugSearch", "Tokenizer", "EnablePrompts", "Instructions", "OAuthTokenEncryptionKey", "SessionRetentionDays", "EnableClientFeatures"}
 
 func configFieldValue(cfg *config.Config, goName string) interface{} {
 	return reflect.ValueOf(cfg).Elem().FieldByName(goName).Interface()

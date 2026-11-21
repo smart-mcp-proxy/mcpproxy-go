@@ -184,6 +184,14 @@ components:
           $ref: '#/components/schemas/config.DockerIsolationConfig'
         docker_recovery:
           $ref: '#/components/schemas/config.DockerRecoveryConfig'
+        enable_client_features:
+          description: |-
+            EnableClientFeatures lets upstream servers use the calling MCP client's
+            elicitation, sampling and roots through mcpproxy (#1964-#1966). nil
+            (default) is on; false declares none of them to any upstream. Read when
+            an upstream connects, so a change needs a restart. Resolved by
+            ClientFeaturesEnabled.
+          type: boolean
         enable_code_execution:
           description: Code execution settings
           type: boolean
@@ -1235,6 +1243,13 @@ components:
             from legacy skip_quarantine), explicit true/false = honored as-is so an
             explicit auto_approve_tool_changes:false overrides a legacy skip_quarantine:true.
             Read via IsAutoApproveToolChanges().
+          type: boolean
+        client_features:
+          description: |-
+            ClientFeatures overrides whether this server may use the calling MCP
+            client's elicitation, sampling and roots when Config.EnableClientFeatures
+            is on. nil (default) inherits; false turns them off for this server. A
+            change reconnects the server (ConnectionEquivalent).
           type: boolean
         command:
           type: string
@@ -3218,6 +3233,12 @@ components:
             an explicit false. Read-only on the GET path; PATCH/POST accept it via
             AddServerRequest.
           type: boolean
+        client_features:
+          description: |-
+            ClientFeatures mirrors config.ServerConfig.ClientFeatures: whether this
+            server may use the calling client's elicitation, sampling and roots.
+            Tri-state *bool; nil/omitted means "inherit".
+          type: boolean
         command:
           type: string
         connected:
@@ -4437,6 +4458,13 @@ components:
             (including false) is applied. Mirrors config.ServerConfig's *bool
             semantics — do NOT collapse to a plain bool, or an omitted field would
             silently reset a previously-set value.
+          type: boolean
+        client_features:
+          description: |-
+            ClientFeatures overrides whether this server may use the calling client's
+            elicitation, sampling and roots. Tri-state *bool mirroring
+            config.ServerConfig.ClientFeatures: nil means "leave unchanged" on PATCH
+            and "inherit" on create.
           type: boolean
         command:
           type: string
@@ -6670,6 +6698,7 @@ paths:
           - prompt_get
           - profile_change
           - upstream_event
+          - client_request
           type: string
       - description: Filter by server name
         in: query

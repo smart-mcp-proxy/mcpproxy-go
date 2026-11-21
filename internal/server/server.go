@@ -2437,6 +2437,9 @@ func applyServerUpdates(existing, updates *config.ServerConfig) {
 	if updates.ExposeSkills != nil {
 		existing.ExposeSkills = updates.ExposeSkills
 	}
+	if updates.ClientFeatures != nil {
+		existing.ClientFeatures = updates.ClientFeatures
+	}
 	if updates.MaxConcurrentRequests != nil {
 		existing.MaxConcurrentRequests = updates.MaxConcurrentRequests
 	}

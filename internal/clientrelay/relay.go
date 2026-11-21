@@ -8,7 +8,9 @@
 // hands this package that context (Handler.Caller). With no such client (no
 // call in flight, a REST or CLI call, a client without the capability), the
 // request is answered without asking anyone: elicitation is declined, sampling
-// fails and roots/list returns no roots.
+// fails and roots/list returns no roots. roots/list alone also asks the last
+// client that called the server (Handler.LastCaller), because servers ask for
+// roots when they connect and when told the roots changed, outside any call.
 package clientrelay
 
 import (
@@ -16,40 +18,61 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
-	"go.uber.org/zap"
 )
 
 // ErrNoClient means no MCP client that can answer the request is attached to
 // the call.
 var ErrNoClient = errors.New("no MCP client in this call can answer")
 
+// lastCallerTimeout bounds a roots/list asked of the last caller, whose
+// session may be gone.
+const lastCallerTimeout = 10 * time.Second
+
 // Capabilities is what mcpproxy declares to an upstream it can relay for.
-// Roots carry no listChanged: mcpproxy does not forward roots changes.
 func Capabilities() mcp.ClientCapabilities {
 	return mcp.ClientCapabilities{
 		Roots: &struct {
 			ListChanged bool `json:"listChanged,omitempty"`
-		}{},
+		}{ListChanged: true},
 		Sampling:    &mcp.SamplingCapability{},
 		Elicitation: &mcp.ElicitationCapability{Form: &struct{}{}, URL: &struct{}{}},
 	}
 }
 
-// Handler answers an upstream's server-to-client requests. It implements
+// Event is one upstream request and how it was answered, for the activity log.
+type Event struct {
+	Server    string
+	Method    mcp.MCPMethod
+	SessionID string // the client asked; "" when nobody was
+	Params    any    // what the upstream asked
+	Result    any    // what the upstream got back (also when nobody was asked)
+	Err       error  // wraps ErrNoClient when nobody could be asked
+	Duration  time.Duration
+}
+
+// Handler answers one upstream's server-to-client requests. It implements
 // mcp-go's client.ElicitationHandler, client.SamplingHandler and
 // client.RootsHandler.
 type Handler struct {
+	// Server is the upstream's name. Elicitation messages are prefixed with
+	// "[Server] " so the user can tell which server is asking.
+	Server string
 	// Caller maps the context mcp-go hands the handler to the context of the
 	// call the request belongs to, which carries the client's session.
 	Caller func(context.Context) context.Context
+	// LastCaller returns a context carrying the session of the last client
+	// that called this server, or nil. Used by roots/list only.
+	LastCaller func() context.Context
 	// URLs remembers where URL-mode elicitations went, for their completion
 	// notification. nil forwards none.
-	URLs   *URLElicitations
-	Logger *zap.Logger
+	URLs *URLElicitations
+	// Audit receives every request and its answer. nil records nothing.
+	Audit func(Event)
 }
 
 // Options returns the mcp-go client options that declare Capabilities and
@@ -65,7 +88,12 @@ func (h Handler) Options() []client.ClientOption {
 
 // Elicit forwards elicitation/create, or declines when no client can answer.
 func (h Handler) Elicit(ctx context.Context, req mcp.ElicitationRequest) (res *mcp.ElicitationResult, err error) {
+	start := time.Now()
 	ctx = h.caller(ctx)
+	asked := req.Params
+	if h.Server != "" {
+		req.Params.Message = "[" + h.Server + "] " + req.Params.Message
+	}
 	if req.Params.Mode == mcp.ElicitationModeURL && h.URLs != nil {
 		// Recorded before asking: the flow can finish as soon as the user opens the URL.
 		forget := h.URLs.add(req.Params.ElicitationID, mcpserver.ClientSessionFromContext(ctx))
@@ -76,32 +104,48 @@ func (h Handler) Elicit(ctx context.Context, req mcp.ElicitationRequest) (res *m
 		}()
 	}
 	res, err = Elicit(ctx, req)
+	reported := err
 	if errors.Is(err, ErrNoClient) {
-		h.log(mcp.MethodElicitationCreate, err)
-		return &mcp.ElicitationResult{ElicitationResponse: mcp.ElicitationResponse{Action: mcp.ElicitationResponseActionDecline}}, nil
+		res, err = &mcp.ElicitationResult{ElicitationResponse: mcp.ElicitationResponse{Action: mcp.ElicitationResponseActionDecline}}, nil
 	}
+	h.audit(ctx, mcp.MethodElicitationCreate, asked, res, reported, start)
 	return res, err
 }
 
 // CreateMessage forwards sampling/createMessage, or fails when no client can
 // answer (sampling has no "declined" result).
 func (h Handler) CreateMessage(ctx context.Context, req mcp.CreateMessageRequest) (*mcp.CreateMessageResult, error) {
+	start := time.Now()
 	ctx = h.caller(ctx)
 	res, err := CreateMessage(ctx, req)
-	if errors.Is(err, ErrNoClient) {
-		h.log(mcp.MethodSamplingCreateMessage, err)
-	}
+	h.audit(ctx, mcp.MethodSamplingCreateMessage, req.CreateMessageParams, res, err, start)
 	return res, err
 }
 
-// ListRoots forwards roots/list, or returns no roots when no client can answer.
+// ListRoots forwards roots/list to the calling client, else to the last client
+// that called the server, or returns no roots when neither can answer.
 func (h Handler) ListRoots(ctx context.Context, req mcp.ListRootsRequest) (*mcp.ListRootsResult, error) {
+	start := time.Now()
 	ctx = h.caller(ctx)
-	res, err := ListRoots(ctx, req)
-	if errors.Is(err, ErrNoClient) {
-		h.log(mcp.MethodListRoots, err)
-		return &mcp.ListRootsResult{Roots: []mcp.Root{}}, nil
+	usedLast := false
+	if !HasClient(ctx) && h.LastCaller != nil {
+		if last := h.LastCaller(); last != nil {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(last, lastCallerTimeout)
+			defer cancel()
+			usedLast = true
+		}
 	}
+	res, err := ListRoots(ctx, req)
+	if err != nil && usedLast && !errors.Is(err, ErrNoClient) {
+		// The last caller may be long gone: answer no roots, as for nobody.
+		err = fmt.Errorf("%w: last caller: %v", ErrNoClient, err)
+	}
+	reported := err
+	if errors.Is(err, ErrNoClient) {
+		res, err = &mcp.ListRootsResult{Roots: []mcp.Root{}}, nil
+	}
+	h.audit(ctx, mcp.MethodListRoots, nil, res, reported, start)
 	return res, err
 }
 
@@ -151,15 +195,47 @@ func (h Handler) caller(ctx context.Context) context.Context {
 	return h.Caller(ctx)
 }
 
-func (h Handler) log(method mcp.MCPMethod, err error) {
-	if h.Logger != nil {
-		h.Logger.Debug("Answered upstream request without a client", zap.String("method", string(method)), zap.Error(err))
+// audit reports one request. res is passed as any, so a nil pointer result
+// becomes a nil interface first.
+func (h Handler) audit(ctx context.Context, method mcp.MCPMethod, params, res any, err error, start time.Time) {
+	if h.Audit == nil {
+		return
 	}
+	e := Event{Server: h.Server, Method: method, Params: params, Err: err, Duration: time.Since(start)}
+	if !isNil(res) {
+		e.Result = res
+	}
+	if s := mcpserver.ClientSessionFromContext(ctx); s != nil && !errors.Is(err, ErrNoClient) {
+		e.SessionID = s.SessionID()
+	}
+	h.Audit(e)
+}
+
+func isNil(v any) bool {
+	switch r := v.(type) {
+	case nil:
+		return true
+	case *mcp.ElicitationResult:
+		return r == nil
+	case *mcp.CreateMessageResult:
+		return r == nil
+	case *mcp.ListRootsResult:
+		return r == nil
+	}
+	return false
 }
 
 // HasClient reports whether ctx carries an MCP client session.
 func HasClient(ctx context.Context) bool {
 	return mcpserver.ClientSessionFromContext(ctx) != nil
+}
+
+// SessionID returns the id of the MCP client session in ctx, or "".
+func SessionID(ctx context.Context) string {
+	if s := mcpserver.ClientSessionFromContext(ctx); s != nil {
+		return s.SessionID()
+	}
+	return ""
 }
 
 // Elicit sends req to the client session in ctx.

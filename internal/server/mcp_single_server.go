@@ -155,6 +155,7 @@ func (p *MCPProxyServer) singleServerSurfaceFor(name string) *singleServerSurfac
 		gen:     p.singleServerGens[name],
 		retired: make(chan struct{}),
 	}
+	watchClientRoots(s.server, p.upstreamManager)
 	if p.singleServers == nil {
 		p.singleServers = map[string]*singleServerSurface{}
 	}

@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // newRelayUpstream is a streamable-HTTP MCP server whose tools ask their
@@ -75,8 +76,9 @@ func newRelayUpstream(t *testing.T) string {
 
 // relayClient is the user's MCP client: it answers what the upstream asks.
 type relayClient struct {
-	mu    sync.Mutex
-	asked []string
+	mu      sync.Mutex
+	asked   []string
+	message string // the last elicitation message shown to the user
 }
 
 func (c *relayClient) record(s string) {
@@ -85,8 +87,11 @@ func (c *relayClient) record(s string) {
 	c.mu.Unlock()
 }
 
-func (c *relayClient) Elicit(context.Context, mcp.ElicitationRequest) (*mcp.ElicitationResult, error) {
+func (c *relayClient) Elicit(_ context.Context, req mcp.ElicitationRequest) (*mcp.ElicitationResult, error) {
 	c.record("elicit")
+	c.mu.Lock()
+	c.message = req.Params.Message
+	c.mu.Unlock()
 	return &mcp.ElicitationResult{ElicitationResponse: mcp.ElicitationResponse{Action: mcp.ElicitationResponseActionAccept}}, nil
 }
 
@@ -156,6 +161,7 @@ func TestClientRelay_UpstreamRequestsReachTheCallingClient(t *testing.T) {
 			h := &relayClient{}
 			c := env.relayMCPClient(s.path, h)
 			assert.Equal(t, "accept", s.call(t, c, "confirm"))
+			assert.Equal(t, "[relay] run it?", h.message, "the user sees which server asks")
 			assert.Equal(t, "client-model", s.call(t, c, "sample"))
 			assert.Equal(t, "roots:file:///project", s.call(t, c, "roots"))
 			assert.Equal(t, []string{"elicit", "sample", "roots"}, upstreamAsks(h.take()))
@@ -174,5 +180,28 @@ func TestClientRelay_UpstreamRequestsReachTheCallingClient(t *testing.T) {
 		assert.Equal(t, "decline", fwdCallRead(t, c, "relay", "confirm"))
 		assert.Contains(t, fwdCallRead(t, c, "relay", "sample"), "error:")
 		assert.Equal(t, "roots:", fwdCallRead(t, c, "relay", "roots"))
+	})
+
+	t.Run("every request is in the activity log", func(t *testing.T) {
+		outcomes := func() map[string]map[string]int {
+			recs, _, err := env.proxyServer.runtime.StorageManager().ListActivities(storage.ActivityFilter{Types: []string{string(storage.ActivityTypeClientRequest)}, Limit: 100})
+			require.NoError(t, err)
+			got := map[string]map[string]int{}
+			for _, r := range recs {
+				assert.Equal(t, "relay", r.ServerName)
+				outcome, _ := r.Metadata["outcome"].(string)
+				if got[r.ToolName] == nil {
+					got[r.ToolName] = map[string]int{}
+				}
+				got[r.ToolName][outcome]++
+			}
+			return got
+		}
+		require.Eventually(t, func() bool {
+			got := outcomes()
+			return got["elicitation/create"]["forwarded"] >= 4 && got["elicitation/create"]["unanswered"] >= 1 &&
+				got["sampling/createMessage"]["forwarded"] >= 3 && got["sampling/createMessage"]["unanswered"] >= 1 &&
+				got["roots/list"]["forwarded"] >= 3
+		}, 10*time.Second, 100*time.Millisecond, "client_request rows: %v", outcomes())
 	})
 }

@@ -902,6 +902,7 @@ func NewMCPProxyServer(
 	// Publish the server to the hooks, which need it to ask the client for its
 	// workspace roots (Spec 082). Set before the server ever serves a request.
 	mcpSrvRef.Store(mcpServer)
+	watchClientRoots(mcpServer, upstreamManager)
 
 	// Initialize JavaScript runtime pool if code execution is enabled
 	var jsPool *jsruntime.Pool

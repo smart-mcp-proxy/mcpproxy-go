@@ -95,6 +95,8 @@ struct ScopeFilter: Equatable {
         "preflight", "prompt_get", "profile_change", "upstream_event",
         // Spec 125: administrator-only skill rows (the app is an administrator).
         "skill_quarantine_change", "skill_access",
+        // #1964: an upstream asked the client for elicitation, sampling or roots.
+        "client_request",
     ]
 
     static let systemTypes = knownTypes.filter { !callTypes.contains($0) }

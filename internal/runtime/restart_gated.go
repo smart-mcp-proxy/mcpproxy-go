@@ -63,6 +63,8 @@ func pinRestartGated(live, desired *config.Config) *config.Config {
 	// Read once at MCP server construction (mcp.go), never re-read.
 	pinned.EnablePrompts = live.EnablePrompts
 	pinned.Instructions = live.Instructions
+	// Declared to each upstream at initialize (#1964).
+	pinned.EnableClientFeatures = live.EnableClientFeatures
 	// Spec 123 FR-023: the OAuth token key is resolved once, before config.db
 	// is opened, and kept for the life of the process.
 	pinned.OAuthTokenEncryptionKey = live.OAuthTokenEncryptionKey

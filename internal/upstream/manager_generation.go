@@ -411,6 +411,9 @@ func (m *Manager) newWiredClientLocked(id string, cfg *config.ServerConfig, gen 
 	if m.promptsChangedCallback != nil {
 		client.SetPromptsChangedCallback(m.promptsChangedCallback)
 	}
+	if m.clientRequestObserver != nil {
+		client.SetClientRequestObserver(m.clientRequestObserver)
+	}
 	// Spec 093: install admission control before the client becomes
 	// reachable, so no dispatch can ever see a client without its limiter.
 	client.SetAdmissionControl(m.limiters, m.currentRejectObserver())

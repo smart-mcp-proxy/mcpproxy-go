@@ -135,6 +135,7 @@ func sseIdentityEventFixtures(server string) []internalRuntime.Event {
 		evt(internalRuntime.EventTypeActivityQuarantineChange, map[string]any{"server_name": server, "quarantined": true}),
 		evt(internalRuntime.EventTypeActivityToolQuarantineChange, map[string]any{"server_name": server, "tool_name": "t", "action": "pending"}),
 		evt(internalRuntime.EventTypeActivityPromptGet, map[string]any{"server_name": server, "prompt_name": "p", "status": "ok"}),
+		evt(internalRuntime.EventTypeActivityClientRequest, map[string]any{"server_name": server, "method": "roots/list", "outcome": "forwarded"}),
 		evt(internalRuntime.EventTypeOAuthTokenRefreshed, map[string]any{"server_name": server, "expires_at": now.Format(time.RFC3339)}),
 		evt(internalRuntime.EventTypeOAuthRefreshFailed, map[string]any{"server_name": server, "error": "re-auth required"}),
 		evt(internalRuntime.EventTypeSecurityScanSettled, map[string]any{"server_name": server, "status": "completed"}),

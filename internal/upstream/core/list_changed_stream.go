@@ -223,7 +223,9 @@ func (c *Client) newListChangedStream(cl *client.Client, info *mcp.InitializeRes
 		}
 		queue.push(n)
 	}
-	opts.OnRequest = c.relayHandler().Answer
+	if c.relayEnabled() {
+		opts.OnRequest = c.relayHandler().Answer
+	}
 	ls := cfg.NewListenStream(sh, opts)
 
 	ctx, cancel := context.WithCancel(c.Gate().Context())

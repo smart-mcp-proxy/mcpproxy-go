@@ -28,6 +28,7 @@ enum ActivityTypePresentation {
         // Spec 125: administrator-only skill rows.
         case "skill_quarantine_change": return "Skill Approval Change"
         case "skill_access": return "Skill Access"
+        case "client_request": return "Client Request"
         default: return type
         }
     }
@@ -51,6 +52,7 @@ enum ActivityTypePresentation {
         case "upstream_event": return "powerplug.fill"
         case "skill_quarantine_change": return "books.vertical.fill"
         case "skill_access": return "book.fill"
+        case "client_request": return "person.fill.questionmark"
         default: return "circle.fill"
         }
     }
@@ -74,6 +76,7 @@ enum ActivityTypePresentation {
         case "upstream_event": return .teal
         case "skill_quarantine_change": return .orange
         case "skill_access": return .brown
+        case "client_request": return .indigo
         default: return .gray
         }
     }

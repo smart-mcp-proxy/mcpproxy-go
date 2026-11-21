@@ -2280,6 +2280,11 @@ type AddServerRequest struct {
 	// Tri-state *bool mirroring config.ServerConfig.ExposeSkills: nil means
 	// "leave unchanged" on PATCH and "inherit" on create.
 	ExposeSkills *bool `json:"expose_skills,omitempty"`
+	// ClientFeatures overrides whether this server may use the calling client's
+	// elicitation, sampling and roots. Tri-state *bool mirroring
+	// config.ServerConfig.ClientFeatures: nil means "leave unchanged" on PATCH
+	// and "inherit" on create.
+	ClientFeatures *bool `json:"client_features,omitempty"`
 	// ForwardHeaders is the per-server allowlist of inbound MCP client header
 	// NAMES forwarded to this server on tools/call (Spec 112). Names only, never
 	// values. On PATCH a nil slice (field omitted) leaves the stored allowlist
@@ -2647,6 +2652,9 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	if req.ExposeSkills != nil {
 		serverConfig.ExposeSkills = req.ExposeSkills
 	}
+	if req.ClientFeatures != nil {
+		serverConfig.ClientFeatures = req.ClientFeatures
+	}
 	// Spec 112: carry the forward_headers allowlist through on create, after
 	// validating the names (write-time layer of FR-005).
 	if len(req.ForwardHeaders) > 0 {
@@ -2954,6 +2962,13 @@ func resolveServerPatch(serverName string, req *AddServerRequest, existingSrv *c
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.ExposeSkills = existingSrv.ExposeSkills
+	}
+	// client_features: same tri-state preserve-the-existing-pointer rule.
+	if req.ClientFeatures != nil {
+		updates.ClientFeatures = req.ClientFeatures
+		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.ClientFeatures = existingSrv.ClientFeatures
 	}
 	// Spec 112: forward_headers preserves the existing allowlist when the
 	// request omits it (nil slice); a non-nil slice replaces it and an empty

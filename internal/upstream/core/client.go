@@ -131,6 +131,8 @@ type Client struct {
 	calls inflightCalls
 	// urlElicitations routes the upstream's URL elicitation completions.
 	urlElicitations clientrelay.URLElicitations
+	// requestObserver records every relayed request (activity log).
+	requestObserver atomic.Pointer[func(clientrelay.Event)]
 
 	// Transport type and stderr access (for stdio)
 	transportType string
@@ -694,7 +696,7 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 	// attributed to the upstream only when the request really left. A no-op
 	// when ctx carries no call recorder.
 	proxytransport.MarkDispatched(ctx)
-	defer c.calls.add(callCtx)()
+	defer c.beginCall(callCtx)()
 	result, err := client.CallTool(callCtx, request)
 	if err != nil {
 		// Spec 112 FR-016.1: scrub echoed forwarded values before this error

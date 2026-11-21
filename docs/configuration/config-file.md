@@ -480,6 +480,15 @@ With `require_mcp_auth` off, a change that would let a client bound to a profile
 
 See [Skills over MCP](/features/skills).
 
+### Upstream requests to the client (`enable_client_features`) {#client-features}
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enable_client_features` | boolean | `true` | Let upstream servers use the calling MCP client's elicitation, sampling and roots. `false` offers none of them to any server. Takes effect after a restart. |
+| `mcpServers[].client_features` | boolean | follows `enable_client_features` | Per-server override. `false` offers this server none of them. A change reconnects the server. |
+
+See [Upstream requests to the client](/features/client-requests).
+
 ### MCP Servers
 
 See [Upstream Servers](/configuration/upstream-servers) for detailed server configuration.

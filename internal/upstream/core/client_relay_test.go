@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientrelay"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 )
@@ -25,6 +27,34 @@ import (
 func relayUpstream() *mcpserver.MCPServer {
 	srv := mcpserver.NewMCPServer("relay-up", "1", mcpserver.WithElicitation(), mcpserver.WithRoots())
 	text := func(s string) *mcp.CallToolResult { return mcp.NewToolResultText(s) }
+
+	// Like the filesystem server: on roots/list_changed, ask for the roots
+	// again, outside any call. "rootsseen" reports how often and what it got.
+	var seenMu sync.Mutex
+	fetches, seen := 0, ""
+	srv.AddNotificationHandler(string(mcp.MethodNotificationRootsListChanged), func(ctx context.Context, _ mcp.JSONRPCNotification) {
+		ctx = context.WithoutCancel(ctx)
+		go func() {
+			res, err := srv.RequestRoots(ctx, mcp.ListRootsRequest{})
+			got := "error"
+			if err == nil {
+				uris := make([]string, 0, len(res.Roots))
+				for _, r := range res.Roots {
+					uris = append(uris, r.URI)
+				}
+				got = strings.Join(uris, ",")
+			}
+			seenMu.Lock()
+			fetches++
+			seen = got
+			seenMu.Unlock()
+		}()
+	})
+	srv.AddTool(mcp.NewTool("rootsseen"), func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		seenMu.Lock()
+		defer seenMu.Unlock()
+		return text(fmt.Sprintf("%d:%s", fetches, seen)), nil
+	})
 	srv.AddTool(mcp.NewTool("confirm"), func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		res, err := srv.RequestElicitation(ctx, mcp.ElicitationRequest{Params: mcp.ElicitationParams{
 			Message: "run it?", RequestedSchema: map[string]any{"type": "object"},
@@ -76,9 +106,10 @@ func relayUpstream() *mcpserver.MCPServer {
 
 // downstreamSession stands in for the MCP client that made the tool call.
 type downstreamSession struct {
-	mu    sync.Mutex
-	asked []string
-	notes chan mcp.JSONRPCNotification
+	mu      sync.Mutex
+	asked   []string
+	notes   chan mcp.JSONRPCNotification
+	message string // the last elicitation message shown to the user
 }
 
 func (s *downstreamSession) SessionID() string                                   { return "downstream" }
@@ -104,8 +135,11 @@ func (s *downstreamSession) record(what string) {
 	s.mu.Unlock()
 }
 
-func (s *downstreamSession) RequestElicitation(context.Context, mcp.ElicitationRequest) (*mcp.ElicitationResult, error) {
+func (s *downstreamSession) RequestElicitation(_ context.Context, req mcp.ElicitationRequest) (*mcp.ElicitationResult, error) {
 	s.record("elicit")
+	s.mu.Lock()
+	s.message = req.Params.Message
+	s.mu.Unlock()
 	return &mcp.ElicitationResult{ElicitationResponse: mcp.ElicitationResponse{Action: mcp.ElicitationResponseActionAccept}}, nil
 }
 
@@ -131,18 +165,40 @@ func callText(t *testing.T, c *Client, ctx context.Context, tool string) string 
 
 func assertRelays(t *testing.T, c *Client) {
 	t.Helper()
+	var auditMu sync.Mutex
+	var audited []clientrelay.Event
+	c.SetClientRequestObserver(func(e clientrelay.Event) {
+		auditMu.Lock()
+		audited = append(audited, e)
+		auditMu.Unlock()
+	})
+
 	caps := callText(t, c, context.Background(), "caps")
 	assert.Contains(t, caps, `"elicitation":{"form":{},"url":{}}`)
 	assert.Contains(t, caps, `"sampling":{}`)
-	assert.Contains(t, caps, `"roots":{}`)
+	assert.Contains(t, caps, `"roots":{"listChanged":true}`)
+	assert.Equal(t, "0:", callText(t, c, context.Background(), "rootsseen"), "no client has called yet")
 
 	down := &downstreamSession{notes: make(chan mcp.JSONRPCNotification, 4)}
 	ctx := mcpserver.NewMCPServer("down", "1").WithContext(context.Background(), down)
 	assert.Equal(t, "accept", callText(t, c, ctx, "confirm"))
+	assert.Equal(t, "["+c.config.Name+"] run it?", down.message, "the user sees which server asks")
 	assert.Equal(t, "client-model", callText(t, c, ctx, "sample"))
 	assert.Equal(t, "roots:file:///project", callText(t, c, ctx, "roots"))
 	assert.Equal(t, "accept", callText(t, c, ctx, "login"))
-	assert.Equal(t, []string{"elicit", "sample", "roots", "elicit"}, down.asked)
+	assert.Contains(t, down.asked, "sample")
+
+	// The first call from a client told the upstream its roots changed; it
+	// asked again outside the call and got this client's roots (#1966).
+	rootsSeen := func(want string) {
+		t.Helper()
+		assert.Eventually(t, func() bool { return callText(t, c, context.Background(), "rootsseen") == want },
+			5*time.Second, 50*time.Millisecond, "want %s", want)
+	}
+	rootsSeen("1:file:///project")
+	c.NotifyClientRootsChanged("someone-else")
+	c.NotifyClientRootsChanged("downstream")
+	rootsSeen("2:file:///project")
 
 	// The URL elicitation's completion reaches the client that was asked.
 	select {
@@ -153,10 +209,52 @@ func assertRelays(t *testing.T, c *Client) {
 		t.Fatal("the URL elicitation's completion did not reach the client")
 	}
 
-	// A call no MCP client made (REST, CLI) is answered without asking.
+	// A call no MCP client made (REST, CLI) is answered without asking; roots
+	// alone come from the last client that called.
 	assert.Equal(t, "decline", callText(t, c, context.Background(), "confirm"))
 	assert.Contains(t, callText(t, c, context.Background(), "sample"), "error:")
-	assert.Equal(t, "roots:", callText(t, c, context.Background(), "roots"))
+	assert.Equal(t, "roots:file:///project", callText(t, c, context.Background(), "roots"))
+
+	auditMu.Lock()
+	defer auditMu.Unlock()
+	methods := map[mcp.MCPMethod]int{}
+	for _, e := range audited {
+		assert.Equal(t, c.config.Name, e.Server)
+		methods[e.Method]++
+	}
+	assert.GreaterOrEqual(t, methods[mcp.MethodElicitationCreate], 3, "confirm, login and the declined confirm")
+	assert.GreaterOrEqual(t, methods[mcp.MethodSamplingCreateMessage], 2)
+	assert.GreaterOrEqual(t, methods[mcp.MethodListRoots], 4, "two in calls, two after list_changed")
+}
+
+// With client features off, globally or for the server, the upstream is
+// offered none of them: exactly the pre-#1964 behaviour.
+func TestRelay_SwitchedOff(t *testing.T) {
+	disableOAuthForTest(t)
+	off := false
+	for name, setup := range map[string]func(*config.ServerConfig) *config.Config{
+		"global":     func(*config.ServerConfig) *config.Config { return &config.Config{EnableClientFeatures: &off} },
+		"per-server": func(sc *config.ServerConfig) *config.Config { sc.ClientFeatures = &off; return &config.Config{} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(mcpserver.NewStreamableHTTPServer(relayUpstream()))
+			t.Cleanup(srv.Close)
+			cfg := &config.ServerConfig{Name: "relay-off", Protocol: "streamable-http", URL: srv.URL, Enabled: true}
+			global := setup(cfg)
+			c, err := NewClient("relay-off", cfg, zap.NewNop(), nil, global, nil, secret.NewResolver())
+			require.NoError(t, err)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			require.NoError(t, c.Connect(ctx))
+			t.Cleanup(func() { _ = c.Disconnect() })
+
+			assert.Equal(t, "{}", callText(t, c, context.Background(), "caps"))
+			down := &downstreamSession{}
+			dctx := mcpserver.NewMCPServer("down", "1").WithContext(context.Background(), down)
+			callText(t, c, dctx, "confirm")
+			assert.Empty(t, down.asked, "nothing reaches the client")
+		})
+	}
 }
 
 func TestRelay_StreamableHTTPUpstream(t *testing.T) {
@@ -212,12 +310,12 @@ func TestInflightCalls_Only(t *testing.T) {
 	assert.False(t, ok, "no call in flight")
 
 	a := context.WithValue(context.Background(), struct{}{}, "a")
-	doneA := f.add(a)
+	doneA, _ := f.add(a)
 	got, ok := f.only()
 	require.True(t, ok)
 	assert.Equal(t, a, got)
 
-	doneB := f.add(context.Background())
+	doneB, _ := f.add(context.Background())
 	_, ok = f.only()
 	assert.False(t, ok, "two calls in flight: nobody to credit")
 

@@ -19,6 +19,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientrelay"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
@@ -214,6 +215,10 @@ type Manager struct {
 
 	// Prompts-changed callback for notifications/prompts/list_changed handling (F13)
 	promptsChangedCallback func(serverName string)
+
+	// clientRequestObserver records every request an upstream sends to a
+	// client: elicitation, sampling, roots (#1964).
+	clientRequestObserver func(clientrelay.Event)
 
 	// limiters owns the spec-093 concurrency limiter instances (one per upstream
 	// plus the proxy-wide aggregate). Created once and never replaced — hot
@@ -615,6 +620,37 @@ func (m *Manager) SetPromptsChangedCallback(callback func(serverName string)) {
 	}
 	m.logger.Debug("Prompts-changed callback set on manager",
 		zap.Int("existing_clients", len(m.clients)))
+}
+
+// SetClientRequestObserver sets the sink for every request an upstream sends
+// to a client (elicitation, sampling, roots), on existing clients and on all
+// clients created later.
+func (m *Manager) SetClientRequestObserver(fn func(clientrelay.Event)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.clientRequestObserver = fn
+	for _, client := range m.clients {
+		if client != nil {
+			client.SetClientRequestObserver(fn)
+		}
+	}
+}
+
+// NotifyClientRootsChanged forwards an MCP client's
+// notifications/roots/list_changed to every upstream it was the last client to
+// call (#1966).
+func (m *Manager) NotifyClientRootsChanged(sessionID string) {
+	m.mu.RLock()
+	clients := make([]*managed.Client, 0, len(m.clients))
+	for _, client := range m.clients {
+		if client != nil {
+			clients = append(clients, client)
+		}
+	}
+	m.mu.RUnlock()
+	for _, client := range clients {
+		client.NotifyClientRootsChanged(sessionID)
+	}
 }
 
 // ShutdownAll disconnects all clients and ensures all Docker containers are stopped

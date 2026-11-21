@@ -1018,6 +1018,8 @@ export type ActivityType =
   | 'skill_quarantine_change'
   /** Spec 125: an agent searched, loaded or read a skill (never carries the skill text). */
   | 'skill_access'
+  /** #1964: an upstream server asked the calling client for elicitation, sampling or roots. */
+  | 'client_request'
 
 export type ActivitySource = 'mcp' | 'cli' | 'api'
 

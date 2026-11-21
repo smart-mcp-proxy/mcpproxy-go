@@ -78,6 +78,13 @@ const (
 	// failed, login required (Spec 124 FR-020). It carries the server, the
 	// kind, the diagnostic code and its fixed message, never a raw error.
 	ActivityTypeUpstreamEvent ActivityType = "upstream_event"
+	// ActivityTypeClientRequest represents a request an upstream server sent to
+	// the calling MCP client: elicitation, sampling or roots (#1964). ServerName
+	// is the upstream, ToolName the method (elicitation/create,
+	// sampling/createMessage, roots/list), Arguments what it asked, Response
+	// what it got back; both are scanned for sensitive data. Metadata: outcome
+	// (forwarded | unanswered | failed).
+	ActivityTypeClientRequest ActivityType = "client_request"
 )
 
 // ValidActivityTypes is the list of all valid activity types for filtering (Spec 024)
@@ -99,6 +106,7 @@ var ValidActivityTypes = []string{
 	string(ActivityTypePromptGet),
 	string(ActivityTypeProfileChange),
 	string(ActivityTypeUpstreamEvent),
+	string(ActivityTypeClientRequest),
 }
 
 // IsAdminOnlyActivityType reports whether rows of the type may be read by

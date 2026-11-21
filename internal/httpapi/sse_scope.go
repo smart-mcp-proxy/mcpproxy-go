@@ -234,6 +234,7 @@ var identityBearingEventTypes = map[internalRuntime.EventType]struct{}{
 	internalRuntime.EventTypeActivityQuarantineChange:     {},
 	internalRuntime.EventTypeActivityToolQuarantineChange: {},
 	internalRuntime.EventTypeActivityPromptGet:            {},
+	internalRuntime.EventTypeActivityClientRequest:        {},
 	internalRuntime.EventTypeOAuthTokenRefreshed:          {},
 	internalRuntime.EventTypeOAuthRefreshFailed:           {},
 	internalRuntime.EventTypeSecurityScanSettled:          {},

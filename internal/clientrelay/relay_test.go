@@ -17,6 +17,7 @@ type fakeSession struct {
 	protocol string
 	asked    []string
 	notes    chan mcp.JSONRPCNotification
+	message  string // the last elicitation message shown to the user
 }
 
 func (s *fakeSession) SessionID() string                                   { return "fake" }
@@ -29,8 +30,9 @@ func (s *fakeSession) GetClientCapabilities() mcp.ClientCapabilities       { ret
 func (s *fakeSession) SetClientCapabilities(mcp.ClientCapabilities)        {}
 func (s *fakeSession) ProtocolVersion() string                             { return s.protocol }
 
-func (s *fakeSession) RequestElicitation(_ context.Context, _ mcp.ElicitationRequest) (*mcp.ElicitationResult, error) {
+func (s *fakeSession) RequestElicitation(_ context.Context, req mcp.ElicitationRequest) (*mcp.ElicitationResult, error) {
 	s.asked = append(s.asked, "elicit")
+	s.message = req.Params.Message
 	return &mcp.ElicitationResult{ElicitationResponse: mcp.ElicitationResponse{Action: mcp.ElicitationResponseActionAccept}}, nil
 }
 

@@ -473,6 +473,13 @@ type Config struct {
 	// variable.
 	EnableSkills bool `json:"enable_skills" mapstructure:"enable-skills"`
 
+	// EnableClientFeatures lets upstream servers use the calling MCP client's
+	// elicitation, sampling and roots through mcpproxy (#1964-#1966). nil
+	// (default) is on; false declares none of them to any upstream. Read when
+	// an upstream connects, so a change needs a restart. Resolved by
+	// ClientFeaturesEnabled.
+	EnableClientFeatures *bool `json:"enable_client_features,omitempty" mapstructure:"enable-client-features"`
+
 	// Repository detection settings
 	CheckServerRepo bool `json:"check_server_repo" mapstructure:"check-server-repo"`
 
@@ -793,6 +800,12 @@ type ServerConfig struct {
 	// extension) are read when Config.EnableSkills is on. nil (default)
 	// inherits (included if the server supports skills); false excludes it.
 	ExposeSkills *bool `json:"expose_skills,omitempty" mapstructure:"expose-skills"`
+
+	// ClientFeatures overrides whether this server may use the calling MCP
+	// client's elicitation, sampling and roots when Config.EnableClientFeatures
+	// is on. nil (default) inherits; false turns them off for this server. A
+	// change reconnects the server (ConnectionEquivalent).
+	ClientFeatures *bool `json:"client_features,omitempty" mapstructure:"client-features"`
 
 	// ForwardHeaders lists inbound MCP-client header NAMES (never values) that
 	// are copied into this server's upstream tools/call requests (Spec 112).
@@ -3936,4 +3949,12 @@ func migrateDeepScanConfig(cfg *Config) {
 // advertise_upstream_servers value (default true when unset).
 func (c *Config) AdvertiseUpstreamServersEnabled() bool {
 	return c == nil || c.AdvertiseUpstreamServers == nil || *c.AdvertiseUpstreamServers
+}
+
+// ClientFeaturesEnabled reports whether server sc may use the calling MCP
+// client's elicitation, sampling and roots: enable_client_features (unset is
+// on) and the server's client_features override (unset inherits).
+func (c *Config) ClientFeaturesEnabled(sc *ServerConfig) bool {
+	global := c == nil || c.EnableClientFeatures == nil || *c.EnableClientFeatures
+	return global && (sc == nil || sc.ClientFeatures == nil || *sc.ClientFeatures)
 }
