@@ -1052,12 +1052,21 @@ func (s *CredentialsService) Revoke(ctx context.Context, a Actor, ref Credential
 		// through the client revoke (key, every login, request cancellation). One
 		// without logins keeps exactly the old result, row and events; its pending
 		// requests are cancelled either way.
-		s.clients.cancelLoginRequests(before.ClientID)
-		hasLogins, herr := s.clients.hasLoginRecords(s.clients.oauthStore(), before.ClientID)
+		//
+		// A service built without a clients service (a supported construction,
+		// also the HTTP token-service fallback) has nothing to cancel; whether the
+		// client has logins is read through the storage interface it does have.
+		if s.clients != nil {
+			s.clients.cancelLoginRequests(before.ClientID)
+		}
+		hasLogins, herr := s.hasLoginRecordsFor(before.ClientID)
 		if herr != nil {
 			return nil, herr
 		}
 		if hasLogins {
+			if s.clients == nil {
+				return nil, ErrCredentialsUnavailable // cannot cascade: refuse, nothing half-done
+			}
 			return s.revokeClientLocked(ctx, a, before.ClientID)
 		}
 	}

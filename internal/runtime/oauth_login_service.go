@@ -52,6 +52,16 @@ import (
 // (and cancelled by it), and one admitted after sees the switch off. Exchange's
 // commit callback holds Store.mu and reads Runtime.mu through the guard, but no
 // path holds Runtime.mu and then waits for Store.mu or lifecycleMu.
+//
+// Approve's finalisation (final status check, activity row, event, redirect)
+// runs under lifecycleMu taken AFTER bindingWriteMu, so a switch-off cannot
+// interleave with it; it does one storage write (the activity row) under it, and
+// the switch-off commit only waits for that. The lazy token key is created under
+// keyInitMu, a leaf lock held across key I/O that nothing else waits behind:
+// reqMu is never held across I/O, so existingRequests (and the switch-off) never
+// wait on it. A file reload does not take bindingWriteMu, so Exchange re-checks
+// the live config after CommitOAuthLogin and undoes the login when it no longer
+// holds (postCommitRefusal).
 type OAuthLoginService struct {
 	store   OAuthLoginStore
 	hmacKey func() ([]byte, error)
@@ -78,6 +88,9 @@ type OAuthLoginService struct {
 	// test hooks, nil in production.
 	testHookBeginAfterEnabled func()
 	testHookApproveAfterStore func()
+	testHookApproveFinalising func()
+	testHookBeforeCommit      func()
+	keyInitMu                 sync.Mutex
 
 	everUsed  bool // positive results only
 	everMu    sync.Mutex
@@ -106,6 +119,7 @@ type OAuthLoginStore interface {
 	CurrentClientBinding(clientID string) (pin, mode string, found bool, err error)
 	ClientBindingRevision(clientID string) (string, error)
 	OAuthLoginEverUsed() (bool, error)
+	ForgetClientLogins(clientID string) (int, error)
 }
 
 // Token lifetimes of a browser login (research R6).
@@ -188,16 +202,26 @@ func (s *OAuthLoginService) EverUsed() bool {
 
 // requests returns the request store, building it on first use.
 func (s *OAuthLoginService) requests() (*mcplogin.Store, error) {
-	s.reqMu.Lock()
-	defer s.reqMu.Unlock()
-	if s.reqs != nil {
-		return s.reqs, nil
+	if st := s.existingRequests(); st != nil {
+		return st, nil
+	}
+	// The key may be created on disk: do that OUTSIDE reqMu (serialised by its
+	// own mutex), so existingRequests, and with it the switch-off path, never
+	// waits on key I/O. Then install the store under reqMu, double-checked.
+	s.keyInitMu.Lock()
+	defer s.keyInitMu.Unlock()
+	if st := s.existingRequests(); st != nil {
+		return st, nil
 	}
 	key, err := s.hmacKey()
 	if err != nil {
 		return nil, err
 	}
-	s.reqs = mcplogin.NewStore(key, s.now)
+	s.reqMu.Lock()
+	defer s.reqMu.Unlock()
+	if s.reqs == nil {
+		s.reqs = mcplogin.NewStore(key, s.now)
+	}
 	return s.reqs, nil
 }
 
@@ -460,6 +484,9 @@ func (s *OAuthLoginService) Exchange(in TokenInput) (TokenResult, *TokenError) {
 		if err != nil {
 			return "", err
 		}
+		if h := s.testHookBeforeCommit; h != nil {
+			h()
+		}
 		stored, err := s.store.CommitOAuthLogin(storage.CommitLoginInput{
 			Grant: storage.OAuthGrant{
 				GrantID: grantID, RegistrationID: req.RegistrationID, Client: req.Decision.ClientID,
@@ -486,6 +513,14 @@ func (s *OAuthLoginService) Exchange(in TokenInput) (TokenResult, *TokenError) {
 			if reason == "" {
 				return "", err // a storage failure: not a refusal
 			}
+			s.writeDecisionRow(profile.ChangeDeny, req, reason, now)
+			return "", errExchangeRefused
+		}
+		// A file reload does not take bindingWriteMu, so the config may have
+		// changed between the checks above and the commit. Re-read it now, before
+		// any token leaves: undo what this exchange stored and refuse.
+		if reason := s.postCommitRefusal(req.Decision, stored); reason != "" {
+			s.undoCommit(req.Decision, stored)
 			s.writeDecisionRow(profile.ChangeDeny, req, reason, now)
 			return "", errExchangeRefused
 		}

@@ -763,6 +763,17 @@ func (s *OAuthLoginService) Approve(ctx context.Context, requestID string, c App
 	// A switch-off cancels without bindingWriteMu, so the approval may have lost
 	// a race after Store.Approve: re-read the request and write nothing, publish
 	// nothing and hand out no redirect if it is no longer approved.
+	//
+	// The rest runs under lifecycleMu (after bindingWriteMu, the documented
+	// order), released by the defer at return: final status check, activity row,
+	// event and redirect are one step, so a switch-off either ran before it
+	// (refusal, no row) or runs after it (the code is cancelled and the client's
+	// exchange fails, which is expected).
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if h := s.testHookApproveFinalising; h != nil {
+		h()
+	}
 	if cur, ok := reqs.Get(requestID); !ok || cur.Status != mcplogin.StatusApproved {
 		return "", ErrOAuthRequestNotFound
 	}

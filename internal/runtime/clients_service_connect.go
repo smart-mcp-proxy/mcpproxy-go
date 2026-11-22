@@ -418,7 +418,23 @@ func (m connectMinter) Abort(clientID string, intent connect.CredentialIntent, i
 	}
 	// A fresh mint whose config write failed: revoke it and write no record
 	// (from the operator's view nothing happened, plan D13).
-	_, err := s.store.ForgetClientCredentialRestoringPrior(clientID)
+	skip, err := s.restoreRefusedLocked(clientID)
+	if err != nil {
+		return err
+	}
+	if skip {
+		revoked, rerr := s.revokeKeyKeepingBinding(clientID)
+		if rerr != nil {
+			return rerr
+		}
+		s.writeChange(context.Background(), actorOf(intent), changeRecord{
+			change: profile.ChangeForget, profile: revoked.ProfilePin, previousProfile: revoked.ProfilePin,
+			clientID: clientID, tokenName: revoked.Name,
+			diff: map[string]interface{}{"reason": "rollback", "restore_skipped": "guard"},
+		})
+		return nil
+	}
+	_, err = s.store.ForgetClientCredentialRestoringPrior(clientID)
 	return err
 }
 

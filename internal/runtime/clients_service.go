@@ -773,6 +773,20 @@ func (s *ClientsService) forgetRecordLocked(ctx context.Context, a Actor, client
 	forget := s.store.ForgetClientCredential
 	if restorePrior {
 		forget = s.store.ForgetClientCredentialRestoringPrior
+		// A connect undone for a client with live logins must not restore a
+		// binding the guard now refuses: revoke the key only and say so.
+		skip, serr := s.restoreRefusedLocked(clientID)
+		if serr != nil {
+			return nil, serr
+		}
+		if skip {
+			forget = s.revokeKeyKeepingBinding
+			nd := map[string]interface{}{"restore_skipped": "guard"}
+			for k, v := range diff {
+				nd[k] = v
+			}
+			diff = nd
+		}
 	} else if o := s.oauthStore(); o != nil {
 		hasLogins, herr := s.hasLoginRecords(o, clientID)
 		if herr != nil {
