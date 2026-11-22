@@ -2,7 +2,7 @@
   <section class="space-y-4 border border-base-300 rounded-lg p-4" data-test="skill-detail">
     <header class="space-y-1">
       <div class="flex flex-wrap items-center gap-2">
-        <h3 class="font-semibold text-lg break-all" data-test="skill-name" v-text="skill.name || skill.path"></h3>
+        <h3 ref="heading" tabindex="-1" class="font-semibold text-lg break-all scroll-mt-4" data-test="skill-name" v-text="skill.name || skill.path"></h3>
         <span class="badge badge-sm" :class="chipClass" data-test="skill-detail-chip" v-text="chip.label"></span>
       </div>
       <p class="text-xs text-base-content/60">from the server, not verified</p>
@@ -114,6 +114,13 @@ const emit = defineEmits<{
   /** A part of another version came back: the listing on screen is out of date. */
   (e: 'content-changed'): void
 }>()
+
+const heading = ref<HTMLHeadingElement | null>(null)
+function focusHeading() {
+  heading.value?.focus({ preventScroll: true })
+  return heading.value
+}
+defineExpose({ focusHeading })
 
 /** Files larger than this (either copy) are not line-diffed in the browser. */
 const LINE_DIFF_MAX_BYTES = 256 * 1024

@@ -392,6 +392,7 @@ curl -k https://localhost:8080/api/v1/status
 
 ### Features
 - [Search & Tool Discovery](https://docs.mcpproxy.app/features/search-discovery/)
+- [Skills over MCP](https://docs.mcpproxy.app/features/skills/) · inspect upstream skills and review those awaiting approval in the Web UI.
 - [Security Quarantine](https://docs.mcpproxy.app/features/security-quarantine/)
 - [Security Scanner Plugins](https://docs.mcpproxy.app/features/security-scanner-plugins/)
 - [Docker Security Isolation](https://docs.mcpproxy.app/features/docker-isolation/)

@@ -38,62 +38,80 @@
       <p v-if="!listing.supported && listing.skills.length === 0" class="text-base-content/70" data-test="skills-empty-unsupported">
         This server does not announce the skills extension.
       </p>
-      <p v-else-if="listing.skills.length === 0" class="text-base-content/70" data-test="skills-empty-none">
-        This server lists no skills.
-      </p>
-      <ul v-else class="divide-y divide-base-200 border border-base-300 rounded-lg" data-test="skills-list">
-        <li v-for="s in listing.skills" :key="s.path">
-          <button
-            type="button"
-            class="w-full text-left px-3 py-2 flex flex-wrap items-center gap-2 hover:bg-base-200"
-            :class="s.path === selectedPath ? 'bg-base-200' : ''"
-            :data-test="`skill-row-${s.path}`"
-            @click="open(s)"
-          >
-            <span class="font-medium break-all" v-text="s.name || s.path"></span>
-            <span class="badge badge-sm" :class="chipClass(s)" :data-test="`skill-chip-${s.path}`" v-text="skillStateChip(s).label"></span>
-            <span class="text-xs text-base-content/60">{{ s.available ? 'Offered to agents' : 'Not offered' }}</span>
-            <span class="text-xs text-base-content/60">{{ s.files?.length ?? 0 }} file{{ (s.files?.length ?? 0) === 1 ? '' : 's' }}</span>
-            <span v-if="s.scan?.verdict" class="text-xs text-base-content/60">scan: <span v-text="s.scan.verdict"></span></span>
-          </button>
-        </li>
-      </ul>
+      <div v-else class="grid items-start gap-4" :class="{ 'lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]': review }">
+        <div class="min-w-0 space-y-3" :class="{ 'hidden lg:block': review }">
+          <div class="join" role="group" aria-label="Filter skills">
+            <button ref="allFilter" type="button" class="btn btn-sm join-item" :class="{ 'btn-active': !needsReview }" :aria-pressed="!needsReview" data-test="skills-filter-all" @click="emit('filter', false)">All skills</button>
+            <button ref="reviewFilter" type="button" class="btn btn-sm join-item" :class="{ 'btn-active': needsReview }" :aria-pressed="needsReview" data-test="skills-filter-needs-review" @click="emit('filter', true)">Needs review ({{ heldSkills.length }})</button>
+          </div>
+          <p v-if="needsReview && visibleSkills.length === 0" class="text-base-content/70" data-test="skills-empty-review" role="status">
+            No skills need review.
+          </p>
+          <p v-else-if="visibleSkills.length === 0" class="text-base-content/70" data-test="skills-empty-none">
+            This server lists no skills.
+          </p>
+          <ul v-else ref="skillList" class="divide-y divide-base-200 border border-base-300 rounded-lg lg:max-h-[65vh] lg:overflow-y-auto" data-test="skills-list">
+            <li v-for="s in visibleSkills" :key="s.path">
+              <button
+                type="button"
+                class="w-full text-left px-3 py-2 flex flex-wrap items-center gap-2 hover:bg-base-200"
+                :class="s.path === selectedPath ? 'bg-base-200' : ''"
+                :aria-pressed="s.path === selectedPath"
+                :data-test="`skill-row-${s.path}`"
+                @click="open(s)"
+              >
+                <span class="font-medium break-all" v-text="s.name || s.path"></span>
+                <span class="badge badge-sm" :class="chipClass(s)" :data-test="`skill-chip-${s.path}`" v-text="skillStateChip(s).label"></span>
+                <span class="text-xs text-base-content/60">{{ s.available ? 'Offered to agents' : 'Not offered' }}</span>
+                <span class="text-xs text-base-content/60">{{ s.files?.length ?? 0 }} file{{ (s.files?.length ?? 0) === 1 ? '' : 's' }}</span>
+                <span v-if="s.scan?.verdict" class="text-xs text-base-content/60">scan: <span v-text="s.scan.verdict"></span></span>
+              </button>
+            </li>
+          </ul>
+        </div>
 
-      <div v-if="review && review.stale" class="alert alert-warning text-sm" data-test="skill-stale" role="status">
-        <span>This skill changed while you were reviewing it. Approve is off until you open the new version.</span>
-        <button v-if="liveSelected" class="btn btn-xs" data-test="skill-reopen" @click="open(liveSelected)">Open the new version</button>
-      </div>
-      <div v-else-if="review && awaitingReload" class="alert alert-info text-sm" data-test="skill-checking" role="status">
-        <span>The server's skills changed. Approve is off until the list is reloaded.</span>
-        <button class="btn btn-xs" data-test="skill-checking-reload" :disabled="loading" @click="load">Reload</button>
-      </div>
+        <div v-if="review" ref="detailPane" class="min-w-0 space-y-3">
+          <button ref="backToList" type="button" class="btn btn-sm btn-ghost scroll-mt-4 lg:hidden" data-test="skill-back-to-list" @click="closeSkill()">Back to skills</button>
+          <div v-if="review.stale" class="alert alert-warning text-sm" data-test="skill-stale" role="status">
+            <span>This skill changed while you were reviewing it. Approve is off until you open the new version.</span>
+            <button v-if="liveSelected" class="btn btn-xs" data-test="skill-reopen" @click="open(liveSelected)">Open the new version</button>
+          </div>
+          <div v-else-if="awaitingReload" class="alert alert-info text-sm" data-test="skill-checking" role="status">
+            <span>The server's skills changed. Approve is off until the list is reloaded.</span>
+            <button class="btn btn-xs" data-test="skill-checking-reload" :disabled="loading" @click="load">Reload</button>
+          </div>
 
-      <!-- Keyed by the review: re-opening resets the viewer and the diff. -->
-      <SkillDetail
-        v-if="review"
-        :key="review.token"
-        :server-name="serverName"
-        :skill="review.entry"
-        :busy="busy"
-        :stale="review.stale || awaitingReload"
-        @approve="approve()"
-        @block="setBlocked(true)"
-        @unblock="setBlocked(false)"
-        @content-changed="onContentChanged"
-      />
+          <!-- Keyed by the review: re-opening resets the viewer and the diff. -->
+          <SkillDetail
+            ref="detail"
+            :key="review.token"
+            :server-name="serverName"
+            :skill="review.entry"
+            :busy="busy"
+            :stale="review.stale || awaitingReload"
+            @approve="approve()"
+            @block="setBlocked(true)"
+            @unblock="setBlocked(false)"
+            @content-changed="onContentChanged"
+          />
+        </div>
+      </div>
     </template>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import api from '@/services/api'
 import type { SkillEntry, SkillsListResponse } from '@/types/api'
 import { formatDateTime } from '@/utils/datetime'
 import { skillsChangeIncludesServer, skillStateChip, skillExpectedHashes, skillErrorCode, skillErrorNotice, skillApprovedNotice, type SkillAction } from '@/utils/skills'
 import SkillDetail from './SkillDetail.vue'
 
-const props = defineProps<{ serverName: string }>()
+const props = withDefaults(defineProps<{ serverName: string; needsReview?: boolean; serverReviewable?: boolean }>(), {
+  serverReviewable: true,
+})
+const emit = defineEmits<{ filter: [needsReview: boolean] }>()
 
 const listing = ref<SkillsListResponse | null>(null)
 const loading = ref(false)
@@ -101,6 +119,18 @@ const error = ref('')
 const notice = ref('')
 const refreshing = ref(false)
 const busy = ref(false)
+const detail = ref<InstanceType<typeof SkillDetail> | null>(null)
+const detailPane = ref<HTMLElement | null>(null)
+const backToList = ref<HTMLButtonElement | null>(null)
+const skillList = ref<HTMLUListElement | null>(null)
+const allFilter = ref<HTMLButtonElement | null>(null)
+const reviewFilter = ref<HTMLButtonElement | null>(null)
+const heldSkills = computed(() => {
+  const current = listing.value
+  if (!current || !props.serverReviewable || current.expose_skills === false) return []
+  return current.skills.filter(s => s.listed && !s.blocked && (s.status === 'pending' || s.status === 'changed'))
+})
+const visibleSkills = computed(() => props.needsReview ? heldSkills.value : listing.value?.skills ?? [])
 // A live skills.changed for this server: the records moved, so the version on
 // screen may be out of date. Approve is off (for the open review and for one
 // opened from the listing still on screen) until a reload for this server
@@ -123,7 +153,26 @@ const liveSelected = computed(() => listing.value?.skills.find(s => s.path === s
 // the previous one (e.g. "Approved.") is not carried over to it.
 function open(s: SkillEntry) {
   notice.value = ''
-  review.value = { path: s.path, entry: s, incarnation: listing.value?.incarnation ?? 0, token: ++reviewToken, stale: false }
+  const token = ++reviewToken
+  review.value = { path: s.path, entry: s, incarnation: listing.value?.incarnation ?? 0, token, stale: false }
+  void nextTick(() => {
+    if (review.value?.token !== token) return
+    const heading = detail.value?.focusHeading()
+    const back = backToList.value
+    if (back?.getClientRects().length) back.scrollIntoView?.({ block: 'start' })
+    else heading?.scrollIntoView?.({ block: 'nearest' })
+  })
+}
+
+async function closeSkill(restoreFocus = true) {
+  const trigger = skillList.value?.querySelector<HTMLButtonElement>('button[aria-pressed="true"]')
+  review.value = null
+  if (!restoreFocus) return
+  await nextTick()
+  if (review.value) return
+  const fallback = props.needsReview ? reviewFilter.value : allFilter.value
+  const focusTarget = trigger?.isConnected ? trigger : fallback
+  focusTarget?.focus()
 }
 
 // The latch: once set, only open() (the reviewer's explicit re-open) clears it;
@@ -169,7 +218,7 @@ function apply(data: SkillsListResponse) {
   const r = review.value
   if (!r) return
   const live = data.skills.find(s => s.path === r.path)
-  if (!live) review.value = null
+  if (!live) void closeSkill(detailPane.value?.contains(document.activeElement) ?? false)
   else if (r.stale) return
   else if (live.current_hash === r.entry.current_hash && data.incarnation === r.incarnation) r.entry = live
   else r.stale = true

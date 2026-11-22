@@ -153,11 +153,23 @@ version you opened: a new version that arrives while you review is shown as a
 stale review with Approve off until you open it, and a skill that changed on the
 server before the page knew is refused with a notice and the list reloads. See [Server Detail page](../web-ui/server-detail.md#skills-tab).
 
+The tab has **All skills** and **Needs review** filters. Opening the tab directly
+shows all skills. A Skills action from the global Review queue opens
+`?tab=skills&state=needs-review`, which shows only currently listed, unblocked
+skills in Pending or Changed state. The displayed count follows that filtered
+list. You can switch to All skills to inspect approved, blocked, or unusable
+records. On desktop, selecting a skill shows its card beside the list. On a
+compact screen, the card takes the list's place and **Back to skills** returns
+to the selected row. Keyboard focus follows the card on open and the row on
+return. A refresh retains the open card and the approval version check; if an
+action removes that skill from Needs review, the card stays visible until you
+go back or choose another skill.
+
 ### Where held skills show up {#held-skills-in-review}
 
 A skill that is pending or changed (not blocked, still listed, on an enabled server that is not quarantined and not excluded) is owed a review, and it shows up next to the tool reviews:
 
-- **Review queue** (`GET /api/v1/review`, the Web UI Review queue, `mcpproxy review list`, the macOS Review Queue). A server with held tools keeps its row and gains `skills_pending` / `skills_changed`; a server with only held skills gets a row of kind `skill_review`, and `count` (the sidebar badge) includes it. In the Web UI that row's **Review** opens the server's Skills tab; a tool row with held skills also offers **Skills**. The macOS app has no Skills tab, so its row says "Review in the Web UI" and opens that page in the browser.
+- **Review queue** (`GET /api/v1/review`, the Web UI Review queue, `mcpproxy review list`, the macOS Review Queue). A server with held tools keeps its row and gains `skills_pending` / `skills_changed`; a server with only held skills gets a row of kind `skill_review`, and `count` (the sidebar badge) includes it. In the Web UI that row's **Review** opens the server's Skills tab with Needs review active; a tool row with held skills also offers **Skills**, which opens the same filter. The tool row's **Review** still opens tool review. The macOS app has no Skills tab, so its row says "Review in the Web UI" and opens that page in the browser.
 - **Needs attention** (Home, the header pill, `mcpproxy attention`): one `skill_review` item per state, ranked right after the tool reviews (62 changed, 63 pending), fixed on the server's Skills tab.
 
 A quarantined server is only a server review: its skills are not read until it is approved.

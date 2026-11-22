@@ -7,6 +7,8 @@
 
 **Related**: Spec 032 (tool-level quarantine), Spec 100 (per-prompt baseline, the closest precedent), Spec 105 and Spec 118 (agent-token and pin scoping), Spec 108 (profiles), Spec 117 (review-bound approvals), Spec 119/120 (scan trust mode and structural holds), Spec 058 (upstream protocol pin).
 
+**Web UI follow-up**: [Spec 130](../130-skills-review-ux/spec.md) defines the filtered Review queue entry and responsive Skills detail navigation.
+
 ---
 
 ## What a skill is, and the one rule that shapes this spec
