@@ -37,7 +37,7 @@ Lifecycle: `pending` rows are deleted 15 minutes after creation, `authorized` (r
 | `revoked`, `revoked_at`, `revoke_reason` | bool, time, enum | `admin`, `client_revoked`, `replaced`, `replay` |
 | `user_id` | string | empty in the personal edition |
 
-Sub-bucket `by_access_hash`: `access_hash → grant_id`.
+Index bucket `oauth_grant_access_index` (a sibling bucket, so iterating `oauth_grants` never meets a nested bucket): `access_hash → grant_id`. Authentication goes through one storage call that also requires the grant not revoked and both the access and the refresh expiry in the future.
 
 A grant is created at the token exchange, not at approval (research R15).
 
@@ -51,6 +51,7 @@ State: `live` (not revoked, `refresh_expires_at` in the future) → `lapsed` (re
 | `profile_mode` | enum | `locked` requires a non-empty pin; All servers is `switchable` |
 | `display_name` | string | for a custom client created at consent, at most 64 runes |
 | `updated_at` | time | |
+| `write_id` | string | random, renewed on every write of the entry; lets a profile-rename rollback tell "still the binding I wrote" from a re-created or reassigned one with the same values. Storage-internal, not part of the binding revision |
 
 Invariants:
 
