@@ -144,11 +144,10 @@ updates:
     commit-message:
       prefix: "chore(deps-scanners)"
     ignore:
-      # python:3.15-slim breaks `pip install cisco-ai-mcp-scanner`: aiohttp,
-      # fastuuid and yara-python have no cp315 wheels, so pip builds sdists and
-      # fails because the -slim image has no gcc (#1898, scanner-images
-      # `build (cisco)` red since). Drop this once those publish cp315 wheels,
-      # or if the image installs a compiler.
+      # Python 3.15 is not usable for this image yet: yara-python (and other
+      # cisco-ai-mcp-scanner deps) publish no cp315 wheels, so pip builds them
+      # from source. The Dockerfile has a gcc builder stage for that, but 3.15
+      # was never verified (#1898); drop this once the scanner builds on it.
       - dependency-name: "python"
         versions: ["3.15.x"]
   - package-ecosystem: docker
