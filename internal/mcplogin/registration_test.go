@@ -87,12 +87,19 @@ func TestNewClientID(t *testing.T) {
 }
 
 func TestRegistrationResponse(t *testing.T) {
-	reg, _ := ValidateRegistration(RegistrationRequest{RedirectURIs: []string{"https://a/cb"}, ClientName: "X"})
+	reg, _ := ValidateRegistration(RegistrationRequest{RedirectURIs: []string{"https://a/cb"}, ClientName: "X", SoftwareID: " SW\x07", SoftwareVersion: "1.0"})
 	reg.ClientID = "abc"
 	m := reg.Response(time.Unix(1700000000, 0))
 	if m["client_id"] != "abc" || m["client_id_issued_at"] != int64(1700000000) ||
 		m["token_endpoint_auth_method"] != "none" || m["client_name"] != "x" {
 		t.Fatalf("%v", m)
+	}
+	if m["software_id"] != "sw" || m["software_version"] != "1.0" {
+		t.Fatalf("software fields: %v", m)
+	}
+	bare, _ := ValidateRegistration(RegistrationRequest{RedirectURIs: []string{"https://a/cb"}})
+	if _, has := bare.Response(time.Unix(1, 0))["software_id"]; has {
+		t.Fatal("empty software_id must be omitted")
 	}
 	if _, has := m["client_secret"]; has {
 		t.Fatal("client_secret present")
