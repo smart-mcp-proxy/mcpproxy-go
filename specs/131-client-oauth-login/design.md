@@ -9,11 +9,14 @@ Today every MCP client needs a credential pasted into its config file. The user 
 
 The open question this design answers: **after an OAuth login, how does MCPProxy know which client this is and what it may reach?**
 
-Answer: MCPProxy suggests, the user confirms. The client's self-reported name only pre-fills the consent page. The identity is the approved registration. Access comes from the profile bound to the client, the same binding API-key clients use.
+Answer: the **address** the client was given says which client it is, and the user confirms on the consent page. Connect writes a per-client address (`/mcp/oauth/cursor`), so nothing is guessed from the name the client reports. That name is shown, labelled unverified, and is never used to pick a client. Access comes from the profile bound to the client, the same binding API-key clients use.
+
+The feature is **off by default** in its first release. With it off, nothing changes for anyone who updates.
 
 ## Goals
 
-- A client configured with `http://127.0.0.1:8080/mcp/oauth` and nothing else can log in through the MCP authorization flow (RFC 9728 discovery, RFC 8414 metadata, RFC 7591 registration, authorization code + PKCE S256, refresh).
+- With `mcp_oauth_enabled` off (the default), an updated MCPProxy behaves byte for byte as before on every existing path, and asks the user for nothing.
+- A client configured with `http://127.0.0.1:8080/mcp/oauth/<client>` (or the generic `/mcp/oauth`) and nothing else can log in through the MCP authorization flow (RFC 9728 discovery, RFC 8414 metadata, RFC 7591 registration, authorization code + PKCE S256, refresh).
 - One click on the consent page in the common case.
 - An OAuth client is an ordinary row in the Clients hub: same profile binding, same activity attribution, same reassign and revoke.
 - A client may hold an API key, OAuth logins, or both.
@@ -22,14 +25,16 @@ Answer: MCPProxy suggests, the user confirms. The client's self-reported name on
 ## Non-goals
 
 - Replacing API keys or agent tokens. Headless clients keep them.
-- OAuth on `/mcp`, `/mcp/all`, `/mcp/code`, `/mcp/call`, `/mcp/p/<slug>`, `/mcp/s/<server>`. Version 1 serves one OAuth endpoint, `/mcp/oauth`. `/mcp` behaves exactly as today.
+- OAuth on `/mcp`, `/mcp/all`, `/mcp/code`, `/mcp/call`, `/mcp/p/<slug>`, `/mcp/s/<server>`. Version 1 serves OAuth only under `/mcp/oauth`. `/mcp` behaves exactly as today.
 - Confidential clients (client secrets), Client ID Metadata Documents, token introspection endpoints.
 - Server edition behaviour and the tunnel. The data model leaves room for both (see "Later").
 - Approving a login from the CLI.
 
 ## Anti-goals
 
-- A client gets access because of the name it reports. Never.
+- A client gets access, or is matched to an existing client, because of the name it reports. Never.
+- Matching that works "most of the time". Which client a login belongs to is either determined by the address or chosen by the user.
+- An update that changes behaviour or needs an action from a user who did not ask for OAuth.
 - A login that silently lands on "All servers" while profiles exist.
 - A second, parallel notion of "client" with its own profile rules.
 - An OAuth client bound to a profile that it can escape by using `/mcp` without a credential.
@@ -48,59 +53,66 @@ Answer: MCPProxy suggests, the user confirms. The client's self-reported name on
 
 1. **Automatic by name.** Match `client_name` to the connect registry and assign that client's profile with no question. Rejected: the name is self-asserted, so any local process can call itself "Cursor" and inherit Cursor's access.
 2. **User selects everything every time.** Safe. Rejected as the default: tedious, and clients that register again pile up as "Cursor (2)", "Cursor (3)".
-3. **Suggest and confirm (chosen).** The server computes a suggestion (which client, which profile, whether this replaces an earlier login). The consent page shows it pre-filled. The user approves with one click or changes it. Chosen by Algis on 2026-11-22.
+3. **Suggest and confirm (chosen).** The consent page arrives pre-filled; the user approves with one click or changes it. Chosen by Algis on 2026-11-22.
+
+How the page is pre-filled was revised the same day, after Algis asked for it to be reliable:
+
+- **3a. Guess from the reported name** (registry list of OAuth registration names, plus learning from earlier approvals). Rejected: clients register under names nobody controls, the list needs upkeep, and a wrong guess puts the wrong client on the page.
+- **3b. Per-client address (chosen).** Connect already knows which client it is configuring, so it writes that into the URL. The server reads the client from the path. Deterministic, no list to maintain, no secret in the config file.
 
 ## How it works
 
 ### Flow
 
-1. The client calls `/mcp/oauth` without a token. Answer: `401` with `WWW-Authenticate: Bearer resource_metadata="…"`.
-2. The client reads `/.well-known/oauth-protected-resource/mcp/oauth` and `/.well-known/oauth-authorization-server`, then registers at `POST /oauth/register`.
-3. The client opens the browser at `GET /oauth/authorize`. The server validates the request (known `client_id`, exact redirect URI match, `code_challenge_method=S256`, `resource` equal to the `/mcp/oauth` URL), stores an **authorization request** (10 minute life) and redirects the browser to `/ui/authorize?request=<id>`.
-4. The Web UI consent page loads the request and its suggestion through the REST API, with the admin API key.
+1. The client calls `/mcp/oauth/<client>` (or `/mcp/oauth`) without a token. Answer: `401` with `WWW-Authenticate: Bearer resource_metadata="…"`.
+2. The client reads the protected-resource metadata for that exact path and `/.well-known/oauth-authorization-server`, then registers at `POST /oauth/register`.
+3. The client opens the browser at `GET /oauth/authorize`. The server validates the request (known `client_id`, exact redirect URI match, `code_challenge_method=S256`, `resource` equal to the URL of an OAuth endpoint this instance serves), stores an **authorization request** (10 minute life) and redirects the browser to `/ui/authorize?request=<id>`.
+4. The Web UI consent page loads the request and its pre-filled choices through the REST API, with the admin API key.
 5. Approve: the page posts the decision; the answer carries the redirect URL with a single-use code. The page sends the browser there. Deny: redirect with `error=access_denied`.
 6. The client exchanges the code at `POST /oauth/token` with its PKCE verifier and gets an access token and a refresh token.
+
+### Which client is it
+
+Two kinds of address, both under `/mcp/oauth`:
+
+| Address | Who writes it | Client on the consent page |
+|---|---|---|
+| `/mcp/oauth/<client-id>` | Connect, or the "Add browser login" action on a Clients row, or the user by hand | **Fixed**: that client. Not selectable |
+| `/mcp/oauth` | the user by hand, for a client MCPProxy has never seen | **Chosen by the user**: "New client" (name field pre-filled from the reported name) or an existing client from a list. Nothing is pre-selected among existing clients |
+
+- `<client-id>` is the Clients hub id: a connect-registry id (`cursor`, `claude-code`) or a custom client's id. The path is the `resource` the client sends at authorize (RFC 8707), so the server knows the client before the page is shown.
+- An id that is neither in the registry nor an existing custom client answers 404 on every step. Clients are not created by typing a new path.
+- The address is not a secret and proves nothing. Any local process can use it. That is why consent is shown every time, and why the page says in words whose access is being handed over.
+- A token issued for `/mcp/oauth/cursor` is accepted only there, and only while its grant belongs to `cursor`.
+- The same registration (`client_id`) coming back is recognised exactly: the page says "Signed in before" and offers to replace that login.
+- After login, the name sent at `initialize` is compared with the client's known names. A mismatch is an advisory warning on the Clients row. It blocks nothing.
 
 ### The consent page
 
 ```
-"Cursor" wants to connect to MCPProxy
-Name reported by the app. MCPProxy cannot verify it.
+Sign-in request for Cursor
+The app calls itself "Cursor IDE". MCPProxy cannot verify that.
 Returns to: http://127.0.0.1:54321/callback
 
-Client    (•) Cursor (already connected with an API key)
-          ( ) New client  [ Cursor 2          ]
-Profile   [ dev-readonly ▾ ]   locked
+Client    Cursor (already connected with an API key)
+Profile   dev-readonly (locked)
           Approving gives this app the same access as Cursor.
-[x] Replace the previous browser login of Cursor (approved 3 Nov)
+[x] Replace the previous browser login (approved 3 Nov)
 
                                    [ Deny ]   [ Approve ]
 ```
 
 Rules for the page:
 
-- The reported name is always labelled as unverified. When an existing client is selected, the page says in words that the app receives that client's access.
+- **Per-client address**: the client is fixed. If it already has a binding, the profile is shown, not asked. If it is new, the profile rule below applies.
+- **Generic address**: the user picks the client first.
+- **Profile for a client with no binding yet**: if no profiles are configured, "All servers". If profiles exist, nothing is pre-selected and Approve stays disabled until the user picks one. Same rule as `profile_required` in the `credentials` tool. Binding mode defaults to `locked`.
+- **Replace previous login** is pre-checked only when this exact `client_id` already has a grant. Otherwise the new login is added next to the existing ones.
 - **No admin key in this browser**: the page cannot load the request. It shows "Open this request from the MCPProxy tray, or paste the API key". The core emits an SSE event for a new authorization request; the tray shows a notification and a menu item "Approve sign-in for Cursor…" that opens the same URL with the key, the way it opens the Web UI today.
-- **Bypassable binding**: when the chosen profile is a named one and `require_mcp_auth` is off, approval would be refused with `binding_bypassable_without_auth`. The page shows that refusal before the button is pressed, with the fixes the binding guard itself lists (`internal/runtime/binding_guard.go`: turn `require_mcp_auth` on, or set `anonymous_profile`). No exception for OAuth clients.
+- **Bypassable binding**: when the profile is a named one and `require_mcp_auth` is off, approval would be refused with `binding_bypassable_without_auth`. The page shows that refusal before the button is pressed, with the fixes the binding guard itself lists (`internal/runtime/binding_guard.go`: turn `require_mcp_auth` on, or set `anonymous_profile`). No exception for OAuth clients.
 - The page is never framed (`frame-ancestors 'none'`). Approval is an API-key-authenticated REST call, not a cookie form, so there is no cross-site request to forge.
 
-### The suggestion
-
-Computed on the server, returned with the authorization request. First match wins:
-
-| # | Evidence | Client | Profile | Extra |
-|---|---|---|---|---|
-| 1 | This `client_id` already has an approved grant | the grant's client | the client's binding | "Signed in before" |
-| 2 | An approved grant exists whose registration had the same reported name (normalised) and the same redirect URI set | that grant's client | its binding | "replace previous login" pre-checked |
-| 3 | Reported name matches the registry (below), and a Clients row with that id exists | that row | its binding | |
-| 4 | Reported name matches the registry, no row yet | new client with the registry id | see below | registry icon and display name |
-| 5 | Nothing matches | new custom client, id is a slug of the name, made unique | see below | |
-
-Registry match: the name a client registers with is not the name it sends at `initialize`, so `ClientInfoNames` alone would rarely match. The registry gains `OAuthClientNames` per client (PR-1, filled from observed registrations and public documentation, best effort like `ClientInfoNames`). A reported name matches a registry client when, after normalisation and case folding, it equals the client's id, display name, a `ClientInfoNames` alias or an `OAuthClientNames` entry. Row 2 is what stops the pile-up for clients the registry does not know: the first approval teaches MCPProxy which client that name and redirect set belong to.
-
-Profile for a new client: if no profiles are configured, "All servers". If profiles exist, nothing is pre-selected and Approve stays disabled until the user picks one. This is the same rule as `profile_required` in the `credentials` tool. Binding mode defaults to `locked`.
-
-Consent is shown every time, including row 1. A public client has no secret and loopback redirects match on any port, so a different local process can reuse a known `client_id`. The click is the check.
+Consent is shown every time. A public client has no secret and loopback redirects match on any port, so a different local process can reuse a known `client_id` or address. The click is the check.
 
 ### Identity and data
 
@@ -112,7 +124,7 @@ Three new records, in their own bbolt buckets. They are keyed by client, not by 
 
 Tokens:
 
-- Access token: opaque, prefix `mcp_oat_`, HMAC-SHA256 hashed like agent tokens, 1 hour, accepted only on `/mcp/oauth`.
+- Access token: opaque, prefix `mcp_oat_`, HMAC-SHA256 hashed like agent tokens, 1 hour, accepted only on the OAuth address it was issued for.
 - Refresh token: opaque, prefix `mcp_ort_`, rotated on every use, 30 days sliding. Reuse of an already rotated refresh token revokes the grant (OAuth 2.1 rule for public clients).
 
 **One client, several credentials.** A Clients hub row is the identity. Under it: at most one API key (today's `mcp_cli_` record) and any number of OAuth grants. The profile binding belongs to the client, not to a credential. An access token authenticates to the same `AuthContext` a client credential produces: `AuthTypeAgent`-class caller, `Kind=client`, the client's id, the client's binding. Everything downstream (profile resolution, pin boundary, activity `client_id`, `/tools?client=`) is unchanged.
@@ -126,7 +138,7 @@ Activity rows gain the credential kind `oauth` and the grant id, so two logins o
 - The resource and the issuer are built from the **origin of the request**, after the existing host validation (loopback names and `trusted_hosts`). `http://127.0.0.1:8080` and `http://localhost:8080` are two resources; a client stays on the one it was configured with. The metadata documents, the `resource` check at authorize and the audience of a token all use that origin, and a token is refused on any other.
 - The consent redirect stays on the same origin. If the browser holds the admin key under another origin, the page takes the "no admin key" path and the tray opens the request on the right origin.
 - Version 1 serves `/mcp/oauth`, `/oauth/*` and the metadata only to requests that arrive from a loopback address with a loopback host. Anything else gets 404, so a LAN listen exposes no open registration. The tunnel lifts this later under its own rules.
-- `/mcp/oauth` serves the same tool surface as `/mcp` (it follows `routing_mode`). It is registered ahead of the `/mcp/` catch-all. Behaviour change to note in the docs: today `/mcp/oauth` falls into that catch-all and answers like `/mcp`.
+- `/mcp/oauth` and `/mcp/oauth/<client>` serve the same tool surface as `/mcp` (they follow `routing_mode`). While the feature is on they are registered ahead of the `/mcp/` catch-all. While it is off they are not registered at all, so these paths keep falling into the catch-all exactly as today.
 - Server edition: the feature answers 404 in version 1 whatever the setting, because consent by admin API key would create grants with no user.
 
 ### Revoke and forget
@@ -151,7 +163,7 @@ Cursor                       profile: dev-readonly (locked)
 
 ### Connect
 
-The registry gains a flag for clients known to support the MCP authorization flow. For those, Connect (Web UI, CLI `mcpproxy connect <client> --auth oauth|key`) offers both. "Sign in with browser" writes only the `/mcp/oauth` URL into the client's config, no header. The diff preview and backup notice are unchanged. Default stays "API key" in version 1.
+The registry gains a flag for clients known to support the MCP authorization flow. Only while `mcp_oauth_enabled` is on, Connect (Web UI, CLI `mcpproxy connect <client> --auth oauth|key`) offers both for those clients. "Sign in with browser" writes only the client's own address, `/mcp/oauth/<client-id>`, into the client's config, no header and no secret. The diff preview and backup notice are unchanged. The default choice stays "API key". With the feature off, Connect looks and behaves as today.
 
 ### Limits and abuse
 
@@ -160,27 +172,38 @@ The registry gains a flag for clients known to support the MCP authorization flo
 - `/oauth/authorize` and `/oauth/token`: rate limited; codes are single-use, 60 seconds, bound to client, redirect URI and PKCE challenge.
 - All `/oauth/*` and `/.well-known/*` endpoints are unauthenticated by nature and answer nothing about servers, profiles or existing clients.
 
-### Configuration
+### Configuration and upgrade
 
-`mcp_oauth_enabled` (default **on**, env `MCPPROXY_MCP_OAUTH_ENABLED`). Off: `/mcp/oauth`, `/oauth/*` and the metadata documents answer 404 and existing grants stop authenticating until it is on again.
+`mcp_oauth_enabled`, default **off**, env `MCPPROXY_MCP_OAUTH_ENABLED`, also a switch on the Settings page marked "Experimental". No restart is needed: routes are added and removed on config reload.
+
+- **Off (default)**: no new route, no metadata document, no new bucket is created, no Connect option, no Clients hub column, no startup notice. Existing API keys, agent tokens, client credentials, `/mcp` and every routing-mode endpoint are untouched. A test pins this: the route table and the answers on `/mcp/oauth*`, `/oauth/*` and `/.well-known/oauth-*` with the feature off equal those of the previous release.
+- **On**: everything in this document. API keys keep working next to it.
+- **Turned off again**: OAuth addresses stop authenticating at once. Grants and bindings are kept, so turning it on again restores them. A client configured with only an OAuth address is then reported on its Clients row as "browser login disabled".
+- **Downgrade** to a binary without the feature: the buckets are ignored, OAuth-only clients fall into the `/mcp/` catch-all as anonymous callers. The docs say to turn `require_mcp_auth` on first, as for pre-108 downgrades.
 
 ## Delivery
 
-1. **PR-1, backend**: metadata, registration, authorize, token, storage, `/mcp/oauth` handler, authentication into the existing client `AuthContext`, the single binding, REST for authorization requests (get with suggestion, approve, deny), activity rows, limits.
+1. **PR-1, backend**: metadata, registration, authorize, token, storage, `/mcp/oauth` and `/mcp/oauth/<client>` handlers, the off-by-default switch with its unchanged-behaviour test, authentication into the existing client `AuthContext`, the single binding, REST for authorization requests (get with pre-filled choices, approve, deny), activity rows, limits.
 2. **PR-2, surfaces**: consent page, macOS tray notification, Clients hub credentials list, `credentials` / REST / CLI list and revoke. **PR-2b**: the same notification in the Go tray (Windows, Linux); until then those users paste the key or open the Web UI from the tray first.
 3. **PR-3, Connect and docs**: registry flag, the Connect choice, `docs/features/client-oauth-login.md`, updates to connect-clients, profiles, REST reference.
 
 Each PR is test-first. End to end: a scripted public client runs the whole flow against a built core (`scripts/test-client-oauth-e2e.sh`), including refresh rotation, reuse detection, revoke on a live session and the bypassable-binding refusal.
 
+## Decided by Algis
+
+- OAuth and API keys both stay; the user chooses per client.
+- Suggest and confirm on the consent page.
+- Which client a login belongs to must be reliable, not guessed from names (2026-11-22).
+- Off by default in the first release; an update needs no action and changes nothing for existing users (2026-11-22).
+
 ## Calls made here (not decided by Algis)
 
-- One OAuth endpoint, `/mcp/oauth`, as the issue proposes; tokens are bound to it.
-- Feature on by default.
+- Readable per-client address (`/mcp/oauth/<client-id>`) instead of a random one: it carries no authority, so it need not be secret.
+- A generic-address login never pre-selects an existing client.
 - Consent every time, with no silent re-approval.
 - Token lifetimes (1 hour / 30 days sliding) and the numeric limits above.
 - Default Connect choice stays "API key".
 - No CLI approval, no custom-scheme redirects, no confidential clients in version 1.
-- Registry gains `OAuthClientNames`; suggestion row 2 learns from earlier approvals.
 - Resource and issuer follow the request origin; OAuth is loopback-only and off in server edition for version 1.
 - "Revoke client" revokes the API key and all grants; forgetting a client deletes its grants.
 - `/mcp/oauth` follows `routing_mode`; Go tray notification is a follow-up PR.
@@ -196,4 +219,4 @@ Each PR is test-first. End to end: a scripted public client runs the whole flow 
 ## Later
 
 - **Server edition**: the consent page needs the user's session; the grant carries `user_id`; selectable profiles and clients are the user's own.
-- **Tunnel (Spec 089)**: same endpoints behind the tunnel origin, consent protected by the proxy-managed credential, tokens bound to the tunnel resource URI. Client ID Metadata Documents would give hosted clients a domain-verified name and can strengthen suggestion row 2.
+- **Tunnel (Spec 089)**: same endpoints behind the tunnel origin, consent protected by the proxy-managed credential, tokens bound to the tunnel resource URI. Client ID Metadata Documents would give hosted clients a domain-verified name to show on the consent page.
