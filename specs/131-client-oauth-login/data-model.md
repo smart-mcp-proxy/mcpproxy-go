@@ -1,0 +1,93 @@
+# Data Model: Browser login for MCP clients
+
+All persistent records live in `config.db` in buckets created on first write. Nothing is created while the feature is off.
+
+## Registration — bucket `oauth_registrations`, key `client_id`
+
+| Field | Type | Rule |
+|---|---|---|
+| `client_id` | string | 22 random base62 chars, server-generated |
+| `reported_name` | string | `client_name` after `clientidentity.SanitizeDisplay`, at most 128 bytes; display only |
+| `redirect_uris` | []string | 1 to 5; each loopback `http` or `https`; no fragment |
+| `software_id`, `software_version` | string | optional, sanitised, display only |
+| `token_endpoint_auth_method` | string | always `none` |
+| `grant_types` | []string | always `authorization_code`, `refresh_token` |
+| `state` | enum | `pending` → `authorized` → `approved`; or `denied` |
+| `created_at`, `authorized_at` | time | |
+
+Lifecycle: `pending` rows are deleted 15 minutes after creation, `authorized` (reached `/oauth/authorize`, never approved) after 24 hours. At most 50 non-approved rows; the oldest is dropped. An `approved` row lives while at least one grant references it.
+
+## Grant (browser login) — bucket `oauth_grants`, key `grant_id`
+
+| Field | Type | Rule |
+|---|---|---|
+| `grant_id` | string | 22 random base62 chars |
+| `registration_id` | string | the `client_id` above |
+| `client` | string | Clients hub client id; passes `auth.ValidClientID` |
+| `resource` | string | full URI approved, immutable |
+| `issuer` | string | origin approved, immutable |
+| `refresh_hash`, `refresh_prefix` | string | HMAC-SHA256 of the current refresh secret; first 12 chars of the token |
+| `access_hash`, `access_expires_at` | string, time | the one live access token |
+| `refresh_expires_at` | time | now + 30 days on every rotation |
+| `approved_at`, `approved_by` | time, actor | |
+| `last_used_at` | time | updated like agent tokens, off the request path |
+| `revoked`, `revoked_at`, `revoke_reason` | bool, time, enum | `admin`, `client_revoked`, `replaced`, `replay` |
+| `user_id` | string | empty in the personal edition |
+
+Sub-bucket `by_access_hash`: `access_hash → grant_id`.
+
+State: `live` (not revoked, `refresh_expires_at` in the future) → `lapsed` (refresh expired) or `revoked`. Neither comes back. A lapsed or revoked grant is kept for display for 30 days, then deleted.
+
+## Client binding for browser logins — bucket `oauth_client_bindings`, key client id
+
+| Field | Type | Rule |
+|---|---|---|
+| `profile_pin` | string | profile name, or empty for All servers |
+| `profile_mode` | enum | `locked` requires a non-empty pin; All servers is `switchable` |
+| `display_name` | string | for a custom client created at consent, at most 64 runes |
+| `updated_at` | time | |
+
+Invariants:
+
+- Exists exactly for clients that have at least one grant record.
+- If the client also has an API-key record, `profile_pin` and `profile_mode` equal that record's `ProfilePin` and `ProfileMode`. One storage function writes both in one transaction. On startup a mismatch is repaired from the API-key record and logged.
+- **Binding revision**: `sha256(client | pin | mode)` truncated, computed on read; the consent page sends back the revision it displayed.
+
+## Ever-used marker — `MetaBucket` key `oauth_login_ever_used`
+
+RFC 3339 time of the first stored grant. Written in the same transaction as that grant. Never deleted.
+
+## Authorization request — memory only
+
+| Field | Rule |
+|---|---|
+| `id` | 22 random base62 chars; appears in the consent URL |
+| `registration_id`, `redirect_uri`, `state`, `code_challenge` | validated at `/oauth/authorize`; stored verbatim |
+| `resource`, `issuer`, `path_client` | `path_client` is the client id from the resource path, empty for the generic address |
+| `status` | `pending` → `approved` \| `denied` \| `expired` \| `cancelled`; one transition, compare-and-set |
+| `expires_at` | created + 10 minutes |
+
+At most 20 pending requests; a new one beyond that is refused with `temporarily_unavailable`.
+
+## Authorization code — memory only
+
+`code` (32 random bytes, stored hashed), bound to request id, registration, redirect URI, challenge, resource, chosen client and the decision. Single use, 60 seconds. A second use revokes the grant created from the first.
+
+## Relationships
+
+```text
+Client (Clients hub id)
+ ├─ 0..1 API key        agent_tokens (Kind=client)      holds ProfilePin/ProfileMode
+ ├─ 0..1 binding copy   oauth_client_bindings           equal to the above when both exist
+ └─ 0..n Grant          oauth_grants ──► Registration   oauth_registrations
+```
+
+## Derived views
+
+- **Credential list of a client** (Clients hub, REST, `credentials get`): the API key if any, then grants ordered by `approved_at` descending, each with state, prefix, `approved_at`, `last_used_at`, reported name, redirect host. Never a secret or a hash.
+- **Active named binding** (guard, `profile_in_use`): a client with a named pin and either a live API key or a live grant.
+- **Client state** on the hub gains `browser_login_disabled` when the client has grants and the feature is off.
+
+## Auth context of a browser-login request
+
+`Type=agent`, `TokenKind=client`, `ClientID=<client>`, `ProfilePin`, `ProfileMode` from the binding, `CredentialKind=oauth`, `AllowedServers=["*"]`, all three permission tiers. Built by the same helper as the `mcp_cli_` path.

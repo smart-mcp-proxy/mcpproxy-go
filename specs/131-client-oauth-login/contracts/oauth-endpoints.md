@@ -1,0 +1,100 @@
+# Contract: public OAuth endpoints
+
+`<origin>` is the scheme and host of the request. All endpoints below answer only when the feature is on, the peer and the Host are loopback, and the build is the personal edition. Otherwise see "Gate".
+
+## Gate
+
+| Feature | Ever used | `/mcp/oauth*` | `/oauth/*`, `/.well-known/oauth-*` |
+|---|---|---|---|
+| off | no | previous behaviour (the `/mcp/` catch-all) | previous behaviour (the root handler) |
+| off | yes | `404` | `404` |
+| on | any | served | served |
+
+Non-loopback peer or Host, or server edition, with the feature on: `404`.
+
+## Protected resource
+
+`ANY /mcp/oauth` and `ANY /mcp/oauth/{client}` — the MCP endpoint, same surface as `/mcp`.
+
+- No or invalid bearer token → `401`, `WWW-Authenticate: Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource/mcp/oauth[/{client}]"`.
+- `{client}` not a known client id → `404` (also on its metadata).
+- Accepts only `Authorization: Bearer mcp_oat_…`. `X-API-Key`, `?apikey=`, `mcp_cli_`, `mcp_agt_` and the admin key → `401`.
+- Token for another resource or origin → `401`.
+
+## `GET /.well-known/oauth-protected-resource/mcp/oauth[/{client}]`
+
+```json
+{
+  "resource": "<origin>/mcp/oauth/cursor",
+  "authorization_servers": ["<origin>"],
+  "bearer_methods_supported": ["header"]
+}
+```
+
+## `GET /.well-known/oauth-authorization-server`
+
+```json
+{
+  "issuer": "<origin>",
+  "authorization_endpoint": "<origin>/oauth/authorize",
+  "token_endpoint": "<origin>/oauth/token",
+  "registration_endpoint": "<origin>/oauth/register",
+  "response_types_supported": ["code"],
+  "grant_types_supported": ["authorization_code", "refresh_token"],
+  "code_challenge_methods_supported": ["S256"],
+  "token_endpoint_auth_methods_supported": ["none"]
+}
+```
+
+## `POST /oauth/register` (RFC 7591)
+
+Request (JSON, at most 16 KiB): `redirect_uris` (required), `client_name`, `software_id`, `software_version`, optional `token_endpoint_auth_method`, `grant_types`, `response_types`.
+
+- `201`: `client_id`, `client_id_issued_at`, `redirect_uris`, `client_name` (sanitised), `token_endpoint_auth_method: "none"`, `grant_types: ["authorization_code","refresh_token"]`, `response_types: ["code"]`. No `client_secret`.
+- `400 invalid_redirect_uri`: not loopback `http` and not `https`, has a fragment, more than 5.
+- `400 invalid_client_metadata`: an auth method other than `none`, a grant type or response type outside the lists above.
+- `429` with `Retry-After`.
+
+## `GET /oauth/authorize`
+
+Query: `response_type=code`, `client_id`, `redirect_uri`, `code_challenge`, `code_challenge_method=S256`, `resource`, `state` (optional), `scope` (ignored).
+
+- Unknown `client_id` or `redirect_uri` not registered (loopback port ignored) → `400` HTML error page, **no redirect**.
+- Other errors → redirect to `redirect_uri` with `error` (`invalid_request`, `unsupported_response_type`, `invalid_target`, `temporarily_unavailable`) and `state`.
+- `resource` must be `<origin>/mcp/oauth` or `<origin>/mcp/oauth/{known client}`, else `invalid_target`.
+- Success → `302` to `<origin>/ui/authorize?request=<id>`. Headers on every answer: `Cache-Control: no-store`, `Referrer-Policy: no-referrer`.
+
+After the administrator decides (admin REST), the browser is sent to:
+
+- approve: `redirect_uri?code=<code>&state=<state>`
+- deny: `redirect_uri?error=access_denied&state=<state>`
+
+## `POST /oauth/token`
+
+Form-encoded, at most 16 KiB. Answers carry `Cache-Control: no-store`.
+
+**`grant_type=authorization_code`**: `code`, `redirect_uri`, `client_id`, `code_verifier`, `resource` (optional; if present must equal the approved one).
+
+**`grant_type=refresh_token`**: `refresh_token`, `client_id`, `resource` (optional, same rule).
+
+`200`:
+
+```json
+{ "access_token": "mcp_oat_…", "token_type": "Bearer", "expires_in": 3600, "refresh_token": "mcp_ort_…" }
+```
+
+Errors (`400` JSON `{error, error_description}`):
+
+| Case | `error` | Side effect |
+|---|---|---|
+| unknown, expired or already used code; wrong verifier, client or redirect URI | `invalid_grant` | a reused code revokes the grant it produced |
+| refresh token malformed, bad MAC, unknown or revoked grant, wrong `client_id` | `invalid_grant` | **none**; all indistinguishable |
+| authentic refresh token that is not the current one | `invalid_grant` | grant revoked (`replay`) |
+| `resource` differs from the approved one | `invalid_target` | none |
+| other grant type | `unsupported_grant_type` | none |
+| over the rate limit | `429` + `Retry-After` | none |
+
+## Token formats
+
+- Access: `mcp_oat_<43 base64url chars>`; lifetime 3600 s.
+- Refresh: `mcp_ort_<grant id>_<secret>_<mac>`; lifetime 30 days from last rotation.
