@@ -65,12 +65,9 @@ func (s *OAuthLoginService) Refresh(in TokenInput) (TokenResult, *TokenError) {
 		s.logger.Error("browser login: cannot mint tokens", zap.Error(err))
 		return TokenResult{}, errTokenServer
 	}
-	now := s.now().UTC()
-	outcome, after, err := s.store.RotateOAuthRefresh(grantID, mcplogin.HashSecret(key, mcplogin.KindRefresh, secret),
-		ts.refreshHash, ts.refreshPrefix, ts.accessHash, now, OAuthAccessTokenTTL, OAuthRefreshTokenTTL)
-	if err != nil {
-		s.logger.Error("browser login: refresh rotation failed", zap.Error(err))
-		return TokenResult{}, errTokenServer
+	outcome, after, rerr := s.rotateFenced(grantID, mcplogin.HashSecret(key, mcplogin.KindRefresh, secret), ts)
+	if rerr != nil {
+		return TokenResult{}, rerr
 	}
 	switch outcome {
 	case storage.RefreshRotated:

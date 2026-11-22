@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -13,6 +12,10 @@ import (
 // hmacKeyMu serialises in-process creators. Disk exclusivity (below) covers
 // other processes and every caller that bypasses this package-level lock.
 var hmacKeyMu sync.Mutex
+
+// linkFile publishes the temp file without replacing a target; a variable so a
+// test can simulate a filesystem without hard links.
+var linkFile = os.Link
 
 // readValidHMACKey returns the key at path when it is a 32-byte file.
 func readValidHMACKey(path string) ([]byte, bool) {
@@ -29,10 +32,17 @@ func readValidHMACKey(path string) ([]byte, bool) {
 //
 // Creation is atomic for every caller: in-process callers are serialised by a
 // package-level mutex, and the key reaches the final name only through a hard
-// link (or O_EXCL) of a fully written 0600 temporary file in the same
-// directory, so two first-time callers can never each generate a key and
-// overwrite the other's. A caller that loses the race reads and returns the
-// winner's key. A file of the wrong size is replaced, as it always was.
+// link (or, where links are unsupported, an atomic rename) of a fully written
+// 0600 temporary file in the same directory, so a crash never leaves a partial
+// key and two first-time callers can never each generate a key and overwrite
+// the other's. A caller that loses the race returns the winner's key; after any
+// write the on-disk bytes are re-read and returned. A file of the wrong size
+// (empty included) is replaced, as it always was.
+//
+// Single-process assumption: replacing an INVALID file is not guarded across
+// processes. That is safe because one data dir has one core process (the bbolt
+// lock on config.db, exit code 3) and every caller runs only after its process
+// holds that lock.
 func GetOrCreateHMACKey(dataDir string) ([]byte, error) {
 	keyPath := filepath.Join(dataDir, hmacKeyFile)
 
@@ -73,37 +83,22 @@ func GetOrCreateHMACKey(dataDir string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to write HMAC key file: %w", err)
 	}
 
-	linkErr := os.Link(tmpPath, keyPath)
-	switch {
-	case linkErr == nil:
-		return key, nil
-	case errors.Is(linkErr, fs.ErrExist):
-		// Someone else created it first: theirs wins when it is valid.
+	// Publish the complete temp file. A hard link never replaces an existing
+	// target; when it fails (the target exists, or the filesystem has no hard
+	// links) a valid existing key wins, and otherwise the complete temp file is
+	// renamed into place, which is atomic and works on every filesystem and also
+	// recovers an empty or wrong-size target.
+	if err := linkFile(tmpPath, keyPath); err != nil {
 		if existing, ok := readValidHMACKey(keyPath); ok {
 			return existing, nil
 		}
-		// A corrupt file of the wrong size: replace it atomically.
 		if err := os.Rename(tmpPath, keyPath); err != nil {
 			return nil, fmt.Errorf("failed to write HMAC key file: %w", err)
 		}
-		return key, nil
-	default:
-		// No hard links on this filesystem: exclusive create instead.
-		f, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if err != nil {
-			if errors.Is(err, fs.ErrExist) {
-				if existing, ok := readValidHMACKey(keyPath); ok {
-					return existing, nil
-				}
-			}
-			return nil, fmt.Errorf("failed to write HMAC key file: %w", err)
-		}
-		_, werr := f.Write(key)
-		cerr := f.Close()
-		if werr != nil || cerr != nil {
-			_ = os.Remove(keyPath)
-			return nil, fmt.Errorf("failed to write HMAC key file: %w", errors.Join(werr, cerr))
-		}
-		return key, nil
 	}
+	// Whatever happened above, return what is on disk now.
+	if onDisk, ok := readValidHMACKey(keyPath); ok {
+		return onDisk, nil
+	}
+	return nil, errors.New("failed to write HMAC key file: the key file is unreadable after writing")
 }

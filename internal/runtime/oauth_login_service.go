@@ -102,6 +102,8 @@ type OAuthLoginService struct {
 	testHookApproveAfterStore func()
 	testHookApproveFinalising func()
 	testHookBeforeCommit      func()
+	testHookBeforeRotateLock  func()
+	testHookInRotate          func()
 
 	everUsed  bool // positive results only
 	everMu    sync.Mutex
