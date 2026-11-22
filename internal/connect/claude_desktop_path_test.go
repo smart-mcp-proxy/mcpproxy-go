@@ -47,6 +47,11 @@ func TestClaudeDesktopWindowsConfigPath(t *testing.T) {
 			writeCfg(t, p, now.Add(-time.Hour))
 			return p
 		}},
+		{"mixed-case Claude_ directory (Windows is case-insensitive)", func(a, l string) string {
+			p := filepath.Join(l, "Claude-Data", "Claude_ABC", "claude_desktop_config.json")
+			writeCfg(t, p, now)
+			return p
+		}},
 		{"newest of several Claude-Data dirs", func(a, l string) string {
 			writeCfg(t, filepath.Join(l, "Claude-Data", "claude_old", "claude_desktop_config.json"), now.Add(-time.Hour))
 			p := filepath.Join(l, "Claude-Data", "claude_new", "claude_desktop_config.json")

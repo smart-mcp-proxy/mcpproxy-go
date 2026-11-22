@@ -249,7 +249,7 @@ func claudeDesktopWindowsConfigPath(homeDir, appData, localAppData string) strin
 	entries, _ := os.ReadDir(filepath.Join(localAppData, "Claude-Data"))
 	best, bestMod := "", int64(0)
 	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), "claude_") {
+		if !e.IsDir() || !strings.HasPrefix(strings.ToLower(e.Name()), "claude_") {
 			continue
 		}
 		m := filepath.Join(localAppData, "Claude-Data", e.Name(), file)
