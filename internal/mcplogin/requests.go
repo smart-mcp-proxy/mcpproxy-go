@@ -155,6 +155,7 @@ func (s *Store) Create(req Request) (Request, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.sweepLocked()
 	if s.pendingCountLocked() >= MaxPendingRequests {
 		return Request{}, ErrTooManyPending
 	}
@@ -208,6 +209,7 @@ func (s *Store) Approve(id string, d Decision) (string, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.sweepLocked()
 	r := s.live(id)
 	if r == nil {
 		return "", ErrRequestNotFound
@@ -275,11 +277,13 @@ func (s *Store) CancelAll() int {
 // commit fails the code is burned too (single use) and the error is returned.
 // Presenting a consumed code again inside the tombstone window returns
 // ErrCodeReused together with the grant id it produced; afterwards the code is
-// unknown.
+// unknown. This holds for a code whose commit failed as well, with an empty
+// grant id: callers must treat an empty grant id as "nothing to revoke".
 func (s *Store) Consume(code string, commit func(Request) (grantID string, err error)) (Request, string, error) {
 	h := HashSecret(s.key, KindCode, code)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.sweepLocked()
 	now := s.now()
 	e := s.codes[h]
 	if e == nil {
@@ -287,9 +291,6 @@ func (s *Store) Consume(code string, commit func(Request) (grantID string, err e
 	}
 	if e.consumed {
 		if now.Before(e.consumedAt.Add(TombstoneLifetime)) {
-			if e.grantID == "" {
-				return Request{}, "", ErrCodeUnknown
-			}
 			return Request{}, e.grantID, ErrCodeReused
 		}
 		delete(s.codes, h)
@@ -319,6 +320,13 @@ func (s *Store) Consume(code string, commit func(Request) (grantID string, err e
 func (s *Store) Sweep() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.sweepLocked()
+}
+
+// sweepLocked drops dead entries. Create, Approve and Consume call it, so the
+// maps stay bounded by what is live (at most MaxPendingRequests pending plus
+// ten minutes of decided state) without an external janitor. Caller holds s.mu.
+func (s *Store) sweepLocked() {
 	now := s.now()
 	for id, r := range s.reqs {
 		if !now.Before(r.ExpiresAt) {

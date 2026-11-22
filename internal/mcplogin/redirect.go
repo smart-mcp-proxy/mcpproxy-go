@@ -68,6 +68,23 @@ func isLoopbackURL(u *url.URL) bool {
 	return u.Scheme == "http" && isLoopbackHost(u.Host[:hostEnd(u.Host)])
 }
 
+// stripPort removes the port from the authority of an already validated URI
+// string and leaves every other byte alone, so two loopback URIs compare equal
+// only when they differ by port at most.
+func stripPort(raw string) string {
+	i := strings.Index(raw, "://")
+	if i < 0 {
+		return raw
+	}
+	start := i + 3
+	end := len(raw)
+	if j := strings.IndexAny(raw[start:], "/?#"); j >= 0 {
+		end = start + j
+	}
+	auth := raw[start:end]
+	return raw[:start] + auth[:hostEnd(auth)] + raw[end:]
+}
+
 // ValidateRegisteredRedirects checks the redirect URIs of a registration: 1 to
 // 5 entries, each an absolute URL without fragment or user info, either http
 // on 127.0.0.1, [::1] or localhost, or https with a host. Custom schemes are
@@ -104,8 +121,7 @@ func MatchRedirect(registered []string, presented string) (matched string, ok bo
 		if err != nil || !isLoopbackURL(r) {
 			continue
 		}
-		if r.Scheme == p.Scheme && r.Hostname() == p.Hostname() &&
-			r.EscapedPath() == p.EscapedPath() && r.RawQuery == p.RawQuery {
+		if isLoopbackURL(p) && stripPort(reg) == stripPort(presented) {
 			return presented, true
 		}
 	}

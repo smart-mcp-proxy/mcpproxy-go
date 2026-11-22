@@ -13,12 +13,6 @@ func newTestStore() (*Store, *fakeClock) {
 	return NewStore(testKey, clk.now), clk
 }
 
-func (s *Store) size() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.reqs) + len(s.codes)
-}
-
 func mkReq(pathClient string) Request {
 	return Request{RegistrationID: "reg1", RedirectURI: "http://127.0.0.1:1/cb", State: "st",
 		CodeChallenge: "ch", Resource: "http://127.0.0.1:8080/mcp/oauth", Issuer: "http://127.0.0.1:8080", PathClient: pathClient}
@@ -186,7 +180,7 @@ func TestConsumeCommitErrorBurnsCode(t *testing.T) {
 	}
 	called := false
 	_, gid, err := s.Consume(code, func(Request) (string, error) { called = true; return "g", nil })
-	if called || gid != "" || !errors.Is(err, ErrCodeUnknown) {
+	if called || gid != "" || !errors.Is(err, ErrCodeReused) {
 		t.Fatalf("code reusable after failed commit: %v %q %v", err, gid, called)
 	}
 }

@@ -111,7 +111,7 @@ func NewClientID() (string, error) { return randomBase62(22) }
 
 // Response is the RFC 7591 201 body. It never carries a client_secret.
 func (r Registration) Response(issuedAt time.Time) map[string]any {
-	return map[string]any{
+	m := map[string]any{
 		"client_id":                  r.ClientID,
 		"client_id_issued_at":        issuedAt.Unix(),
 		"redirect_uris":              r.RedirectURIs,
@@ -120,4 +120,11 @@ func (r Registration) Response(issuedAt time.Time) map[string]any {
 		"grant_types":                r.GrantTypes,
 		"response_types":             r.ResponseTypes,
 	}
+	if r.SoftwareID != "" {
+		m["software_id"] = r.SoftwareID
+	}
+	if r.SoftwareVersion != "" {
+		m["software_version"] = r.SoftwareVersion
+	}
+	return m
 }
