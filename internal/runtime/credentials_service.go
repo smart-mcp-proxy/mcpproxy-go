@@ -958,6 +958,16 @@ func (s *CredentialsService) issueClientMCP(ctx context.Context, a Actor, req Is
 				Msg: fmt.Sprintf("client %s already exists (%s); choose a new id", req.ID, state)}
 		}
 	}
+	// 8. A client that has browser logins but no record exists too: create_client
+	// must not "create" it and rebind it (Spec 132).
+	hasLogins, herr := s.clients.hasLoginRecords(s.clients.oauthStore(), req.ID)
+	if herr != nil {
+		return nil, herr
+	}
+	if hasLogins {
+		return nil, &CredentialError{ErrCode: profile.CredentialErrorCodeIdentityExists, Field: "client", State: "browser_login", Status: 409,
+			Msg: fmt.Sprintf("client %s already exists (browser_login); choose a new id", req.ID)}
+	}
 	profileArg := req.Profile
 	return s.mintClientLocked(ctx, a, req, &profileArg, &mode, expiresAt)
 }
@@ -1012,7 +1022,9 @@ func (s *CredentialsService) Revoke(ctx context.Context, a Actor, ref Credential
 		return nil, err
 	}
 	if ref.Grant != "" {
-		return s.revokeGrantLocked(ctx, ref.Client, ref.Grant)
+		// The login service reads the actor from the context: stamp the one this
+		// call was given, as every other branch uses it.
+		return s.revokeGrantLocked(ContextWithActor(ctx, a), ref.Client, ref.Grant)
 	}
 	if ref.Client != "" {
 		return s.revokeClientLocked(ctx, a, ref.Client)
@@ -1033,6 +1045,21 @@ func (s *CredentialsService) Revoke(ctx context.Context, a Actor, ref Credential
 	if before.Kind == auth.KindClient && !allowClientRecordByToken {
 		return nil, credErr(profile.CredentialErrorCodeReservedIdentity, "token",
 			fmt.Sprintf("token %s is a client credential; revoke it with client=%s", ref.Token, before.ClientID), 400)
+	}
+	if before.Kind == auth.KindClient {
+		// The legacy token-name door (DELETE /tokens/client-<id>) used to cut a client
+		// off completely. It still does: a client that has browser logins goes
+		// through the client revoke (key, every login, request cancellation). One
+		// without logins keeps exactly the old result, row and events; its pending
+		// requests are cancelled either way.
+		s.clients.cancelLoginRequests(before.ClientID)
+		hasLogins, herr := s.clients.hasLoginRecords(s.clients.oauthStore(), before.ClientID)
+		if herr != nil {
+			return nil, herr
+		}
+		if hasLogins {
+			return s.revokeClientLocked(ctx, a, before.ClientID)
+		}
 	}
 	cfg := s.cfg()
 	if before.Revoked {
@@ -1135,6 +1162,10 @@ func (s *CredentialsService) revokeClientLocked(ctx context.Context, a Actor, cl
 		return nil, credErr(profile.CredentialErrorCodeInvalidArgument, "client",
 			`invalid argument "client": must be lower-case letters, digits, '-' or '_', at most 56 characters`, 400)
 	}
+	// Cancel the client's pending AND approved sign-in requests before any
+	// idempotent early return: a revoke that changes nothing stored must still
+	// kill a login that was approved but not yet exchanged (Spec 132 R15).
+	s.clients.cancelLoginRequests(clientID)
 	all, err := s.clients.records()
 	if err != nil {
 		return nil, err
@@ -1143,13 +1174,24 @@ func (s *CredentialsService) revokeClientLocked(ctx context.Context, a Actor, cl
 	hasKey := rec != nil && rec.Kind == auth.KindClient
 	// Spec 132: a client with browser logins is a client even without an API
 	// key, and revoking it revokes every login too.
-	hasLogins := s.clients.hasLoginRecords(s.clients.oauthStore(), clientID)
+	hasLogins, err := s.clients.hasLoginRecords(s.clients.oauthStore(), clientID)
+	if err != nil {
+		return nil, err
+	}
 	if !hasKey && !hasLogins {
 		return nil, s.notFound("client", clientID)
 	}
 	cfg := s.cfg()
-	if hasKey && rec.Revoked && (!hasLogins || !s.hasLiveGrant(clientID, s.now())) {
-		return &RevokeResult{View: ViewOf(rec, cfg, s.now()), ClientConfigUntouched: true}, nil
+	if hasKey && rec.Revoked {
+		live := false
+		if hasLogins {
+			if live, err = s.hasLiveGrant(clientID, s.now()); err != nil {
+				return nil, err // fail closed: an unreadable list is not "nothing live"
+			}
+		}
+		if !live {
+			return &RevokeResult{View: ViewOf(rec, cfg, s.now()), ClientConfigUntouched: true}, nil
+		}
 	}
 	var view CredentialView
 	if hasKey {
@@ -1207,7 +1249,13 @@ func (s *CredentialsService) List(f CredentialFilter) ([]CredentialView, error) 
 		}
 		out = append(out, v)
 	}
-	out, err = s.listOAuth(f, out)
+	haveClient := map[string]bool{} // from the UNFILTERED records
+	for _, t := range ownerlessTokens(all) {
+		if t.Kind == auth.KindClient {
+			haveClient[t.ClientID] = true
+		}
+	}
+	out, err = s.listOAuth(f, out, haveClient)
 	if err != nil {
 		return nil, err
 	}

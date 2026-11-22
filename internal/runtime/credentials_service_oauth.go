@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
@@ -75,7 +76,7 @@ func (s *CredentialsService) oauthOnlyCredentialView(id string, b storage.OAuthC
 
 // listOAuth adds the browser logins (and the clients that have only logins) to
 // a List result. It adds nothing while the feature was never used.
-func (s *CredentialsService) listOAuth(f CredentialFilter, out []CredentialView) ([]CredentialView, error) {
+func (s *CredentialsService) listOAuth(f CredentialFilter, out []CredentialView, have map[string]bool) ([]CredentialView, error) {
 	if s.clients == nil {
 		return out, nil
 	}
@@ -85,12 +86,6 @@ func (s *CredentialsService) listOAuth(f CredentialFilter, out []CredentialView)
 	}
 	if !st.active {
 		return out, nil
-	}
-	have := map[string]bool{}
-	for _, v := range out {
-		if v.Kind == CredentialKindClient {
-			have[v.ID] = true
-		}
 	}
 	add := func(v CredentialView) {
 		if f.Kind != "" && f.Kind != "all" && f.Kind != v.Kind {
@@ -176,19 +171,19 @@ func (s *CredentialsService) revokeGrantLocked(ctx context.Context, clientID, gr
 
 // hasLiveGrant reports whether the client has a browser login that is neither
 // revoked nor lapsed.
-func (s *CredentialsService) hasLiveGrant(clientID string, now time.Time) bool {
+func (s *CredentialsService) hasLiveGrant(clientID string, now time.Time) (bool, error) {
 	o := s.clients.oauthStore()
 	if o == nil {
-		return false
+		return false, nil
 	}
 	gs, err := o.ListOAuthGrants()
 	if err != nil {
-		return false
+		return false, fmt.Errorf("cannot read browser logins: %w", err) // fail closed
 	}
 	for i := range gs {
 		if gs[i].Client == clientID && GrantStateOf(&gs[i], now) == GrantStateActive {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }

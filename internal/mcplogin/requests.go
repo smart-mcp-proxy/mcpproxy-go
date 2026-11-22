@@ -31,6 +31,9 @@ var (
 	// ErrCodeReused means a consumed code was presented again inside the
 	// tombstone window. Consume returns the grant id it produced.
 	ErrCodeReused = errors.New("mcplogin: authorization code already used")
+	// ErrCodeOriginMismatch means the code was presented on another origin than
+	// the one it was issued for. Nothing is consumed and nothing is revoked.
+	ErrCodeOriginMismatch = errors.New("mcplogin: authorization code presented on another origin")
 )
 
 // Status is the state of an authorization request.
@@ -99,6 +102,10 @@ type codeEntry struct {
 	consumed   bool
 	consumedAt time.Time
 	grantID    string // empty when the commit failed
+	// issuer is the origin the request was made on. It stays on the entry (and
+	// so on the tombstone) for its whole life, so a replay on another origin is
+	// refused before replay handling.
+	issuer string
 }
 
 // Store holds authorization requests and their codes. It is safe for
@@ -223,7 +230,7 @@ func (s *Store) Approve(id string, d Decision) (string, error) {
 	// Pending expiry and approved-code expiry are separate: an approved
 	// request lives exactly as long as its code.
 	r.ExpiresAt = now.Add(CodeLifetime)
-	s.codes[HashSecret(s.key, KindCode, code)] = &codeEntry{requestID: id, expiresAt: now.Add(CodeLifetime)}
+	s.codes[HashSecret(s.key, KindCode, code)] = &codeEntry{requestID: id, expiresAt: now.Add(CodeLifetime), issuer: r.Issuer}
 	return code, nil
 }
 
@@ -284,6 +291,18 @@ func (s *Store) CancelAll() int {
 // unknown. This holds for a code whose commit failed as well, with an empty
 // grant id: callers must treat an empty grant id as "nothing to revoke".
 func (s *Store) Consume(code string, commit func(Request) (grantID string, err error)) (Request, string, error) {
+	return s.consume(code, "", false, commit)
+}
+
+// ConsumeAt is Consume that first requires the code to have been issued for
+// origin. The comparison happens inside the store, BEFORE consumption and
+// BEFORE replay handling, and also for an already consumed code: a mismatch is
+// ErrCodeOriginMismatch with nothing consumed and no grant id returned.
+func (s *Store) ConsumeAt(code, origin string, commit func(Request) (grantID string, err error)) (Request, string, error) {
+	return s.consume(code, origin, true, commit)
+}
+
+func (s *Store) consume(code, origin string, checkOrigin bool, commit func(Request) (string, error)) (Request, string, error) {
 	h := HashSecret(s.key, KindCode, code)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -292,6 +311,9 @@ func (s *Store) Consume(code string, commit func(Request) (grantID string, err e
 	e := s.codes[h]
 	if e == nil {
 		return Request{}, "", ErrCodeUnknown
+	}
+	if checkOrigin && e.issuer != origin {
+		return Request{}, "", ErrCodeOriginMismatch
 	}
 	if e.consumed {
 		if now.Before(e.consumedAt.Add(TombstoneLifetime)) {

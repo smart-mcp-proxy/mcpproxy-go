@@ -58,12 +58,15 @@ func (s *ClientsService) cancelLoginRequests(clientID string) {
 }
 
 // hasLoginRecords reports whether the client has browser-login storage.
-func (s *ClientsService) hasLoginRecords(o oauthClientStore, clientID string) bool {
+func (s *ClientsService) hasLoginRecords(o oauthClientStore, clientID string) (bool, error) {
 	if o == nil {
-		return false
+		return false, nil
 	}
 	b, err := o.GetOAuthClientBinding(clientID)
-	return err == nil && b != nil
+	if err != nil {
+		return false, fmt.Errorf("cannot read browser-login bindings: %w", err)
+	}
+	return b != nil, nil
 }
 
 // loadOAuthBindings reads the OAuth side of a guard state (fail closed: an error

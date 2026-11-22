@@ -29,18 +29,33 @@ func (s *ProfilesService) addOAuthUsers(tokens []auth.AgentToken, target func(pi
 		return nil
 	}
 	active := map[string]bool{}
+	recs := map[string]*auth.AgentToken{}
 	for i := range tokens {
 		t := &tokens[i]
-		if t.Kind == auth.KindClient && t.UserID == "" && !t.Revoked && t.ExpiresAt.After(now) {
+		if t.Kind != auth.KindClient || t.UserID != "" {
+			continue
+		}
+		recs[t.ClientID] = t
+		if !t.Revoked && t.ExpiresAt.After(now) {
 			active[t.ClientID] = true
 		}
 	}
 	for _, b := range bindings {
-		if !b.Live || b.Pin == "" || active[b.ClientID] {
+		if !b.Live || active[b.ClientID] {
 			continue
 		}
-		if u := target(b.Pin); u != nil {
-			u.Clients = append(u.Clients, UsedByClient{ID: b.ClientID, Mode: b.Mode})
+		// The API-key record, in any state, decides the binding (as
+		// EffectiveTokens and CurrentClientBinding do); the entry only when there
+		// is no record.
+		pin, mode := b.Pin, b.Mode
+		if rec := recs[b.ClientID]; rec != nil {
+			pin, mode = rec.ProfilePin, rec.ProfileMode
+		}
+		if pin == "" {
+			continue
+		}
+		if u := target(pin); u != nil {
+			u.Clients = append(u.Clients, UsedByClient{ID: b.ClientID, Mode: mode})
 		}
 	}
 	return nil

@@ -116,7 +116,30 @@ func (s *ClientsService) releaseConnect(clientID, token string) {
 // instead of silently widening a profile-locked client to All servers. A
 // tombstone with no binding (or no record) starts from the defaults, and an
 // explicit profile always wins.
-func (s *ClientsService) resolveBindingLocked(rec *auth.AgentToken, profilePtr, modePtr *string) (pin, mode string, err error) {
+func (s *ClientsService) resolveBindingLocked(clientID string, rec *auth.AgentToken, profilePtr, modePtr *string) (pin, mode string, err error) {
+	// Spec 132: a client with browser logins and no API-key record keeps the
+	// binding of its logins when the connect names no profile, exactly as a
+	// reconnect keeps a record's. A read error refuses (fail closed); explicit
+	// arguments override and still go through the guard.
+	if rec == nil && profilePtr == nil {
+		if o := s.oauthStore(); o != nil {
+			entry, gerr := o.GetOAuthClientBinding(clientID)
+			if gerr != nil {
+				return "", "", fmt.Errorf("cannot read browser-login bindings: %w", gerr)
+			}
+			if entry != nil {
+				pin = entry.ProfilePin
+				mode, err = resolveMode(pin, modePtr, entry.ProfileMode)
+				if err != nil {
+					return "", "", err
+				}
+				if pin != "" && !s.profileExists(s.cfg(), pin) {
+					return "", "", &ValidationError{Field: "profile", Message: fmt.Sprintf("unknown profile %q", pin)}
+				}
+				return pin, mode, nil
+			}
+		}
+	}
 	keepBinding := rec != nil && profilePtr == nil &&
 		(s.stateOf(rec) == profile.CredentialStateClient || s.stateOf(rec) == profile.CredentialStateExpired ||
 			s.stateOf(rec) == profile.CredentialStateRevoked)
@@ -161,7 +184,7 @@ func (s *ClientsService) issueLockedRecord(clientID string, profilePtr, modePtr 
 		return nil, nil, &ValidationError{Field: "id", Message: fmt.Sprintf("client %s already has an active credential; rotate it instead", clientID)}
 	}
 
-	pin, mode, err := s.resolveBindingLocked(rec, profilePtr, modePtr)
+	pin, mode, err := s.resolveBindingLocked(clientID, rec, profilePtr, modePtr)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -254,7 +277,7 @@ func (m connectMinter) PreviewBinding(clientID string, intent connect.Credential
 	if rec != nil && rec.Kind != auth.KindClient {
 		return "", "", storage.ErrClientCredentialConflict
 	}
-	return s.resolveBindingLocked(rec, intent.Profile, intent.Mode)
+	return s.resolveBindingLocked(clientID, rec, intent.Profile, intent.Mode)
 }
 
 // Release implements connect.CredentialMinter: it ends the in-flight claim

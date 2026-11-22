@@ -33,12 +33,25 @@ import (
 //	    own services take it) and then call Store.CancelForClient, the same order.
 //	  - Approve holds bindingWriteMu while it validates the choice and calls
 //	    Store.Approve, the same order.
-//	  - The turn-off cancellation (CancelAll from the config commit) takes Store.mu
-//	    alone. It needs no bindingWriteMu: it is one in-memory step, atomic with
-//	    Consume through Store.mu, and may run while the caller already holds
-//	    bindingWriteMu (MutateConfig) or does not (file reload).
+//	  - The turn-off cancellation (beginDisable from the config commit) takes
+//	    lifecycleMu and then Store.mu. It needs no bindingWriteMu: it is one
+//	    in-memory step, atomic with Consume through Store.mu, and may run while the
+//	    caller already holds bindingWriteMu (MutateConfig) or does not (reload).
 //	  - Nothing holding Store.mu ever acquires bindingWriteMu (the commit callback
 //	    never does), so the two cannot be taken in opposite orders.
+//
+// The switch-off boundary adds one lock, lifecycleMu, with the full order
+//
+//	bindingWriteMu -> configCommitMu -> lifecycleMu -> {Runtime.mu | Store.mu}
+//
+// BeginAuthorization holds lifecycleMu only across "Enabled() -> Store.Create"
+// (Enabled reads Runtime.mu, Create takes Store.mu: both are leaves below it)
+// and never takes bindingWriteMu, configCommitMu, storage or any disk I/O under
+// it. The commit holds it from CancelAll until the new config is published, so
+// a request admitted before the switch-off is created before CancelAll runs
+// (and cancelled by it), and one admitted after sees the switch off. Exchange's
+// commit callback holds Store.mu and reads Runtime.mu through the guard, but no
+// path holds Runtime.mu and then waits for Store.mu or lifecycleMu.
 type OAuthLoginService struct {
 	store   OAuthLoginStore
 	hmacKey func() ([]byte, error)
@@ -57,6 +70,14 @@ type OAuthLoginService struct {
 	// creating that key writes a file: a default-off install must not.
 	reqMu sync.Mutex
 	reqs  *mcplogin.Store
+
+	// lifecycleMu is the switch-off boundary (see the lock-order note): held
+	// across "enabled check -> Store.Create" in BeginAuthorization and across
+	// "CancelAll -> config published" in the commit.
+	lifecycleMu sync.Mutex
+	// test hooks, nil in production.
+	testHookBeginAfterEnabled func()
+	testHookApproveAfterStore func()
 
 	everUsed  bool // positive results only
 	everMu    sync.Mutex
@@ -193,14 +214,31 @@ func (s *OAuthLoginService) existingRequests() *mcplogin.Store {
 // feature is being turned off). It takes the request store's mutex only (see
 // the lock-order note): it may run under bindingWriteMu or without it.
 func (s *OAuthLoginService) CancelAll(reason string) int {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	return s.cancelAllLocked(reason)
+}
+
+// beginDisable is the switch-off boundary: it takes the lifecycle lock, cancels
+// every request and returns the release the caller runs AFTER the new config
+// is visible. A BeginAuthorization either created its request before this ran
+// (and it is cancelled here) or waits and then sees the switch off.
+func (s *OAuthLoginService) beginDisable(reason string) (release func()) {
+	s.lifecycleMu.Lock()
+	s.cancelAllLocked(reason)
+	return s.lifecycleMu.Unlock
+}
+
+// cancelAllLocked snapshots the pending ids and cancels everything in one
+// request-store critical section (s.lifecycleMu held).
+func (s *OAuthLoginService) cancelAllLocked(reason string) int {
 	reqs := s.existingRequests()
 	if reqs == nil {
 		return 0
 	}
-	pending := reqs.ListPending()
-	n := reqs.CancelAll()
-	for _, p := range pending {
-		s.publishDecided(p.ID, string(mcplogin.StatusCancelled))
+	pending, n := reqs.CancelAllReport()
+	for _, id := range pending {
+		s.publishDecided(id, string(mcplogin.StatusCancelled))
 	}
 	if n > 0 {
 		s.logger.Info("cancelled browser sign-in requests", zap.Int("count", n), zap.String("reason", reason))
@@ -238,10 +276,28 @@ func (s *OAuthLoginService) publishDecided(requestID, status string) {
 
 // --- registration --------------------------------------------------------------
 
+// ErrOAuthFeatureDisabled is the refusal of a public entry point while browser
+// login is off. The HTTP layer maps it to 404.
+var ErrOAuthFeatureDisabled = errors.New("browser login is disabled")
+
+// canonicalResource is THE resource identity: a resource that parses as an
+// OAuth address on origin becomes origin + mcplogin.ResourcePath(client) (no
+// trailing slash); anything else is returned unchanged, so it matches nothing.
+// Stored and compared in this form everywhere.
+func canonicalResource(origin, resource string) string {
+	if clientID, _, ok := mcplogin.ParseResource(origin, resource); ok {
+		return origin + mcplogin.ResourcePath(clientID)
+	}
+	return resource
+}
+
 // Register validates an RFC 7591 request and stores a pending registration.
 // The first return is the 201 body; the second a refusal shaped for the
 // client; the third an internal failure.
 func (s *OAuthLoginService) Register(req mcplogin.RegistrationRequest) (map[string]any, *mcplogin.RegError, error) {
+	if !s.Enabled() {
+		return nil, nil, ErrOAuthFeatureDisabled // the HTTP layer answers 404; nothing is written
+	}
 	reg, regErr := mcplogin.ValidateRegistration(req)
 	if regErr != nil {
 		return nil, regErr, nil
@@ -364,12 +420,6 @@ func (s *OAuthLoginService) Exchange(in TokenInput) (TokenResult, *TokenError) {
 		s.logger.Error("browser login: cannot read the token key", zap.Error(err))
 		return TokenResult{}, errTokenServer
 	}
-	// The origin check comes first and consumes nothing.
-	peek, ok := reqs.PeekCode(in.Code)
-	if ok && peek.Issuer != in.Origin {
-		return TokenResult{}, errInvalidGrant
-	}
-
 	// Lock order: bindingWriteMu BEFORE the request store (see the type doc).
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -382,18 +432,22 @@ func (s *OAuthLoginService) Exchange(in TokenInput) (TokenResult, *TokenError) {
 	)
 	commit := func(req mcplogin.Request) (string, error) {
 		decided = req.Decision
-		if req.Issuer != in.Origin {
-			return "", errExchangeRefused // the code was re-issued between peek and consume: refuse, burn
-		}
+		// (the origin was already compared inside the store, before consumption)
 		if !mcplogin.VerifyS256(in.CodeVerifier, req.CodeChallenge) ||
 			in.ClientID != req.RegistrationID || in.RedirectURI != req.RedirectURI {
 			return "", errExchangeRefused
 		}
-		if in.Resource != "" && in.Resource != req.Resource {
+		if in.Resource != "" && canonicalResource(in.Origin, in.Resource) != req.Resource {
 			target = true
 			return "", errExchangeRefused
 		}
 		now := s.now().UTC()
+		// A new client's profile must still exist: a later profile of the same
+		// name must never apply silently to a decision made about another one.
+		if req.Decision.NewClient && req.Decision.Profile != "" && !profileConfigured(s.cfg(), req.Decision.Profile) {
+			s.writeDecisionRow(profile.ChangeDeny, req, "profile_gone", now)
+			return "", errExchangeRefused
+		}
 		if err := s.recheckGuard(req.Decision); err != nil {
 			s.writeDecisionRow(profile.ChangeDeny, req, "guard", now)
 			return "", errExchangeRefused
@@ -439,9 +493,13 @@ func (s *OAuthLoginService) Exchange(in TokenInput) (TokenResult, *TokenError) {
 		return grantID, nil
 	}
 
-	req, replayedGrant, err := reqs.Consume(in.Code, commit)
+	// The store compares the origin with the issuer kept on the code (also on
+	// its tombstone) BEFORE consumption and replay handling.
+	req, replayedGrant, err := reqs.ConsumeAt(in.Code, in.Origin, commit)
 	switch {
 	case err == nil:
+	case errors.Is(err, mcplogin.ErrCodeOriginMismatch):
+		return TokenResult{}, errInvalidGrant
 	case errors.Is(err, mcplogin.ErrCodeReused):
 		// A code presented again inside the tombstone window revokes the login
 		// it produced. An empty grant id means the first presentation stored

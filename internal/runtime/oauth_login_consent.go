@@ -111,10 +111,23 @@ func (s *OAuthLoginService) BeginAuthorization(in AuthorizeInput) (string, *Auth
 		s.logger.Error("browser login: cannot build the request store", zap.Error(err))
 		return "", fail("temporarily_unavailable", "try again")
 	}
+	// "enabled check -> Create" is one boundary shared with the switch-off
+	// (lifecycleMu): a request admitted here is either created before CancelAll
+	// runs, and cancelled by it, or refused because the switch is already off.
+	// Nothing but those two steps happens under the lock.
+	s.lifecycleMu.Lock()
+	if !s.Enabled() {
+		s.lifecycleMu.Unlock()
+		return "", &AuthorizeError{Kind: AuthorizeNotFound, Code: "not_found", Description: "not found"}
+	}
+	if h := s.testHookBeginAfterEnabled; h != nil {
+		h()
+	}
 	req, err := reqs.Create(mcplogin.Request{
 		RegistrationID: reg.ClientID, RedirectURI: redirect, State: in.State, CodeChallenge: in.CodeChallenge,
-		Resource: in.Resource, Issuer: in.Origin, PathClient: pathClient,
+		Resource: in.Origin + mcplogin.ResourcePath(pathClient), Issuer: in.Origin, PathClient: pathClient,
 	})
+	s.lifecycleMu.Unlock()
 	if err != nil {
 		if errors.Is(err, mcplogin.ErrTooManyPending) {
 			return "", fail("temporarily_unavailable", "too many sign-in requests are waiting")
@@ -743,6 +756,15 @@ func (s *OAuthLoginService) Approve(ctx context.Context, requestID string, c App
 	})
 	if err != nil {
 		return "", mapRequestStoreError(err)
+	}
+	if h := s.testHookApproveAfterStore; h != nil {
+		h()
+	}
+	// A switch-off cancels without bindingWriteMu, so the approval may have lost
+	// a race after Store.Approve: re-read the request and write nothing, publish
+	// nothing and hand out no redirect if it is no longer approved.
+	if cur, ok := reqs.Get(requestID); !ok || cur.Status != mcplogin.StatusApproved {
+		return "", ErrOAuthRequestNotFound
 	}
 	writeChangeRecord(ctx, s.activity, s.logger, s.now(), actor, changeRecord{
 		change: profile.ChangeApprove, profile: rc.pin, clientID: rc.clientID, tokenName: auth.ClientTokenName(rc.clientID),

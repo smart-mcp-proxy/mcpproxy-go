@@ -765,13 +765,24 @@ func (s *ClientsService) forgetLockedChange(ctx context.Context, a Actor, client
 // forgetRecordLocked is forgetLockedChange returning the committed revoked
 // record, so the credentials service projects its view without a re-read.
 func (s *ClientsService) forgetRecordLocked(ctx context.Context, a Actor, clientID string, diff map[string]interface{}, restorePrior bool, change profile.ChangeKind) (*auth.AgentToken, error) {
+	// Cancel the client's pending and approved sign-in requests FIRST, under the
+	// mutex the token exchange commits under, and whatever the storage call
+	// below answers: a client with nothing stored yet (no_client_credential)
+	// must not keep an approved first login alive (Spec 132 R15).
+	s.cancelLoginRequests(clientID)
 	forget := s.store.ForgetClientCredential
 	if restorePrior {
 		forget = s.store.ForgetClientCredentialRestoringPrior
-	} else if o := s.oauthStore(); s.hasLoginRecords(o, clientID) {
-		// Spec 132: forget deletes the client's browser logins, revoke marks
-		// them revoked; both cover the API key exactly as before.
-		forget = s.oauthForgetFunc(o, change)
+	} else if o := s.oauthStore(); o != nil {
+		hasLogins, herr := s.hasLoginRecords(o, clientID)
+		if herr != nil {
+			return nil, herr // fail closed: never leave live logins behind
+		}
+		if hasLogins {
+			// Spec 132: forget deletes the client's browser logins, revoke
+			// marks them revoked; both cover the API key exactly as before.
+			forget = s.oauthForgetFunc(o, change)
+		}
 	}
 	// The restore path rewrites the revoked record's binding, so capture the
 	// binding it held when revoked for the audit record.
@@ -793,14 +804,12 @@ func (s *ClientsService) forgetRecordLocked(ctx context.Context, a Actor, client
 	if !restorePrior {
 		heldPin = revoked.ProfilePin
 	}
-	// Revoking or forgetting a client also cancels its pending and approved
-	// sign-in requests, under the same mutex the token exchange commits under
-	// (Spec 132 R15).
-	s.cancelLoginRequests(clientID)
 	s.writeChange(ctx, a, changeRecord{
 		change: change, profile: heldPin, previousProfile: heldPin,
 		clientID: clientID, tokenName: revoked.Name, diff: diff,
 	})
+	// Live MCP sessions and streams are not terminated here: a revoked login is
+	// refused on its next request, which the HTTP layer enforces per request.
 	if s.publish != nil {
 		s.publish(newEvent(EventTypeCredentialsChanged, map[string]any{
 			"kind": CredentialKindClient, "id": clientID, "token_name": revoked.Name,

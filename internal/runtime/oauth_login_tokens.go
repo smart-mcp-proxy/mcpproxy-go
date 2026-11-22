@@ -50,7 +50,13 @@ func (s *OAuthLoginService) Refresh(in TokenInput) (TokenResult, *TokenError) {
 	if grant.Issuer != in.Origin || grant.RegistrationID != in.ClientID {
 		return TokenResult{}, errInvalidGrant
 	}
-	if in.Resource != "" && in.Resource != grant.Resource {
+	// A dead grant answers the uniform invalid_grant BEFORE the resource check,
+	// so it never reveals its resource. (The rotation re-checks liveness inside
+	// its own transaction.)
+	if grant.Revoked || !grant.RefreshExpiresAt.After(s.now()) {
+		return TokenResult{}, errInvalidGrant
+	}
+	if in.Resource != "" && canonicalResource(in.Origin, in.Resource) != grant.Resource {
 		return TokenResult{}, errInvalidTarget
 	}
 	ts, err := newTokenSet(key, grantID)
@@ -229,6 +235,9 @@ func (s *OAuthLoginService) revokeGrantLocked(ctx context.Context, clientID, gra
 		clientID: clientID, tokenName: auth.ClientTokenName(clientID),
 		meta: map[string]interface{}{"grant_id": grantID, "credential_kind": CredentialKindBrowserLogin},
 	})
+	// Terminating live MCP sessions or streams is NOT done here: a revoked login is
+	// refused on its NEXT request (storage no longer authenticates it), which the
+	// HTTP layer enforces per request.
 	s.publishGrantChanged(*g, profile.ChangeRevoke, pin)
 	s.notifyGrantRevoked(*g)
 	return true, nil
