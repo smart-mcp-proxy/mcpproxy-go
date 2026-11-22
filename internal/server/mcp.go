@@ -817,6 +817,9 @@ func NewMCPProxyServer(
 		if ac := auth.AuthContextFromContext(ctx); ac != nil && ac.AgentName != "" {
 			sessionStore.SetSessionIdentity(sessionID, ac.AgentName, ac.ClientID)
 			sessionStore.SetSessionTokenPrefix(sessionID, ac.TokenPrefix)
+			if ac.GrantID != "" {
+				sessionStore.SetSessionGrantID(sessionID, ac.GrantID)
+			}
 		}
 		sessionStore.SetSessionServer(sessionID, mcpserver.ServerFromContext(ctx))
 		// Spec 108-f F10: a session that presented no credential has

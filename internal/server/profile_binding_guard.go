@@ -41,6 +41,14 @@ func (p *MCPProxyServer) bindingGuardActive(idx *profileIndex) bool {
 		}
 		return true
 	}
+	oauthBindings, err := runtime.LoadOAuthBindings(p.storage, time.Now())
+	if err != nil {
+		if p.logger != nil {
+			p.logger.Error("cannot inspect browser-login bindings for anonymous profile guard", zap.Error(err))
+		}
+		return true
+	}
+	tokens = runtime.GuardState{Tokens: tokens, OAuthBindings: oauthBindings}.EffectiveTokens(time.Now())
 	if cfg == nil || idx == nil || idx.cfg == nil {
 		// During a publication gap the guard cannot compare reachability. Any
 		// live named client binding therefore denies anonymous access until a
@@ -123,15 +131,17 @@ func (p *MCPProxyServer) BindingGuardDelta(current, candidate runtime.GuardState
 	curIdx := newProfileIndex(current.Config)
 	candIdx := newProfileIndex(candidate.Config)
 	already := make(map[string]bool)
-	for i := range current.Tokens {
-		t := &current.Tokens[i]
+	currentTokens := current.EffectiveTokens(e.now)
+	for i := range currentTokens {
+		t := &currentTokens[i]
 		if e.bypassable(current.Config, curIdx, t) {
 			already[t.Name] = true
 		}
 	}
 	var out []runtime.BindingRef
-	for i := range candidate.Tokens {
-		t := &candidate.Tokens[i]
+	candidateTokens := candidate.EffectiveTokens(e.now)
+	for i := range candidateTokens {
+		t := &candidateTokens[i]
 		if !already[t.Name] && e.bypassable(candidate.Config, candIdx, t) {
 			out = append(out, runtime.BindingRefOf(t))
 		}
@@ -167,8 +177,9 @@ func (p *MCPProxyServer) BindingGuardFixes(candidate runtime.GuardState, delta [
 		altIdx := newProfileIndex(&alt)
 		e := p.newGuardEvaluation()
 		qualifies := true
-		for i := range candidate.Tokens {
-			t := &candidate.Tokens[i]
+		fixTokens := candidate.EffectiveTokens(e.now)
+		for i := range fixTokens {
+			t := &fixTokens[i]
 			if e.bypassable(&alt, altIdx, t) {
 				qualifies = false
 				break
@@ -195,8 +206,16 @@ func (p *MCPProxyServer) BindingGuardActiveBindings() []runtime.BindingRef {
 		}
 		return nil
 	}
+	oauthBindings, err := runtime.LoadOAuthBindings(p.storage, time.Now())
+	if err != nil {
+		if p.logger != nil {
+			p.logger.Error("cannot inspect browser-login bindings for the binding guard", zap.Error(err))
+		}
+		return nil
+	}
 	idx := p.profileIndexFor(cfg)
 	e := p.newGuardEvaluation()
+	tokens = runtime.GuardState{Tokens: tokens, OAuthBindings: oauthBindings}.EffectiveTokens(e.now)
 	var out []runtime.BindingRef
 	for i := range tokens {
 		if e.bypassable(cfg, idx, &tokens[i]) {

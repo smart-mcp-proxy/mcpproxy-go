@@ -44,6 +44,8 @@ type CredentialsService struct {
 	mu       *sync.Mutex
 	logger   *zap.Logger
 	generate func() (string, error)
+	// oauth revokes one browser login (Spec 132). Nil in tests that do not wire it.
+	oauth *OAuthLoginService
 }
 
 // CredentialTokenStore is the token-store surface the service needs. Every
@@ -180,6 +182,15 @@ type CredentialView struct {
 	// RateLimit is the token's own call budget (issue #1699), set at issue
 	// time. Absent when the token has none and follows agent_token_rate_limit.
 	RateLimit *auth.TokenRateLimit `json:"rate_limit,omitempty"`
+
+	// The fields below describe a browser login (kind browser_login, Spec 132);
+	// they are empty for every other kind. ID is the grant id and Client the
+	// Clients hub id.
+	Client       string `json:"client,omitempty"`
+	ReportedName string `json:"reported_name,omitempty"`
+	RedirectHost string `json:"redirect_host,omitempty"`
+	ObservedName string `json:"observed_name,omitempty"`
+	NameMismatch *bool  `json:"name_mismatch,omitempty"`
 }
 
 // CredentialStateOf classifies a record: revoked over expired over active.
@@ -339,6 +350,8 @@ type IssueTokenRequest struct {
 // token name (the OWNERLESS namespace only, data-model §9).
 type CredentialRef struct {
 	Client, Token string
+	// Grant, with Client, names ONE browser login of the client (Spec 132).
+	Grant string
 	// EnforceWriteGates (MCP) re-checks read_only_mode and disable_management
 	// under bindingWriteMu, so a mutation queued behind a config write that
 	// turns a gate on is refused (the handler's check alone is a TOCTOU).
@@ -712,7 +725,11 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 	if req.EnforceGuard {
 		current := guardedOnly(all)
 		next := append(append([]auth.AgentToken(nil), current...), candidate)
-		if err := CheckBindingGuard(s.guard(), GuardState{Config: cfg, Tokens: current}, GuardState{Config: cfg, Tokens: next}); err != nil {
+		oauth, err := LoadOAuthBindings(s.tokens, s.now())
+		if err != nil {
+			return nil, err // fail closed: an unreadable browser-login store refuses the issue
+		}
+		if err := CheckBindingGuard(s.guard(), GuardState{Config: cfg, Tokens: current, OAuthBindings: oauth}, GuardState{Config: cfg, Tokens: next, OAuthBindings: oauth}); err != nil {
 			return nil, err
 		}
 	}
@@ -986,10 +1003,16 @@ func (s *CredentialsService) Revoke(ctx context.Context, a Actor, ref Credential
 	if (ref.Client == "") == (ref.Token == "") {
 		return nil, credErr(profile.CredentialErrorCodeInvalidArgument, "client", "exactly one of client or token is required", 400)
 	}
+	if ref.Grant != "" && ref.Client == "" {
+		return nil, credErr(profile.CredentialErrorCodeInvalidArgument, "grant", "a grant is revoked together with its client", 400)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.writeGateError(ref.EnforceWriteGates); err != nil {
 		return nil, err
+	}
+	if ref.Grant != "" {
+		return s.revokeGrantLocked(ctx, ref.Client, ref.Grant)
 	}
 	if ref.Client != "" {
 		return s.revokeClientLocked(ctx, a, ref.Client)
@@ -1117,15 +1140,28 @@ func (s *CredentialsService) revokeClientLocked(ctx context.Context, a Actor, cl
 		return nil, err
 	}
 	rec := clientRecord(all, clientID)
-	if rec == nil || rec.Kind != auth.KindClient {
+	hasKey := rec != nil && rec.Kind == auth.KindClient
+	// Spec 132: a client with browser logins is a client even without an API
+	// key, and revoking it revokes every login too.
+	hasLogins := s.clients.hasLoginRecords(s.clients.oauthStore(), clientID)
+	if !hasKey && !hasLogins {
 		return nil, s.notFound("client", clientID)
 	}
 	cfg := s.cfg()
-	if rec.Revoked {
+	if hasKey && rec.Revoked && (!hasLogins || !s.hasLiveGrant(clientID, s.now())) {
 		return &RevokeResult{View: ViewOf(rec, cfg, s.now()), ClientConfigUntouched: true}, nil
 	}
+	var view CredentialView
+	if hasKey {
+		view = ViewOf(rec, cfg, s.now())
+	} else {
+		st, err := s.clients.loadOAuthState()
+		if err != nil {
+			return nil, err
+		}
+		view = s.oauthOnlyCredentialView(clientID, st.bindings[clientID], st.grants[clientID])
+	}
 	diff := map[string]interface{}{"via": viaOf(a), "changed": true, "client_config_untouched": true}
-	view := ViewOf(rec, cfg, s.now())
 	for k, v := range lifecycleDiff(view, a) {
 		if _, set := diff[k]; !set {
 			diff[k] = v
@@ -1171,6 +1207,10 @@ func (s *CredentialsService) List(f CredentialFilter) ([]CredentialView, error) 
 		}
 		out = append(out, v)
 	}
+	out, err = s.listOAuth(f, out)
+	if err != nil {
+		return nil, err
+	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Kind != out[j].Kind {
 			return out[i].Kind < out[j].Kind
@@ -1204,6 +1244,11 @@ func (s *CredentialsService) Get(ref CredentialRef) (*CredentialView, error) {
 		return nil, fmt.Errorf("cannot read credentials: %w", err)
 	}
 	if rec == nil || (kind == "client") != (rec.Kind == auth.KindClient) {
+		if kind == "client" {
+			if v, err := s.getOAuthOnlyClient(ref.Client); err != nil || v != nil {
+				return v, err
+			}
+		}
 		label := ref.Token
 		if kind == "client" {
 			label = ref.Client

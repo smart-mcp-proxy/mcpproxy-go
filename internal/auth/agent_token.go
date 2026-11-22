@@ -340,29 +340,96 @@ func (t *AgentToken) AuthContext() *AuthContext {
 	if t == nil {
 		return nil
 	}
-	return &AuthContext{
-		Type:            AuthTypeAgent,
+	return ClientAuthContext(ClientIdentity{
 		AgentName:       t.Name,
+		TokenKind:       normalizeKind(t.Kind),
+		ClientID:        t.ClientID,
+		ProfilePin:      t.ProfilePin,
+		ProfileMode:     t.ProfileMode,
+		CredentialKind:  CredentialKindAgentToken,
 		TokenPrefix:     t.authenticatedPrefix(),
 		TokenGeneration: t.MatchedGeneration,
 		AllowedServers:  t.AllowedServers,
 		Permissions:     t.Permissions,
-		ProfilePin:      t.ProfilePin,
-		Email:           t.OwnerEmail,
-		Provider:        t.OwnerProvider,
-		Role:            t.OwnerRole,
-		CredentialKind:  CredentialKindAgentToken,
-		TokenKind:       normalizeKind(t.Kind),
-		ClientID:        t.ClientID,
-		ProfileMode:     t.ProfileMode,
-		RateLimit:       t.RateLimit.clone(),
+		RateLimit:       t.RateLimit,
 		// UserID carries the owning tenant (server edition). Without it an
 		// agent-token request had no tenant identity at all, so its activity
 		// could not be attributed or scoped. It does NOT confer the user tier:
 		// Type stays AuthTypeAgent, so IsUser()/IsAdmin() remain false, and
 		// every per-user surface must gate on IsUser() rather than on a
 		// non-empty UserID.
-		UserID: t.UserID,
+		UserID:   t.UserID,
+		Email:    t.OwnerEmail,
+		Provider: t.OwnerProvider,
+		Role:     t.OwnerRole,
+	})
+}
+
+// ClientIdentity is everything the one AuthContext builder needs. Both the
+// stored-token path ((*AgentToken).AuthContext) and a browser login (Spec 132)
+// fill it, so no path can silently drop a field.
+type ClientIdentity struct {
+	// AgentName is the context's AgentName. Empty means ClientTokenName(ClientID)
+	// (what a client credential's record is named, so activity and filters match).
+	AgentName string
+	// TokenKind is KindAgent or KindClient. Empty means KindClient.
+	TokenKind string
+	// ClientID, ProfilePin and ProfileMode are the client binding.
+	ClientID, ProfilePin, ProfileMode string
+	// CredentialKind is the source credential (agent_token or oauth).
+	CredentialKind CredentialKind
+	// GrantID is the browser-login grant id (oauth only).
+	GrantID string
+	// TokenPrefix is the display prefix; TokenGeneration identifies the
+	// authenticated secret (a browser login uses its grant id).
+	TokenPrefix, TokenGeneration string
+	// AllowedServers and Permissions are the token's own scope. For a browser
+	// login (CredentialKindOAuth) nil means "*" and all three tiers: its
+	// reach comes from the client's profile binding only.
+	AllowedServers, Permissions []string
+	// RateLimit is the credential's own call budget (copied, never aliased).
+	RateLimit *TokenRateLimit
+	// UserID, Email, Provider and Role are the owning tenant (server edition).
+	UserID, Email, Provider, Role string
+}
+
+// ClientAuthContext is the single builder of the agent-tier AuthContext.
+func ClientAuthContext(id ClientIdentity) *AuthContext {
+	kind := id.TokenKind
+	if kind == "" {
+		kind = KindClient
+	}
+	name := id.AgentName
+	if name == "" && id.ClientID != "" {
+		name = ClientTokenName(id.ClientID)
+	}
+	servers, perms := id.AllowedServers, id.Permissions
+	if id.CredentialKind == CredentialKindOAuth {
+		if servers == nil {
+			servers = []string{"*"}
+		}
+		if perms == nil {
+			perms = []string{PermRead, PermWrite, PermDestructive}
+		}
+	}
+	return &AuthContext{
+		Type:            AuthTypeAgent,
+		AgentName:       name,
+		TokenPrefix:     id.TokenPrefix,
+		TokenGeneration: id.TokenGeneration,
+		AllowedServers:  servers,
+		Permissions:     perms,
+		ProfilePin:      id.ProfilePin,
+		Email:           id.Email,
+		Provider:        id.Provider,
+		Role:            id.Role,
+		CredentialKind:  id.CredentialKind,
+		GrantID:         id.GrantID,
+		TokenKind:       kind,
+		ClientID:        id.ClientID,
+		ProfileMode:     id.ProfileMode,
+		RateLimit:       id.RateLimit.clone(),
+		UserID:          id.UserID,
 	}
 }
 

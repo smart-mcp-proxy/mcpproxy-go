@@ -155,7 +155,7 @@ func (s *ClientsService) Warnings(states map[string]profile.CredentialState) []W
 			Message:  fmt.Sprintf("anonymous callers are denied while %s could be bypassed without auth", strings.Join(names, ", ")),
 			Action:   &WarningAction{Kind: string(profile.FixChangeSetting), Target: "require_mcp_auth"},
 			Bindings: active,
-			Fixes:    g.BindingGuardFixes(GuardState{Config: cfg, Tokens: guardedOnly(all)}, active),
+			Fixes:    g.BindingGuardFixes(GuardState{Config: cfg, Tokens: guardedOnly(all), OAuthBindings: s.oauthBindingsBestEffort()}, active),
 		})
 	}
 	now := s.now()

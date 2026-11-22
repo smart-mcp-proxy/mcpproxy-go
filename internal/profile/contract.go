@@ -216,6 +216,13 @@ const (
 	// page's Forget action.
 	ChangeIssue  ChangeKind = "issue"
 	ChangeRevoke ChangeKind = "revoke"
+	// ChangeApprove, ChangeDeny and ChangeReplayRevoke are the Spec 132 browser
+	// login records: an administrator approved or denied a sign-in request
+	// (before any login exists), and an authentic refresh token that was
+	// already spent came back, so its login was revoked (reason replay).
+	ChangeApprove      ChangeKind = "approve"
+	ChangeDeny         ChangeKind = "deny"
+	ChangeReplayRevoke ChangeKind = "replay_revoke"
 )
 
 // Credential error codes of the `credentials` admin MCP tool (Spec 115,
