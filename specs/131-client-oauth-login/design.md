@@ -65,11 +65,23 @@ How the page is pre-filled was revised the same day, after Algis asked for it to
 ### Flow
 
 1. The client calls `/mcp/oauth/<client>` (or `/mcp/oauth`) without a token. Answer: `401` with `WWW-Authenticate: Bearer resource_metadata="…"`.
-2. The client reads the protected-resource metadata for that exact path and `/.well-known/oauth-authorization-server`, then registers at `POST /oauth/register`.
-3. The client opens the browser at `GET /oauth/authorize`. The server validates the request (known `client_id`, exact redirect URI match, `code_challenge_method=S256`, `resource` equal to the URL of an OAuth endpoint this instance serves), stores an **authorization request** (10 minute life) and redirects the browser to `/ui/authorize?request=<id>`.
+2. The client reads the protected-resource metadata for that exact path and the authorization-server metadata, then registers at `POST /oauth/register`.
+3. The client opens the browser at `GET /oauth/authorize`. The server validates the request (known `client_id`, exact redirect URI match, `code_challenge_method=S256`, `resource` equal to the URL of an OAuth endpoint this instance serves on this origin), stores an **authorization request** (10 minute life) with the client's `state`, the full `resource` URI and the issuer, and redirects the browser to `/ui/authorize?request=<id>`.
 4. The Web UI consent page loads the request and its pre-filled choices through the REST API, with the admin API key.
-5. Approve: the page posts the decision; the answer carries the redirect URL with a single-use code. The page sends the browser there. Deny: redirect with `error=access_denied`.
+5. Approve: the page posts the decision; the answer carries the redirect URL with a single-use code. The page sends the browser there. Deny: redirect with `error=access_denied`. Both redirects are built from the stored, already validated redirect URI and return the client's `state` unchanged.
 6. The client exchanges the code at `POST /oauth/token` with its PKCE verifier and gets an access token and a refresh token.
+
+**Resource binding.** The approved `resource` and issuer are stored on the authorization request, the code and the grant, and never change. A `resource` sent at code exchange or refresh must equal the stored one, else `invalid_target`. The audience of every access token comes from the grant, never from the Host or parameters of the current request.
+
+**An authorization request is decided once.** Its state moves `pending → approved | denied | expired | cancelled` in one transaction; at most one code is ever produced, and a second tab gets "already decided". The page carries the revision of what it displayed (client, profile, binding mode). Approval is refused with "this changed, review again" when the client's binding differs from that revision. Forgetting the client or turning the feature off cancels its pending requests.
+
+**Metadata.** Tested against these exact shapes:
+
+- `GET /.well-known/oauth-protected-resource/mcp/oauth/cursor` → `resource: "<origin>/mcp/oauth/cursor"`, `authorization_servers: ["<origin>"]`. Each path has its own document; the generic one is `/.well-known/oauth-protected-resource/mcp/oauth`. A document is never reused across paths.
+- `GET /.well-known/oauth-authorization-server` → `issuer: "<origin>"`, the three endpoints, `response_types_supported: ["code"]`, `grant_types_supported: ["authorization_code","refresh_token"]`, `code_challenge_methods_supported: ["S256"]`, `token_endpoint_auth_methods_supported: ["none"]`.
+- The registration answer (RFC 7591) states the effective values, `token_endpoint_auth_method: "none"` and the two grant types, and the registration record stores them. A registration that asks for a secret-based method or another grant type is refused.
+
+**Plain HTTP on loopback is a known deviation.** RFC 8414 and the MCP authorization spec ask for an HTTPS authorization server; RFC 8252 only exempts loopback redirect URIs. Version 1 serves the issuer on `http://127.0.0.1` as most local MCP servers do, says so in the docs, and claims support only for clients that pass a real-client test (PR-1 gate: Claude Code, Cursor, VS Code, MCP Inspector, each on a per-client path). When local TLS (`internal/tlslocal`) is on, the same endpoints are served over HTTPS and conform.
 
 ### Which client is it
 
@@ -106,7 +118,7 @@ Rules for the page:
 
 - **Per-client address**: the client is fixed. If it already has a binding, the profile is shown, not asked. If it is new, the profile rule below applies.
 - **Generic address**: the user picks the client first.
-- **Profile for a client with no binding yet**: if no profiles are configured, "All servers". If profiles exist, nothing is pre-selected and Approve stays disabled until the user picks one. Same rule as `profile_required` in the `credentials` tool. Binding mode defaults to `locked`.
+- **Profile for a client with no binding yet**: if no profiles are configured, "All servers", stored the way it is today for a client credential (no pin, `switchable`; a locked credential with an empty profile is invalid under `ValidateTokenInvariants` and stays so). If profiles exist, nothing is pre-selected and Approve stays disabled until the user picks one; a named profile defaults to `locked`. Same rule as `profile_required` in the `credentials` tool.
 - **Replace previous login** is pre-checked only when this exact `client_id` already has a grant. Otherwise the new login is added next to the existing ones.
 - **No admin key in this browser**: the page cannot load the request. It shows "Open this request from the MCPProxy tray, or paste the API key". The core emits an SSE event for a new authorization request; the tray shows a notification and a menu item "Approve sign-in for Cursor…" that opens the same URL with the key, the way it opens the Web UI today.
 - **Bypassable binding**: when the profile is a named one and `require_mcp_auth` is off, approval would be refused with `binding_bypassable_without_auth`. The page shows that refusal before the button is pressed, with the fixes the binding guard itself lists (`internal/runtime/binding_guard.go`: turn `require_mcp_auth` on, or set `anonymous_profile`). No exception for OAuth clients.
@@ -119,17 +131,24 @@ Consent is shown every time. A public client has no secret and loopback redirect
 Three new records, in their own bbolt buckets. They are keyed by client, not by upstream server, so the Spec 116 server purge set does not apply; their cleanup is described under "Revoke and forget".
 
 - **Registration** (`oauth_registrations`): opaque random `client_id`, reported name (sanitised with `clientidentity`), redirect URIs, optional `software_id` / `software_version`, created time, state `pending | approved | denied`.
-- **Grant** (`oauth_grants`): one approved login. Fields: id, `client_id` of the registration, **Clients hub client id**, approved time, approving actor, last used, revoked flag, `user_id` (empty in the personal edition). Holds the hash and 12-character prefix of the current refresh token and the token family id.
+- **Grant** (`oauth_grants`): one approved login. Fields: id, `client_id` of the registration, **Clients hub client id**, the approved `resource` URI and issuer, approved time, approving actor, last used, revoked flag, `user_id` (empty in the personal edition). Holds the hash and 12-character prefix of the current refresh token.
 - **Authorization request / code**: short-lived, memory only. A restart drops them and the client starts again.
 
 Tokens:
 
 - Access token: opaque, prefix `mcp_oat_`, HMAC-SHA256 hashed like agent tokens, 1 hour, accepted only on the OAuth address it was issued for.
-- Refresh token: opaque, prefix `mcp_ort_`, rotated on every use, 30 days sliding. Reuse of an already rotated refresh token revokes the grant (OAuth 2.1 rule for public clients).
+- Refresh token: `mcp_ort_<grant-id>_<secret>`, rotated on every use, 30 days sliding. The grant id inside the token is what makes replay detectable after any number of rotations and across restarts: a token that names a live grant but whose secret is not the current one is a replay, and the grant is revoked in the same transaction (OAuth 2.1 rule for public clients). Consuming the old secret and storing the new hash is one transaction. The grant id is random, appears only inside tokens and grants nothing by itself.
 
 **One client, several credentials.** A Clients hub row is the identity. Under it: at most one API key (today's `mcp_cli_` record) and any number of OAuth grants. The profile binding belongs to the client, not to a credential. An access token authenticates to the same `AuthContext` a client credential produces: `AuthTypeAgent`-class caller, `Kind=client`, the client's id, the client's binding. Everything downstream (profile resolution, pin boundary, activity `client_id`, `/tools?client=`) is unchanged.
 
-The invariant for the builder: **one binding per client id, read by both the API-key path and the OAuth path, changed by one writer** (`ClientsService`, which already owns `SetBinding`, `BulkAssign`, `Add` and `Forget`). Today the binding is stored on the API-key record. How to hold it for a client that has only OAuth grants is the builder's call (a credential-less client record, or a small `client_bindings` bucket that both paths read). Reassign, rename, delete-profile (`profile_in_use`, `reassign_to`, dangling means deny-all) and the bypassable-binding check must cover OAuth-only clients exactly as they cover API-key clients.
+The invariant for the builder: **one binding per client id, read by both the API-key path and the OAuth path, changed by one writer** (`ClientsService`, which already owns `SetBinding`, `BulkAssign`, `Add` and `Forget`). Where it is stored is fixed here, because a downgrade must never widen access:
+
+- A client with an API key keeps its binding on that record (`ProfilePin`, `ProfileMode`), exactly as today. Those fields stay authoritative for the API-key path and are always kept current, so an older binary reads the right profile.
+- A client with grants also has the binding in an OAuth-side record (`oauth_client_bindings`), read by the OAuth path.
+- `ClientsService` writes both in one transaction when both exist, including on rotation and reconnect. A startup check repairs a mismatch from the API-key record and logs it.
+- With the feature off, no bucket is created and nothing is migrated.
+
+Reassign, rename, delete-profile (`profile_in_use`, `reassign_to`, dangling means deny-all) and the bypassable-binding check must cover OAuth-only clients exactly as they cover API-key clients.
 
 Activity rows gain the credential kind `oauth` and the grant id, so two logins of one client can be told apart. Issue, approve, deny, refresh-reuse and revoke are recorded as `profile_change`-family rows through `CredentialsService`, with the actor in context.
 
@@ -178,7 +197,9 @@ The registry gains a flag for clients known to support the MCP authorization flo
 
 - **Off (default)**: no new route, no metadata document, no new bucket is created, no Connect option, no Clients hub column, no startup notice. Existing API keys, agent tokens, client credentials, `/mcp` and every routing-mode endpoint are untouched. A test pins this: the route table and the answers on `/mcp/oauth*`, `/oauth/*` and `/.well-known/oauth-*` with the feature off equal those of the previous release.
 - **On**: everything in this document. API keys keep working next to it.
-- **Turned off again**: OAuth addresses stop authenticating at once. Grants and bindings are kept, so turning it on again restores them. A client configured with only an OAuth address is then reported on its Clients row as "browser login disabled".
+- **Turned off again**: two cases, told apart by whether any grant was ever stored.
+  - Never used (no grant record): identical to "off" above, including the legacy catch-all on `/mcp/oauth*`.
+  - Used: `/mcp/oauth*` answers 404 instead of falling into the `/mcp/` catch-all, so a browser-login client does not quietly continue as an anonymous caller when `require_mcp_auth` is off. `/oauth/*`, the metadata and the consent REST calls answer 404 and pending requests are cancelled. Grants and bindings are kept, so turning it on again restores them. Such a client's row says "browser login disabled".
 - **Downgrade** to a binary without the feature: the buckets are ignored, OAuth-only clients fall into the `/mcp/` catch-all as anonymous callers. The docs say to turn `require_mcp_auth` on first, as for pre-108 downgrades.
 
 ## Delivery
@@ -211,10 +232,13 @@ Each PR is test-first. End to end: a scripted public client runs the whole flow 
 
 ## Left to the builder
 
-- Where the per-client binding is stored (see the invariant).
 - Bucket layouts, the exact REST paths and payloads, SSE event name.
 - Whether access tokens are separate rows or derived from the grant record.
 - Rate-limit implementation, reusing the existing limiter where it fits.
+
+## Review
+
+Cross-model review, round 1 (opencode `gpt-6.1-sol`, 2026-11-22): nine findings, all accepted. Replay detection through the grant id in the refresh token, resource and issuer stored on request, code and grant, single-decision consent with a binding revision, fail-closed OAuth paths after the feature was used and turned off, the HTTP-issuer deviation, exact metadata shapes, `state`, downgrade-safe binding storage, and the "All servers" representation.
 
 ## Later
 
