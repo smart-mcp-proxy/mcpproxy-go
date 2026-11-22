@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -21,6 +22,17 @@ import (
 func bindingRevision(clientID, pin, mode string) string {
 	sum := sha256.Sum256([]byte(clientID + "|" + pin + "|" + mode))
 	return hex.EncodeToString(sum[:8])
+}
+
+// putOAuthBindingTx is the only writer of an oauth_client_bindings entry: it
+// stamps a fresh WriteID on every write.
+func putOAuthBindingTx(tx *bbolt.Tx, clientID string, b *OAuthClientBinding) error {
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return fmt.Errorf("failed to generate binding write id: %w", err)
+	}
+	b.WriteID = hex.EncodeToString(raw[:])
+	return oauthPutJSON(tx, OAuthClientBindingsBucket, clientID, b)
 }
 
 // validateClientBinding: mode is locked or switchable, and locked needs a pin.
@@ -82,7 +94,7 @@ func writeClientBindingOptsTx(tx *bbolt.Tx, clientID, pin, mode string, clearPri
 	}
 	if b != nil {
 		b.ProfilePin, b.ProfileMode, b.UpdatedAt = pin, mode, time.Now().UTC()
-		if err := oauthPutJSON(tx, OAuthClientBindingsBucket, clientID, b); err != nil {
+		if err := putOAuthBindingTx(tx, clientID, b); err != nil {
 			return err
 		}
 		found = true

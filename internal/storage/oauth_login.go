@@ -138,6 +138,10 @@ type OAuthClientBinding struct {
 	ProfileMode string    `json:"profile_mode"`
 	DisplayName string    `json:"display_name,omitempty"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	// WriteID is the entry's incarnation: a fresh random id on EVERY write, so a
+	// deleted-and-recreated entry never carries an old id even with identical
+	// pin and mode. Storage-internal; it is not part of ClientBindingRevision.
+	WriteID string `json:"write_id,omitempty"`
 }
 
 // Refresh rotation outcomes.
@@ -630,7 +634,7 @@ func (m *Manager) CommitOAuthLogin(in CommitLoginInput) (OAuthGrant, error) {
 					nb.DisplayName = anyRecord.DisplayName
 				}
 			}
-			if err := oauthPutJSON(tx, OAuthClientBindingsBucket, in.Client, &nb); err != nil {
+			if err := putOAuthBindingTx(tx, in.Client, &nb); err != nil {
 				return err
 			}
 		}

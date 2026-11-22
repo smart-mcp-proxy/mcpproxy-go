@@ -146,10 +146,10 @@ func TestRepinProfile_KeepsKeyOrderForRecordsAndHooks(t *testing.T) {
 	assert.Equal(t, seq, hooked)
 }
 
-// TestRepinProfile_ClearsStaleRollbackSnapshotOfClientWithLogins: after a connect
-// mint over an OAuth-only client and a reassignment, rolling the connect back must
-// not bring the pre-reassignment binding back onto the existing logins.
-func TestRepinProfile_ClearsStaleRollbackSnapshotOfClientWithLogins(t *testing.T) {
+// TestRepinProfile_LeavesConnectSnapshotAlone documents the semantics: undoing a
+// connect returns the client to its PRE-CONNECT binding, whatever profile rename
+// happened in between, exactly as for an API-key tombstone. Grants are untouched.
+func TestRepinProfile_LeavesConnectSnapshotAlone(t *testing.T) {
 	m, cleanup := setupTestStorageForAgentTokens(t)
 	defer cleanup()
 	commitNew(t, m, "r", "g1", "webonly", "", auth.ProfileModeSwitchable, time.Now())
@@ -160,10 +160,7 @@ func TestRepinProfile_ClearsStaleRollbackSnapshotOfClientWithLogins(t *testing.T
 	_, err = m.ForgetClientCredentialRestoringPrior("webonly")
 	require.NoError(t, err)
 
-	_, _, _, oPin, oMode, oOK := bindings(t, m, "webonly")
-	require.True(t, oOK)
-	assert.Equal(t, "restricted", oPin)
-	assert.Equal(t, auth.ProfileModeLocked, oMode)
+	assertEqualBindings(t, m, "webonly", "", auth.ProfileModeSwitchable)
 	g, err := m.GetOAuthGrant("g1")
 	require.NoError(t, err)
 	assert.False(t, g.Revoked)

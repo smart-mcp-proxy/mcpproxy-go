@@ -16,16 +16,16 @@ import (
 // whatever its TokenHash is.
 const repinRestoreMarker = "spec132-repin-binding-restore"
 
-// repinRestoreEntry builds the restore entry of one client RepinProfile moved
-// and whose binding lives (also) in an oauth_client_bindings entry. It carries
-// the OLD binding in ProfilePin/ProfileMode and what repin WROTE in
-// PriorProfilePin/PriorProfileMode, so RestorePins can compare-and-set.
-func repinRestoreEntry(clientID, oldPin, oldMode, wrotePin, wroteMode string) auth.AgentToken {
+// repinRestoreEntry is the restore entry of one client whose binding also lives
+// in an oauth_client_bindings entry. It carries the client id, the OLD pin and
+// mode (ProfilePin/ProfileMode) and, in MatchedPrefix (never persisted), the
+// WriteID that repin's own write produced on that entry: RestorePins restores
+// only while the entry still has exactly that incarnation.
+func repinRestoreEntry(clientID, oldPin, oldMode, writeID string) auth.AgentToken {
 	return auth.AgentToken{
 		Name: auth.ClientTokenName(clientID), Kind: auth.KindClient, ClientID: clientID,
 		ProfilePin: oldPin, ProfileMode: oldMode,
-		PriorProfilePin: wrotePin, PriorProfileMode: wroteMode,
-		MatchedGeneration: repinRestoreMarker,
+		MatchedGeneration: repinRestoreMarker, MatchedPrefix: writeID,
 	}
 }
 
@@ -48,9 +48,13 @@ func isRepinRestoreEntry(t *auth.AgentToken) bool {
 // Spec 132: a client's pin is written through writeClientBindingTx, so its
 // browser-login binding entry moves with its API-key record, and an entry of a
 // client that has NO API-key record moves too. For every client that has an
-// entry, `before` ends with a restore entry (see repinRestoreEntry) that
-// RestorePins applies compare-and-set. Existing records come first, in bbolt
-// key order, exactly as before.
+// entry, `before` ends with a restore entry (see repinRestoreEntry). Existing
+// records come first, in bbolt key order, exactly as before.
+//
+// A repin never touches PriorProfilePin/PriorProfileMode: that snapshot is the
+// binding the client had before its connect, and undoing the connect returns the
+// client to exactly that, whatever profile renames happened since — the same as
+// for an API-key tombstone before Spec 132.
 func (m *Manager) RepinProfile(from, to string) (before []auth.AgentToken, err error) {
 	return m.repinProfile(from, to, nil)
 }
@@ -129,6 +133,14 @@ func (m *Manager) repinProfile(from, to string, hook func(written int) error) ([
 			i++
 			return nil
 		}
+		// captureWriteID reads the incarnation repin's own write just produced.
+		captureWriteID := func(id string) (string, bool, error) {
+			e, err := getOAuthBindingTx(tx, id)
+			if err != nil || e == nil {
+				return "", false, err
+			}
+			return e.WriteID, true, nil
+		}
 		var restores []auth.AgentToken
 		for _, w := range work {
 			if err := step(); err != nil {
@@ -142,20 +154,17 @@ func (m *Manager) repinProfile(from, to string, hook func(written int) error) ([
 				continue
 			}
 			// A client record: through the binding writer so its OAuth entry
-			// moves too. When it has an entry, the mint-time rollback snapshot
-			// is stale after this move and is cleared in the same write, so a
-			// later connect rollback cannot put a pre-reassignment binding back
-			// on the existing browser logins.
-			entry, err := getOAuthBindingTx(tx, w.old.ClientID)
-			if err != nil {
-				return err
-			}
-			if err := writeClientBindingOptsTx(tx, w.old.ClientID, to, w.old.ProfileMode, entry != nil); err != nil {
+			// (if any) moves too.
+			if err := writeClientBindingTx(tx, w.old.ClientID, to, w.old.ProfileMode); err != nil {
 				return fmt.Errorf("failed to repin agent token: %w", err)
 			}
 			before = append(before, w.old)
-			if entry != nil {
-				restores = append(restores, repinRestoreEntry(w.old.ClientID, w.old.ProfilePin, w.old.ProfileMode, to, w.old.ProfileMode))
+			wid, has, err := captureWriteID(w.old.ClientID)
+			if err != nil {
+				return err
+			}
+			if has {
+				restores = append(restores, repinRestoreEntry(w.old.ClientID, w.old.ProfilePin, w.old.ProfileMode, wid))
 			}
 		}
 		for j, id := range oauthOnlyIDs {
@@ -165,7 +174,11 @@ func (m *Manager) repinProfile(from, to string, hook func(written int) error) ([
 			if err := writeClientBindingTx(tx, id, to, oauthOnly[j].ProfileMode); err != nil {
 				return fmt.Errorf("failed to repin agent token: %w", err)
 			}
-			restores = append(restores, repinRestoreEntry(id, oauthOnly[j].ProfilePin, oauthOnly[j].ProfileMode, to, oauthOnly[j].ProfileMode))
+			wid, _, err := captureWriteID(id)
+			if err != nil {
+				return err
+			}
+			restores = append(restores, repinRestoreEntry(id, oauthOnly[j].ProfilePin, oauthOnly[j].ProfileMode, wid))
 		}
 		before = append(before, restores...)
 		return nil
@@ -176,17 +189,54 @@ func (m *Manager) repinProfile(from, to string, hook func(written int) error) ([
 	return before, nil
 }
 
+// restoreRecordPinTx puts back the stored pin of one record by hash, exactly as
+// before Spec 132 (the mode is never changed by a repin). A record that no
+// longer exists, or is owned, is left alone.
+func restoreRecordPinTx(tx *bbolt.Tx, rec *auth.AgentToken) error {
+	tokenBucket := tx.Bucket([]byte(AgentTokensBucket))
+	if tokenBucket == nil {
+		return nil
+	}
+	key := []byte(rec.TokenHash)
+	v := tokenBucket.Get(key)
+	if v == nil {
+		return nil
+	}
+	var t auth.AgentToken
+	if json.Unmarshal(v, &t) != nil || t.UserID != "" {
+		return nil
+	}
+	t.ProfilePin = rec.ProfilePin
+	data, err := json.Marshal(t)
+	if err != nil {
+		return err
+	}
+	if err := tokenBucket.Put(key, data); err != nil {
+		return fmt.Errorf("failed to restore agent token pin: %w", err)
+	}
+	return nil
+}
+
 // RestorePins puts back the ProfilePin of each record RepinProfile returned,
 // in one transaction (the rollback of a repin whose config write failed). A
-// record that no longer exists is left alone.
+// record that no longer exists is left alone. Regular tokens are restored by
+// hash.
 //
-// Stored records are restored by hash, as before. The restore entries for
-// browser-login bindings are compare-and-set: the entry is restored only if it
-// still holds exactly what repin wrote (and a current API-key record of that
-// client holds that or the old binding); an entry that is gone is not
-// re-created, and one that changed since (re-created client, new mint, an
-// administrator's reassignment) is left alone. They do not depend on the
-// original API-key record still existing.
+// For a CLIENT, ONE decision is made before either copy is touched, from the
+// client's oauth_client_bindings entry as it is now:
+//
+//   - no entry: restore the API-key record by hash, unconditionally, as before
+//     Spec 132; an entry is never created;
+//   - entry and a restore entry in `before`: restore the old pin and mode on
+//     both copies (through the binding writer, so it also works when the
+//     API-key record is gone) only if the entry's WriteID is still the one
+//     repin's own write produced; anything that wrote the binding since
+//     (reassignment, new mint, forget and re-create, even with the same pin and
+//     mode) restores neither copy, nor the record by hash;
+//   - entry but no restore entry (the client got its first browser login after
+//     the repin): restore both copies only if the record from `before` still
+//     exists and the entry equals that record's CURRENT pin and mode; else
+//     leave both alone.
 func (m *Manager) RestorePins(before []auth.AgentToken) error {
 	if len(before) == 0 {
 		return nil
@@ -194,65 +244,73 @@ func (m *Manager) RestorePins(before []auth.AgentToken) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.db.db.Update(func(tx *bbolt.Tx) error {
-		for i := range before {
-			if isRepinRestoreEntry(&before[i]) {
-				continue // second pass, after the records
-			}
-			tokenBucket := tx.Bucket([]byte(AgentTokensBucket))
-			if tokenBucket == nil {
-				continue
-			}
-			key := []byte(before[i].TokenHash)
-			v := tokenBucket.Get(key)
-			if v == nil {
-				continue
-			}
-			var t auth.AgentToken
-			if json.Unmarshal(v, &t) != nil || t.UserID != "" {
-				continue
-			}
-			t.ProfilePin = before[i].ProfilePin
-			data, err := json.Marshal(t)
-			if err != nil {
-				return err
-			}
-			if err := tokenBucket.Put(key, data); err != nil {
-				return fmt.Errorf("failed to restore agent token pin: %w", err)
+		restoreEntries := map[string]*auth.AgentToken{}
+		clientRecords := map[string]*auth.AgentToken{}
+		var clientOrder []string
+		seen := map[string]bool{}
+		note := func(id string) {
+			if !seen[id] {
+				seen[id] = true
+				clientOrder = append(clientOrder, id)
 			}
 		}
 		for i := range before {
-			if isRepinRestoreEntry(&before[i]) {
-				if err := restoreRepinnedClientTx(tx, &before[i]); err != nil {
+			b := &before[i]
+			switch {
+			case isRepinRestoreEntry(b):
+				restoreEntries[b.ClientID] = b
+				note(b.ClientID)
+			case b.Kind == auth.KindClient && b.ClientID != "" && b.TokenHash != "":
+				clientRecords[b.ClientID] = b
+				note(b.ClientID)
+			default:
+				if b.TokenHash == "" {
+					continue
+				}
+				if err := restoreRecordPinTx(tx, b); err != nil {
 					return err
+				}
+			}
+		}
+		for _, id := range clientOrder {
+			entry, err := getOAuthBindingTx(tx, id)
+			if err != nil {
+				return err
+			}
+			rec, e := clientRecords[id], restoreEntries[id]
+			switch {
+			case entry == nil:
+				if rec != nil {
+					if err := restoreRecordPinTx(tx, rec); err != nil {
+						return err
+					}
+				}
+			case e != nil:
+				if entry.WriteID != "" && entry.WriteID == e.MatchedPrefix {
+					if err := writeClientBindingTx(tx, id, e.ProfilePin, e.ProfileMode); err != nil {
+						return err
+					}
+				}
+			default: // entry, no restore entry; rec is non-nil here
+				cur := tx.Bucket([]byte(AgentTokensBucket))
+				if cur == nil {
+					continue
+				}
+				v := cur.Get([]byte(rec.TokenHash))
+				if v == nil {
+					continue
+				}
+				var t auth.AgentToken
+				if json.Unmarshal(v, &t) != nil || t.UserID != "" {
+					continue
+				}
+				if t.ProfilePin == entry.ProfilePin && t.ProfileMode == entry.ProfileMode {
+					if err := writeClientBindingTx(tx, id, rec.ProfilePin, rec.ProfileMode); err != nil {
+						return err
+					}
 				}
 			}
 		}
 		return nil
 	})
-}
-
-// restoreRepinnedClientTx is the compare-and-set restore of one client's
-// browser-login binding (see RestorePins).
-func restoreRepinnedClientTx(tx *bbolt.Tx, p *auth.AgentToken) error {
-	oldPin, oldMode := p.ProfilePin, p.ProfileMode
-	wrotePin, wroteMode := p.PriorProfilePin, p.PriorProfileMode
-	entry, err := getOAuthBindingTx(tx, p.ClientID)
-	if err != nil {
-		return err
-	}
-	if entry == nil || entry.ProfilePin != wrotePin || entry.ProfileMode != wroteMode {
-		return nil // gone (not re-created) or changed since: leave it alone
-	}
-	_, tok, err := findClientTokenRecordLocked(tx, p.ClientID)
-	if err != nil {
-		return err
-	}
-	if tok != nil && tok.Kind == auth.KindClient {
-		wrote := tok.ProfilePin == wrotePin && tok.ProfileMode == wroteMode
-		old := tok.ProfilePin == oldPin && tok.ProfileMode == oldMode // already restored by hash
-		if !wrote && !old {
-			return nil // the API-key record moved on its own
-		}
-	}
-	return writeClientBindingTx(tx, p.ClientID, oldPin, oldMode)
 }

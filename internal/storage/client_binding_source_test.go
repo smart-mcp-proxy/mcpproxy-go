@@ -91,7 +91,7 @@ var allowedBindingWriteSites = map[string]int{
 	// Restores a stored record's pin by hash, exactly as before Spec 132 (the
 	// mode is never changed by a repin; browser-login entries are restored
 	// compare-and-set through writeClientBindingTx).
-	"RestorePins|assign:t.ProfilePin": 1,
+	"restoreRecordPinTx|assign:t.ProfilePin": 1,
 
 	// The only creator of oauth_client_bindings entries (a client's first login).
 	"CommitOAuthLogin|assign:nb.ProfilePin":  2, // new-client branch and existing-client branch
