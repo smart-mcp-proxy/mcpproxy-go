@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -145,7 +146,7 @@ func TestOAuthLogin_DefaultOff_NoStorage(t *testing.T) {
 	srv := newOAuthLoginTestServer(t, nil)
 	db := srv.runtime.StorageManager().GetDB()
 	require.NotNil(t, db)
-	beforeBuckets, beforeMeta := bucketSnapshot(t, db)
+	beforeBuckets, _ := bucketSnapshot(t, db)
 
 	mux := oauthLoginTestMux(srv, true)
 	for _, path := range oauthLoginTestPaths {
@@ -156,9 +157,24 @@ func TestOAuthLogin_DefaultOff_NoStorage(t *testing.T) {
 		}
 	}
 
+	// Only browser-login state is asserted: unrelated runtime startup tasks
+	// (e.g. the work-session backfill) may write to the database concurrently.
 	afterBuckets, afterMeta := bucketSnapshot(t, db)
-	assert.Equal(t, beforeBuckets, afterBuckets, "bucket list must not change")
-	assert.Equal(t, beforeMeta, afterMeta, "MetaBucket keys must not change")
+	before := map[string]bool{}
+	for _, name := range beforeBuckets {
+		before[name] = true
+	}
+	for _, name := range afterBuckets {
+		if strings.HasPrefix(name, "oauth_") && !before[name] {
+			t.Errorf("browser login created bucket %q while off", name)
+		}
+	}
+	for _, name := range []string{"oauth_registrations", "oauth_grants", "oauth_grant_access_index", "oauth_client_bindings"} {
+		assert.NotContains(t, afterBuckets, name, "lazy browser-login bucket must not exist")
+	}
+	for _, key := range afterMeta {
+		assert.False(t, strings.HasPrefix(key, "oauth_login"), "MetaBucket key %q must not exist", key)
+	}
 }
 
 // Patterns the gate guards (the ones registered by registerOAuthLoginRoutes).
