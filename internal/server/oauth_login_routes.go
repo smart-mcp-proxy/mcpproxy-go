@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/netip"
 
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpx"
 )
 
@@ -72,7 +71,7 @@ func (s *Server) oauthLoginGate(prev, served http.Handler) http.Handler {
 			prev.ServeHTTP(w, r)
 			return
 		}
-		if !peerIsLoopback(r) || !httpx.IsLoopbackHost(r.Host) || config.ServerEditionEnabled(cfg) {
+		if !peerIsLoopback(r) || !httpx.IsLoopbackHost(r.Host) || !oauthLoginEditionSupported {
 			http.NotFound(w, r)
 			return
 		}
