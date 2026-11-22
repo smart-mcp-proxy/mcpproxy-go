@@ -217,9 +217,13 @@ func (s *Store) Approve(id string, d Decision) (string, error) {
 	if r.Status != StatusPending {
 		return "", ErrAlreadyDecided
 	}
+	now := s.now()
 	r.Status = StatusApproved
 	r.Decision = d
-	s.codes[HashSecret(s.key, KindCode, code)] = &codeEntry{requestID: id, expiresAt: s.now().Add(CodeLifetime)}
+	// Pending expiry and approved-code expiry are separate: an approved
+	// request lives exactly as long as its code.
+	r.ExpiresAt = now.Add(CodeLifetime)
+	s.codes[HashSecret(s.key, KindCode, code)] = &codeEntry{requestID: id, expiresAt: now.Add(CodeLifetime)}
 	return code, nil
 }
 
