@@ -143,6 +143,14 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(deps-scanners)"
+    ignore:
+      # python:3.15-slim breaks `pip install cisco-ai-mcp-scanner`: aiohttp,
+      # fastuuid and yara-python have no cp315 wheels, so pip builds sdists and
+      # fails because the -slim image has no gcc (#1898, scanner-images
+      # `build (cisco)` red since). Drop this once those publish cp315 wheels,
+      # or if the image installs a compiler.
+      - dependency-name: "python"
+        versions: ["3.15.x"]
   - package-ecosystem: docker
     directory: "/docker/scanners/proximity"
     schedule:
