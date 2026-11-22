@@ -12,6 +12,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientidentity"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/mcplogin"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
@@ -83,10 +84,12 @@ func (s *OAuthLoginService) Refresh(in TokenInput) (TokenResult, *TokenError) {
 }
 
 // revokeReplayedCode revokes the login an authorization code produced when the
-// code is presented again inside the tombstone window.
-func (s *OAuthLoginService) revokeReplayedCode(grantID string) {
+// code is presented again inside the tombstone window. The revoke and its
+// activity row happen now (under the caller's locks); the event and the
+// notifier callback are returned to run after they are released.
+func (s *OAuthLoginService) revokeReplayedCode(grantID string) []func() {
 	if grantID == "" {
-		return
+		return nil
 	}
 	now := s.now().UTC()
 	changed, err := s.store.RevokeOAuthGrant(grantID, storage.OAuthRevokeReplay, now)
@@ -94,18 +97,20 @@ func (s *OAuthLoginService) revokeReplayedCode(grantID string) {
 		if !errors.Is(err, storage.ErrOAuthGrantNotFound) {
 			s.logger.Error("browser login: cannot revoke a replayed login", zap.Error(err))
 		}
-		return
+		return nil
 	}
 	if !changed {
-		return
+		return nil
 	}
 	g, err := s.store.GetOAuthGrant(grantID)
 	if err != nil || g == nil {
-		return
+		return nil
 	}
 	s.writeGrantRow(profile.ChangeReplayRevoke, *g, mcplogin.Decision{}, "code_replay")
-	s.publishGrantChanged(*g, profile.ChangeReplayRevoke, "")
-	s.notifyGrantRevoked(*g)
+	return []func(){func() {
+		s.publishGrantChanged(*g, profile.ChangeReplayRevoke, "")
+		s.notifyGrantRevoked(*g)
+	}}
 }
 
 // --- authentication ------------------------------------------------------------------
@@ -306,7 +311,7 @@ func (s *OAuthLoginService) writeDecisionRow(change profile.ChangeKind, req mcpl
 // clientID with (pin, mode) would create: the candidate adds or replaces the
 // client's own browser-login entry with Live true, before anything is stored.
 // A storage read error is returned and the caller must refuse (fail closed).
-func (s *OAuthLoginService) guardStatesFor(clientID, pin, mode string) (current, candidate GuardState, err error) {
+func (s *OAuthLoginService) guardStatesFor(cfg *config.Config, clientID, pin, mode string) (current, candidate GuardState, err error) {
 	all, err := s.store.ListAgentTokens()
 	if err != nil {
 		return current, candidate, fmt.Errorf("cannot inspect client bindings: %w", err)
@@ -315,7 +320,6 @@ func (s *OAuthLoginService) guardStatesFor(clientID, pin, mode string) (current,
 	if err != nil {
 		return current, candidate, err
 	}
-	cfg := s.cfg()
 	tokens := guardedOnly(all)
 	current = GuardState{Config: cfg, Tokens: tokens, OAuthBindings: oauth}
 	candidate = GuardState{Config: cfg, Tokens: tokens,
@@ -323,8 +327,8 @@ func (s *OAuthLoginService) guardStatesFor(clientID, pin, mode string) (current,
 	return current, candidate, nil
 }
 
-func (s *OAuthLoginService) recheckGuard(d mcplogin.Decision) error {
-	cur, cand, err := s.guardStatesFor(d.ClientID, d.Profile, d.Mode)
+func (s *OAuthLoginService) recheckGuard(cfg *config.Config, d mcplogin.Decision) error {
+	cur, cand, err := s.guardStatesFor(cfg, d.ClientID, d.Profile, d.Mode)
 	if err != nil {
 		return err
 	}

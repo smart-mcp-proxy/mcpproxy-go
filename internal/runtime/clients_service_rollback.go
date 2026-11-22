@@ -7,7 +7,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 )
 
-// restoreRefusedLocked reports whether undoing a connect (restoring the binding
+// restoreRefusedInner reports whether undoing a connect (restoring the binding
 // the revoked record replaced) would create a binding the guard now refuses
 // (s.mu held). It only matters for a client that has LIVE browser logins: the
 // restore also rewrites their binding, and the configuration may have changed
@@ -15,7 +15,7 @@ import (
 // binding plus the surviving live logins bound to it. A client without live
 // logins, or without a prior binding to restore, answers false: the rollback
 // behaves exactly as before. A read error is returned (fail closed).
-func (s *ClientsService) restoreRefusedLocked(clientID string) (bool, error) {
+func (s *ClientsService) restoreRefusedInner(clientID string) (bool, error) {
 	o := s.oauthStore()
 	has, err := s.hasLoginRecords(o, clientID)
 	if err != nil || !has {

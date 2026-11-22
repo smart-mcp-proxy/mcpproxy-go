@@ -23,7 +23,7 @@ import (
 // the in-memory request store takes the runtime's bindingWriteMu FIRST and the
 // request store's own mutex second:
 //
-//		bindingWriteMu  ->  mcplogin.Store.mu  ->  storage.Manager.mu
+//		bindingWriteMu  ->  configCommitMu (Exchange only)  ->  mcplogin.Store.mu  ->  storage.Manager.mu
 //
 //	  - Exchange takes bindingWriteMu BEFORE calling Store.Consume, and its commit
 //	    callback (which Consume runs under Store.mu) does NOT take bindingWriteMu
@@ -56,12 +56,21 @@ import (
 // Approve's finalisation (final status check, activity row, event, redirect)
 // runs under lifecycleMu taken AFTER bindingWriteMu, so a switch-off cannot
 // interleave with it; it does one storage write (the activity row) under it, and
-// the switch-off commit only waits for that. The lazy token key is created under
-// keyInitMu, a leaf lock held across key I/O that nothing else waits behind:
-// reqMu is never held across I/O, so existingRequests (and the switch-off) never
-// wait on it. A file reload does not take bindingWriteMu, so Exchange re-checks
-// the live config after CommitOAuthLogin and undoes the login when it no longer
-// holds (postCommitRefusal).
+// the switch-off commit only waits for that. The lazy token key is created before
+// reqMu is taken (auth.GetOrCreateHMACKey is atomic): reqMu is never held across
+// I/O, so existingRequests (and the switch-off) never wait on it.
+//
+// THE EXCHANGE FENCE. A file reload commits without bindingWriteMu, so Exchange
+// takes bindingWriteMu, then configCommitMu (the lock every config publication
+// holds), then Store.mu and storage, reads ONE config snapshot inside that
+// section and uses it for every check. Publication is thereby fenced: a config
+// change completes before the exchange starts (its checks refuse) or starts after
+// the grant is stored (an ordinary change over an existing login). It is safe
+// because no path holding configCommitMu waits for bindingWriteMu (MutateConfig
+// and GuardedApplyConfig take bindingWriteMu BEFORE the commit; no commit hook,
+// publish hook or callback calls a service that takes it), and the commit path
+// never calls Exchange or Store.Consume. Key creation, token minting, events and
+// notifier callbacks stay outside the fence.
 type OAuthLoginService struct {
 	store   OAuthLoginStore
 	hmacKey func() ([]byte, error)
@@ -73,6 +82,9 @@ type OAuthLoginService struct {
 	now      func() time.Time
 	mu       *sync.Mutex
 	logger   *zap.Logger
+	// commitLock is the lock every config publication holds (the runtime's
+	// configCommitMu); nil in tests that build the service without a runtime.
+	commitLock sync.Locker
 
 	notifier BindingNotifier
 
@@ -90,7 +102,6 @@ type OAuthLoginService struct {
 	testHookApproveAfterStore func()
 	testHookApproveFinalising func()
 	testHookBeforeCommit      func()
-	keyInitMu                 sync.Mutex
 
 	everUsed  bool // positive results only
 	everMu    sync.Mutex
@@ -119,7 +130,6 @@ type OAuthLoginStore interface {
 	CurrentClientBinding(clientID string) (pin, mode string, found bool, err error)
 	ClientBindingRevision(clientID string) (string, error)
 	OAuthLoginEverUsed() (bool, error)
-	ForgetClientLogins(clientID string) (int, error)
 }
 
 // Token lifetimes of a browser login (research R6).
@@ -144,13 +154,16 @@ type OAuthLoginDeps struct {
 	// Requests is the in-memory request and code store (tests inject one with
 	// a fake clock).
 	Requests *mcplogin.Store
+	// ConfigCommitLock fences the token exchange against config publication
+	// (see exchangeFenced). Nil is allowed.
+	ConfigCommitLock sync.Locker
 }
 
 // NewOAuthLoginService builds the service.
 func NewOAuthLoginService(d OAuthLoginDeps) *OAuthLoginService {
 	s := &OAuthLoginService{
 		store: d.Store, hmacKey: d.HMACKey, cfg: d.Config, guard: d.Guard, activity: d.Activity,
-		publish: d.Publish, now: d.Now, mu: d.Mu, logger: d.Logger, reqs: d.Requests,
+		publish: d.Publish, now: d.Now, mu: d.Mu, logger: d.Logger, reqs: d.Requests, commitLock: d.ConfigCommitLock,
 		lastTouch: map[string]time.Time{},
 	}
 	if s.now == nil {
@@ -205,14 +218,10 @@ func (s *OAuthLoginService) requests() (*mcplogin.Store, error) {
 	if st := s.existingRequests(); st != nil {
 		return st, nil
 	}
-	// The key may be created on disk: do that OUTSIDE reqMu (serialised by its
-	// own mutex), so existingRequests, and with it the switch-off path, never
-	// waits on key I/O. Then install the store under reqMu, double-checked.
-	s.keyInitMu.Lock()
-	defer s.keyInitMu.Unlock()
-	if st := s.existingRequests(); st != nil {
-		return st, nil
-	}
+	// The key may be created on disk (atomically, see auth.GetOrCreateHMACKey):
+	// do that OUTSIDE reqMu, so existingRequests, and with it the switch-off
+	// path, never waits on key I/O. Then install the store under reqMu,
+	// double-checked: two racing builders hold the same key.
 	key, err := s.hmacKey()
 	if err != nil {
 		return nil, err
@@ -431,9 +440,13 @@ func (t *tokenSet) result() TokenResult {
 // the binding revision in one transaction. Any failed check answers
 // invalid_grant (invalid_target for a resource mismatch) with nothing stored.
 func (s *OAuthLoginService) Exchange(in TokenInput) (TokenResult, *TokenError) {
+	// Advisory early exit: a disabled install must not create a key file. The
+	// authoritative check is made on the one config snapshot taken below.
 	if !s.Enabled() {
 		return TokenResult{}, errInvalidGrant
 	}
+	// Everything that may touch the key file or mint secrets happens BEFORE the
+	// config-commit lock is taken.
 	reqs, err := s.requests()
 	if err != nil {
 		s.logger.Error("browser login: cannot build the request store", zap.Error(err))
@@ -444,12 +457,44 @@ func (s *OAuthLoginService) Exchange(in TokenInput) (TokenResult, *TokenError) {
 		s.logger.Error("browser login: cannot read the token key", zap.Error(err))
 		return TokenResult{}, errTokenServer
 	}
-	// Lock order: bindingWriteMu BEFORE the request store (see the type doc).
+	grantID, err := mcplogin.NewGrantID()
+	if err != nil {
+		return TokenResult{}, errTokenServer
+	}
+	ts, err := newTokenSet(key, grantID)
+	if err != nil {
+		return TokenResult{}, errTokenServer
+	}
+	// Events and notifier callbacks run after every lock is released.
+	var after []func()
+	res, terr := s.exchangeFenced(in, reqs, ts, grantID, &after)
+	for _, f := range after {
+		f()
+	}
+	return res, terr
+}
+
+// exchangeFenced is the part of Exchange that runs inside the fence:
+// bindingWriteMu, then configCommitMu (the lock every config publication,
+// including a file reload, holds), then the request store and storage. With
+// publication fenced a config change either completed before the exchange
+// started (its checks see it and refuse) or starts after the grant is stored (an
+// ordinary config change over an existing login, covered by the funnel's guard
+// and repin logic). ONE config snapshot is read inside the fence and used for
+// every check of this exchange.
+func (s *OAuthLoginService) exchangeFenced(in TokenInput, reqs *mcplogin.Store, ts *tokenSet, grantID string, after *[]func()) (TokenResult, *TokenError) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.commitLock != nil {
+		s.commitLock.Lock()
+		defer s.commitLock.Unlock()
+	}
+	cfg := s.cfg()
+	if cfg == nil || !cfg.MCPOAuthEnabled {
+		return TokenResult{}, errInvalidGrant
+	}
 
 	var (
-		tokens  *tokenSet
 		grant   storage.OAuthGrant
 		decided mcplogin.Decision
 		target  bool
@@ -468,21 +513,13 @@ func (s *OAuthLoginService) Exchange(in TokenInput) (TokenResult, *TokenError) {
 		now := s.now().UTC()
 		// A new client's profile must still exist: a later profile of the same
 		// name must never apply silently to a decision made about another one.
-		if req.Decision.NewClient && req.Decision.Profile != "" && !profileConfigured(s.cfg(), req.Decision.Profile) {
+		if req.Decision.NewClient && req.Decision.Profile != "" && !profileConfigured(cfg, req.Decision.Profile) {
 			s.writeDecisionRow(profile.ChangeDeny, req, "profile_gone", now)
 			return "", errExchangeRefused
 		}
-		if err := s.recheckGuard(req.Decision); err != nil {
+		if err := s.recheckGuard(cfg, req.Decision); err != nil {
 			s.writeDecisionRow(profile.ChangeDeny, req, "guard", now)
 			return "", errExchangeRefused
-		}
-		grantID, err := mcplogin.NewGrantID()
-		if err != nil {
-			return "", err
-		}
-		ts, err := newTokenSet(key, grantID)
-		if err != nil {
-			return "", err
 		}
 		if h := s.testHookBeforeCommit; h != nil {
 			h()
@@ -516,15 +553,7 @@ func (s *OAuthLoginService) Exchange(in TokenInput) (TokenResult, *TokenError) {
 			s.writeDecisionRow(profile.ChangeDeny, req, reason, now)
 			return "", errExchangeRefused
 		}
-		// A file reload does not take bindingWriteMu, so the config may have
-		// changed between the checks above and the commit. Re-read it now, before
-		// any token leaves: undo what this exchange stored and refuse.
-		if reason := s.postCommitRefusal(req.Decision, stored); reason != "" {
-			s.undoCommit(req.Decision, stored)
-			s.writeDecisionRow(profile.ChangeDeny, req, reason, now)
-			return "", errExchangeRefused
-		}
-		tokens, grant = ts, stored
+		grant = stored
 		return grantID, nil
 	}
 
@@ -539,7 +568,7 @@ func (s *OAuthLoginService) Exchange(in TokenInput) (TokenResult, *TokenError) {
 		// A code presented again inside the tombstone window revokes the login
 		// it produced. An empty grant id means the first presentation stored
 		// nothing: there is nothing to revoke.
-		s.revokeReplayedCode(replayedGrant)
+		*after = append(*after, s.revokeReplayedCode(replayedGrant)...)
 		return TokenResult{}, errInvalidGrant
 	default:
 		if target {
@@ -553,9 +582,11 @@ func (s *OAuthLoginService) Exchange(in TokenInput) (TokenResult, *TokenError) {
 	}
 
 	s.writeGrantRow(profile.ChangeIssue, grant, decided, "")
-	s.publishGrantChanged(grant, profile.ChangeIssue, req.Decision.Profile)
-	if s.notifier != nil && decided.ReplaceGrantID != "" {
-		s.notifier.NotifyBindingChanged(auth.ClientTokenName(grant.Client))
-	}
-	return tokens.result(), nil
+	*after = append(*after, func() {
+		s.publishGrantChanged(grant, profile.ChangeIssue, req.Decision.Profile)
+		if s.notifier != nil && decided.ReplaceGrantID != "" {
+			s.notifier.NotifyBindingChanged(auth.ClientTokenName(grant.Client))
+		}
+	})
+	return ts.result(), nil
 }

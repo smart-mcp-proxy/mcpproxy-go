@@ -788,12 +788,13 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		HMACKey: func() ([]byte, error) {
 			return auth.GetOrCreateHMACKey(rt.Config().DataDir)
 		},
-		Config:   rt.Config,
-		Guard:    rt.BindingGuard,
-		Activity: storageManager.SaveActivity,
-		Publish:  rt.publishEvent,
-		Mu:       &rt.bindingWriteMu,
-		Logger:   logger,
+		Config:           rt.Config,
+		Guard:            rt.BindingGuard,
+		Activity:         storageManager.SaveActivity,
+		Publish:          rt.publishEvent,
+		Mu:               &rt.bindingWriteMu,
+		Logger:           logger,
+		ConfigCommitLock: &rt.configCommitMu,
 	})
 	rt.clientsService.SetLoginCanceler(func(clientID string) { rt.oauthLoginService.CancelForClient(clientID) })
 	rt.credentialsService.SetOAuthLogin(rt.oauthLoginService)

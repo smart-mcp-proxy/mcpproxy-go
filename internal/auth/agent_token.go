@@ -7,8 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -640,37 +638,6 @@ func TokenPrefix(token string) string {
 
 // hmacKeyFile is the filename for the persisted HMAC key.
 const hmacKeyFile = ".token_key"
-
-// GetOrCreateHMACKey reads the HMAC key from <dataDir>/.token_key.
-// If the file does not exist, it generates a 32-byte random key,
-// writes it with 0600 permissions, and returns it.
-func GetOrCreateHMACKey(dataDir string) ([]byte, error) {
-	keyPath := filepath.Join(dataDir, hmacKeyFile)
-
-	// Try to read existing key
-	data, err := os.ReadFile(keyPath)
-	if err == nil && len(data) == 32 {
-		return data, nil
-	}
-
-	// Generate new key
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		return nil, fmt.Errorf("failed to generate HMAC key: %w", err)
-	}
-
-	// Ensure directory exists
-	if err := os.MkdirAll(dataDir, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create data directory: %w", err)
-	}
-
-	// Write key file with restrictive permissions
-	if err := os.WriteFile(keyPath, key, 0600); err != nil {
-		return nil, fmt.Errorf("failed to write HMAC key file: %w", err)
-	}
-
-	return key, nil
-}
 
 // ValidatePermissions checks that the given permissions list is valid.
 // It must contain "read" and only contain valid permission values.

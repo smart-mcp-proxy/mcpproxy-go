@@ -683,7 +683,7 @@ func profileConfigured(cfg *config.Config, name string) bool {
 // checkCandidateGuard runs the binding guard over the state this client's login
 // would create (its entry added or replaced with Live true).
 func (s *OAuthLoginService) checkCandidateGuard(clientID, pin, mode string) error {
-	cur, cand, err := s.guardStatesFor(clientID, pin, mode)
+	cur, cand, err := s.guardStatesFor(s.cfg(), clientID, pin, mode)
 	if err != nil {
 		return err
 	}
