@@ -137,7 +137,10 @@ Three new records, in their own bbolt buckets. They are keyed by client, not by 
 Tokens:
 
 - Access token: opaque, prefix `mcp_oat_`, HMAC-SHA256 hashed like agent tokens, 1 hour, accepted only on the OAuth address it was issued for.
-- Refresh token: `mcp_ort_<grant-id>_<secret>`, rotated on every use, 30 days sliding. The grant id inside the token is what makes replay detectable after any number of rotations and across restarts: a token that names a live grant but whose secret is not the current one is a replay, and the grant is revoked in the same transaction (OAuth 2.1 rule for public clients). Consuming the old secret and storing the new hash is one transaction. The grant id is random, appears only inside tokens and grants nothing by itself.
+- Refresh token: `mcp_ort_<grant-id>_<secret>_<mac>`, rotated on every use, 30 days sliding. `<mac>` is an HMAC over the grant id and the secret with the server's token key (the key agent tokens are hashed with), so the server can tell a token it really issued from a made-up one without storing spent tokens. Order of checks at the token endpoint:
+  1. Malformed token, bad MAC, unknown or revoked grant id: `invalid_grant`, identical answer for all, **nothing is written**. Knowing a grant id (it is shown in activity rows and management surfaces) is therefore not enough to disturb a grant.
+  2. MAC valid and the secret is the grant's current one: rotate. Consuming the old secret and storing the new hash is one transaction.
+  3. MAC valid and the secret is not the current one: an authentic, already used token came back. The grant is revoked in that transaction (OAuth 2.1 rule for public clients). This works after any number of rotations and across restarts.
 
 **One client, several credentials.** A Clients hub row is the identity. Under it: at most one API key (today's `mcp_cli_` record) and any number of OAuth grants. The profile binding belongs to the client, not to a credential. An access token authenticates to the same `AuthContext` a client credential produces: `AuthTypeAgent`-class caller, `Kind=client`, the client's id, the client's binding. Everything downstream (profile resolution, pin boundary, activity `client_id`, `/tools?client=`) is unchanged.
 
@@ -197,8 +200,8 @@ The registry gains a flag for clients known to support the MCP authorization flo
 
 - **Off (default)**: no new route, no metadata document, no new bucket is created, no Connect option, no Clients hub column, no startup notice. Existing API keys, agent tokens, client credentials, `/mcp` and every routing-mode endpoint are untouched. A test pins this: the route table and the answers on `/mcp/oauth*`, `/oauth/*` and `/.well-known/oauth-*` with the feature off equal those of the previous release.
 - **On**: everything in this document. API keys keep working next to it.
-- **Turned off again**: two cases, told apart by whether any grant was ever stored.
-  - Never used (no grant record): identical to "off" above, including the legacy catch-all on `/mcp/oauth*`.
+- **Turned off again**: two cases, told apart by a persistent marker `oauth_ever_used`. It is written in the transaction that stores the first grant and is never cleared, not by revoke, forget or cleanup, so forgetting the last browser-login client does not bring the catch-all back.
+  - Never used (marker absent): identical to "off" above, including the legacy catch-all on `/mcp/oauth*`. Storing the marker is the only write the feature makes outside its own buckets.
   - Used: `/mcp/oauth*` answers 404 instead of falling into the `/mcp/` catch-all, so a browser-login client does not quietly continue as an anonymous caller when `require_mcp_auth` is off. `/oauth/*`, the metadata and the consent REST calls answer 404 and pending requests are cancelled. Grants and bindings are kept, so turning it on again restores them. Such a client's row says "browser login disabled".
 - **Downgrade** to a binary without the feature: the buckets are ignored, OAuth-only clients fall into the `/mcp/` catch-all as anonymous callers. The docs say to turn `require_mcp_auth` on first, as for pre-108 downgrades.
 
@@ -244,3 +247,5 @@ Cross-model review, round 1 (opencode `gpt-6.1-sol`, 2026-11-22): nine findings,
 
 - **Server edition**: the consent page needs the user's session; the grant carries `user_id`; selectable profiles and clients are the user's own.
 - **Tunnel (Spec 089)**: same endpoints behind the tunnel origin, consent protected by the proxy-managed credential, tokens bound to the tunnel resource URI. Client ID Metadata Documents would give hosted clients a domain-verified name to show on the consent page.
+
+Round 2 (same reviewer): two findings, both accepted. A refresh token is authenticated by a MAC before the replay rule applies, so a known grant id cannot be used to revoke a grant; "ever used" is a persistent marker, not the presence of grant records.
