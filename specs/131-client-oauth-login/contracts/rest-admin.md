@@ -99,7 +99,7 @@ Records the decision and issues the code. The login itself is stored when the cl
 
 ## Activity
 
-`profile_change` rows with `change` = `approve` | `deny` | `issue` | `revoke` | `replay_revoke`, metadata `client_id`, `grant_id`, `profile`, `actor_kind`, `actor_name`, `surface`. `approve`, `deny` and `revoke` name the administrator who made the request. `issue` (first token exchange) and `replay_revoke` happen on the public token endpoint: they name the administrator who approved the login (`approved_by`) and add `trigger: "client"`. Tool-call rows of a browser login carry `client_id` and `metadata.grant_id`, credential kind `oauth`.
+`profile_change` rows with `change` = `approve` | `deny` | `issue` | `revoke` | `replay_revoke`, metadata `client_id`, `request_id` (rows written before a login exists: `approve`, `deny`), `grant_id` (rows about a stored login: `issue`, `revoke`, `replay_revoke`), `profile`, `actor_kind`, `actor_name`, `surface`. `approve`, `revoke` and a `deny` clicked on the page name the administrator who made the request. Rows written on the public token endpoint (`issue`, `replay_revoke`, and a `deny` caused by the re-check at exchange) name the administrator who approved (`approved_by`) and add `trigger: "client"`. Tool-call rows of a browser login carry `client_id` and `metadata.grant_id`, credential kind `oauth`.
 
 ## MCP `credentials` tool
 

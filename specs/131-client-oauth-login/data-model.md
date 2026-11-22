@@ -12,10 +12,10 @@ All persistent records live in `config.db` in buckets created on first write. No
 | `software_id`, `software_version` | string | optional, sanitised, display only |
 | `token_endpoint_auth_method` | string | always `none` |
 | `grant_types` | []string | always `authorization_code`, `refresh_token` |
-| `state` | enum | `pending` → `authorized` → `approved`; or `denied` |
+| `state` | enum | `pending` → `authorized` → `approved` |
 | `created_at`, `authorized_at` | time | |
 
-Lifecycle: `pending` rows are deleted 15 minutes after creation, `authorized` (reached `/oauth/authorize`, never approved) after 24 hours. At most 50 non-approved rows; the oldest is dropped. An `approved` row lives while at least one grant references it.
+Lifecycle: `pending` rows are deleted 15 minutes after creation, `authorized` (reached `/oauth/authorize`, no login stored yet, whether the request was denied, abandoned or is still open) 24 hours after `authorized_at`. At most 50 rows that are not `approved`; the oldest is dropped. A row becomes `approved` in the transaction that stores its first grant, lives while at least one grant record references it, and is deleted with its last grant record. A denial is not a registration state.
 
 ## Grant (browser login) — bucket `oauth_grants`, key `grant_id`
 
@@ -54,7 +54,7 @@ State: `live` (not revoked, `refresh_expires_at` in the future) → `lapsed` (re
 
 Invariants:
 
-- Exists exactly for clients that have at least one grant record; it is created in the transaction that stores the client's first grant.
+- Exists exactly for clients that have at least one grant record; it is created in the transaction that stores the client's first grant, for a new client and for an existing API-key client alike, from the client's current binding.
 - If the client also has an API-key record, `profile_pin` and `profile_mode` equal that record's `ProfilePin` and `ProfileMode`. One storage function writes both in one transaction. On startup a mismatch is repaired from the API-key record and logged.
 - **Binding revision**: `sha256(client | pin | mode)` truncated, computed on read; the consent page sends back the revision it displayed.
 
@@ -69,7 +69,7 @@ RFC 3339 time of the first stored grant. Written in the same transaction as that
 | `id` | 22 random base62 chars; appears in the consent URL |
 | `registration_id`, `redirect_uri`, `state`, `code_challenge` | validated at `/oauth/authorize`; stored verbatim |
 | `resource`, `issuer`, `path_client` | `path_client` is the client id from the resource path, empty for the generic address |
-| `status` | `pending` → `approved` \| `denied` \| `expired` \| `cancelled`; one transition, compare-and-set |
+| `status` | `pending` → `approved` \| `denied` \| `expired` \| `cancelled`; one decision, compare-and-set. An `approved` request can still become `cancelled` until its code is consumed (client revoked or forgotten, feature turned off) |
 | `decision` | set on approval: client (existing or new), profile, mode, binding revision seen, replace choice, approving actor |
 | `expires_at` | created + 10 minutes |
 
