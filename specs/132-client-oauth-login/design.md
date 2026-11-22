@@ -231,7 +231,7 @@ Each PR is test-first. End to end: a scripted public client runs the whole flow 
 - Resource and issuer follow the request origin; OAuth is loopback-only and off in server edition for version 1.
 - "Revoke client" revokes the API key and all grants; forgetting a client deletes its grants.
 - `/mcp/oauth` follows `routing_mode`; Go tray notification is a follow-up PR.
-- Document location: `specs/131-client-oauth-login/design.md`, to become the input of `speckit.specify`.
+- Document location: `specs/132-client-oauth-login/design.md`, to become the input of `speckit.specify`.
 
 ## Left to the builder
 

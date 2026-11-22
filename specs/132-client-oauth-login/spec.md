@@ -259,7 +259,7 @@ When committing changes for this feature, follow these guidelines:
 
 ### Example Commit Message
 ```
-feat(oauth): browser login for MCP clients, backend (Spec 131 PR-1)
+feat(oauth): browser login for MCP clients, backend (Spec 132 PR-1)
 
 Related #1971
 

@@ -39,7 +39,7 @@ Re-check after Phase 1: unchanged.
 ### Documentation (this feature)
 
 ```text
-specs/131-client-oauth-login/
+specs/132-client-oauth-login/
 ├── design.md            # approved design (decisions, alternatives)
 ├── spec.md
 ├── plan.md              # this file
@@ -139,7 +139,7 @@ Full reasoning is in [research.md](./research.md).
 - `make swagger` and `swagger-verify`.
 - Web UI: vitest + Playwright sweep report for `/ui/authorize`, `/ui/clients`, `/ui/settings`.
 - macOS tray: build, swap, `mcpproxy-ui-test` for the menu item.
-- Real-client check (SC-005), recorded in `specs/131-client-oauth-login/verification/`.
+- Real-client check (SC-005), recorded in `specs/132-client-oauth-login/verification/`.
 - Cross-model review per PR (opencode `gpt-6.1-sol`, at most 10 rounds).
 
 ## Complexity Tracking

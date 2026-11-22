@@ -82,7 +82,7 @@ Tasks are grouped by the three delivery PRs. Each PR is merged before the next s
 ### Phase 8: End to end and real clients
 
 - [ ] T043 [US2] Write `scripts/test-client-oauth-e2e.sh` following `scripts/test-oauth-token-encryption-e2e.sh`, covering the seven numbered steps of `quickstart.md` §2 with `tests/oauthclient`
-- [ ] T044 [US2] Run the real-client check of `research.md` R13 for Claude Code, Cursor, VS Code and MCP Inspector; record `specs/131-client-oauth-login/verification/real-clients.md`. **If none completes the flow over plain HTTP, stop and report before PR-2.**
+- [ ] T044 [US2] Run the real-client check of `research.md` R13 for Claude Code, Cursor, VS Code and MCP Inspector; record `specs/132-client-oauth-login/verification/real-clients.md`. **If none completes the flow over plain HTTP, stop and report before PR-2.**
 - [ ] T045 Write `docs/features/client-oauth-login.md` (backend scope: enabling, addresses, tokens, turning off, downgrade, the HTTP note, REST) and add it to the docs sidebar/allowlist; add the CLAUDE.md "Recent Changes" entry by hand
 - [ ] T046 PR gate for PR-1 (see below)
 
@@ -140,7 +140,7 @@ Tasks are grouped by the three delivery PRs. Each PR is merged before the next s
 3. `./scripts/test-api-e2e.sh` (run alone) and `./scripts/test-client-oauth-e2e.sh`.
 4. `make swagger` clean; frontend `npm run test:unit` and build when `frontend/` changed.
 5. Cross-model review (opencode `github-copilot/gpt-6.1-sol`, chunked by file, at most 10 rounds); security-sensitive PR-1 also gets one Opus subagent review.
-6. PR title `feat(oauth): … (Spec 131 PR-n)`, body via `--body-file`, `Related #1971`, no QA report in the body.
+6. PR title `feat(oauth): … (Spec 132 PR-n)`, body via `--body-file`, `Related #1971`, no QA report in the body.
 
 ## Dependencies
 

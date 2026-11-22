@@ -1444,4 +1444,5 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [128-server-list-outcomes](./specs/128-server-list-outcomes/) | — | — |
 | [129-per-user-upstream-credentials](./specs/129-per-user-upstream-credentials/) | — | — |
 | [130-skills-review-ux](./specs/130-skills-review-ux/) | `shipped` | 9/9 (100%) |
-| [131-client-oauth-login](./specs/131-client-oauth-login/) | `drafted` | 0/71 (0%) |
+| [131-skills-card-ux](./specs/131-skills-card-ux/) | `shipped` | 7/7 (100%) |
+| [132-client-oauth-login](./specs/132-client-oauth-login/) | `drafted` | 0/71 (0%) |
