@@ -205,6 +205,13 @@ func (m *Manager) MintClientCredentialWith(clientID, rawToken string, hmacKey []
 			if pendingBucket != nil && existing.PendingHash != "" {
 				_ = pendingBucket.Delete([]byte(existing.PendingHash))
 			}
+		} else if ob, obErr := getOAuthBindingTx(tx, clientID); obErr != nil {
+			return obErr
+		} else if ob != nil {
+			// A client with only browser logins: snapshot its binding so an
+			// aborted or undone connect can put it back on the OAuth entry
+			// (Spec 132 R4). With no OAuth entry nothing is read or written.
+			token.PriorProfilePin, token.PriorProfileMode = ob.ProfilePin, ob.ProfileMode
 		}
 
 		count := tokenBucket.Stats().KeyN
@@ -216,7 +223,12 @@ func (m *Manager) MintClientCredentialWith(clientID, rawToken string, hmacKey []
 		if err != nil {
 			return fmt.Errorf("failed to marshal client credential: %w", err)
 		}
-		return tokenBucket.Put([]byte(hash), data)
+		if err := tokenBucket.Put([]byte(hash), data); err != nil {
+			return err
+		}
+		// Keep one binding: the requested pin/mode also goes to the client's
+		// OAuth entry when it has one (Spec 132 R4).
+		return writeClientBindingTx(tx, clientID, pin, mode)
 	})
 	if err != nil {
 		return nil, err
@@ -249,7 +261,7 @@ func (m *Manager) UpdateClientCredentialBinding(clientID, pin, mode string) (bef
 		if tokenBucket == nil {
 			return ErrClientCredentialNotFound
 		}
-		primaryHash, existing, err := findClientTokenRecordLocked(tx, clientID)
+		_, existing, err := findClientTokenRecordLocked(tx, clientID)
 		if err != nil {
 			return err
 		}
@@ -272,11 +284,10 @@ func (m *Manager) UpdateClientCredentialBinding(clientID, pin, mode string) (bef
 		if err := auth.ValidateTokenInvariants(&updated, auth.KindClient); err != nil {
 			return fmt.Errorf("binding update produced an invalid client credential record: %w", err)
 		}
-		data, err := json.Marshal(updated)
-		if err != nil {
-			return fmt.Errorf("failed to marshal client credential: %w", err)
-		}
-		if err := tokenBucket.Put(primaryHash, data); err != nil {
+		// `updated` only validates the result and is returned as the new
+		// snapshot; the stored write is the one binding writer, which also
+		// keeps the client's OAuth entry equal.
+		if err := writeClientBindingOptsTx(tx, clientID, pin, mode, true); err != nil {
 			return fmt.Errorf("failed to store client binding: %w", err)
 		}
 		before, after = &snapshot, &updated
@@ -560,9 +571,7 @@ func (m *Manager) forgetClientCredential(clientID string, restorePrior bool) (*a
 			return ErrClientCredentialNotFound
 		}
 		markRevoked(tok, time.Now())
-		if restorePrior && tok.PriorProfileMode != "" {
-			tok.ProfilePin, tok.ProfileMode = tok.PriorProfilePin, tok.PriorProfileMode
-		}
+		priorPin, priorMode := tok.PriorProfilePin, tok.PriorProfileMode
 		tok.PriorProfilePin, tok.PriorProfileMode = "", ""
 		data, err := json.Marshal(tok)
 		if err != nil {
@@ -570,6 +579,14 @@ func (m *Manager) forgetClientCredential(clientID string, restorePrior bool) (*a
 		}
 		if err := tokenBucket.Put(primaryHash, data); err != nil {
 			return fmt.Errorf("failed to store revoked client credential: %w", err)
+		}
+		if restorePrior && priorMode != "" {
+			// Roll back the aborted connect's binding on BOTH records through
+			// the one binding writer; browser-login grants are not touched.
+			if err := writeClientBindingTx(tx, clientID, priorPin, priorMode); err != nil {
+				return err
+			}
+			tok.ProfilePin, tok.ProfileMode = priorPin, priorMode
 		}
 		revoked = tok
 		return nil
