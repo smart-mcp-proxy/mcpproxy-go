@@ -166,7 +166,12 @@ func TestRetrieveTools_ProfileNarrowedStaleIndexNeverExposes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newProfileReloadFixture(t, tc.mutate)
-			require.Equal(t, []string{"b:beta_tool"}, reloadToolNames(f.search(t, "beta_tool")), "baseline: b is in ro")
+			// The per-profile index is built asynchronously after the profile is
+			// created, so the baseline must wait for it to answer (#1985).
+			require.Eventually(t, func() bool {
+				names := reloadToolNames(f.search(t, "beta_tool"))
+				return len(names) == 1 && names[0] == "b:beta_tool"
+			}, 30*time.Second, 50*time.Millisecond, "baseline: b is in ro")
 
 			require.NoError(t, config.SaveConfig(f.editedConfig(t, []string{"a"}), f.cfgPath))
 			require.NoError(t, f.srv.runtime.ReloadConfiguration())
