@@ -98,6 +98,7 @@ Errors (`400` JSON `{error, error_description}`):
 | request origin differs from the stored issuer | `invalid_grant` | none |
 | binding changed or guard refuses at exchange | `invalid_grant` | none; `deny` activity row |
 | request cancelled after approval (client revoked or forgotten, feature turned off) | `invalid_grant` | none |
+| registration no longer exists, or the new client id chosen at approval now exists | `invalid_grant` | none |
 | refresh token malformed, bad MAC, unknown, revoked or expired grant, wrong `client_id` | `invalid_grant` | **none**; all indistinguishable; an expired login is never extended |
 | authentic refresh token that is not the current one | `invalid_grant` | grant revoked (`replay`) |
 | `resource` differs from the approved one | `invalid_target` | none |

@@ -56,7 +56,7 @@ Invariants:
 
 - Exists exactly for clients that have at least one grant record; it is created in the transaction that stores the client's first grant, for a new client and for an existing API-key client alike, from the client's current binding.
 - If the client also has an API-key record, `profile_pin` and `profile_mode` equal that record's `ProfilePin` and `ProfileMode`. One storage function writes both in one transaction. On startup a mismatch is repaired from the API-key record and logged.
-- **Binding revision**: `sha256(client | pin | mode)` truncated, computed on read; the consent page sends back the revision it displayed.
+- **Binding revision**: `sha256(client | pin | mode)` truncated, computed on read; a client that does not exist yet has the fixed revision `absent`. The consent page sends back the revision it displayed.
 
 ## Ever-used marker — `MetaBucket` key `oauth_login_ever_used`
 
