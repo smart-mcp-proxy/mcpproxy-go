@@ -64,13 +64,38 @@ func TestClaudeDesktopWindowsConfigPath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			appData := filepath.Join(root, "Roaming")
-			local := filepath.Join(root, "Local")
+			// '[' is legal in a Windows user name and is a glob metacharacter.
+			local := filepath.Join(root, "Local[x]")
 			want := tc.setup(appData, local)
 			if got := claudeDesktopWindowsConfigPath(root, appData, local); got != want {
 				t.Fatalf("got %q, want %q", got, want)
 			}
 		})
 	}
+
+	// ConfigPath's Windows branch must go through the resolver.
+	t.Run("ConfigPath wiring", func(t *testing.T) {
+		old := connectGOOS
+		connectGOOS = "windows"
+		t.Cleanup(func() { connectGOOS = old })
+
+		home := t.TempDir()
+		appData := filepath.Join(home, "Roaming")
+		local := filepath.Join(home, "Local[x]")
+		t.Setenv("APPDATA", appData)
+		t.Setenv("LOCALAPPDATA", local)
+
+		roaming := filepath.Join(appData, "Claude", "claude_desktop_config.json")
+		if got := ConfigPath("claude-desktop", home); got != roaming {
+			t.Fatalf("got %q, want %q", got, roaming)
+		}
+		want := filepath.Join(local, "Claude-Data", "claude_pzs8sxrjxfjjc", "claude_desktop_config.json")
+		writeCfg(t, want, now.Add(-time.Hour))
+		writeCfg(t, roaming, now) // roaming newer: Claude-Data must still win
+		if got := ConfigPath("claude-desktop", home); got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
 
 	t.Run("empty env falls back under home", func(t *testing.T) {
 		home := t.TempDir()

@@ -221,12 +221,21 @@ func copilotHomeOverride() string {
 	return filepath.Clean(dir)
 }
 
+// connectGOOS is the OS the Claude Desktop path is resolved for; a variable so
+// tests can exercise the Windows branch of ConfigPath on any host.
+var connectGOOS = runtime.GOOS
+
 // claudeDesktopWindowsConfigPath resolves the Claude Desktop config on Windows.
 // Classic installs use %APPDATA%\Claude; installs such as the WinGet one in
 // issue #1957 keep it at %LOCALAPPDATA%\Claude-Data\claude_<id>\ and the app
 // ignores the roaming file. An existing Claude-Data config wins (the newest
 // when several exist), then the roaming one; with neither present the roaming
-// path is returned. Not windows-tagged so it is testable on any OS.
+// path is returned. Precedence is deliberately NOT cross-location mtime:
+// earlier MCPProxy versions wrote the roaming file the WinGet app ignores, so a
+// newer roaming file is exactly the broken state of issue #1957. Known
+// tradeoff: someone who moved from a WinGet to a classic install and kept the
+// old Claude-Data dir gets the stale path. Not windows-tagged so it is
+// testable on any OS.
 func claudeDesktopWindowsConfigPath(homeDir, appData, localAppData string) string {
 	if appData == "" {
 		appData = filepath.Join(homeDir, "AppData", "Roaming")
@@ -235,9 +244,15 @@ func claudeDesktopWindowsConfigPath(homeDir, appData, localAppData string) strin
 		localAppData = filepath.Join(homeDir, "AppData", "Local")
 	}
 	const file = "claude_desktop_config.json"
-	matches, _ := filepath.Glob(filepath.Join(localAppData, "Claude-Data", "claude_*", file))
+	// ReadDir, not Glob: LOCALAPPDATA is env-derived and may contain glob
+	// metacharacters ('[' is legal in a Windows user name).
+	entries, _ := os.ReadDir(filepath.Join(localAppData, "Claude-Data"))
 	best, bestMod := "", int64(0)
-	for _, m := range matches {
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "claude_") {
+			continue
+		}
+		m := filepath.Join(localAppData, "Claude-Data", e.Name(), file)
 		fi, err := os.Stat(m)
 		if err != nil || fi.IsDir() {
 			continue
@@ -274,7 +289,7 @@ func ConfigPath(clientID, homeDir string) string {
 		return filepath.Join(homeDir, ".claude.json")
 
 	case "claude-desktop":
-		switch runtime.GOOS {
+		switch connectGOOS {
 		case "darwin":
 			return filepath.Join(homeDir, "Library", "Application Support", "Claude", "claude_desktop_config.json")
 		case "windows":
