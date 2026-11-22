@@ -31,6 +31,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/mcplogin"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
@@ -125,6 +126,10 @@ type Server struct {
 	// oauthLoginEverUsed reports whether browser login was ever used on this
 	// install (Spec 132). nil means never; tests inject it.
 	oauthLoginEverUsed func() bool
+	// oauthLimiter rate limits the public browser-login endpoints (Spec 132);
+	// built on first use so a default-off install never allocates it.
+	oauthLimiterOnce sync.Once
+	oauthLimiter     *mcplogin.Limiter
 	// createAfterConfigRead is a Spec 116 test seam (nil in production): it
 	// runs in the create path after the runtime configuration was read and
 	// before the new server is published.
@@ -591,6 +596,19 @@ func (s *Server) logQueryAPIKeyRejection(r *http.Request) {
 		zap.String("path", r.URL.Path))
 }
 
+// mcpRequestMiddlewares wraps next in the per-request middlewares every MCP
+// route shares, whichever way the request authenticated (mcpAuthMiddleware and
+// the browser-login resource chain, Spec 132, both use it).
+func mcpRequestMiddlewares(next http.Handler) http.Handler {
+	next = directRequestKindMiddleware(next)
+	// Spec 124 FR-003: the run name header, for MCP over HTTP.
+	next = runNameMiddleware(next)
+	// Spec 058 US3 (R1): drop a modern client's separately posted
+	// notifications/cancelled before mcp-go can match it against another
+	// client's in-flight request — every modern request shares session id "".
+	return modernCancellationGuard(next)
+}
+
 // mcpAuthMiddleware wraps the MCP endpoint handler to inject AuthContext into the
 // request context. The MCP endpoint is not behind the REST API key middleware, so
 // this middleware extracts tokens from the request and creates the appropriate
@@ -618,13 +636,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 	// automatically, on top of whatever AuthContext that branch attaches.
 	// Harmless on every endpoint but /mcp/all, whose filters are the only
 	// consumers.
-	next = directRequestKindMiddleware(next)
-	// Spec 124 FR-003: the run name header, for MCP over HTTP.
-	next = runNameMiddleware(next)
-	// Spec 058 US3 (R1): drop a modern client's separately posted
-	// notifications/cancelled before mcp-go can match it against another
-	// client's in-flight request — every modern request shares session id "".
-	next = modernCancellationGuard(next)
+	next = mcpRequestMiddlewares(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// mcp_reject_query_apikey: refuse a URL-borne credential outright. It
 		// must be a 401 and not "no token": with require_mcp_auth off a request
@@ -670,6 +682,15 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 			// two apart.
 			ctx := auth.WithAuthContext(r.Context(), credentialKindContext(auth.AnonymousContext(), auth.CredentialKindAnonymous))
 			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		// Spec 132: a browser-login access token is valid only on its own
+		// /mcp/oauth address (audience binding). Anywhere else it is refused,
+		// also with require_mcp_auth off, but only while the feature is on or
+		// was used: with it off and never used every answer is the previous one.
+		if mcplogin.IsAccessToken(token) && s.oauthLoginLive() {
+			http.Error(w, `{"error":"This token is not valid for this endpoint."}`, http.StatusUnauthorized)
 			return
 		}
 
@@ -3575,6 +3596,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 			connectSvc.WithCredentialMinter(clients.ConnectMinter())
 			clients.SetConfigReader(connectSvc)
 			httpAPIServer.SetClientsService(clients)
+			httpAPIServer.SetOAuthLoginService(s.runtime.OAuthLoginService())
 			go func() {
 				if err := clients.Reconcile(s.runtime.AppContext()); err != nil {
 					s.logger.Warn("client rotation reconcile failed", zap.Error(err))
@@ -3771,7 +3793,8 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux.Handle("/", rootHandler)
 	// Spec 132: opt-in browser login. Behaves exactly like the handlers above
 	// until mcp_oauth_enabled is switched on (or the feature has been used).
-	s.registerOAuthLoginRoutes(mux, mcpHandler, rootHandler)
+	oauthMCPHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.oauthResourceAuth(loggingHandler(streamableServer)))))
+	s.registerOAuthLoginRoutes(mux, mcpHandler, rootHandler, oauthMCPHandler)
 	s.logger.Info("Registered Web UI endpoints", zap.Strings("ui_endpoints", []string{"/ui/", "/"}))
 
 	// Determine actual TCP address for logging

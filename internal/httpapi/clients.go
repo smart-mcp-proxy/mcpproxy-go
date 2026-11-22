@@ -69,6 +69,12 @@ type clientPresence struct {
 	Lease        bool                   `json:"lease,omitempty"`
 	ProfileState string                 `json:"profile_state,omitempty"`
 
+	// Spec 132: the client's credentials (API key and browser logins) and
+	// whether browser login is off right now. Both exist only once browser
+	// login was used on this install; until then a row is exactly what it was.
+	Credentials          []ClientCredential `json:"credentials,omitempty"`
+	BrowserLoginDisabled *bool              `json:"browser_login_disabled,omitempty"`
+
 	// resolvedCredential is the classification of the on-demand config read of a
 	// detail request; never serialised.
 	resolvedCredential profile.CredentialState
@@ -271,6 +277,10 @@ func (s *Server) clientRows(ctx context.Context, withSessions bool, detailID str
 	}
 
 	rows = s.decorateClientRows(rows, records, pctx, stats, cfg, now, withSessions, detailID)
+	rows, err = s.decorateBrowserLogins(rows, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	var warnings []internalRuntime.Warning
 	if s.clientsService != nil {

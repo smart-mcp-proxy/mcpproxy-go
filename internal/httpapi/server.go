@@ -342,6 +342,8 @@ type Server struct {
 	feedbackSubmitter FeedbackSubmitter               // Feedback submission (Spec 036)
 	connectService    *connect.Service                // Client connect/disconnect operations
 	clientsService    *internalRuntime.ClientsService // Client credentials and bindings (Spec 108 FR-026)
+	// oauthLoginService is the Spec 132 browser-login service (admin REST).
+	oauthLoginService *internalRuntime.OAuthLoginService
 	// credentialsService is the Spec 115 issue/revoke path shared with the
 	// MCP `credentials` tool (tokens and custom clients).
 	credentialsService *internalRuntime.CredentialsService
@@ -526,6 +528,12 @@ func (s *Server) SetCredentialsService(svc *internalRuntime.CredentialsService) 
 func (s *Server) SetClientsService(svc *internalRuntime.ClientsService) {
 	s.clientsService = svc
 	s.wireClientsService()
+}
+
+// SetOAuthLoginService configures the Spec 132 browser-login service behind the
+// /oauth/authorizations routes and the per-login revoke (personal edition).
+func (s *Server) SetOAuthLoginService(svc *internalRuntime.OAuthLoginService) {
+	s.oauthLoginService = svc
 }
 
 // wireClientsService connects the clients service to the REST server's

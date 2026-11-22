@@ -19,26 +19,27 @@ func TestOAuthLogin_Gate_On(t *testing.T) {
 	srv := newOAuthLoginTestServer(t, func(c *config.Config) { c.MCPOAuthEnabled = true })
 	mux := oauthLoginTestMux(srv, true)
 
+	// A path every handler answers for a loopback peer without any credential:
+	// the discovery documents and the OAuth MCP address (401 challenge).
+	for _, path := range []string{"/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource/mcp/oauth", "/mcp/oauth"} {
+		for _, hostPeer := range [][2]string{{"127.0.0.1:4000", "127.0.0.1:8080"}, {"[::1]:4000", "localhost:8080"}} {
+			req := httptest.NewRequest(http.MethodGet, path, http.NoBody)
+			req.RemoteAddr, req.Host = hostPeer[0], hostPeer[1]
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			want := http.StatusOK
+			if path == "/mcp/oauth" {
+				want = http.StatusUnauthorized
+			}
+			assert.Equal(t, want, rec.Code, "loopback "+path+" "+hostPeer[0])
+		}
+	}
+
 	for _, path := range oauthLoginGatedPaths {
 		req := httptest.NewRequest(http.MethodGet, path, http.NoBody)
-		req.RemoteAddr = "127.0.0.1:4000"
-		req.Host = "127.0.0.1:8080"
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusNotImplemented, rec.Code, "loopback peer+host "+path)
-		assert.Contains(t, rec.Header().Get("Content-Type"), "application/json", path)
-
-		req = httptest.NewRequest(http.MethodGet, path, http.NoBody)
-		req.RemoteAddr = "[::1]:4000"
-		req.Host = "localhost:8080"
-		rec = httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusNotImplemented, rec.Code, "ipv6 loopback peer "+path)
-
-		req = httptest.NewRequest(http.MethodGet, path, http.NoBody)
 		req.RemoteAddr = "192.0.2.1:4000"
 		req.Host = "127.0.0.1:8080"
-		rec = httptest.NewRecorder()
+		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusNotFound, rec.Code, "non-loopback peer "+path)
 
@@ -57,7 +58,7 @@ func TestOAuthLogin_Gate_FollowsLiveConfig(t *testing.T) {
 	srv := newOAuthLoginTestServer(t, nil)
 	mux := oauthLoginTestMux(srv, true)
 	get := func() int {
-		req := httptest.NewRequest(http.MethodGet, "/oauth/token", http.NoBody)
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", http.NoBody)
 		req.RemoteAddr = "127.0.0.1:4000"
 		req.Host = "127.0.0.1:8080"
 		rec := httptest.NewRecorder()
@@ -71,5 +72,5 @@ func TestOAuthLogin_Gate_FollowsLiveConfig(t *testing.T) {
 	on := *cfg
 	on.MCPOAuthEnabled = true
 	srv.runtime.UpdateConfig(&on, "")
-	assert.Equal(t, http.StatusNotImplemented, get(), "on")
+	assert.Equal(t, http.StatusOK, get(), "on")
 }

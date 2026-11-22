@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"go.etcd.io/bbolt"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
@@ -56,7 +58,17 @@ func oauthLoginTestMux(s *Server, withRoutes bool) *http.ServeMux {
 	mux.Handle("/mcp/", mcpHandler)
 	mux.Handle("/", rootHandler)
 	if withRoutes {
-		s.registerOAuthLoginRoutes(mux, mcpHandler, rootHandler)
+		// The OAuth address runs the REAL resource authentication around a
+		// sentinel that reports the identity it was handed.
+		oauthMCP := s.oauthResourceAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ac := auth.AuthContextFromContext(r.Context())
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"client": ac.ClientID, "kind": ac.CredentialKind, "grant": ac.GrantID,
+				"pin": ac.ProfilePin, "mode": ac.ProfileMode, "agent": ac.AgentName, "path": r.URL.Path,
+			})
+		}))
+		s.registerOAuthLoginRoutes(mux, mcpHandler, rootHandler, s.hostValidationMiddleware(oauthMCP))
 	}
 	return mux
 }
@@ -100,6 +112,9 @@ func TestOAuthLogin_DefaultOff_RoutesUnchanged(t *testing.T) {
 		"none":    nil,
 		"admin":   {"X-API-Key": oauthLoginTestAPIKey},
 		"garbage": {"Authorization": "Bearer garbage-token"},
+		// An access-token-shaped credential is just an unknown token while the
+		// feature is off and never used (Spec 132 FR-002).
+		"oat": {"Authorization": "Bearer mcp_oat_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
 	}
 	for _, requireAuth := range []bool{false, true} {
 		srv := newOAuthLoginTestServer(t, func(c *config.Config) { c.RequireMCPAuth = requireAuth })

@@ -1,6 +1,9 @@
 package runtime
 
-import "github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+import (
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+)
 
 // attributionPayloadKey is the event-payload key that carries an
 // ActivityAttribution. It is a NESTED object on purpose: the legacy flat
@@ -182,6 +185,11 @@ func applyAttribution(rec *storage.ActivityRecord, a ActivityAttribution) {
 	setMetadataIfAbsent("client_name", a.ClientName)
 	setMetadataIfAbsent("client_version", a.ClientVersion)
 	setMetadataIfAbsent("grant_id", a.GrantID)
+	// A browser login (Spec 132) is labelled as such: a row with a grant id was
+	// authenticated by an OAuth access token, never by an agent token.
+	if a.GrantID != "" {
+		setMetadataIfAbsent("credential_kind", string(auth.CredentialKindOAuth))
+	}
 }
 
 // NewUsageAggregate returns an empty aggregate at the current admission

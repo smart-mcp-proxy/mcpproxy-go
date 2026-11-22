@@ -30,4 +30,22 @@ func TestActivityAttribution_GrantIDRoundTripsToMetadata(t *testing.T) {
 	})
 	rec := onlyRecord(t, store)
 	require.Equal(t, "grantAAAAAAAAAAAAAAAAAA", rec.Metadata["grant_id"])
+	// A row with a grant id was authenticated by a browser login, never by an
+	// agent token: it is labelled as the OAuth credential kind.
+	require.Equal(t, "oauth", rec.Metadata["credential_kind"])
+}
+
+func TestActivityAttribution_NoGrantNoCredentialKind(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+	svc := NewActivityService(store, zap.NewNop())
+	svc.handleEvent(Event{
+		Type: EventTypeActivityToolCallCompleted, Timestamp: time.Now().UTC(),
+		Payload: map[string]any{
+			"server_name": "github", "tool_name": "list_issues", "session_id": "s1", "request_id": "r1",
+			"source": "mcp", "status": "success", "duration_ms": int64(5), "attribution": testAttribution().payload(),
+		},
+	})
+	rec := onlyRecord(t, store)
+	require.NotContains(t, rec.Metadata, "credential_kind", "an API-key row is unchanged")
 }
