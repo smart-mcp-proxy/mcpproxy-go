@@ -240,6 +240,14 @@ printf '%s\n' "$OK_OUT" > "$d/run2.out"; echo 0 > "$d/run2.exit"
 check "free object: exit 0" [ "$st" -eq 0 ]
 check "free object: two go invocations" [ "$(count)" = 2 ]
 
+# 7b-crlf. The same signature through a CRLF-converted log (windows runner).
+new_case free_object_crlf
+printf '%s\r\n' '=== RUN   TestSolR2' 'fatal error: found pointer to free object' $'FAIL\tgithub.com/x/y/internal/security/scanner\t1171.109s' 'FAIL' > "$d/run1.out"; echo 2 > "$d/run1.exit"
+printf '%s\n' "$OK_OUT" > "$d/run2.out"; echo 0 > "$d/run2.exit"
+"$SUT" -v -- ./... >/dev/null 2>&1; st=$?
+check "free object crlf: exit 0" [ "$st" -eq 0 ]
+check "free object crlf: two go invocations" [ "$(count)" = 2 ]
+
 # 7c. ...but not when a genuine failure sits in the same block.
 new_case free_object_plus_assert
 printf '%s\n' '=== RUN   TestA' '--- FAIL: TestA (0.00s)' 'fatal error: found pointer to free object' $'FAIL\tgithub.com/x/y/internal/mixed\t3.000s' 'FAIL' > "$d/run1.out"; echo 2 > "$d/run1.exit"
