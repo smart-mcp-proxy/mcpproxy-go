@@ -45,11 +45,15 @@ updates:
       # vue-tsc fails on TS 7's package exports (see PR #869).
       - dependency-name: "typescript"
         versions: ["7.x"]
-      # vue-tsc 3.3.12/3.3.13 mis-type the props bound to the inline
-      # FunctionalComponent ClientRow in OnboardingWizard.vue (28 bogus TS7053/
-      # TS18047 errors; 3.3.11 is clean). Drop this once a release fixes it.
+      # vue-tsc 3.3.12-3.3.14 emit `x.value` for any setup binding that the
+      # template reads in a narrowing position (`rec[id]`, `store.prop`) and
+      # type it with an intersection that clobbers index-signature types, so
+      # `reactive<Record<string, T>>` bindings in OnboardingWizard.vue become
+      # `Boolean`/`ConnectPreview` and the Pinia store loses its members (28
+      # bogus TS7053/TS18047/TS2339 errors, #1976). 3.3.11 is clean. Re-test
+      # each new release and drop this once one passes `npm run type-check`.
       - dependency-name: "vue-tsc"
-        versions: ["3.3.12", "3.3.13"]
+        versions: ["3.3.12", "3.3.13", "3.3.14"]
     groups:
       frontend-dependencies:
         patterns:
