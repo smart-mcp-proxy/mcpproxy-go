@@ -32,7 +32,9 @@ func TestWriteClientBindingTx_ValidatesBeforeAnyWrite(t *testing.T) {
 	commitNew(t, m, "r", "g1", "webonly", "ro", auth.ProfileModeLocked, time.Now())
 	clientWithBoth(t, m, "both", auth.ProfileModeLocked, "ro")
 
-	for _, id := range []string{"keyonly", "webonly", "both"} {
+	// (An API-key-only client is deliberately NOT validated: it is written as
+	// before Spec 132, see TestAPIKeyOnlyClientsAreNotValidated.)
+	for _, id := range []string{"webonly", "both"} {
 		for _, bad := range []struct{ pin, mode string }{
 			{"x", "sticky"}, {"", auth.ProfileModeLocked}, {"x", ""},
 		} {
@@ -89,8 +91,9 @@ func TestUpdateClientCredentialBinding_ErrorTextUnchangedForAPIKeyOnly(t *testin
 	require.EqualError(t, err, "a locked client credential requires a non-empty profile")
 	_, _, err = m.UpdateClientCredentialBinding("cursor", "ro", "sticky")
 	require.EqualError(t, err, `invalid profile mode "sticky"`)
-	// The writer's own wording is never doubled.
-	err = m.db.db.Update(func(tx *bbolt.Tx) error { return writeClientBindingTx(tx, "cursor", "x", "sticky") })
+	// The writer's own wording is never doubled (OAuth-side validation).
+	commitNew(t, m, "r", "g1", "webonly", "ro", auth.ProfileModeLocked, time.Now())
+	err = m.db.db.Update(func(tx *bbolt.Tx) error { return writeClientBindingTx(tx, "webonly", "x", "sticky") })
 	require.EqualError(t, err, `invalid profile mode "sticky"`)
 }
 

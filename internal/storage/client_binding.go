@@ -47,9 +47,19 @@ func writeClientBindingTx(tx *bbolt.Tx, clientID, pin, mode string) error {
 // the API-key record's PriorProfile* snapshot in the same write (a binding
 // change makes the mint-time snapshot stale).
 func writeClientBindingOptsTx(tx *bbolt.Tx, clientID, pin, mode string, clearPrior bool) error {
-	// Validate before ANY write so neither copy can be left half-updated.
-	if err := validateClientBinding(pin, mode); err != nil {
+	// Validation applies only where a browser-login copy would be written: a
+	// client with just an API-key record is written exactly as before Spec 132
+	// (one malformed legacy tombstone must not block a profile rename). A client
+	// with an OAuth entry is validated before ANY write, so neither copy can be
+	// left half-updated.
+	b, err := getOAuthBindingTx(tx, clientID)
+	if err != nil {
 		return err
+	}
+	if b != nil {
+		if err := validateClientBinding(pin, mode); err != nil {
+			return err
+		}
 	}
 	found := false
 	hash, tok, err := findClientTokenRecordLocked(tx, clientID)
@@ -69,10 +79,6 @@ func writeClientBindingOptsTx(tx *bbolt.Tx, clientID, pin, mode string, clearPri
 			return fmt.Errorf("failed to store client binding: %w", err)
 		}
 		found = true
-	}
-	b, err := getOAuthBindingTx(tx, clientID)
-	if err != nil {
-		return err
 	}
 	if b != nil {
 		b.ProfilePin, b.ProfileMode, b.UpdatedAt = pin, mode, time.Now().UTC()
