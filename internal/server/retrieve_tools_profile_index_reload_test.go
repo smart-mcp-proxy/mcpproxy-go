@@ -166,7 +166,19 @@ func TestRetrieveTools_ProfileNarrowedStaleIndexNeverExposes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newProfileReloadFixture(t, tc.mutate)
-			require.Equal(t, []string{"b:beta_tool"}, reloadToolNames(f.search(t, "beta_tool")), "baseline: b is in ro")
+			// The per-profile index is built asynchronously after the profile is
+			// created, so the baseline must wait for it to answer (#1985).
+			// Poll in the test goroutine: f.search uses require.*, which must
+			// not run on a condition goroutine.
+			deadline := time.Now().Add(30 * time.Second)
+			for {
+				names := reloadToolNames(f.search(t, "beta_tool"))
+				if len(names) == 1 && names[0] == "b:beta_tool" {
+					break
+				}
+				require.True(t, time.Now().Before(deadline), "baseline: b is in ro (last result: %v)", names)
+				time.Sleep(50 * time.Millisecond)
+			}
 
 			require.NoError(t, config.SaveConfig(f.editedConfig(t, []string{"a"}), f.cfgPath))
 			require.NoError(t, f.srv.runtime.ReloadConfiguration())
