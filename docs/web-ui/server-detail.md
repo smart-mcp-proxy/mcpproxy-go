@@ -43,8 +43,14 @@ offered opens the Tools tab instead (and the URL says `?tab=tools`).
   row. Focus enters the detail when a skill is opened. If an action removes an
   open skill from Needs review, its card stays visible until Back or another
   selection. A normal refresh also keeps the card open.
-- **Files and viewer.** The files of the selected skill with size and digest.
-  A text file opens in a viewer that reads it in 64 KiB parts (**Load more**);
+- **Scan.** The verdict and findings appear before **Approve** or **Approve
+  changes**, including incomplete coverage and truncated findings. Each
+  finding shows its file, position, rule, severity, and excerpt.
+- **Files and viewer.** **Read SKILL.md** opens the current instructions in one
+  action when that file is text. Supporting text files open from the file list.
+  The viewer receives focus on open and returns it to the original action on
+  close. File sizes stay in the list and **File hashes** reveals the full
+  digests. The viewer reads text in 64 KiB parts (**Load more**), and
   once a skill has an approved copy you can switch the viewer between the
   current and the approved copy. A binary file is listed but never shown. Every
   part must be the version the list on screen names (same digest, same
@@ -52,13 +58,12 @@ offered opens the Tools tab instead (and the URL says `?tab=tools`).
   viewer says "This file changed; reload to review the new version", and the
   list reloads.
 - **Changes.** For a skill with an approved copy, the files are compared by
-  path and digest (added, removed, changed, same). **Show line diff** compares
+  path and digest. Added, removed, and changed paths stay visible. Expand
+  **Unchanged files** to see the matching paths. **Show line diff** compares
   one changed text file line by line; a file over 256 KiB on either side is not
   compared in the browser. A file whose approved copy is text has **View
   approved**, which opens that copy; this covers a removed file and a text file
   replaced by a binary file at the same path, which has no line diff.
-- **Scan.** The verdict, whether the scan was complete and why not, and each
-  finding with its file, position, rule, severity and excerpt.
 - **Approve, Block, Unblock.** Approve names the content hash and the server
   incarnation of the version you opened. If a reload (Refresh, or a
   `skills.changed` event) brings a new version of the open skill, or the server

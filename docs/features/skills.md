@@ -165,6 +165,11 @@ return. A refresh retains the open card and the approval version check; if an
 action removes that skill from Needs review, the card stays visible until you
 go back or choose another skill.
 
+The card shows scan evidence and any coverage warnings above **Approve** and
+**Approve changes**. **Read SKILL.md** opens the current text directly. Expand
+**File hashes** for full digests or **Unchanged files** for matching paths.
+Added, removed, and changed files stay visible in the comparison.
+
 ### Where held skills show up {#held-skills-in-review}
 
 A skill that is pending or changed (not blocked, still listed, on an enabled server that is not quarantined and not excluded) is owed a review, and it shows up next to the tool reviews:
