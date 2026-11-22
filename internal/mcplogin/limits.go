@@ -70,9 +70,7 @@ func NewLimiter(now func() time.Time) *Limiter {
 // admit records key as seen now. For an unseen key at the cap it prunes idle
 // keys first and, if the limiter is still full, refuses with the seconds until
 // the oldest key becomes idle. Active keys are never evicted.
-func (l *Limiter) admit(key string) (bool, int) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+func (l *Limiter) admitLocked(key string) (bool, int) {
 	now := l.now()
 	if _, known := l.seen[key]; !known && len(l.seen) >= MaxTrackedKeys {
 		oldest := now
@@ -101,7 +99,11 @@ func (l *Limiter) Allow(endpoint, remoteIP string) (ok bool, retryAfterSeconds i
 		return true, 0
 	}
 	key := endpoint + "|" + remoteIP
-	if ok, retry := l.admit(key); !ok {
+	// One lock spans admission and the bucket charge, so a key cannot be
+	// pruned between the two and leave a bucket that seen does not know.
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if ok, retry := l.admitLocked(key); !ok {
 		return false, retry
 	}
 	d := l.rates.Allow(key, &spec)
