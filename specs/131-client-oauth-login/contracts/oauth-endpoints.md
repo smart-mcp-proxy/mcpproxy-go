@@ -60,14 +60,17 @@ Request (JSON, at most 16 KiB): `redirect_uris` (required), `client_name`, `soft
 Query: `response_type=code`, `client_id`, `redirect_uri`, `code_challenge`, `code_challenge_method=S256`, `resource`, `state` (optional), `scope` (ignored).
 
 - Unknown `client_id` or `redirect_uri` not registered (loopback port ignored) → `400` HTML error page, **no redirect**.
+- `resource` is `<origin>/mcp/oauth/{client}` with a client id that does not exist → `404` HTML page, **no redirect** (FR-015). Checked before the general `resource` rule.
 - Other errors → redirect to `redirect_uri` with `error` (`invalid_request`, `unsupported_response_type`, `invalid_target`, `temporarily_unavailable`) and `state`.
-- `resource` must be `<origin>/mcp/oauth` or `<origin>/mcp/oauth/{known client}`, else `invalid_target`.
+- Any other `resource` that is not `<origin>/mcp/oauth` or `<origin>/mcp/oauth/{known client}` → `invalid_target`.
 - Success → `302` to `<origin>/ui/authorize?request=<id>`. Headers on every answer: `Cache-Control: no-store`, `Referrer-Policy: no-referrer`.
 
 After the administrator decides (admin REST), the browser is sent to:
 
-- approve: `redirect_uri?code=<code>&state=<state>`
-- deny: `redirect_uri?error=access_denied&state=<state>`
+- approve: the stored redirect URI with `code` added
+- deny: the stored redirect URI with `error=access_denied` added
+
+Every redirect (these two and the error redirects above) is built by parsing the stored redirect URI, keeping its existing query, and appending percent-encoded parameters. `state` is added only if the client sent one, with its value unchanged.
 
 ## `POST /oauth/token`
 
@@ -87,8 +90,8 @@ Errors (`400` JSON `{error, error_description}`):
 
 | Case | `error` | Side effect |
 |---|---|---|
-| unknown, expired or already used code; wrong verifier, client or redirect URI | `invalid_grant` | a reused code revokes the grant it produced |
-| refresh token malformed, bad MAC, unknown or revoked grant, wrong `client_id` | `invalid_grant` | **none**; all indistinguishable |
+| unknown, expired or already used code; wrong verifier, client or redirect URI | `invalid_grant` | a code reused within 10 minutes revokes the grant it produced |
+| refresh token malformed, bad MAC, unknown, revoked or expired grant, wrong `client_id` | `invalid_grant` | **none**; all indistinguishable; an expired login is never extended |
 | authentic refresh token that is not the current one | `invalid_grant` | grant revoked (`replay`) |
 | `resource` differs from the approved one | `invalid_target` | none |
 | other grant type | `unsupported_grant_type` | none |

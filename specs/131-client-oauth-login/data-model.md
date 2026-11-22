@@ -31,6 +31,8 @@ Lifecycle: `pending` rows are deleted 15 minutes after creation, `authorized` (r
 | `refresh_expires_at` | time | now + 30 days on every rotation |
 | `approved_at`, `approved_by` | time, actor | |
 | `last_used_at` | time | updated like agent tokens, off the request path |
+| `observed_client_name`, `observed_at` | string, time | name sent at `initialize` on this login, sanitised; for the advisory mismatch warning only |
+| `display_prefix` | string | 12 chars shown in lists and used as the context's token prefix |
 | `revoked`, `revoked_at`, `revoke_reason` | bool, time, enum | `admin`, `client_revoked`, `replaced`, `replay` |
 | `user_id` | string | empty in the personal edition |
 
@@ -71,7 +73,7 @@ At most 20 pending requests; a new one beyond that is refused with `temporarily_
 
 ## Authorization code — memory only
 
-`code` (32 random bytes, stored hashed), bound to request id, registration, redirect URI, challenge, resource, chosen client and the decision. Single use, 60 seconds. A second use revokes the grant created from the first.
+`code` (32 random bytes, stored hashed), bound to request id, registration, redirect URI, challenge, resource, issuer, chosen client and the decision. Single use, 60 seconds. Consuming it and storing the grant is one step; the entry then stays as a tombstone `{consumed_at, grant_id}` for 10 minutes. A second presentation within that time revokes that grant (`replay`); after it, the code is simply unknown.
 
 ## Relationships
 
@@ -86,8 +88,9 @@ Client (Clients hub id)
 
 - **Credential list of a client** (Clients hub, REST, `credentials get`): the API key if any, then grants ordered by `approved_at` descending, each with state, prefix, `approved_at`, `last_used_at`, reported name, redirect host. Never a secret or a hash.
 - **Active named binding** (guard, `profile_in_use`): a client with a named pin and either a live API key or a live grant.
-- **Client state** on the hub gains `browser_login_disabled` when the client has grants and the feature is off.
+- **Client state** on the hub gains `browser_login_disabled` when the client has grants and the feature is off. The logins stay listed.
+- **Name mismatch** per login: derived from `observed_client_name` (research R14).
 
 ## Auth context of a browser-login request
 
-`Type=agent`, `TokenKind=client`, `ClientID=<client>`, `ProfilePin`, `ProfileMode` from the binding, `CredentialKind=oauth`, `AllowedServers=["*"]`, all three permission tiers. Built by the same helper as the `mcp_cli_` path.
+`Type=agent`, `TokenKind=client`, `ClientID=<client>`, `AgentName=client-<client>`, `ProfilePin`, `ProfileMode` from the binding, `CredentialKind=oauth`, `GrantID`, `TokenPrefix=<display_prefix>`, `TokenGeneration=<grant id>`, the client rate limit, `AllowedServers=["*"]`, all three permission tiers. Built by the same helper as the `mcp_cli_` path. The grant id is also kept on the MCP session record.

@@ -1,6 +1,6 @@
 # Contract: administrator surfaces
 
-All REST routes are under `/api/v1`, use the standard `{success, data}` envelope, require administrator credentials (admin API key or tray socket) and answer `403` to agent tokens and client credentials. With the feature off they answer `404 feature_disabled`, except the grant listing fields on `/clients`, which are simply empty.
+All REST routes are under `/api/v1`, use the standard `{success, data}` envelope, require administrator credentials (admin API key or tray socket) and answer `403` to agent tokens and client credentials. With the feature off the sign-in request routes answer `404 feature_disabled`. Client payloads depend on whether the feature was ever used: never used → exactly today's payload, no new fields; used → logins are still listed and `browser_login_disabled` is `true`. Revoking a login works in both on and off-after-use states.
 
 ## Sign-in requests
 
@@ -66,7 +66,8 @@ Pending requests, newest first: `[{id, client_label, created_at, expires_at}]`. 
   "credentials": [
     { "kind": "api_key", "prefix": "mcp_cli_ab12", "state": "active", "expires_at": "…", "last_used_at": "…" },
     { "kind": "browser_login", "grant_id": "…", "state": "active",       // active | lapsed | revoked
-      "approved_at": "…", "last_used_at": "…", "reported_name": "Cursor IDE", "redirect_host": "127.0.0.1" }
+      "approved_at": "…", "last_used_at": "…", "reported_name": "Cursor IDE", "redirect_host": "127.0.0.1",
+      "observed_name": "cursor-vscode", "name_mismatch": false }
   ],
   "browser_login_disabled": false
   ```
@@ -84,7 +85,7 @@ Pending requests, newest first: `[{id, client_label, created_at, expires_at}]`. 
 
 ## Activity
 
-`profile_change` rows with `change` = `approve` | `deny` | `revoke` | `replay_revoke`, metadata `client_id`, `grant_id`, `profile`, `actor_kind`, `actor_name`, `surface`. Tool-call rows of a browser login carry `client_id` and `metadata.grant_id`, credential kind `oauth`.
+`profile_change` rows with `change` = `approve` | `deny` | `issue` | `revoke` | `replay_revoke`, metadata `client_id`, `grant_id`, `profile`, `actor_kind`, `actor_name`, `surface`. `approve`, `deny` and `revoke` name the administrator who made the request. `issue` (first token exchange) and `replay_revoke` happen on the public token endpoint: they name the administrator who approved the login (`approved_by`) and add `trigger: "client"`. Tool-call rows of a browser login carry `client_id` and `metadata.grant_id`, credential kind `oauth`.
 
 ## MCP `credentials` tool
 
