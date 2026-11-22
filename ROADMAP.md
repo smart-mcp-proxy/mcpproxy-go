@@ -1443,3 +1443,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [127-profile-argument-rules](./specs/127-profile-argument-rules/) | — | — |
 | [128-server-list-outcomes](./specs/128-server-list-outcomes/) | — | — |
 | [129-per-user-upstream-credentials](./specs/129-per-user-upstream-credentials/) | — | — |
+| [130-skills-review-ux](./specs/130-skills-review-ux/) | `shipped` | 9/9 (100%) |

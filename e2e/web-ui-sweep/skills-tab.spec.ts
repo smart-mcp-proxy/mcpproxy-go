@@ -18,7 +18,10 @@
 //      the open review by the live skills.changed event alone: its stale
 //      banner appears by itself;
 //   7. block and unblock;
-//   8. no uncaught page error anywhere.
+//   8. reload through the Skills deep link;
+//   9. a skill-only Review queue action opens only held skills;
+//  10. selecting a skill puts its detail beside the desktop list;
+//  11. compact keyboard selection opens the detail and Back restores row focus.
 //
 // Normally run by scripts/run-skills-tab-sweep.sh, which starts everything and
 // sets the environment (docs/development/web-ui-verification.md):
@@ -60,7 +63,7 @@ function url(route: string): string {
 test.use({ trace: 'off' })
 
 async function shot(page: Page, name: string, focus?: string) {
-  // The detail pane sits below the list; scroll the part worth seeing into view.
+  // Bring a specific viewer or diff into view when the scenario needs it.
   if (focus) await page.locator(focus).first().scrollIntoViewIfNeeded()
   const body = await page.screenshot({ fullPage: false })
   await test.info().attach(`skills-tab-${name}`, { body, contentType: 'image/png' })
@@ -292,5 +295,84 @@ test('the tab survives a reload through ?tab=skills and no page error was thrown
   await expect(page.locator('[data-test="skills-panel"]')).toBeVisible()
   await page.reload()
   await expect(page.locator('[data-test="skills-tab"]')).toHaveClass(/tab-active/)
+  expect(pageErrors, 'uncaught page errors').toEqual([])
+})
+
+// The manual-trust fixture also has a pending echo tool. Check its mixed
+// queue row first, then approve echo to exercise the skill-only row as well.
+test('the mixed and skill-only Review queue actions open only held skills', async ({ page }) => {
+  await page.goto(url('/review'))
+  const queueRow = page.locator(`[data-test="servers-review-row-${SERVER}"]`)
+  const skills = queueRow.locator(`[data-test="servers-review-skills-link-${SERVER}"]`)
+  const review = queueRow.locator(`[data-test="servers-review-link-${SERVER}"]`)
+  const expectHeldSkills = async () => {
+    await expect(page).toHaveURL(url(`/servers/${SERVER}?tab=skills&state=needs-review`))
+    const filter = page.locator('[data-test="skills-filter-needs-review"]')
+    await expect(filter).toHaveAttribute('aria-pressed', 'true')
+    await expect(filter).toHaveText('Needs review (2)')
+    await expect(row(page, 'with-files')).toBeVisible()
+    await expect(row(page, 'big')).toBeVisible()
+    await expect(row(page, 'plain')).toHaveCount(0)
+  }
+
+  await skills.click()
+  await expectHeldSkills()
+
+  await page.goto(url('/review'))
+  await review.click()
+  await expect(page).toHaveURL(url(`/review/${SERVER}`))
+  const echo = page.locator('[data-test="review-tool-echo"]')
+  await echo.getByRole('button', { name: 'Approve', exact: true }).click()
+  await expect(echo.locator('[data-test="review-tool-state-echo"]')).toHaveText('Approved')
+
+  await page.goto(url('/review'))
+  await expect(queueRow).toBeVisible()
+  await expect(skills).toHaveCount(0)
+  await review.click()
+  await expectHeldSkills()
+  await shot(page, '07-queue-needs-review')
+})
+
+test('selecting a skill reveals its detail beside the desktop list', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(url(`/servers/${SERVER}?tab=skills`))
+  await expect(page.locator('[data-test="skills-filter-all"]')).toHaveAttribute('aria-pressed', 'true')
+  const list = page.locator('[data-test="skills-list"]')
+  await row(page, 'with-files').click()
+  const detail = page.locator('[data-test="skill-detail"]')
+  const heading = detail.locator('[data-test="skill-name"]')
+  await expect(heading).toHaveText('with-files')
+  await expect(heading).toBeInViewport()
+  const listBox = await list.boundingBox()
+  const detailBox = await detail.boundingBox()
+  expect(listBox).not.toBeNull()
+  expect(detailBox).not.toBeNull()
+  expect(detailBox!.x, 'detail begins to the right of the list').toBeGreaterThan(listBox!.x + listBox!.width - 2)
+  await shot(page, '08-desktop-detail')
+})
+
+test('compact keyboard selection opens detail and Back restores row focus', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(url(`/servers/${SERVER}?tab=skills`))
+  const selected = row(page, 'with-files')
+  await expect(selected).toBeVisible()
+  await selected.focus()
+  await selected.press('Enter')
+
+  const heading = page.locator('[data-test="skill-name"]')
+  const back = page.locator('[data-test="skill-back-to-list"]')
+  await expect(heading).toHaveText('with-files')
+  await expect(heading).toBeFocused()
+  await expect(heading).toBeInViewport()
+  await expect(back).toBeInViewport()
+  await expect(selected).toBeHidden()
+  await shot(page, '09-mobile-detail')
+
+  await page.keyboard.press('Shift+Tab')
+  await expect(back).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(selected).toBeVisible()
+  await expect(selected).toBeFocused()
+  await expect(page.locator('[data-test="skill-detail"]')).toHaveCount(0)
   expect(pageErrors, 'uncaught page errors').toEqual([])
 })

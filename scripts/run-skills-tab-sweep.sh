@@ -531,6 +531,9 @@ const about = [
   ['Live skills.changed', 'With the pending skill big open, its SKILL.md changes upstream and the refresh is made through POST /api/v1/servers/{id}/skills/refresh, not in the page. The core\'s skills.changed SSE frame, re-dispatched by the Web UI, reloads the listing by itself and the open review shows the stale banner with Approve disabled.', ['05c-live-event-stale']],
   ['Block and unblock', 'Block marks the skill Blocked and removes Approve; Unblock returns it to Awaiting review.', ['06-blocked']],
   ['Reload', 'The tab survives a reload through ?tab=skills, and no uncaught page error was thrown in any scenario.', []],
+  ['Queue filter', 'Both the mixed-row Skills and skill-only Review actions open Needs review with the two held skills. The mixed-row Review action still opens tool review.', ['07-queue-needs-review']],
+  ['Desktop detail', 'Selecting a skill opens its detail beside the list with the heading in the viewport.', ['08-desktop-detail']],
+  ['Compact detail', 'Pressing Enter on a skill at 390 px opens its detail in place of the list. Back to skills returns keyboard focus to the original row.', ['09-mobile-detail']],
 ]
 const stateTable = step => {
   const s = r.states[step]

@@ -33,7 +33,16 @@ offered opens the Tools tab instead (and the URL says `?tab=tools`).
   Changed, Awaiting review or Approved), whether it is offered to agents, its
   file count and its scan verdict. **Refresh** reads the server's skills again;
   the list also reloads by itself when a `skills.changed` event arrives for
-  this server.
+  this server. **All skills** is the default for a direct tab visit. **Needs
+  review** shows only Pending or Changed skills that are currently listed and
+  unblocked, with a count matching the visible rows. Review queue Skills links
+  open `?tab=skills&state=needs-review`.
+- **Selection.** On a desktop screen the selected skill's card opens beside the
+  list, immediately in view. On a compact screen the card replaces the list;
+  **Back to skills** returns to the list and restores focus to the selected
+  row. Focus enters the detail when a skill is opened. If an action removes an
+  open skill from Needs review, its card stays visible until Back or another
+  selection. A normal refresh also keeps the card open.
 - **Files and viewer.** The files of the selected skill with size and digest.
   A text file opens in a viewer that reads it in 64 KiB parts (**Load more**);
   once a skill has an approved copy you can switch the viewer between the

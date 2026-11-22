@@ -53,6 +53,101 @@ describe('SkillsPanel', () => {
     expect(w.get('[data-test="skill-row-plain"]').text()).toContain('Not offered')
   })
 
+  it('shows only listed, unblocked pending and changed skills in Needs review', async () => {
+    m(api.getServerSkills).mockResolvedValue(ok(makeListing([
+      makeSkill('new'),
+      makeSkill('changed', { status: 'changed' }),
+      makeSkill('approved', { status: 'approved' }),
+      makeSkill('unusable', { status: 'unusable' }),
+      makeSkill('blocked', { blocked: true }),
+      makeSkill('unlisted', { listed: false, status: 'changed' }),
+    ])))
+    const w = mount(SkillsPanel, { props: { serverName: 'srv', needsReview: true } })
+    await flushPromises()
+    const rows = () => w.findAll('[data-test^="skill-row-"]').map(row => row.attributes('data-test'))
+    expect(rows()).toEqual(['skill-row-new', 'skill-row-changed'])
+    expect(w.get('[data-test="skills-filter-needs-review"]').text()).toBe('Needs review (2)')
+    await w.setProps({ serverReviewable: false })
+    expect(rows()).toEqual([])
+    expect(w.get('[data-test="skills-empty-review"]').text()).toBe('No skills need review.')
+    await w.setProps({ needsReview: false })
+    expect(rows()).toHaveLength(6)
+    w.unmount()
+  })
+
+  it('moves focus to the detail and restores it when returning to the list', async () => {
+    m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('new')])))
+    const w = mount(SkillsPanel, { attachTo: document.body, props: { serverName: 'srv', needsReview: true } })
+    try {
+      await flushPromises()
+      const row = w.get('[data-test="skill-row-new"]')
+      await row.trigger('click')
+      await flushPromises()
+      expect(document.activeElement).toBe(w.get('[data-test="skill-name"]').element)
+      await w.get('[data-test="skill-back-to-list"]').trigger('click')
+      await flushPromises()
+      expect(w.find('[data-test="skill-detail"]').exists()).toBe(false)
+      expect(document.activeElement).toBe(row.element)
+    } finally {
+      w.unmount()
+    }
+  })
+
+  it('keeps the tracked detail open after approval removes its row from Needs review', async () => {
+    m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([makeSkill('new')])))
+    m(api.approveSkills).mockResolvedValue(ok({ approved: 1 }))
+    const w = mount(SkillsPanel, { attachTo: document.body, props: { serverName: 'srv', needsReview: true } })
+    try {
+      await flushPromises()
+      await w.get('[data-test="skill-row-new"]').trigger('click')
+      m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('new', { status: 'approved', available: true })])))
+      await w.get('[data-test="skill-approve"]').trigger('click')
+      await flushPromises()
+      expect(w.get('[data-test="skill-detail-chip"]').text()).toBe('Approved')
+      expect(w.find('[data-test="skill-row-new"]').exists()).toBe(false)
+      await w.get('[data-test="skill-back-to-list"]').trigger('click')
+      await flushPromises()
+      expect(document.activeElement).toBe(w.get('[data-test="skills-filter-needs-review"]').element)
+    } finally {
+      w.unmount()
+    }
+  })
+
+  it('keeps an open detail when switching filters, even if its row is hidden', async () => {
+    m(api.getServerSkills).mockResolvedValue(ok(makeListing([makeSkill('approved', { status: 'approved' })])))
+    const w = mountPanel()
+    try {
+      await flushPromises()
+      await w.get('[data-test="skill-row-approved"]').trigger('click')
+      await w.setProps({ needsReview: true })
+      expect(w.find('[data-test="skill-row-approved"]').exists()).toBe(false)
+      expect(w.get('[data-test="skill-name"]').text()).toBe('approved')
+    } finally {
+      w.unmount()
+    }
+  })
+
+  it.each([true, false])('closes a removed detail without moving external focus (focus inside: %s)', async (inside) => {
+    m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([makeSkill('gone'), makeSkill('remaining')])))
+    const outside = document.body.appendChild(document.createElement('button'))
+    const w = mount(SkillsPanel, { attachTo: document.body, props: { serverName: 'srv', needsReview: true } })
+    try {
+      await flushPromises()
+      await w.get('[data-test="skill-row-gone"]').trigger('click')
+      await flushPromises()
+      if (!inside) outside.focus()
+      m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([makeSkill('remaining')])))
+      emitSkillsChanged('srv')
+      await flushPromises()
+      expect(w.find('[data-test="skill-detail"]').exists()).toBe(false)
+      const expected = inside ? w.get('[data-test="skills-filter-needs-review"]').element : outside
+      expect(document.activeElement).toBe(expected)
+    } finally {
+      w.unmount()
+      outside.remove()
+    }
+  })
+
   it('shows the feature-off, unsupported and empty states', async () => {
     m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([], { enabled: false })))
     let w = mountPanel(); await flushPromises()
@@ -460,10 +555,10 @@ describe('SkillsPanel', () => {
   })
 
   // Review finding 1: approval is bound to the version the reviewer opened.
-  it('a reload that changes the open skill shows a notice, keeps Approve off until re-open, then approves the new hash', async () => {
+  it('a changed skill opened from Needs review keeps Approve off until re-open, then approves the new hash', async () => {
     m(api.getServerSkills).mockResolvedValueOnce(ok(makeListing([makeSkill('a', { current_hash: 'sk1-read' })], { incarnation: 3 })))
     m(api.approveSkills).mockResolvedValue(ok({ approved: 1 }))
-    const w = mountPanel(); await flushPromises()
+    const w = mount(SkillsPanel, { props: { serverName: 'srv', needsReview: true } }); await flushPromises()
     await w.get('[data-test="skill-row-a"]').trigger('click'); await flushPromises()
     expect(w.find('[data-test="skill-stale"]').exists()).toBe(false)
     // A skills.changed reload replaces the entry; the chip still says Awaiting review.
