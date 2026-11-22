@@ -287,14 +287,20 @@ func TestRT05_ListChangedDuringInFlightVerification_IsFollowedUp(t *testing.T) {
 	}
 
 	require.NoError(t, rt.onUpstreamToolsListChanged(context.Background(), "quarantined"))
-	require.True(t, coalescedReturned.Load(), "the single notification was delivered during the in-flight verification")
+	require.Eventually(t, coalescedReturned.Load, 10*time.Second, 20*time.Millisecond,
+		"the single notification was delivered during the in-flight verification")
 	assert.Equal(t, int32(1), notified.Load())
 
-	// No polling: the outer call returns only after its follow-up ran.
-	rec, err = rt.storageManager.GetToolApproval("quarantined", "calendar_get_events")
-	require.NoError(t, err)
-	assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "the coalesced notification triggered an automatic follow-up verification")
-	assert.Equal(t, "armed definition", rec.CurrentDescription)
+	// The outer call is not guaranteed to be the discovery owner: a background
+	// pass (sweep or reconnect) may hold the marker when it runs, in which case
+	// the outer call only coalesces and returns at once while that owner runs
+	// the follow-up (#1984). The follow-up is awaited by its owner, not by this
+	// call, so wait for its effect rather than sampling right after the return.
+	require.Eventually(t, func() bool {
+		rec, err := rt.storageManager.GetToolApproval("quarantined", "calendar_get_events")
+		return err == nil && rec != nil &&
+			rec.Status == storage.ToolApprovalStatusChanged && rec.CurrentDescription == "armed definition"
+	}, 10*time.Second, 20*time.Millisecond, "the coalesced notification triggered an automatic follow-up verification")
 	assert.True(t, rt.serverIsQuarantined("quarantined"))
 	indexed, err := rt.indexManager.GetToolsByServer("quarantined")
 	require.NoError(t, err)
