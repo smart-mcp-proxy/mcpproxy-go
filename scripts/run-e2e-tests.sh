@@ -13,6 +13,17 @@ TEST_TIMEOUT=${TEST_TIMEOUT:-"5m"}
 VERBOSE=${VERBOSE:-"true"}
 RACE=${RACE:-"true"}
 COVER=${COVER:-"false"}
+COVERAGE_FILE="${MCPPROXY_TEST_COVERAGE_FILE:-coverage.out}"
+COVERAGE_HTML="${MCPPROXY_TEST_COVERAGE_HTML:-coverage.html}"
+COVERAGE_CREATED=false
+
+if [ "$COVER" = "true" ]; then
+    if [ -e "$COVERAGE_FILE" ]; then
+        echo -e "${RED}Coverage output already exists: $COVERAGE_FILE${NC}"
+        exit 1
+    fi
+    COVERAGE_CREATED=true
+fi
 
 echo -e "${GREEN}Running MCP Proxy E2E Tests${NC}"
 echo "=================================="
@@ -31,10 +42,14 @@ echo ""
 
 # Build the binary first to ensure everything compiles
 echo -e "${YELLOW}Building mcpproxy binary...${NC}"
-go build -o mcpproxy ./cmd/mcpproxy
+MCPPROXY_BINARY="./mcpproxy"
+if [ "$(go env GOOS)" = "windows" ]; then
+    MCPPROXY_BINARY="./mcpproxy.exe"
+fi
+go build -o "$MCPPROXY_BINARY" ./cmd/mcpproxy
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ Build successful${NC}"
-    export MCPPROXY_BINARY_PATH="$(pwd)/mcpproxy"
+    export MCPPROXY_BINARY_PATH="$(pwd)/${MCPPROXY_BINARY#./}"
     export MCPPROXY_BINARY="$MCPPROXY_BINARY_PATH"
 else
     echo -e "${RED}✗ Build failed${NC}"
@@ -47,7 +62,7 @@ if [ "$RACE" = "true" ]; then
     TEST_ARGS="$TEST_ARGS -race"
 fi
 if [ "$COVER" = "true" ]; then
-    TEST_ARGS="$TEST_ARGS -coverprofile=coverage.out -covermode=atomic"
+    TEST_ARGS="$TEST_ARGS -coverprofile=$COVERAGE_FILE -covermode=atomic"
 fi
 
 # Run unit tests first (excluding E2E, Binary, and MCP tests)
@@ -66,7 +81,7 @@ echo ""
 echo -e "${YELLOW}Running E2E tests...${NC}"
 E2E_TEST_ARGS="-v -timeout $TEST_TIMEOUT"
 if [ "$COVER" = "true" ]; then
-    E2E_TEST_ARGS="$E2E_TEST_ARGS -coverprofile=coverage.out -covermode=atomic"
+    E2E_TEST_ARGS="$E2E_TEST_ARGS -coverprofile=$COVERAGE_FILE -covermode=atomic"
 fi
 go test $E2E_TEST_ARGS ./internal/server -run TestE2E
 E2E_EXIT_CODE=$?
@@ -78,20 +93,22 @@ else
 fi
 
 # Generate coverage report if enabled
-if [ "$COVER" = "true" ] && [ -f coverage.out ]; then
+if [ "$COVER" = "true" ] && [ -f "$COVERAGE_FILE" ]; then
     echo -e "${YELLOW}Generating coverage report...${NC}"
-    go tool cover -html=coverage.out -o coverage.html
-    echo -e "${GREEN}Coverage report generated: coverage.html${NC}"
+    go tool cover -html="$COVERAGE_FILE" -o "$COVERAGE_HTML"
+    echo -e "${GREEN}Coverage report generated: $COVERAGE_HTML${NC}"
     
     # Show coverage summary
-    go tool cover -func=coverage.out | tail -1
+    go tool cover -func="$COVERAGE_FILE" | tail -1
 fi
 
 # Cleanup
 echo -e "${YELLOW}Cleaning up...${NC}"
 # Note: Don't delete mcpproxy binary here - it's needed by other test stages
 # The main test script (run-all-tests.sh) will handle final cleanup
-rm -f coverage.out
+if [ "$COVERAGE_CREATED" = "true" ]; then
+    rm -f "$COVERAGE_FILE"
+fi
 
 if [ $E2E_EXIT_CODE -eq 0 ]; then
     echo -e "${GREEN}All tests completed successfully!${NC}"
