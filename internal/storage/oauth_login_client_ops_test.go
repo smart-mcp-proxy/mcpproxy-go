@@ -40,7 +40,7 @@ func TestForgetClient_DeletesLoginsBindingAndOrphanRegistrations(t *testing.T) {
 	gs, err := m.ListOAuthGrantsForClient("cursor")
 	require.NoError(t, err)
 	assert.Empty(t, gs)
-	_, err = m.GetOAuthGrantByAccessHash("ah-grant-cursor")
+	_, err = m.getOAuthGrantByAccessHash("ah-grant-cursor")
 	assert.ErrorIs(t, err, ErrOAuthGrantNotFound)
 	b, _ := m.GetOAuthClientBinding("cursor")
 	assert.Nil(t, b)
@@ -109,7 +109,7 @@ func TestRevokeClient_RevokesKeyAndAllGrantsKeepsRecords(t *testing.T) {
 		assert.Equal(t, OAuthRevokeClientRevoked, g.RevokeReason)
 		require.NotNil(t, g.RevokedAt)
 	}
-	_, err = m.GetOAuthGrantByAccessHash("ah-grant-cursor")
+	_, err = m.getOAuthGrantByAccessHash("ah-grant-cursor")
 	assert.ErrorIs(t, err, ErrOAuthGrantNotFound, "revoked grants leave the access index")
 	b, _ := m.GetOAuthClientBinding("cursor")
 	assert.NotNil(t, b, "the binding entry is kept for display")

@@ -82,6 +82,9 @@ var (
 	ErrOAuthBindingChanged = errors.New("client binding changed since it was reviewed")
 	// ErrOAuthGrantNotFound: no such grant.
 	ErrOAuthGrantNotFound = errors.New("oauth grant not found")
+	// ErrOAuthRegistrationExists: CreateOAuthRegistration found the client id
+	// already stored (an approved registration must never be overwritten).
+	ErrOAuthRegistrationExists = errors.New("oauth registration already exists")
 )
 
 // OAuthActor names who approved a login.
@@ -275,6 +278,14 @@ func (m *Manager) CreateOAuthRegistration(reg OAuthRegistration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		// An id that is already stored (above all an approved registration
+		// with live grants) is never overwritten.
+		var existing OAuthRegistration
+		if found, err := oauthGetJSON(tx, OAuthRegistrationsBucket, reg.ClientID, &existing); err != nil {
+			return err
+		} else if found {
+			return ErrOAuthRegistrationExists
+		}
 		if err := oauthPutJSON(tx, OAuthRegistrationsBucket, reg.ClientID, &reg); err != nil {
 			return err
 		}
@@ -282,7 +293,9 @@ func (m *Manager) CreateOAuthRegistration(reg OAuthRegistration) error {
 			id string
 			at time.Time
 		}
-		var open []row
+		// The new row takes part in the "oldest non-approved" choice, so a
+		// backdated insert cannot evict a newer row while surviving itself.
+		open := []row{{reg.ClientID, reg.CreatedAt}}
 		if err := oauthForEach(tx, OAuthRegistrationsBucket, func(key string, r OAuthRegistration) error {
 			if r.State != OAuthRegistrationApproved && key != reg.ClientID {
 				open = append(open, row{key, r.CreatedAt})
@@ -291,8 +304,7 @@ func (m *Manager) CreateOAuthRegistration(reg OAuthRegistration) error {
 		}); err != nil {
 			return err
 		}
-		// The new row counts toward the cap.
-		excess := len(open) + 1 - MaxUnapprovedOAuthRegistrations
+		excess := len(open) - MaxUnapprovedOAuthRegistrations
 		if excess <= 0 {
 			return nil
 		}
@@ -363,30 +375,26 @@ func (m *Manager) MarkOAuthRegistrationAuthorized(id string, at time.Time) error
 func (m *Manager) SweepOAuthRegistrations(now time.Time) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// View first: with nothing to sweep no write transaction is opened (an
+	// empty Update still commits a meta page).
+	any := false
+	if err := m.db.db.View(func(tx *bbolt.Tx) error {
+		drop, err := registrationsToSweepTx(tx, now)
+		any = len(drop) > 0
+		return err
+	}); err != nil || !any {
+		return 0, err
+	}
+
 	deleted := 0
 	err := m.db.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(OAuthRegistrationsBucket))
 		if b == nil {
 			return nil
 		}
-		var drop []string
-		if err := oauthForEach(tx, OAuthRegistrationsBucket, func(key string, r OAuthRegistration) error {
-			switch r.State {
-			case OAuthRegistrationPending:
-				if now.Sub(r.CreatedAt) > OAuthPendingRegistrationTTL {
-					drop = append(drop, key)
-				}
-			case OAuthRegistrationAuthorized:
-				at := r.CreatedAt
-				if r.AuthorizedAt != nil {
-					at = *r.AuthorizedAt
-				}
-				if now.Sub(at) > OAuthAuthorizedRegistrationTTL {
-					drop = append(drop, key)
-				}
-			}
-			return nil
-		}); err != nil {
+		drop, err := registrationsToSweepTx(tx, now)
+		if err != nil {
 			return err
 		}
 		for _, k := range drop {
@@ -398,6 +406,28 @@ func (m *Manager) SweepOAuthRegistrations(now time.Time) (int, error) {
 		return nil
 	})
 	return deleted, err
+}
+
+func registrationsToSweepTx(tx *bbolt.Tx, now time.Time) ([]string, error) {
+	var drop []string
+	err := oauthForEach(tx, OAuthRegistrationsBucket, func(key string, r OAuthRegistration) error {
+		switch r.State {
+		case OAuthRegistrationPending:
+			if now.Sub(r.CreatedAt) > OAuthPendingRegistrationTTL {
+				drop = append(drop, key)
+			}
+		case OAuthRegistrationAuthorized:
+			at := r.CreatedAt
+			if r.AuthorizedAt != nil {
+				at = *r.AuthorizedAt
+			}
+			if now.Sub(at) > OAuthAuthorizedRegistrationTTL {
+				drop = append(drop, key)
+			}
+		}
+		return nil
+	})
+	return drop, err
 }
 
 // ListOAuthRegistrations returns every stored registration.
@@ -450,6 +480,23 @@ func currentClientBindingTx(tx *bbolt.Tx, clientID string) (pin, mode string, ex
 	return "", "", false, nil
 }
 
+// CurrentClientBinding returns the binding the client is held to: the API-key
+// record's pin and mode when the client has one, else its browser-login entry;
+// found=false when it has neither. The browser-login request path MUST read the
+// binding through this function and never from the OAuth entry alone: an older
+// binary that knows nothing of browser logins may have changed the API-key
+// record while the entry stayed behind, and the API-key record is the truth.
+func (m *Manager) CurrentClientBinding(clientID string) (pin, mode string, found bool, err error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	err = m.db.db.View(func(tx *bbolt.Tx) error {
+		var e error
+		pin, mode, found, e = currentClientBindingTx(tx, clientID)
+		return e
+	})
+	return pin, mode, found, err
+}
+
 // ClientBindingRevision returns the binding revision the consent page shows
 // and sends back; see clientBindingRevisionTx.
 func (m *Manager) ClientBindingRevision(clientID string) (string, error) {
@@ -491,6 +538,12 @@ type CommitLoginInput struct {
 // creates the OAuth-side binding when the client has none, promotes the
 // registration to approved, stores the grant, revokes the replaced login and
 // writes the ever-used marker. Any failed check leaves the database untouched.
+//
+// What it does NOT detect: a revoke or forget of an EXISTING client between
+// approval and exchange. The binding revision covers pin and mode only, and a
+// revoke changes neither. The caller must prevent that by cancelling the
+// pending request (and any unconsumed code) under the binding write lock when
+// it revokes or forgets the client (research R15).
 func (m *Manager) CommitOAuthLogin(in CommitLoginInput) (OAuthGrant, error) {
 	g := in.Grant
 	if in.Client == "" {
@@ -554,11 +607,8 @@ func (m *Manager) CommitOAuthLogin(in CommitLoginInput) (OAuthGrant, error) {
 		if existingBinding == nil {
 			nb := OAuthClientBinding{UpdatedAt: now}
 			if in.NewClient {
-				if in.Mode != auth.ProfileModeLocked && in.Mode != auth.ProfileModeSwitchable {
-					return fmt.Errorf("invalid profile mode %q", in.Mode)
-				}
-				if in.Mode == auth.ProfileModeLocked && in.Pin == "" {
-					return fmt.Errorf("a locked client binding requires a non-empty profile")
+				if err := validateClientBinding(in.Pin, in.Mode); err != nil {
+					return err
 				}
 				if utf8.RuneCountInString(in.DisplayName) > auth.MaxClientDisplayName {
 					return fmt.Errorf("client display name is too long")
@@ -571,6 +621,9 @@ func (m *Manager) CommitOAuthLogin(in CommitLoginInput) (OAuthGrant, error) {
 				}
 				if !exists {
 					return ErrOAuthBindingChanged
+				}
+				if err := validateClientBinding(pin, mode); err != nil {
+					return err
 				}
 				nb.ProfilePin, nb.ProfileMode = pin, mode
 				if anyRecord != nil {
@@ -683,11 +736,27 @@ func (m *Manager) ListOAuthGrantsForClient(clientID string) ([]OAuthGrant, error
 	return out, nil
 }
 
-// GetOAuthGrantByAccessHash resolves an access-token hash to its grant through
-// the index, re-checking that the grant still carries that hash. A missing or
-// stale entry is ErrOAuthGrantNotFound. Revocation and expiry are the
-// caller's decision (it needs the grant to report them).
-func (m *Manager) GetOAuthGrantByAccessHash(hash string) (*OAuthGrant, error) {
+// AuthenticateOAuthAccess resolves an access-token hash to its grant and
+// enforces validity itself: the hash must match (constant time), the grant must
+// not be revoked, and both the access and the refresh lifetime must end
+// strictly after now (so a lapsed-but-unswept grant, and the exact expiry
+// instant, fail). Every failure is the one uniform ErrOAuthGrantNotFound.
+func (m *Manager) AuthenticateOAuthAccess(accessHash string, now time.Time) (*OAuthGrant, error) {
+	g, err := m.getOAuthGrantByAccessHash(accessHash)
+	if err != nil {
+		return nil, err
+	}
+	if g.Revoked || !g.AccessExpiresAt.After(now) || !g.RefreshExpiresAt.After(now) {
+		return nil, ErrOAuthGrantNotFound
+	}
+	return g, nil
+}
+
+// getOAuthGrantByAccessHash resolves an access-token hash to a NON-revoked
+// grant through the index, re-checking that the grant still carries that hash.
+// Expiry is not checked here; authentication goes through
+// AuthenticateOAuthAccess.
+func (m *Manager) getOAuthGrantByAccessHash(hash string) (*OAuthGrant, error) {
 	if hash == "" {
 		return nil, ErrOAuthGrantNotFound
 	}
@@ -707,7 +776,7 @@ func (m *Manager) GetOAuthGrantByAccessHash(hash string) (*OAuthGrant, error) {
 		if err != nil || cand == nil {
 			return err
 		}
-		if subtle.ConstantTimeCompare([]byte(cand.AccessHash), []byte(hash)) == 1 {
+		if !cand.Revoked && subtle.ConstantTimeCompare([]byte(cand.AccessHash), []byte(hash)) == 1 {
 			g = cand
 		}
 		return nil
@@ -722,10 +791,14 @@ func (m *Manager) GetOAuthGrantByAccessHash(hash string) (*OAuthGrant, error) {
 }
 
 // RotateOAuthRefresh is the refresh-token exchange, in one transaction. The
-// caller has already verified the token's MAC; storage sees hashes only.
+// caller has already verified the token's MAC; storage sees hashes only. That
+// MAC must bind the grant id AND the secret: storage cannot tell an old
+// authentic secret from a forged one, so any non-current secret presented for a
+// live grant revokes it as a replay.
 //
 //   - unknown, revoked or lapsed grant: RefreshInvalid, nothing written, the
 //     lifetime is not extended;
+//   - an empty presented hash: RefreshInvalid, nothing written (never a replay);
 //   - presented hash equals the current one (constant time): rotate;
 //   - anything else: the grant is revoked with reason "replay".
 func (m *Manager) RotateOAuthRefresh(grantID, presentedSecretHash, newRefreshHash, newRefreshPrefix, newAccessHash string, now time.Time, accessTTL, refreshTTL time.Duration) (RefreshOutcome, OAuthGrant, error) {
@@ -738,7 +811,7 @@ func (m *Manager) RotateOAuthRefresh(grantID, presentedSecretHash, newRefreshHas
 	live := false
 	if err := m.db.db.View(func(tx *bbolt.Tx) error {
 		g, err := getOAuthGrantTx(tx, grantID)
-		live = err == nil && g != nil && !g.Revoked && g.RefreshExpiresAt.After(now)
+		live = err == nil && presentedSecretHash != "" && g != nil && !g.Revoked && g.RefreshExpiresAt.After(now)
 		return err
 	}); err != nil {
 		return RefreshInvalid, OAuthGrant{}, err
@@ -830,6 +903,32 @@ func (m *Manager) TouchOAuthGrant(id string, lastUsedAt time.Time, observedName 
 	})
 }
 
+// deadGrantsTx lists the grants past the retention window and the registration
+// and client ids still referenced by a surviving grant.
+func deadGrantsTx(tx *bbolt.Tx, now time.Time) (dead []OAuthGrant, survivingReg, survivingClient map[string]bool, err error) {
+	survivingReg, survivingClient = map[string]bool{}, map[string]bool{}
+	err = oauthForEach(tx, OAuthGrantsBucket, func(_ string, g OAuthGrant) error {
+		var since time.Time
+		if g.Revoked {
+			if g.RevokedAt != nil {
+				since = *g.RevokedAt
+			} else {
+				since = g.ApprovedAt
+			}
+		} else if !g.RefreshExpiresAt.After(now) {
+			since = g.RefreshExpiresAt
+		}
+		if !since.IsZero() && now.Sub(since) > OAuthDeadGrantRetention {
+			dead = append(dead, g)
+			return nil
+		}
+		survivingReg[g.RegistrationID] = true
+		survivingClient[g.Client] = true
+		return nil
+	})
+	return dead, survivingReg, survivingClient, err
+}
+
 // SweepOAuthGrants deletes grants that were revoked, or whose refresh token
 // lapsed, more than 30 days ago. A registration whose last grant record goes
 // is deleted with it, and so is the binding entry of a client whose last grant
@@ -837,34 +936,25 @@ func (m *Manager) TouchOAuthGrant(id string, lastUsedAt time.Time, observedName 
 func (m *Manager) SweepOAuthGrants(now time.Time) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// View first: with nothing to delete no write transaction is opened.
+	any := false
+	if err := m.db.db.View(func(tx *bbolt.Tx) error {
+		dead, _, _, err := deadGrantsTx(tx, now)
+		any = len(dead) > 0
+		return err
+	}); err != nil || !any {
+		return 0, err
+	}
+
 	deleted := 0
 	err := m.db.db.Update(func(tx *bbolt.Tx) error {
 		gb := tx.Bucket([]byte(OAuthGrantsBucket))
 		if gb == nil {
 			return nil
 		}
-		var dead []OAuthGrant
-		survivingReg := map[string]bool{}
-		survivingClient := map[string]bool{}
-		if err := oauthForEach(tx, OAuthGrantsBucket, func(_ string, g OAuthGrant) error {
-			var since time.Time
-			if g.Revoked {
-				if g.RevokedAt != nil {
-					since = *g.RevokedAt
-				} else {
-					since = g.ApprovedAt
-				}
-			} else if !g.RefreshExpiresAt.After(now) {
-				since = g.RefreshExpiresAt
-			}
-			if !since.IsZero() && now.Sub(since) > OAuthDeadGrantRetention {
-				dead = append(dead, g)
-				return nil
-			}
-			survivingReg[g.RegistrationID] = true
-			survivingClient[g.Client] = true
-			return nil
-		}); err != nil {
+		dead, survivingReg, survivingClient, err := deadGrantsTx(tx, now)
+		if err != nil {
 			return err
 		}
 		for _, g := range dead {

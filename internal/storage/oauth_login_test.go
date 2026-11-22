@@ -103,7 +103,7 @@ func TestOAuthLoginLazyBuckets(t *testing.T) {
 	assert.Empty(t, regs)
 	_, err = m.GetOAuthGrant("x")
 	assert.ErrorIs(t, err, ErrOAuthGrantNotFound)
-	_, err = m.GetOAuthGrantByAccessHash("h")
+	_, err = m.getOAuthGrantByAccessHash("h")
 	assert.ErrorIs(t, err, ErrOAuthGrantNotFound)
 	gs, err := m.ListOAuthGrants()
 	require.NoError(t, err)
@@ -138,7 +138,7 @@ func TestOAuthLoginLazyBuckets(t *testing.T) {
 	assert.ErrorIs(t, err, ErrOAuthGrantNotFound)
 	assert.ErrorIs(t, m.TouchOAuthGrant("g", now, ""), ErrOAuthGrantNotFound)
 	assert.ErrorIs(t, m.MarkOAuthRegistrationAuthorized("r", now), ErrOAuthRegistrationGone)
-	rep, err := m.RepairOAuthClientBindings()
+	rep, _, err := m.RepairOAuthClientBindings()
 	require.NoError(t, err)
 	assert.Empty(t, rep)
 	_, err = m.ForgetClient("cursor")
@@ -269,7 +269,7 @@ func TestCommitOAuthLogin_NewClient(t *testing.T) {
 	assert.Equal(t, auth.ProfileModeLocked, b.ProfileMode)
 	assert.Equal(t, "Custom", b.DisplayName)
 
-	byHash, err := m.GetOAuthGrantByAccessHash("ah-grant1")
+	byHash, err := m.getOAuthGrantByAccessHash("ah-grant1")
 	require.NoError(t, err)
 	assert.Equal(t, "grant1", byHash.GrantID)
 
@@ -438,7 +438,7 @@ func TestCommitOAuthLogin_ReplaceGrant(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, old.Revoked)
 	assert.Equal(t, OAuthRevokeReplaced, old.RevokeReason)
-	_, err = m.GetOAuthGrantByAccessHash("ah-old1")
+	_, err = m.getOAuthGrantByAccessHash("ah-old1")
 	assert.ErrorIs(t, err, ErrOAuthGrantNotFound, "a revoked grant leaves the access index")
 
 	// A grant of ANOTHER client is ignored.
@@ -468,9 +468,9 @@ func TestRotateOAuthRefresh(t *testing.T) {
 		assert.Equal(t, "ah2", g.AccessHash)
 		assert.WithinDuration(t, later.Add(15*time.Minute), g.AccessExpiresAt, time.Second)
 		assert.WithinDuration(t, later.Add(30*24*time.Hour), g.RefreshExpiresAt, time.Second)
-		_, err = m.GetOAuthGrantByAccessHash("ah-grant1")
+		_, err = m.getOAuthGrantByAccessHash("ah-grant1")
 		assert.ErrorIs(t, err, ErrOAuthGrantNotFound, "the old access token is gone")
-		byNew, err := m.GetOAuthGrantByAccessHash("ah2")
+		byNew, err := m.getOAuthGrantByAccessHash("ah2")
 		require.NoError(t, err)
 		assert.Equal(t, "grant1", byNew.GrantID)
 	})
@@ -481,7 +481,7 @@ func TestRotateOAuthRefresh(t *testing.T) {
 		assert.Equal(t, RefreshReplay, out)
 		assert.True(t, g.Revoked)
 		assert.Equal(t, OAuthRevokeReplay, g.RevokeReason)
-		_, err = m.GetOAuthGrantByAccessHash("ah2")
+		_, err = m.getOAuthGrantByAccessHash("ah2")
 		assert.ErrorIs(t, err, ErrOAuthGrantNotFound)
 	})
 
@@ -547,7 +547,7 @@ func TestRevokeTouchOAuthGrant(t *testing.T) {
 	assert.False(t, changed)
 	g, _ = m.GetOAuthGrant("grant1")
 	assert.Equal(t, OAuthRevokeAdmin, g.RevokeReason, "the first reason stays")
-	_, err = m.GetOAuthGrantByAccessHash("ah-grant1")
+	_, err = m.getOAuthGrantByAccessHash("ah-grant1")
 	assert.ErrorIs(t, err, ErrOAuthGrantNotFound)
 }
 

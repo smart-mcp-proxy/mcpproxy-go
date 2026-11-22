@@ -23,6 +23,17 @@ func bindingRevision(clientID, pin, mode string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
+// validateClientBinding: mode is locked or switchable, and locked needs a pin.
+func validateClientBinding(pin, mode string) error {
+	if mode != auth.ProfileModeLocked && mode != auth.ProfileModeSwitchable {
+		return fmt.Errorf("invalid profile mode %q", mode)
+	}
+	if mode == auth.ProfileModeLocked && pin == "" {
+		return fmt.Errorf("a locked client binding requires a non-empty profile")
+	}
+	return nil
+}
+
 // writeClientBindingTx writes (pin, mode) on the client's API-key record when
 // there is one AND on its oauth_client_bindings entry when there is one, and
 // fails with ErrClientCredentialNotFound only when NEITHER exists. It never
@@ -36,6 +47,10 @@ func writeClientBindingTx(tx *bbolt.Tx, clientID, pin, mode string) error {
 // the API-key record's PriorProfile* snapshot in the same write (a binding
 // change makes the mint-time snapshot stale).
 func writeClientBindingOptsTx(tx *bbolt.Tx, clientID, pin, mode string, clearPrior bool) error {
+	// Validate before ANY write so neither copy can be left half-updated.
+	if err := validateClientBinding(pin, mode); err != nil {
+		return err
+	}
 	found := false
 	hash, tok, err := findClientTokenRecordLocked(tx, clientID)
 	if err != nil {
@@ -75,13 +90,13 @@ func writeClientBindingOptsTx(tx *bbolt.Tx, clientID, pin, mode string, clearPri
 // RepairOAuthClientBindings makes every client that has both an API-key record
 // and an oauth_client_bindings entry agree, taking the API-key record as the
 // truth. It returns the ids it repaired (the caller logs them).
-func (m *Manager) RepairOAuthClientBindings() (repaired []string, err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	err = m.db.db.Update(func(tx *bbolt.Tx) error {
-		repaired = nil
-		var todo []struct{ id, pin, mode string }
-		if err := oauthForEach(tx, OAuthClientBindingsBucket, func(id string, b OAuthClientBinding) error {
+//
+// An API-key binding that is itself invalid (unknown mode, locked without a
+// pin) is NOT copied: that client is skipped and returned in `skipped`.
+func (m *Manager) RepairOAuthClientBindings() (repaired, skipped []string, err error) {
+	type fix struct{ id, pin, mode string }
+	collect := func(tx *bbolt.Tx) (todo []fix, skip []string, err error) {
+		err = oauthForEach(tx, OAuthClientBindingsBucket, func(id string, b OAuthClientBinding) error {
 			_, tok, err := findClientTokenRecordLocked(tx, id)
 			if err != nil {
 				return err
@@ -89,13 +104,42 @@ func (m *Manager) RepairOAuthClientBindings() (repaired []string, err error) {
 			if tok == nil || tok.Kind != auth.KindClient {
 				return nil
 			}
-			if tok.ProfilePin != b.ProfilePin || tok.ProfileMode != b.ProfileMode {
-				todo = append(todo, struct{ id, pin, mode string }{id, tok.ProfilePin, tok.ProfileMode})
+			if tok.ProfilePin == b.ProfilePin && tok.ProfileMode == b.ProfileMode {
+				return nil
 			}
+			if validateClientBinding(tok.ProfilePin, tok.ProfileMode) != nil {
+				skip = append(skip, id)
+				return nil
+			}
+			todo = append(todo, fix{id, tok.ProfilePin, tok.ProfileMode})
 			return nil
-		}); err != nil {
+		})
+		return todo, skip, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// View first: with nothing to repair no write transaction is opened.
+	var skip []string
+	needWrite := false
+	if err := m.db.db.View(func(tx *bbolt.Tx) error {
+		todo, s, err := collect(tx)
+		needWrite, skip = len(todo) > 0, s
+		return err
+	}); err != nil {
+		return nil, nil, err
+	}
+	if !needWrite {
+		return nil, skip, nil
+	}
+	err = m.db.db.Update(func(tx *bbolt.Tx) error {
+		repaired = nil
+		todo, s, err := collect(tx)
+		if err != nil {
 			return err
 		}
+		skip = s
 		for _, r := range todo {
 			if err := writeClientBindingTx(tx, r.id, r.pin, r.mode); err != nil {
 				return err
@@ -105,9 +149,9 @@ func (m *Manager) RepairOAuthClientBindings() (repaired []string, err error) {
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return repaired, nil
+	return repaired, skip, nil
 }
 
 // forgetClientLoginsTx deletes every grant record of the client with its

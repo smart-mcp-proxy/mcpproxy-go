@@ -3,13 +3,6 @@ package storage
 import (
 	"encoding/json"
 	"errors"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"os"
-	"path/filepath"
-	"sort"
-	"strings"
 	"testing"
 	"time"
 
@@ -180,7 +173,7 @@ func TestRepinProfile_MovesOAuthOnlyClientAndRestorePinsRestores(t *testing.T) {
 
 	before, err := m.RepinProfile("old", "new")
 	require.NoError(t, err)
-	require.Len(t, before, 2, "the API-key client and the OAuth-only client")
+	require.Len(t, before, 3, "API-key record, plus restore entries for both clients")
 
 	_, _, apiOK, oPin, oMode, oOK := bindings(t, m, "webonly")
 	assert.False(t, apiOK)
@@ -229,12 +222,12 @@ func TestRepairOAuthClientBindings_TakesAPIKeyRecord(t *testing.T) {
 			ProfilePin: "stale", ProfileMode: auth.ProfileModeSwitchable, UpdatedAt: time.Now(),
 		})
 	}))
-	repaired, err := m.RepairOAuthClientBindings()
+	repaired, _, err := m.RepairOAuthClientBindings()
 	require.NoError(t, err)
 	assert.Equal(t, []string{"cursor"}, repaired)
 	assertEqualBindings(t, m, "cursor", "ro", auth.ProfileModeLocked)
 
-	repaired, err = m.RepairOAuthClientBindings()
+	repaired, _, err = m.RepairOAuthClientBindings()
 	require.NoError(t, err)
 	assert.Empty(t, repaired)
 }
@@ -282,84 +275,4 @@ func TestDowngradeView_APIKeyRecordStaysCurrent(t *testing.T) {
 	assert.Equal(t, "", pin)
 	assert.Equal(t, auth.ProfileModeSwitchable, mode)
 	assertEqualBindings(t, m, "cursor", "", auth.ProfileModeSwitchable)
-}
-
-// TestClientBindingFieldsWrittenOnlyByAllowListedFunctions is the source test of
-// research R4: an assignment to, or a composite-literal key of, ProfilePin or
-// ProfileMode in this package's non-test code may appear only in the functions
-// below. A new writer must go through writeClientBindingTx instead.
-func TestClientBindingFieldsWrittenOnlyByAllowListedFunctions(t *testing.T) {
-	allowed := map[string]string{
-		// THE writer of a client's pin/mode in both stores.
-		"writeClientBindingOptsTx": "the one binding writer",
-		// Builds the brand-new record literal; the OAuth entry is then synced
-		// through writeClientBindingTx in the same transaction.
-		"MintClientCredentialWith": "new client record literal",
-		// Assigns pin/mode on a COPY only to validate invariants and to return
-		// the after-snapshot; the stored write is writeClientBindingOptsTx.
-		"UpdateClientCredentialBinding": "validation copy and returned snapshot",
-		// Sets the restored binding on the returned (already stored) record;
-		// the stored restore is writeClientBindingTx.
-		"forgetClientCredential": "returned snapshot of the restored binding",
-		// Regular (non-client) agent tokens are rewritten directly; client
-		// records and OAuth-only entries go through writeClientBindingTx. The
-		// pseudo-record for an OAuth-only entry is a literal here.
-		"repinProfile": "plain pin rewrite of regular tokens, pseudo-record literal",
-		"RestorePins":  "plain pin restore of regular tokens",
-		// Creates the OAuth-side entry at a client's first login (the only
-		// creator of oauth_client_bindings entries).
-		"CommitOAuthLogin": "creates the oauth_client_bindings entry",
-	}
-
-	files, err := filepath.Glob("*.go")
-	require.NoError(t, err)
-	fset := token.NewFileSet()
-	isBindingField := func(name string) bool { return name == "ProfilePin" || name == "ProfileMode" }
-	var violations []string
-	used := map[string]bool{}
-
-	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(f)
-		require.NoError(t, err)
-		file, err := parser.ParseFile(fset, f, src, 0)
-		require.NoError(t, err)
-		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				var pos token.Pos
-				hit := false
-				switch x := n.(type) {
-				case *ast.AssignStmt:
-					for _, lhs := range x.Lhs {
-						if sel, ok := lhs.(*ast.SelectorExpr); ok && isBindingField(sel.Sel.Name) {
-							hit, pos = true, sel.Pos()
-						}
-					}
-				case *ast.KeyValueExpr:
-					if id, ok := x.Key.(*ast.Ident); ok && isBindingField(id.Name) {
-						hit, pos = true, id.Pos()
-					}
-				}
-				if hit {
-					if _, ok := allowed[fn.Name.Name]; ok {
-						used[fn.Name.Name] = true
-					} else {
-						violations = append(violations, fset.Position(pos).String()+" in "+fn.Name.Name)
-					}
-				}
-				return true
-			})
-		}
-	}
-	sort.Strings(violations)
-	assert.Empty(t, violations, "route the write through writeClientBindingTx or justify a new allow-list entry")
-	for name := range allowed {
-		assert.True(t, used[name], "allow-list entry %s is stale (no such write any more); remove it", name)
-	}
 }

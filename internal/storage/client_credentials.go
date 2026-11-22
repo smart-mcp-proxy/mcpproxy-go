@@ -288,7 +288,7 @@ func (m *Manager) UpdateClientCredentialBinding(clientID, pin, mode string) (bef
 		// snapshot; the stored write is the one binding writer, which also
 		// keeps the client's OAuth entry equal.
 		if err := writeClientBindingOptsTx(tx, clientID, pin, mode, true); err != nil {
-			return fmt.Errorf("failed to store client binding: %w", err)
+			return err
 		}
 		before, after = &snapshot, &updated
 		return nil
