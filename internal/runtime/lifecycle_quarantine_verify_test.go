@@ -241,7 +241,9 @@ func approvedRT05Server() *mcpserver.StreamableHTTPServer {
 // approved contract. The notification must not be dropped by the in-progress
 // dedup: the in-flight owner runs one follow-up verification that sees the
 // armed contract. Periodic discovery skips quarantined servers, so nothing
-// else would. Deterministic: one outer trigger, one notification, no polling.
+// else would. One notification is delivered from the hook; the follow-up's
+// effect is awaited with Eventually, because the outer call is not guaranteed
+// to be the discovery owner (#1984).
 func TestRT05_ListChangedDuringInFlightVerification_IsFollowedUp(t *testing.T) {
 	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
 	mcpSrv := mcpserver.NewMCPServer("stage", "0.0.1", mcpserver.WithToolCapabilities(true))
@@ -274,15 +276,21 @@ func TestRT05_ListChangedDuringInFlightVerification_IsFollowedUp(t *testing.T) {
 	// at once — it must be coalesced, not dropped.
 	var notified atomic.Int32
 	var coalescedReturned atomic.Bool
+	var hookBusy atomic.Bool
+	var hookErr atomic.Value
 	rt.quarantinedCaptureBeforePersist = func() {
 		if !notified.CompareAndSwap(0, 1) {
 			return
 		}
 		mcpSrv.DeleteTools("calendar_get_events")
 		mcpSrv.AddTool(mcp.NewTool("calendar_get_events", mcp.WithDescription("armed definition")), handler)
+		// The hook may run on a background goroutine: record results, assert
+		// in the test goroutine.
 		_, busy := rt.discoveryInProgress.Load("quarantined")
-		require.True(t, busy, "the notification must race an in-flight verification")
-		require.NoError(t, rt.onUpstreamToolsListChanged(context.Background(), "quarantined"))
+		hookBusy.Store(busy)
+		if err := rt.onUpstreamToolsListChanged(context.Background(), "quarantined"); err != nil {
+			hookErr.Store(err.Error())
+		}
 		coalescedReturned.Store(true)
 	}
 
@@ -290,6 +298,8 @@ func TestRT05_ListChangedDuringInFlightVerification_IsFollowedUp(t *testing.T) {
 	require.Eventually(t, coalescedReturned.Load, 10*time.Second, 20*time.Millisecond,
 		"the single notification was delivered during the in-flight verification")
 	assert.Equal(t, int32(1), notified.Load())
+	assert.True(t, hookBusy.Load(), "the notification must race an in-flight verification")
+	assert.Nil(t, hookErr.Load(), "the notification handler returned an error")
 
 	// The outer call is not guaranteed to be the discovery owner: a background
 	// pass (sweep or reconnect) may hold the marker when it runs, in which case
