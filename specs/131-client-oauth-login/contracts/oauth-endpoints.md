@@ -76,6 +76,10 @@ Every redirect (these two and the error redirects above) is built by parsing the
 
 Form-encoded, at most 16 KiB. Answers carry `Cache-Control: no-store`.
 
+The origin of the token request must equal the issuer stored with the code or the grant. This is checked first, for both grant types: on a mismatch the answer is `invalid_grant` and nothing is consumed, rotated or revoked.
+
+The authorization-code exchange is where the login is stored (data-model, research R15). If the client's binding changed since approval, or the binding guard now refuses it, the answer is `invalid_grant` and nothing is stored.
+
 **`grant_type=authorization_code`**: `code`, `redirect_uri`, `client_id`, `code_verifier`, `resource` (optional; if present must equal the approved one).
 
 **`grant_type=refresh_token`**: `refresh_token`, `client_id`, `resource` (optional, same rule).
@@ -91,6 +95,8 @@ Errors (`400` JSON `{error, error_description}`):
 | Case | `error` | Side effect |
 |---|---|---|
 | unknown, expired or already used code; wrong verifier, client or redirect URI | `invalid_grant` | a code reused within 10 minutes revokes the grant it produced |
+| request origin differs from the stored issuer | `invalid_grant` | none |
+| binding changed or guard refuses at exchange | `invalid_grant` | none; `deny` activity row |
 | refresh token malformed, bad MAC, unknown, revoked or expired grant, wrong `client_id` | `invalid_grant` | **none**; all indistinguishable; an expired login is never extended |
 | authentic refresh token that is not the current one | `invalid_grant` | grant revoked (`replay`) |
 | `resource` differs from the approved one | `invalid_target` | none |

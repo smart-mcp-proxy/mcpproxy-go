@@ -1,6 +1,6 @@
 # Contract: administrator surfaces
 
-All REST routes are under `/api/v1`, use the standard `{success, data}` envelope, require administrator credentials (admin API key or tray socket) and answer `403` to agent tokens and client credentials. With the feature off the sign-in request routes answer `404 feature_disabled`. Client payloads depend on whether the feature was ever used: never used → exactly today's payload, no new fields; used → logins are still listed and `browser_login_disabled` is `true`. Revoking a login works in both on and off-after-use states.
+All REST routes are under `/api/v1`, use the standard `{success, data}` envelope, require administrator credentials (admin API key or tray socket) and answer `403` to agent tokens and client credentials. With the feature off the sign-in request routes answer `404 feature_disabled`. Client payloads depend on whether the feature was ever used: never used → exactly today's payload, no new fields; used → the new fields are present and logins are listed. `browser_login_disabled` reflects only whether the feature is off right now: `false` while on, `true` while off after use. Revoking a login works in both on and off-after-use states.
 
 ## Sign-in requests
 
@@ -29,13 +29,27 @@ Pending requests, newest first: `[{id, client_label, created_at, expires_at}]`. 
   "profiles": [ { "name": "dev-readonly" } ],
   "profile_required": true,               // profiles exist and the client has no binding
   "previous_login": { "grant_id": "…", "approved_at": "…" }, // same registration signed in before
-  "guard": null                           // or { "code": "binding_bypassable_without_auth", "bindings": [...], "fixes": [...] }
+  "guard": null                           // only when the address fixes a client that has a binding; else absent, use preview
 }
 ```
 
 `404` for an unknown, expired, decided or cancelled id (one uniform answer).
 
+### `POST /oauth/authorizations/{id}/preview`
+
+Read-only. Body: the same `client`, `profile`, `mode` as approve. Answer:
+
+```jsonc
+{ "complete": true,
+  "access": { "client": "cursor", "profile": "dev-readonly", "mode": "locked", "same_access_as_existing_client": true },
+  "guard": null }   // or { "code": "binding_bypassable_without_auth", "bindings": [...], "fixes": [...] }
+```
+
+`complete: false` (and no verdict) while a required choice is missing. Same `422` codes as approve for an invalid choice. Writes nothing.
+
 ### `POST /oauth/authorizations/{id}/approve`
+
+Records the decision and issues the code. The login itself is stored when the client exchanges the code.
 
 ```jsonc
 {

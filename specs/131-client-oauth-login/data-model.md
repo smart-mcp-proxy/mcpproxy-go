@@ -24,6 +24,7 @@ Lifecycle: `pending` rows are deleted 15 minutes after creation, `authorized` (r
 | `grant_id` | string | 22 random base62 chars |
 | `registration_id` | string | the `client_id` above |
 | `client` | string | Clients hub client id; passes `auth.ValidClientID` |
+| `redirect_uri` | string | the registered redirect URI actually used; `redirect_host` in listings comes from it |
 | `resource` | string | full URI approved, immutable |
 | `issuer` | string | origin approved, immutable |
 | `refresh_hash`, `refresh_prefix` | string | HMAC-SHA256 of the current refresh secret; first 12 chars of the token |
@@ -38,6 +39,8 @@ Lifecycle: `pending` rows are deleted 15 minutes after creation, `authorized` (r
 
 Sub-bucket `by_access_hash`: `access_hash → grant_id`.
 
+A grant is created at the token exchange, not at approval (research R15).
+
 State: `live` (not revoked, `refresh_expires_at` in the future) → `lapsed` (refresh expired) or `revoked`. Neither comes back. A lapsed or revoked grant is kept for display for 30 days, then deleted.
 
 ## Client binding for browser logins — bucket `oauth_client_bindings`, key client id
@@ -51,7 +54,7 @@ State: `live` (not revoked, `refresh_expires_at` in the future) → `lapsed` (re
 
 Invariants:
 
-- Exists exactly for clients that have at least one grant record.
+- Exists exactly for clients that have at least one grant record; it is created in the transaction that stores the client's first grant.
 - If the client also has an API-key record, `profile_pin` and `profile_mode` equal that record's `ProfilePin` and `ProfileMode`. One storage function writes both in one transaction. On startup a mismatch is repaired from the API-key record and logged.
 - **Binding revision**: `sha256(client | pin | mode)` truncated, computed on read; the consent page sends back the revision it displayed.
 
@@ -67,13 +70,14 @@ RFC 3339 time of the first stored grant. Written in the same transaction as that
 | `registration_id`, `redirect_uri`, `state`, `code_challenge` | validated at `/oauth/authorize`; stored verbatim |
 | `resource`, `issuer`, `path_client` | `path_client` is the client id from the resource path, empty for the generic address |
 | `status` | `pending` → `approved` \| `denied` \| `expired` \| `cancelled`; one transition, compare-and-set |
+| `decision` | set on approval: client (existing or new), profile, mode, binding revision seen, replace choice, approving actor |
 | `expires_at` | created + 10 minutes |
 
 At most 20 pending requests; a new one beyond that is refused with `temporarily_unavailable`.
 
 ## Authorization code — memory only
 
-`code` (32 random bytes, stored hashed), bound to request id, registration, redirect URI, challenge, resource, issuer, chosen client and the decision. Single use, 60 seconds. Consuming it and storing the grant is one step; the entry then stays as a tombstone `{consumed_at, grant_id}` for 10 minutes. A second presentation within that time revokes that grant (`replay`); after it, the code is simply unknown.
+`code` (32 random bytes, stored hashed), bound to request id, registration, redirect URI, challenge, resource, issuer, chosen client and the decision. Single use, 60 seconds. Consuming it, re-checking revision and guard, and storing the grant and any new binding is one step (research R15); the entry then stays as a tombstone `{consumed_at, grant_id}` for 10 minutes. A second presentation within that time revokes that grant (`replay`); after it, the code is simply unknown.
 
 ## Relationships
 
