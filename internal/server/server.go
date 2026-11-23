@@ -122,6 +122,9 @@ type Server struct {
 	// mcp_reject_query_apikey warning, so a client retrying in a loop logs
 	// once per queryAPIKeyRejectLogInterval, not once per request.
 	queryAPIKeyRejectLogged atomic.Int64
+	// oauthLoginEverUsed reports whether browser login was ever used on this
+	// install (Spec 132). nil means never; tests inject it.
+	oauthLoginEverUsed func() bool
 	// createAfterConfigRead is a Spec 116 test seam (nil in production): it
 	// runs in the create path after the runtime configuration was read and
 	// before the new server is published.
@@ -3751,7 +3754,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	selectiveProtectedWebUIHandler := s.createSelectiveWebUIProtectedHandler(http.StripPrefix("/ui", webUIHandler))
 	mux.Handle("/ui/", selectiveProtectedWebUIHandler)
 	// Redirect root to web UI
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	rootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
 			http.Redirect(w, r, "/ui/", http.StatusFound)
 			return
@@ -3765,6 +3768,10 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		}
 		http.NotFound(w, r)
 	})
+	mux.Handle("/", rootHandler)
+	// Spec 132: opt-in browser login. Behaves exactly like the handlers above
+	// until mcp_oauth_enabled is switched on (or the feature has been used).
+	s.registerOAuthLoginRoutes(mux, mcpHandler, rootHandler)
 	s.logger.Info("Registered Web UI endpoints", zap.Strings("ui_endpoints", []string{"/ui/", "/"}))
 
 	// Determine actual TCP address for logging

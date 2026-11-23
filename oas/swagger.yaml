@@ -295,6 +295,13 @@ components:
             inline-response ceiling from 50k to up to 500k chars. Omit the key for
             the 500000 default; set it to 0 to disable the annotation.
           type: integer
+        mcp_oauth_enabled:
+          description: |-
+            MCPOAuthEnabled turns on browser login (OAuth 2.1 + PKCE) for MCP
+            clients on the loopback listener (Spec 132). Experimental, default false:
+            with it off nothing changes. Env override MCPPROXY_MCP_OAUTH_ENABLED is
+            process-only and never persisted. Live, no restart needed.
+          type: boolean
         mcp_reject_query_apikey:
           description: |-
             MCPRejectQueryAPIKey makes every MCP endpoint (/mcp*) refuse a request that

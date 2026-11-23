@@ -937,6 +937,20 @@ func applyTLSEnvOverrides(cfg *Config) {
 	}
 	envOverride(b, cfg, FieldForwardClientHeaders, fwd != nil, fwd)
 
+	// Spec 132: MCPPROXY_MCP_OAUTH_ENABLED switches browser login on or off for
+	// this process. Only the documented vocabulary overrides; a typo leaves the
+	// file value.
+	var mcpOAuth *bool
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvMCPOAuthEnabled))) {
+	case trueValue, "1":
+		on := true
+		mcpOAuth = &on
+	case falseValue, "0":
+		off := false
+		mcpOAuth = &off
+	}
+	envOverride(b, cfg, FieldMCPOAuthEnabled, mcpOAuth != nil, derefBool(mcpOAuth))
+
 	// Override trusted hosts for reverse-proxy deployments (GH #898).
 	// Comma-separated list of Host header values accepted on loopback listeners.
 	var hosts []string
@@ -1109,3 +1123,5 @@ func envNonNegativeDuration(name, want string) (bool, *Duration) {
 	dur := Duration(d)
 	return true, &dur
 }
+
+func derefBool(p *bool) bool { return p != nil && *p }
