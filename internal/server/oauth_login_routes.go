@@ -41,6 +41,18 @@ func peerIsLoopback(r *http.Request) bool {
 	return ap.Addr().Unmap().IsLoopback()
 }
 
+// hasProxyHeaders reports whether the request carries a header a reverse
+// proxy or tunnel adds. A proxy on the same host presents as a loopback peer,
+// so such a request is not a local one and the OAuth routes answer 404.
+func hasProxyHeaders(r *http.Request) bool {
+	for _, h := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Real-IP"} {
+		if _, ok := r.Header[http.CanonicalHeaderKey(h)]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // oauthLoginEverUsedNow reports whether browser login has ever been used on
 // this install: the storage marker `oauth_login_ever_used`, read through the
 // service (only a positive answer is cached; a read never writes). It is
@@ -73,7 +85,7 @@ func (s *Server) oauthLoginGate(prev, served http.Handler) http.Handler {
 			prev.ServeHTTP(w, r)
 			return
 		}
-		if !peerIsLoopback(r) || !httpx.IsLoopbackHost(r.Host) || !oauthLoginEditionSupported {
+		if !peerIsLoopback(r) || !httpx.IsLoopbackHost(r.Host) || !oauthLoginEditionSupported || hasProxyHeaders(r) {
 			http.NotFound(w, r)
 			return
 		}

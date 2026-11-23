@@ -156,6 +156,24 @@ func (s *OAuthLoginService) Authenticate(accessToken, origin, path string, now t
 	return ac, grant, nil
 }
 
+// GrantLive reports whether the login grantID still authenticates the access
+// token that expires at accessExpiresAt: the feature is on, the grant exists
+// (a forgotten client's grants are gone), is not revoked, its refresh lifetime
+// has not run out and its access token is the one that was authenticated (a
+// refresh rotates it). A plain storage read that takes no runtime lock; any
+// read error answers false (fail closed).
+func (s *OAuthLoginService) GrantLive(grantID string, accessExpiresAt time.Time) bool {
+	if !s.Enabled() {
+		return false
+	}
+	g, err := s.store.GetOAuthGrant(grantID)
+	if err != nil || g == nil || g.Revoked {
+		return false
+	}
+	now := s.now()
+	return g.AccessExpiresAt.Equal(accessExpiresAt) && g.AccessExpiresAt.After(now) && g.RefreshExpiresAt.After(now)
+}
+
 // touchInterval bounds how often a grant's last-used stamp is rewritten.
 const touchInterval = time.Minute
 

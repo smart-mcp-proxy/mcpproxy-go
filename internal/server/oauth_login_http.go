@@ -1,9 +1,12 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"html"
+	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -137,6 +140,30 @@ func oauthErrorPage(w http.ResponseWriter, status int, title, detail string) {
 		html.EscapeString(title) + "</h1><p>" + html.EscapeString(detail) + "</p></body></html>"))
 }
 
+// oauthMediaType reports whether the request's Content-Type is want (a media
+// type; parameters such as charset are allowed).
+func oauthMediaType(r *http.Request, want string) bool {
+	mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return err == nil && mt == want
+}
+
+// oauthCrossSite refuses (403, and reports true) a state-changing public
+// request that a web page in the administrator's browser sent to the loopback
+// address: an Origin that is not this request's own origin, or
+// Sec-Fetch-Site: cross-site. Native clients send neither header. It is not
+// applied to the authorize GET, which is a top-level browser navigation.
+func oauthCrossSite(w http.ResponseWriter, r *http.Request) bool {
+	if o := r.Header.Get("Origin"); o != "" && o != mcplogin.Origin(r) {
+		oauthJSONError(w, http.StatusForbidden, "access_denied", "cross-origin requests are not accepted")
+		return true
+	}
+	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		oauthJSONError(w, http.StatusForbidden, "access_denied", "cross-site requests are not accepted")
+		return true
+	}
+	return false
+}
+
 // --- metadata --------------------------------------------------------------------
 
 func (s *Server) oauthASMetadata(w http.ResponseWriter, r *http.Request) {
@@ -171,13 +198,29 @@ func (s *Server) oauthRegister(w http.ResponseWriter, r *http.Request, svc *runt
 		oauthMethodNotAllowed(w, "POST")
 		return
 	}
-	if !s.oauthAllow(w, r, mcplogin.EndpointRegister, false) {
+	if oauthCrossSite(w, r) || !s.oauthAllow(w, r, mcplogin.EndpointRegister, false) {
+		return
+	}
+	if !oauthMediaType(r, "application/json") {
+		oauthJSONError(w, http.StatusUnsupportedMediaType, "invalid_request", "the body must be application/json")
 		return
 	}
 	var req mcplogin.RegistrationRequest
 	body := http.MaxBytesReader(w, r.Body, mcplogin.MaxBodyBytes)
 	dec := json.NewDecoder(body)
-	if err := dec.Decode(&req); err != nil {
+	err := dec.Decode(&req)
+	if err == nil {
+		// Exactly one JSON value: whatever follows it (a second value, or
+		// padding that pushes the body past the limit) is refused.
+		var extra json.RawMessage
+		if err = dec.Decode(&extra); errors.Is(err, io.EOF) {
+			err = nil
+		} else if err == nil {
+			oauthJSONError(w, http.StatusBadRequest, mcplogin.ErrCodeInvalidClientMetadata, "the body must be a single JSON object")
+			return
+		}
+	}
+	if err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
 			oauthJSONError(w, http.StatusRequestEntityTooLarge, mcplogin.ErrCodeInvalidClientMetadata, "the request is too large")
@@ -247,7 +290,7 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request, svc *runtime
 		oauthMethodNotAllowed(w, "POST")
 		return
 	}
-	if !s.oauthAllow(w, r, mcplogin.EndpointToken, false) {
+	if oauthCrossSite(w, r) || !s.oauthAllow(w, r, mcplogin.EndpointToken, false) {
 		return
 	}
 	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(strings.ToLower(ct), "application/x-www-form-urlencoded") {
@@ -339,6 +382,12 @@ func (s *Server) oauthResourceAuth(next http.Handler) http.Handler {
 			return
 		}
 		svc.Touch(grant.GrantID, "")
-		mcpRequestMiddlewares(next).ServeHTTP(w, r.WithContext(auth.WithAuthContext(r.Context(), ac)))
+		// The request (an SSE stream can live for hours) ends when the login is
+		// revoked, its client forgotten, the feature switched off, its tokens
+		// rotated or its access token expires.
+		ctx, cancel := context.WithCancel(auth.WithAuthContext(r.Context(), ac))
+		release := s.trackOAuthRequest(grant.GrantID, grant.AccessExpiresAt, cancel)
+		defer release()
+		mcpRequestMiddlewares(next).ServeHTTP(w, r.WithContext(ctx))
 	})
 }

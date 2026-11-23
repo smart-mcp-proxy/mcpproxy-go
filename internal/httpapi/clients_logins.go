@@ -65,15 +65,21 @@ func (s *Server) decorateBrowserLogins(rows []clientPresence, cfg *config.Config
 	if err != nil {
 		return nil, err
 	}
-	used := false
+	// Used = the runtime decorated the views (it does so only once the feature
+	// was used); the flag is the same install-wide value on every view.
+	var disabled *bool
 	for i := range views {
-		if views[i].Credentials != nil {
-			used = true
+		if views[i].BrowserLoginDisabled != nil {
+			disabled = views[i].BrowserLoginDisabled
 			break
 		}
 	}
-	if !used {
-		return rows, nil
+	if disabled == nil {
+		if len(views) > 0 || !s.browserLoginUsed() {
+			return rows, nil
+		}
+		off := !s.oauthLoginService.Enabled()
+		disabled = &off
 	}
 	titleOf := func(name string) string {
 		if cfg != nil {
@@ -119,13 +125,17 @@ func (s *Server) decorateBrowserLogins(rows []clientPresence, cfg *config.Config
 	sort.Strings(ids)
 
 	for i := range rows {
+		// Every row carries both fields once the feature was used.
+		empty := []ClientCredential{}
+		rows[i].Credentials = &empty
+		rows[i].BrowserLoginDisabled = disabled
 		vi, ok := byID[rows[i].ID]
 		if !ok {
 			continue
 		}
 		v := &views[vi]
-		rows[i].Credentials = clientCredentials(v.Credentials)
-		rows[i].BrowserLoginDisabled = v.BrowserLoginDisabled
+		creds := clientCredentials(v.Credentials)
+		rows[i].Credentials = &creds
 		if rows[i].TokenName == "" {
 			// No API-key record: the binding the row shows is the browser login's.
 			rows[i].Profile, rows[i].ProfileMode = v.Profile, v.Mode
@@ -139,6 +149,7 @@ func (s *Server) decorateBrowserLogins(rows []clientPresence, cfg *config.Config
 			continue
 		}
 		v := &views[byID[id]]
+		creds := clientCredentials(v.Credentials)
 		name := v.DisplayName
 		if name == "" {
 			name = id
@@ -148,8 +159,14 @@ func (s *Server) decorateBrowserLogins(rows []clientPresence, cfg *config.Config
 			CredentialState: profile.CredentialStateNone,
 			Profile:         v.Profile, ProfileMode: v.Mode, ProfileTitle: titleOf(v.Profile),
 			ProfileMissing: profileMissing(v.Profile), ProfileSource: source(v.Mode),
-			Credentials: clientCredentials(v.Credentials), BrowserLoginDisabled: v.BrowserLoginDisabled,
+			Credentials: &creds, BrowserLoginDisabled: disabled,
 		})
 	}
 	return rows, nil
+}
+
+// browserLoginUsed reports whether browser login was ever used (fail closed on
+// an unreadable marker).
+func (s *Server) browserLoginUsed() bool {
+	return s.oauthLoginService != nil && s.oauthLoginService.EverUsed()
 }

@@ -199,7 +199,8 @@ func (s *OAuthLoginService) Enabled() bool {
 }
 
 // EverUsed reports whether a browser login was ever stored. Only a positive
-// answer is cached: the marker is never cleared, a negative one can change.
+// answer is cached: the marker is never cleared, a negative one can change. A
+// storage read error answers true (fail closed, never cached).
 func (s *OAuthLoginService) EverUsed() bool {
 	s.everMu.Lock()
 	defer s.everMu.Unlock()
@@ -208,8 +209,10 @@ func (s *OAuthLoginService) EverUsed() bool {
 	}
 	used, err := s.store.OAuthLoginEverUsed()
 	if err != nil {
-		s.logger.Warn("cannot read the browser-login marker", zap.Error(err))
-		return false
+		// Fail closed: an unreadable marker is read as "used", so a used and
+		// switched-off install never falls back to the previous behaviour.
+		s.logger.Warn("cannot read the browser-login marker; treating the feature as used", zap.Error(err))
+		return true
 	}
 	s.everUsed = used
 	return used

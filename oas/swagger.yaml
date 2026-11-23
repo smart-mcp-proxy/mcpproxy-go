@@ -5587,6 +5587,9 @@ components:
             Spec 132: the client's credentials (API key and browser logins) and
             whether browser login is off right now. Both exist only once browser
             login was used on this install; until then a row is exactly what it was.
+
+            Credentials is a pointer so that once the feature was used a row with no
+            credential serialises "credentials": [] instead of omitting the field.
           items:
             $ref: '#/components/schemas/httpapi.ClientCredential'
           type: array

@@ -298,6 +298,14 @@ func TestOAuthLoginREST_ClientCredentialsPayloadAndRevokes(t *testing.T) {
 	assert.Equal(t, "cursor ide", login["reported_name"])
 	assert.Contains(t, login, "name_mismatch")
 	assert.Equal(t, false, row["browser_login_disabled"])
+	// Once the feature was used EVERY row carries both fields, an empty list as [].
+	for _, c := range dataOf(t, w)["clients"].([]interface{}) {
+		m := c.(map[string]interface{})
+		_, has := m["credentials"]
+		assert.True(t, has, "row %v lacks credentials", m["id"])
+		assert.Contains(t, m, "browser_login_disabled", "row %v", m["id"])
+	}
+	assert.Equal(t, []interface{}{}, findRowByID(t, w, "windsurf")["credentials"])
 	assert.Len(t, login["prefix"], 12, "only the display prefix of a token appears in a client payload")
 	grantID := login["grant_id"].(string)
 
@@ -307,6 +315,7 @@ func TestOAuthLoginREST_ClientCredentialsPayloadAndRevokes(t *testing.T) {
 	row = findRow(w)
 	assert.Equal(t, true, row["browser_login_disabled"])
 	assert.Len(t, row["credentials"].([]interface{}), 2)
+	assert.Equal(t, true, findRowByID(t, w, "windsurf")["browser_login_disabled"], "the flag is install-wide")
 
 	w = h.call(http.MethodDelete, "/api/v1/clients/cursor/logins/"+grantID, "", bindingAdminKey)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -352,4 +361,36 @@ func TestOAuthLoginREST_OAuthOnlyClientRow(t *testing.T) {
 	assert.Equal(t, "ro", found["profile"])
 	assert.Equal(t, "locked", found["profile_mode"])
 	assert.Len(t, found["credentials"].([]interface{}), 1)
+}
+
+func findRowByID(t *testing.T, w *httptest.ResponseRecorder, id string) map[string]interface{} {
+	t.Helper()
+	for _, c := range dataOf(t, w)["clients"].([]interface{}) {
+		if m := c.(map[string]interface{}); m["id"] == id {
+			return m
+		}
+	}
+	t.Fatalf("%s row missing", id)
+	return nil
+}
+
+// An mcp_oat_ access token is valid on its MCP address only: on the REST API it
+// gets the client-credential 403 once the feature is on or was used, and the
+// previous answer (unknown token, 401) while it is off and never used.
+func TestOAuthLoginREST_AccessTokenRefusedOnREST(t *testing.T) {
+	const oat = "mcp_oat_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	status := func(h *oauthHarness, hdr, val string) int {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/status", http.NoBody)
+		req.Header.Set(hdr, val)
+		w := httptest.NewRecorder()
+		h.srv.ServeHTTP(w, req)
+		return w.Code
+	}
+	on := newOAuthHarness(t, true)
+	assert.Equal(t, http.StatusForbidden, status(on, "Authorization", "Bearer "+oat))
+	assert.Equal(t, http.StatusForbidden, status(on, "Authorization", "Bearer  "+oat), "extra whitespace is the same token")
+	assert.Equal(t, http.StatusForbidden, status(on, "X-API-Key", oat))
+	off := newOAuthHarness(t, false)
+	assert.Equal(t, http.StatusUnauthorized, status(off, "Authorization", "Bearer "+oat), "off and never used: unchanged")
+	assert.Equal(t, http.StatusUnauthorized, status(off, "X-API-Key", oat))
 }

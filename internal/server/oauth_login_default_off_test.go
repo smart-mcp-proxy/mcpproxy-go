@@ -114,7 +114,8 @@ func TestOAuthLogin_DefaultOff_RoutesUnchanged(t *testing.T) {
 		"garbage": {"Authorization": "Bearer garbage-token"},
 		// An access-token-shaped credential is just an unknown token while the
 		// feature is off and never used (Spec 132 FR-002).
-		"oat": {"Authorization": "Bearer mcp_oat_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+		"oat":    {"Authorization": "Bearer mcp_oat_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+		"oat-ws": {"Authorization": "Bearer  mcp_oat_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
 	}
 	for _, requireAuth := range []bool{false, true} {
 		srv := newOAuthLoginTestServer(t, func(c *config.Config) { c.RequireMCPAuth = requireAuth })

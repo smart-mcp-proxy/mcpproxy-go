@@ -72,8 +72,11 @@ type clientPresence struct {
 	// Spec 132: the client's credentials (API key and browser logins) and
 	// whether browser login is off right now. Both exist only once browser
 	// login was used on this install; until then a row is exactly what it was.
-	Credentials          []ClientCredential `json:"credentials,omitempty"`
-	BrowserLoginDisabled *bool              `json:"browser_login_disabled,omitempty"`
+	//
+	// Credentials is a pointer so that once the feature was used a row with no
+	// credential serialises "credentials": [] instead of omitting the field.
+	Credentials          *[]ClientCredential `json:"credentials,omitempty"`
+	BrowserLoginDisabled *bool               `json:"browser_login_disabled,omitempty"`
 
 	// resolvedCredential is the classification of the on-demand config read of a
 	// detail request; never serialised.

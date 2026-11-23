@@ -30,6 +30,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/launch"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/mcplogin"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
@@ -682,6 +683,10 @@ func (s *Server) authenticateWithPrecedence(w http.ResponseWriter, r *http.Reque
 // sources never resolve a session principal (only Authorization: Bearer and
 // the cookie do).
 func (s *Server) authenticateExplicitToken(w http.ResponseWriter, r *http.Request, next http.Handler, cfg *config.Config, token string) {
+	if token != "" && s.isLiveOAuthAccessToken(token) {
+		s.rejectClientCredentialOnREST(w, r)
+		return
+	}
 	if token != "" && strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
 		s.rejectClientCredentialOnREST(w, r)
 		return
@@ -712,6 +717,10 @@ func (s *Server) authenticateExplicitToken(w http.ResponseWriter, r *http.Reques
 func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next http.Handler, cfg *config.Config, authHeader string) {
 	token := bearerToken(authHeader)
 
+	if token != "" && s.isLiveOAuthAccessToken(token) {
+		s.rejectClientCredentialOnREST(w, r)
+		return
+	}
 	if token != "" && strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
 		s.rejectClientCredentialOnREST(w, r)
 		return
@@ -739,6 +748,18 @@ func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next
 		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 		zap.String("remote_addr", r.RemoteAddr))
 	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
+}
+
+// isLiveOAuthAccessToken reports whether token is a browser-login access token
+// (mcp_oat_) while browser login is on or was used (Spec 132): like a client
+// credential it is valid on MCP endpoints only. With the feature off and never
+// used the prefix means nothing and the request is handled as before.
+func (s *Server) isLiveOAuthAccessToken(token string) bool {
+	if !strings.HasPrefix(strings.TrimSpace(token), mcplogin.AccessTokenPrefix) {
+		return false
+	}
+	svc := s.oauthLoginService
+	return svc != nil && (svc.Enabled() || svc.EverUsed())
 }
 
 // rejectClientCredentialOnREST is the FR-023 refusal: a Spec 108-c client

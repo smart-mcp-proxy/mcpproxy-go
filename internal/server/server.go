@@ -128,6 +128,10 @@ type Server struct {
 	oauthLoginEverUsed func() bool
 	// oauthLimiter rate limits the public browser-login endpoints (Spec 132);
 	// built on first use so a default-off install never allocates it.
+	// oauthStreams tracks authenticated browser-login requests so a revoke or
+	// a switch-off ends what is already open (oauth_login_streams.go); nil
+	// until the first one.
+	oauthStreams     atomic.Pointer[oauthStreamRegistry]
 	oauthLimiterOnce sync.Once
 	oauthLimiter     *mcplogin.Limiter
 	// createAfterConfigRead is a Spec 116 test seam (nil in production): it
@@ -689,7 +693,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 		// /mcp/oauth address (audience binding). Anywhere else it is refused,
 		// also with require_mcp_auth off, but only while the feature is on or
 		// was used: with it off and never used every answer is the previous one.
-		if mcplogin.IsAccessToken(token) && s.oauthLoginLive() {
+		if mcplogin.IsAccessToken(strings.TrimSpace(token)) && s.oauthLoginLive() {
 			http.Error(w, `{"error":"This token is not valid for this endpoint."}`, http.StatusUnauthorized)
 			return
 		}
