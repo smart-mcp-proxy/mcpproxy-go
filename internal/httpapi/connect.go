@@ -204,8 +204,14 @@ func (s *Server) handleConnectClientPreview(w http.ResponseWriter, r *http.Reque
 	// Honor an optional server_name so a caller can preview the exact entry name
 	// a subsequent POST connect (which accepts server_name) will write; defaults
 	// to "mcpproxy" when omitted, matching Connect (Spec 078 FR-002).
-	s.reconcileClient(r, clientID)
-	preview, err := svc.PreviewWithIntent(clientID, r.URL.Query().Get("server_name"), previewIntent(r))
+	// A browser-login request never touches the client's API key: its choice is
+	// validated first and the key-rotation reconcile is skipped for it (a refused
+	// one falls through to PreviewWithIntent, which answers the refusal).
+	intent := previewIntent(r)
+	if oauth, authErr := svc.CheckAuth(clientID, intent); authErr == nil && !oauth {
+		s.reconcileClient(r, clientID)
+	}
+	preview, err := svc.PreviewWithIntent(clientID, r.URL.Query().Get("server_name"), intent)
 	if err != nil {
 		if s.writeCredentialFailure(w, r, clientID, err) {
 			return
@@ -279,7 +285,10 @@ func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.reconcileClient(r, clientID)
+	// See the preview: a browser-login write never reconciles a key rotation.
+	if oauth, authErr := svc.CheckAuth(clientID, connect.CredentialIntent{Auth: req.Auth, Keyless: req.Keyless, Profile: req.Profile, Mode: req.Mode}); authErr == nil && !oauth {
+		s.reconcileClient(r, clientID)
+	}
 	actor := actorFromRequest(r)
 	result, err := svc.ConnectWithOptions(clientID, req.ServerName, connect.ConnectOptions{
 		Force:             req.Force,

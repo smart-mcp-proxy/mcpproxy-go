@@ -3623,6 +3623,10 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 			WithMCPOAuthEnabled(func() bool {
 				c := s.runtime.Config()
 				return c != nil && c.MCPOAuthEnabled
+			}).
+			WithTLSEnabled(func() bool {
+				c := s.runtime.Config()
+				return c != nil && c.TLS != nil && c.TLS.Enabled
 			})
 		// Spec 108 FR-024: connect never writes the admin API key. Every write
 		// embeds a per-client `mcp_cli_` credential minted by the runtime's

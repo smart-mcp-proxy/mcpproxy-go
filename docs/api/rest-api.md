@@ -1423,8 +1423,8 @@ would use.
 `?auth=oauth` previews the browser-login entry (Spec 132): `auth: "oauth"`, no `credential`,
 `auth_note`, and `browser_login_available`; the same refusals as the write answer `400`. The
 `precondition_token` binds the choice. `GET /api/v1/connect` and `GET /api/v1/connect/{client}`
-carry `supports_browser_login` (the client passed a real-client check) and
-`browser_login_available` (and the feature is on in this edition); the per-client read adds
+carry `supports_browser_login` and `browser_login_available` (the client passed a real-client
+check and the feature is available: on, personal edition, loopback or wildcard listener); the per-client read adds
 `auth: "oauth"` when the entry holds the sign-in address. All three are omitted when false.
 
 Spec 091 adds three response fields:

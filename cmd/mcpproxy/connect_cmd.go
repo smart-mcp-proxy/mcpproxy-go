@@ -104,7 +104,8 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	}
 
 	svc := connect.NewService(cfg.Listen, cfg.APIKey).WithRequireMCPAuth(cfg.RequireMCPAuth).
-		WithMCPOAuthEnabled(func() bool { return cfg.MCPOAuthEnabled })
+		WithMCPOAuthEnabled(func() bool { return cfg.MCPOAuthEnabled }).
+		WithTLSEnabled(func() bool { return cfg.TLS != nil && cfg.TLS.Enabled })
 
 	format := clioutput.ResolveFormat(globalOutputFormat, globalJSONOutput)
 	formatter, err := clioutput.NewFormatter(format)

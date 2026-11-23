@@ -324,7 +324,7 @@
                 :data-test="`client-preview-confirm-${client.id}`"
                 @click="confirmConnect(client.id)"
                 class="btn btn-primary btn-xs"
-                :disabled="loading.clients[client.id] || previewRefreshing[client.id] || previewStale[client.id] || previews[client.id]!.access_state === 'malformed'"
+                :disabled="loading.clients[client.id] || previewLoading[client.id] || previewRefreshing[client.id] || previewStale[client.id] || previews[client.id]!.access_state === 'malformed'"
               >
                 <span v-if="loading.clients[client.id]" class="loading loading-spinner loading-xs"></span>
                 <span v-else>Connect</span>
@@ -954,9 +954,18 @@ async function startConnect(clientId: string) {
   const ticket = (previewTickets[clientId] = (previewTickets[clientId] ?? 0) + 1)
   setRefreshing(clientId, false)
   setStale(clientId, false)
+  // Restarting a row sends the form back to its defaults. A preview shown for
+  // another sign-in choice (the browser) is dropped at once, because its token
+  // binds that choice and the form no longer says so; a key preview stays up,
+  // disabled, until the new one arrives (confirmConnect also refuses it).
+  if (forms[clientId]?.auth === 'oauth') {
+    const nextPreviews = { ...previews.value }
+    delete nextPreviews[clientId]
+    previews.value = nextPreviews
+  }
+  delete forms[clientId]
   // The row's current binding lives in the clients store; make sure it is there.
   if (!clientsStore.clients.some(c => c.id === clientId)) await clientsStore.refreshPresence()
-  delete forms[clientId]
   try {
     const response = await fetchPreview(clientId, intentFor(clientId))
     if (ticket !== previewTickets[clientId]) return
@@ -1004,6 +1013,11 @@ function clearPreview(clientId: string) {
 // implies force=true (the user saw the overwrite warning in the preview).
 async function confirmConnect(clientId: string) {
   const preview = previews.value[clientId]
+  // Only a settled preview for the choice on screen may be written: never one
+  // that is being replaced, failed to refresh, or was fetched for another
+  // sign-in choice (its token binds that choice).
+  if (!preview || previewLoading[clientId] || previewRefreshing.value[clientId] || previewStale.value[clientId]) return
+  if ((preview.auth === 'oauth') !== (formFor(clientId).auth === 'oauth')) return
   const force = preview?.entry_exists === true
   bulkBackups.value = []
   copiedBulkClient.value = null

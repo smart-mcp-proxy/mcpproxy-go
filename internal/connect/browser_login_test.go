@@ -35,16 +35,13 @@ func TestSupportsBrowserLogin_OnlyClaudeCode(t *testing.T) {
 	}
 	svc, _ := testService(t)
 	for _, st := range svc.GetAllStatus() {
-		if st.SupportsBrowserLogin != (st.ID == "claude-code") {
-			t.Errorf("status %s: SupportsBrowserLogin=%v", st.ID, st.SupportsBrowserLogin)
-		}
-		if st.BrowserLoginAvailable {
+		if st.SupportsBrowserLogin || st.BrowserLoginAvailable {
 			t.Errorf("status %s: available while the feature is off", st.ID)
 		}
 	}
 	oauthOn(svc)
 	for _, st := range svc.GetAllStatus() {
-		if st.BrowserLoginAvailable != (st.ID == "claude-code") {
+		if st.SupportsBrowserLogin != (st.ID == "claude-code") || st.BrowserLoginAvailable != (st.ID == "claude-code") {
 			t.Errorf("status %s: BrowserLoginAvailable=%v with the feature on", st.ID, st.BrowserLoginAvailable)
 		}
 	}

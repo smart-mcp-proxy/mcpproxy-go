@@ -201,8 +201,11 @@ access is chosen on the consent page.
 What Connect does with `--auth oauth` (REST `auth: "oauth"`, preview `?auth=oauth`):
 
 - It is **refused**, with nothing written, while `mcp_oauth_enabled` is off, for a client that
-  is not in the table, in the server edition, and together with `--profile`, `--lock`,
+  is not in the table, in the server edition, when the core listens on a specific non-loopback
+  address (browser login is loopback only), and together with `--profile`, `--lock`,
   `--switchable` or `--keyless`.
+- The address follows the listener: `https://` when `tls.enabled` is on, and `127.0.0.1` when the
+  core listens on a wildcard (`0.0.0.0`, `[::]`, `:8080`). What the API-key path writes is unchanged.
 - The preview and the result carry `auth: "oauth"`, no credential and no masked value. The
   preview token binds the choice, so a key write cannot ride an oauth preview.
 - **Reconnecting replaces the one entry, it never adds a second.** Key to browser and
@@ -215,9 +218,10 @@ What Connect does with `--auth oauth` (REST `auth: "oauth"`, preview `?auth=oaut
   `mcpproxy client revoke-login <id> <grant-id>`).
 - Disconnect, Undo and the status read recognise an entry written this way. Undo of an oauth
   connect restores the earlier config and revokes nothing, since the connect minted nothing.
-- `GET /api/v1/connect` and `GET /api/v1/connect/{client}` report `supports_browser_login`
-  (the client is in the table) and `browser_login_available` (it is in the table **and** the
-  feature is on in this edition). A status read of a client whose entry holds the address
+- `GET /api/v1/connect` and `GET /api/v1/connect/{client}` report `supports_browser_login` and
+  `browser_login_available` (the client is in the table **and** the feature is on, this is the
+  personal edition and the listener is loopback or a wildcard). Both fields are absent otherwise,
+  so with the feature off the payloads are exactly what they were. A status read of a client whose entry holds the address
   reports `auth: "oauth"`.
 
 ### Clients checked so far

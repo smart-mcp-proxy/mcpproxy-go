@@ -152,6 +152,33 @@ final class ConnectBrowserLoginTests: XCTestCase {
         XCTAssertEqual(model.authChoice, .key)
     }
 
+    /// Reselecting the client while its next preview is still in flight: the old
+    /// browser preview is gone at once and no Connect control exists for it.
+    func testReselectingDuringAPreviewLeavesNothingConfirmable() async {
+        let source = FakeConnectSource()
+        let model = await selected(source, available: true)
+        source.previewResults = [.success(oauthPreview())]
+        model.chooseAuth(.oauth)
+        await model.refreshPreview()
+        XCTAssertTrue(model.connectControlExists)
+
+        var duringExists = true
+        var duringChoice = ConnectClientModel.AuthChoice.oauth
+        source.duringPreview = { _ in
+            await MainActor.run {
+                duringExists = model.connectControlExists
+                duringChoice = model.authChoice
+            }
+        }
+        source.previewResults = [.success(FakeConnectSource.preview())]
+        await model.select("claude-code")
+        XCTAssertFalse(duringExists, "no Connect control while the new preview is loading")
+        XCTAssertEqual(duringChoice, .key)
+        await model.connect()
+        XCTAssertEqual(source.connectBindings.last, .unspecified, "the key write carries the key preview's token only")
+        XCTAssertEqual(source.connectCalls.last?.preconditionToken, "tok")
+    }
+
     func testBindingControlsCannotOverrideTheBrowserChoice() async {
         let model = await selected(FakeConnectSource(), available: true)
         model.chooseAuth(.oauth)

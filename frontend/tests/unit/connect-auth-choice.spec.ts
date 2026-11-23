@@ -227,6 +227,37 @@ describe('Connect screen: choice of how the client signs in (Spec 132 PR-3)', ()
       expect((wrapper.get('[data-test="client-preview-confirm-claude-code"]').element as HTMLButtonElement).disabled).toBe(true)
     })
 
+    it('reopening a row after choosing the browser drops the old preview and cannot confirm it', async () => {
+      const wrapper = await open()
+      await startClaude(wrapper)
+      ;(api.getConnectPreview as any).mockResolvedValue(oauthPreview())
+      await wrapper.get('[data-test="connect-auth-oauth-claude-code"]').setValue(true)
+      await flushPromises()
+      expect(wrapper.find('[data-test="client-preview-confirm-claude-code"]').exists()).toBe(true)
+
+      // click the row again; the key preview is still in flight
+      let resolveKey: (v: unknown) => void = () => {}
+      ;(api.getConnectPreview as any).mockReturnValue(new Promise(resolve => { resolveKey = resolve }))
+      await wrapper.get('[data-test="connect-claude-code"]').trigger('click')
+      await flushPromises()
+      // nothing of the old OAuth preview is left to confirm
+      const confirm = wrapper.find('[data-test="client-preview-confirm-claude-code"]')
+      expect(confirm.exists() && !(confirm.element as HTMLButtonElement).disabled).toBe(false)
+      expect(wrapper.find('[data-test="client-preview-entry-claude-code"]').exists()).toBe(false)
+      if (confirm.exists()) await confirm.trigger('click')
+      await flushPromises()
+      expect(api.connectClient).not.toHaveBeenCalled()
+
+      // the key preview arrives: the form is on "API key" and sends its own token
+      resolveKey(preview())
+      await flushPromises()
+      expect((wrapper.get('[data-test="connect-auth-key-claude-code"]').element as HTMLInputElement).checked).toBe(true)
+      await wrapper.get('[data-test="client-preview-confirm-claude-code"]').trigger('click')
+      await flushPromises()
+      expect(api.connectClient).toHaveBeenCalledTimes(1)
+      expect(api.connectClient).toHaveBeenCalledWith('claude-code', 'mcpproxy', false, { precondition_token: 'pre-key' })
+    })
+
     it('a fresh Connect starts on "API key" again', async () => {
       const wrapper = await open()
       await startClaude(wrapper)

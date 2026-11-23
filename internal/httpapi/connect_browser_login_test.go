@@ -119,7 +119,7 @@ func TestConnectREST_ListCarriesSupportsBrowserLogin(t *testing.T) {
 		require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 		seen := 0
 		for _, c := range resp.Data {
-			assert.Equal(t, c.ID == "claude-code", c.SupportsBrowserLogin, c.ID)
+			assert.Equal(t, on && c.ID == "claude-code", c.SupportsBrowserLogin, c.ID)
 			assert.Equal(t, on && c.ID == "claude-code", c.BrowserLoginAvailable, c.ID)
 			seen++
 		}

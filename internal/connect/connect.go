@@ -154,7 +154,10 @@ type ClientStatus struct {
 
 	// SupportsBrowserLogin is true for a client that passed a real-client check
 	// of the browser login flow and may be given the per-client sign-in address
-	// (Spec 132). A registry property: it does not depend on the feature switch.
+	// (Spec 132). It is emitted only while browser login is available (feature
+	// on, personal edition, loopback listener), so a feature-off payload is
+	// exactly what it was before; the registry fact itself stays internal
+	// (ClientDef.SupportsBrowserLogin).
 	SupportsBrowserLogin bool `json:"supports_browser_login,omitempty" yaml:"supports_browser_login,omitempty"`
 	// BrowserLoginAvailable is true when Connect would accept auth=oauth for this
 	// client right now: SupportsBrowserLogin, mcp_oauth_enabled on, personal
@@ -220,6 +223,7 @@ type Service struct {
 	// mcpOAuthEnabled reports the live mcp_oauth_enabled switch (Spec 132). Nil
 	// counts as off, so a service nobody wired never offers browser login.
 	mcpOAuthEnabled func() bool
+	tlsEnabled      func() bool
 }
 
 // WithRequireMCPAuth sets whether the /mcp endpoint requires authentication,
@@ -443,7 +447,7 @@ func (s *Service) GetAllStatus() []ClientStatus {
 			AccessState:  accessUnknown,
 			ProxyURL:     proxyURL,
 
-			SupportsBrowserLogin:  c.SupportsBrowserLogin,
+			SupportsBrowserLogin:  s.browserLoginAvailable(&c),
 			BrowserLoginAvailable: s.browserLoginAvailable(&c),
 		}
 
@@ -496,7 +500,7 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 		AccessState:  accessUnknown,
 		ProxyURL:     s.baseURL(),
 
-		SupportsBrowserLogin:  c.SupportsBrowserLogin,
+		SupportsBrowserLogin:  s.browserLoginAvailable(c),
 		BrowserLoginAvailable: s.browserLoginAvailable(c),
 	}
 
@@ -1584,7 +1588,7 @@ func findEquivalentJSONServerName(serversMap map[string]interface{}, baseURL, re
 			if !ok {
 				continue
 			}
-			if urlPointsHere(entryURL, baseURL) {
+			if entryURL == baseURL || strings.HasPrefix(entryURL, baseURL+"?") {
 				return name, true
 			}
 		}
@@ -1657,7 +1661,7 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLoc
 		// Check various URL fields used by different clients
 		for _, field := range []string{"url", "serverUrl", "httpUrl"} {
 			if u, ok := entry[field].(string); ok {
-				if urlPointsHere(u, baseURL) {
+				if s.urlPointsHere(u, baseURL) {
 					return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}, true, true
 				}
 			}
@@ -1922,7 +1926,7 @@ func (s *Service) findEntryTOMLBytes(raw []byte) (loc entryLocation, found, pars
 			continue
 		}
 		if u, ok := entry["url"].(string); ok {
-			if urlPointsHere(u, baseURL) {
+			if s.urlPointsHere(u, baseURL) {
 				return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}, true, true
 			}
 		}

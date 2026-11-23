@@ -267,6 +267,7 @@ func newOfflineConnectBackend(cfg *config.Config) (*offlineConnectBackend, error
 	svc := connect.NewService(cfg.Listen, cfg.APIKey).
 		WithRequireMCPAuth(config.EffectiveRequireMCPAuth(cfg)).
 		WithMCPOAuthEnabled(func() bool { return cfg.MCPOAuthEnabled }).
+		WithTLSEnabled(func() bool { return cfg.TLS != nil && cfg.TLS.Enabled }).
 		WithCredentialMinter(clients.ConnectMinter())
 	clients.SetConfigReader(svc)
 	return &offlineConnectBackend{sm: sm, svc: svc, clients: clients}, nil
@@ -279,7 +280,11 @@ func (o *offlineConnectBackend) connect(clientID, serverName string, force bool,
 	// secret may already be in the client config) before staging another one,
 	// which would silently replace it. Best effort: an unreadable config keeps
 	// both secrets, exactly as the daemon's reconciler does.
-	_ = o.clients.ReconcileClient(context.Background(), clientID)
+	// A browser-login connect never touches the client's API key, so it skips
+	// the reconcile (and a refused one has not even been allowed to start one).
+	if oauth, authErr := o.svc.CheckAuth(clientID, intent); authErr == nil && !oauth {
+		_ = o.clients.ReconcileClient(context.Background(), clientID)
+	}
 	return o.svc.ConnectWithOptions(clientID, serverName, connect.ConnectOptions{Force: force, Intent: intent})
 }
 

@@ -3,6 +3,7 @@ package connect
 import (
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 )
 
@@ -34,6 +35,7 @@ var (
 	ErrBrowserLoginDisabled = errors.New("browser login is off: set mcp_oauth_enabled to true (or MCPPROXY_MCP_OAUTH_ENABLED=true) first")
 	ErrBrowserLoginKeyless  = errors.New("auth oauth cannot be combined with keyless: a browser login has no config credential to leave out")
 	ErrBrowserLoginProfile  = errors.New("auth oauth cannot carry a profile or mode: the access is chosen on the consent page")
+	ErrBrowserLoginListen   = errors.New("browser login is served on loopback only, but this instance listens on a non-loopback address: use the API key, or listen on 127.0.0.1")
 )
 
 // WithMCPOAuthEnabled installs the live accessor for mcp_oauth_enabled, so the
@@ -54,7 +56,11 @@ func (s *Service) browserLoginOn() bool {
 // client: the feature is on, this is the personal edition and the client passed
 // a real-client check.
 func (s *Service) browserLoginAvailable(c *ClientDef) bool {
-	return c != nil && c.Supported && c.SupportsBrowserLogin && s.browserLoginOn()
+	if c == nil || !c.Supported || !c.SupportsBrowserLogin || !s.browserLoginOn() {
+		return false
+	}
+	_, err := s.oauthEndpoint()
+	return err == nil
 }
 
 // planAuth validates the auth choice of an intent for a client and reports
@@ -99,6 +105,9 @@ func (s *Service) planAuthChoice(clientID string, intent CredentialIntent) (oaut
 		}
 		return false, fmt.Errorf("%s does not support browser login in MCPProxy yet (only clients with a recorded real-client check do); use the API key", name)
 	}
+	if _, err := s.oauthEndpoint(); err != nil {
+		return false, err
+	}
 	if intent.Keyless {
 		return false, ErrBrowserLoginKeyless
 	}
@@ -108,9 +117,39 @@ func (s *Service) planAuthChoice(clientID string, intent CredentialIntent) (oaut
 	return true, nil
 }
 
-// oauthURL is the per-client browser login address of this instance.
+// oauthEndpoint is the MCP endpoint a browser-login address hangs off, built
+// from the scheme the listener really speaks (tls.enabled) and a host a client
+// can dial: a wildcard listener (0.0.0.0, [::], ":port") is reached on
+// 127.0.0.1. Browser login is served to loopback only, so a listener bound to
+// a specific non-loopback address is refused. The key path keeps using baseURL.
+func (s *Service) oauthEndpoint() (string, error) {
+	addr, _, _ := s.resolveConfig()
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", ErrBrowserLoginListen
+	}
+	switch ip := net.ParseIP(strings.Trim(host, "[]")); {
+	case host == "" || (ip != nil && ip.IsUnspecified()):
+		host = "127.0.0.1"
+	case host == "localhost" || (ip != nil && ip.IsLoopback()):
+	default:
+		return "", ErrBrowserLoginListen
+	}
+	scheme := "http"
+	if s.tlsEnabled != nil && s.tlsEnabled() {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s/mcp", scheme, net.JoinHostPort(host, port)), nil
+}
+
+// oauthURL is the per-client browser login address of this instance. Only
+// called after planAuth accepted the listener.
 func (s *Service) oauthURL(clientID string) string {
-	return s.baseURL() + oauthPathSegment + "/" + clientID
+	base, err := s.oauthEndpoint()
+	if err != nil {
+		base = s.baseURL()
+	}
+	return base + oauthPathSegment + "/" + clientID
 }
 
 // entryParamsFor builds the entry parameters for a client: with oauth set the
@@ -126,11 +165,23 @@ func (s *Service) entryParamsFor(clientID string, oauth bool, credential string)
 // urlPointsHere reports whether a URL found in a client config addresses this
 // instance: the MCP endpoint itself (with or without a legacy ?apikey= query)
 // or one of its browser login addresses (`<base>/oauth`, `<base>/oauth/<id>`).
-func urlPointsHere(u, baseURL string) bool {
+func (s *Service) urlPointsHere(u, baseURL string) bool {
 	if u == baseURL || strings.HasPrefix(u, baseURL+"?") {
 		return true
 	}
-	return isOAuthAddress(u, baseURL)
+	return s.isOAuthURL(u)
+}
+
+// isOAuthURL reports whether u is a browser login address of this instance:
+// under the key-path endpoint, or under the dialable oauth endpoint.
+func (s *Service) isOAuthURL(u string) bool {
+	if isOAuthAddress(u, s.baseURL()) {
+		return true
+	}
+	if base, err := s.oauthEndpoint(); err == nil {
+		return isOAuthAddress(u, base)
+	}
+	return false
 }
 
 // isOAuthAddress reports whether u is a browser login address of the instance
@@ -146,9 +197,8 @@ func isOAuthAddress(u, baseURL string) bool {
 // entryIsOAuth reports whether a parsed client entry carries a browser login
 // address of this instance in one of the URL fields clients use.
 func (s *Service) entryIsOAuth(entry map[string]interface{}) bool {
-	base := s.baseURL()
 	for _, field := range []string{"url", "serverUrl", "httpUrl"} {
-		if u, ok := entry[field].(string); ok && isOAuthAddress(u, base) {
+		if u, ok := entry[field].(string); ok && s.isOAuthURL(u) {
 			return true
 		}
 	}
@@ -169,4 +219,22 @@ func displayClientName(id string) string {
 		return c.Name
 	}
 	return id
+}
+
+// WithTLSEnabled installs the live accessor for tls.enabled, so the browser
+// login address uses the scheme the listener really speaks.
+func (s *Service) WithTLSEnabled(fn func() bool) *Service {
+	s.tlsEnabled = fn
+	return s
+}
+
+// CheckAuth validates the auth choice of an intent for a client without
+// reading, writing or minting anything, and reports whether it is an oauth
+// one. Callers run it before any side effect (a key-rotation reconcile above
+// all): a browser-login request must never touch the client's API key.
+func (s *Service) CheckAuth(clientID string, intent CredentialIntent) (oauth bool, err error) {
+	if FindClient(clientID) == nil {
+		return false, nil // the connect or preview call reports the unknown client
+	}
+	return s.planAuth(clientID, intent)
 }
