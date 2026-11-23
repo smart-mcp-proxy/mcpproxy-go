@@ -117,7 +117,7 @@ func TestReadFileWithPolicy_RefusesHardlinkIntoLogs(t *testing.T) {
 	require.ErrorIs(t, err, ErrSecretFileDenied)
 }
 
-// The link-count rule is upstream-only: a proxy-scope read of a hardlinked
+// The link-count rule is upstream-only: a proxy-scope read of a hard-linked
 // file still works, and a plain upstream secret (one link) still works.
 func TestReadFileWithPolicy_LinkCountRuleScope(t *testing.T) {
 	root := t.TempDir()

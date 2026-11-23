@@ -363,7 +363,7 @@ upstream-scoped read refuses:
 
 Checks use the opened file’s identity (device and inode), so hardlinks, aliases,
 and a config file replaced by rename are refused — not only a literal path match.
-Secret files have no reason to be hardlinked: the link-count rule refuses a
+Secret files have no reason to be hard-linked: the link-count rule refuses a
 hardlink to any live proxy file, wherever it is under `<data-dir>`. Earlier
 config versions are remembered for the life of the process only; a hardlink to
 a version replaced by an earlier run is not recognised, so keep allowed

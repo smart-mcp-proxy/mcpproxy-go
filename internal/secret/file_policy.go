@@ -262,7 +262,7 @@ func readOpenedSecret(policy *FilePolicy, f *os.File, labelPath string) (string,
 	// have now; a link made to an earlier inode (SaveConfig renames a new file
 	// over mcp_config.json, the old inode still holds api_key) or to a file
 	// outside the listed state directories would pass it. Secret files have no
-	// reason to be hardlinked, so the link count closes the whole class.
+	// reason to be hard-linked, so the link count closes the whole class.
 	if policy != nil && policy.Scope == ScopeUpstream {
 		n, err := handleLinkCount(f, info)
 		if err != nil || n > 1 {
