@@ -41,13 +41,27 @@ Findings that matter for the design:
 
 ## Manual checklist (needs a human, not done)
 
-For each of Claude Code, Cursor, VS Code, MCP Inspector (web UI), with a scratch core (`MCPPROXY_MCP_OAUTH_ENABLED=true ./mcpproxy serve --listen 127.0.0.1:18080 --data-dir "$(mktemp -d)"`) and the client configured with `http://127.0.0.1:18080/mcp/oauth/<client-id>` (back up the client config first):
+For each of Claude Code, Cursor, VS Code, MCP Inspector (web UI), with an isolated scratch core (below) and the client configured with `http://127.0.0.1:18080/mcp/oauth/<client-id>` (back up the client config first):
 
 1. Start the client; does it show a sign-in step instead of failing on the 401?
 2. In the core log or with `GET /api/v1/oauth/authorizations`, note: name it registered (`reported_name`), redirect URI shape, whether `resource` was sent, and the metadata URLs it fetched in order.
 3. Approve with `POST /api/v1/oauth/authorizations/<id>/approve`; does the client finish and list tools?
-4. Leave it past access-token expiry (1 h) or revoke the access token path by restarting the client; does it refresh without a new browser step?
+4. Refresh: either leave the client past real access-token expiry (1 h), or invalidate only its cached access token (as `sdk-client.mjs` does) and keep the refresh token. Restarting the client proves nothing (it may reuse the stored access token). Pass only if the core log or a proxy shows a successful `POST /oauth/token` with `grant_type=refresh_token` (200), followed by a working request, with no new browser step.
 5. Revoke the login (`DELETE /api/v1/clients/<id>/logins/<grant_id>`); does the client prompt to sign in again?
 6. Record: accepts an `http://127.0.0.1` issuer (yes/no), follows per-client metadata (yes/no).
+
+Isolated scratch core (the same isolation as `scripts/test-client-oauth-e2e.sh`; never omit `--config`, a bare `--data-dir` can pick up a legacy `~/.mcpproxy/mcp_config.json` and save to it):
+
+```bash
+S="$(mktemp -d)"; mkdir -p "$S/data" "$S/home"
+cat > "$S/config.json" <<CONF
+{ "listen": "127.0.0.1:18080", "data_dir": "$S/data", "api_key": "scratch-key",
+  "enable_socket": false, "enable_web_ui": false, "mcpServers": [] }
+CONF
+# clear every MCPPROXY_*/MCPP_* override, then set only what this check needs
+env $(compgen -e | grep -E '^(MCPPROXY_|MCPP_)' | sed 's/^/-u /') \
+  HOME="$S/home" MCPPROXY_TELEMETRY=false MCPPROXY_MCP_OAUTH_ENABLED=true \
+  ./mcpproxy serve --config "$S/config.json" --data-dir "$S/data" --listen 127.0.0.1:18080
+```
 
 If none of the four accepts a plain-HTTP loopback issuer, stop before PR-2 (research R13 fallback: serve the OAuth endpoints only when local TLS is on).

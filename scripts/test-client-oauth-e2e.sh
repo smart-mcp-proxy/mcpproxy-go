@@ -257,6 +257,26 @@ else
 fi
 
 #############################################################################
+step "1b. on, register only, off again"
+# A registration alone persists a row but is not a stored login: the ever-used marker is set at
+# token exchange, so off must still behave as before (not 404).
+write_config true
+start_proxy true || { bad "core did not start"; tail -20 "$WORK/proxy.log"; exit 1; }
+register "Register only"
+eq "registration while on" 201 "$CODE"
+stop_proxy
+grep -a -q -F oauth_registrations "$DATA/config.db" && ok "registration row persisted" || bad "no registration row persisted"
+grep -a -q -F oauth_login_ever_used "$DATA/config.db" && bad "ever-used marker set by a registration alone" || ok "no ever-used marker after registration only"
+write_config false
+start_proxy false || { bad "core did not start"; tail -20 "$WORK/proxy.log"; exit 1; }
+req POST "$B/mcp/oauth/cursor" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d "$INIT"
+eq "off after registration only: OAuth MCP address keeps its previous behaviour (not 404)" 200 "$CODE"
+eq "...with no sign-in challenge" "" "$(hdr WWW-Authenticate)"
+req POST "$B/oauth/register" -H 'Content-Type: application/json' -d "{\"redirect_uris\":[\"$RU\"]}"
+eq "registration not served while off" 404 "$CODE"
+stop_proxy
+
+#############################################################################
 step "2. on: discovery"
 write_config true
 start_proxy true || { bad "core did not start"; tail -20 "$WORK/proxy.log"; exit 1; }
@@ -407,8 +427,14 @@ req POST "$B/mcp/oauth/cursor?apikey=$API_KEY" -H 'Content-Type: application/jso
 eq "?apikey= on the OAuth address" 401 "$CODE"
 req POST "$B/mcp/oauth/cursor" -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' -d "$INIT"
 eq "admin key as bearer on the OAuth address" 401 "$CODE"
-req POST "$B/mcp/oauth/cursor" -H "Authorization: Bearer mcp_oat_0000000000000000000000000000000000000000000" -H 'Content-Type: application/json' -d "$INIT"
-eq "forged access token" 401 "$CODE"
+# Real shape (mcp_oat_ + 43 base64url characters), wrong secret: the genuine token with its last character changed.
+case "$AT_C" in *A) FLIP=B ;; *) FLIP=A ;; esac
+FORGED_AT="${AT_C%?}$FLIP"
+eq "forged access token keeps the real shape (same length)" "${#AT_C}" "${#FORGED_AT}"
+req POST "$B/mcp/oauth/cursor" -H "Authorization: Bearer $FORGED_AT" -H 'Content-Type: application/json' -d "$INIT"
+eq "forged access token (right shape, wrong secret)" 401 "$CODE"
+mcp_post "$B/mcp/oauth/cursor" "$INIT" -H "Authorization: Bearer $AT_C"
+eq "the genuine access token still works after the forged one" 200 "$CODE"
 req POST "$B/mcp" -H "X-API-Key: $API_KEY" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d "$INIT"
 eq "API key on classic /mcp still works" 200 "$CODE"
 req POST "$B/mcp" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d "$INIT"
@@ -417,7 +443,11 @@ eq "classic /mcp without credentials refused (require_mcp_auth on)" 401 "$CODE"
 #############################################################################
 step "7. refresh, forged refresh token, replay"
 GID="${RT_C#mcp_ort_}"; GID="${GID%%_*}"
-FORGED="mcp_ort_${GID}_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+# Real shape, wrong MAC: the genuine token with its last (MAC) character changed, same length, so
+# it passes the shape check and is refused by MAC verification.
+case "$RT_C" in *A) FLIP=B ;; *) FLIP=A ;; esac
+FORGED="${RT_C%?}$FLIP"
+eq "forged refresh token keeps the real shape (same length)" "${#RT_C}" "${#FORGED}"
 refresh "$CID_A" "$FORGED" /mcp/oauth/cursor
 eq "forged refresh token (real grant id) refused" 400 "$CODE"
 has "forged is invalid_grant" "$BODY" "invalid_grant"

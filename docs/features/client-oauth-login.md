@@ -38,11 +38,11 @@ or `MCPPROXY_MCP_OAUTH_ENABLED=true` for one process (never persisted). The sett
 read live, so a config change needs no restart; the environment variable is read at start.
 
 With the setting off **and never used**, nothing changes: the OAuth paths behave as they did
-before, and no storage bucket is created. Once the feature has been on, records exist (a
-client registration is stored as soon as a client registers, before any login), so "off" then
-means the OAuth paths answer `404` and the records are kept (see [Turning it off](#turning-it-off)).
-`scripts/test-client-oauth-e2e.sh` checks the off-and-never-used case before it switches the
-feature on.
+before, and no storage bucket is created. A client registration is stored as soon as a client registers, but that does not change what
+"off" means. The boundary is the first stored **login** (an authorization code exchanged for
+tokens): from then on, off means the OAuth paths answer `404` and the records are kept (see
+[Turning it off](#turning-it-off)). `scripts/test-client-oauth-e2e.sh` checks off-and-never-used
+before it switches the feature on, and that "on, register only, off" still behaves as before.
 
 ## Addresses
 
