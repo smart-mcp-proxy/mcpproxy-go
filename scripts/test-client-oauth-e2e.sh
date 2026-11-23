@@ -5,7 +5,7 @@
 # There is no browser: the consent step is done through the admin REST
 # (/api/v1/oauth/authorizations/{id}/approve), as PR-1 ships no consent page.
 #
-#   1. default off            -> OAuth paths are not served, nothing is written to config.db
+#   1. off and never used    -> OAuth paths are not served, no OAuth bucket in config.db (only for off AND never used)
 #   2. on: discovery          -> 401 challenge + both metadata documents, unknown client 404
 #   3. register / authorize   -> RFC 7591 registration, authorize redirect, bad requests
 #   4. approve / token        -> admin approve, deny, double approve, PKCE exchange, code reuse
@@ -25,12 +25,17 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The only MCPPROXY_* variable this script reads is MCPPROXY_BIN. Every other MCPPROXY_* /
+# MCPP_* variable (data dir, listen, API key, TLS, ...) is an instance override the core would
+# read, so drop them all: the scratch core must not be steered at a real installation.
+BIN_OVERRIDE="${MCPPROXY_BIN:-}"
+while IFS= read -r v; do unset "$v"; done < <(compgen -e | grep -E '^(MCPPROXY_|MCPP_)')
 WORK="$(mktemp -d)"
 PORT="${PORT:-19561}"
 API_KEY="e2e-client-oauth-key"
 DATA="$WORK/data"
 HOME_DIR="$WORK/home"
-BIN="${MCPPROXY_BIN:-$WORK/mcpproxy}"
+BIN="${BIN_OVERRIDE:-$WORK/mcpproxy}"
 B="http://127.0.0.1:$PORT"
 API="$B/api/v1"
 RU="http://127.0.0.1:54321/callback"
@@ -61,11 +66,13 @@ hasnt() { case "$2" in *"$3"*) bad "$1 (found '$3')" ;; *) ok "$1" ;; esac; }
 mask() { sed -E 's/mcp_o[ar]t_[A-Za-z0-9_-]+/<token>/g'; }
 
 mkdir -p "$DATA" "$HOME_DIR"
-if [ -z "${MCPPROXY_BIN:-}" ]; then
+DATA_REAL="$(cd "$DATA" && pwd -P)"
+case "$DATA" in "$WORK"/*) ;; *) echo "refusing to run: data dir $DATA is not under the scratch dir $WORK"; exit 2 ;; esac
+if [ -z "$BIN_OVERRIDE" ]; then
 	echo "building mcpproxy"
 	(cd "$ROOT" && go build -o "$BIN" ./cmd/mcpproxy) || { echo "build failed"; exit 2; }
 fi
-if curl -s -o /dev/null "http://127.0.0.1:$PORT/"; then echo "port $PORT is in use"; exit 2; fi
+if curl -s --connect-timeout 2 --max-time 5 -o /dev/null "http://127.0.0.1:$PORT/"; then echo "port $PORT is in use"; exit 2; fi
 
 # write_config REQUIRE_MCP_AUTH
 write_config() {
@@ -91,11 +98,25 @@ start_proxy() {
 	case "$1" in
 	true | false) envv=(MCPPROXY_MCP_OAUTH_ENABLED="$1") ;;
 	esac
-	env -u MCPPROXY_MCP_OAUTH_ENABLED HOME="$HOME_DIR" MCPPROXY_TELEMETRY=false "${envv[@]+"${envv[@]}"}" \
-		"$BIN" serve --config "$WORK/config.json" >>"$WORK/proxy.log" 2>&1 &
+	# Data dir and listen address are passed explicitly as well as in the config file.
+	env HOME="$HOME_DIR" MCPPROXY_TELEMETRY=false "${envv[@]+"${envv[@]}"}" \
+		"$BIN" serve --config "$WORK/config.json" --data-dir "$DATA" --listen "127.0.0.1:$PORT" >>"$WORK/proxy.log" 2>&1 &
 	PROXY_PID=$!
 	for _ in $(seq 1 100); do
-		curl -sf -H "X-API-Key: $API_KEY" "$API/status" >/dev/null && return 0
+		if curl -sf --connect-timeout 2 --max-time 5 -H "X-API-Key: $API_KEY" "$API/status" >/dev/null; then
+			# the core must be keeping its database in the scratch dir
+			[ -s "$DATA/config.db" ] || { echo "core is up but $DATA/config.db is missing: not using the scratch data dir"; return 1; }
+			# and the process we started must hold exactly that file open (a real instance may be running)
+			if command -v lsof >/dev/null; then
+				local held
+				held=$(lsof -nP -p "$PROXY_PID" 2>/dev/null | awk '/config\.db$/ {print $NF}' | head -1)
+				case "$held" in
+				"$DATA_REAL"/config.db) ;;
+				*) echo "core opened '$held', not $DATA_REAL/config.db: aborting"; return 1 ;;
+				esac
+			fi
+			return 0
+		fi
 		kill -0 "$PROXY_PID" 2>/dev/null || return 1
 		sleep 0.2
 	done
@@ -116,9 +137,12 @@ req() {
 	local m="$1" u="$2"
 	shift 2
 	for _ in 1 2 3; do
-		CODE=$(curl -s -o "$WORK/body" -D "$WORK/hdrs" -w '%{http_code}' -X "$m" "$u" "$@")
+		: > "$WORK/body"; : > "$WORK/hdrs"
+		CODE=$(curl -s --connect-timeout 5 --max-time 30 -o "$WORK/body" -D "$WORK/hdrs" -w '%{http_code}' -X "$m" "$u" "$@")
 		BODY=$(cat "$WORK/body")
 		HDRS=$(tr -d '\r' < "$WORK/hdrs")
+		# A transport failure (HTTP 000) is a failure of its own, never a quiet pass of a negative check.
+		[ "$CODE" != 000 ] || { bad "transport failure: $m ${u%%\?*} (curl could not complete)"; return 0; }
 		[ "$CODE" = 429 ] && [ "$NO_RETRY" != 1 ] || return 0
 		sleep "$(hdr Retry-After | grep -E '^[0-9]+$' || echo 5)"
 	done
@@ -193,27 +217,44 @@ full_login() {
 step "1. default off"
 write_config false
 start_proxy unset || { bad "core did not start"; tail -20 "$WORK/proxy.log"; exit 1; }
-req POST "$B/mcp/oauth/cursor" -H 'Content-Type: application/json' -d "$INIT"
-eq "OAuth MCP address gives no sign-in challenge" "" "$(hdr WWW-Authenticate)"
+req POST "$B/mcp/oauth/cursor" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d "$INIT"
+eq "OAuth MCP address answers as the /mcp catch-all (HTTP)" 200 "$CODE"
+eq "...with no sign-in challenge" "" "$(hdr WWW-Authenticate)"
 req GET "$B/.well-known/oauth-authorization-server"
-hasnt "no authorization-server metadata" "$BODY" "token_endpoint"
+eq "AS metadata not served" 404 "$CODE"
+hasnt "...and no authorization-server document" "$BODY" "token_endpoint"
 req GET "$B/.well-known/oauth-protected-resource/mcp/oauth/cursor"
-hasnt "no protected-resource metadata" "$BODY" "authorization_servers"
+eq "protected-resource metadata not served" 404 "$CODE"
+hasnt "...and no protected-resource document" "$BODY" "authorization_servers"
 req POST "$B/oauth/register" -H 'Content-Type: application/json' -d "{\"redirect_uris\":[\"$RU\"]}"
-[ "$CODE" != 201 ] && ok "registration not served (HTTP $CODE)" || bad "registration answered 201 while off"
+eq "registration not served" 404 "$CODE"
 req GET "$B/oauth/authorize?response_type=code&client_id=x"
-[ "$CODE" != 302 ] && ok "authorize not served (HTTP $CODE)" || bad "authorize redirected while off"
+eq "authorize not served" 404 "$CODE"
+req POST "$B/oauth/token" -d grant_type=refresh_token -d refresh_token=x -d client_id=x
+eq "token endpoint not served" 404 "$CODE"
 admin GET "/oauth/authorizations"
 eq "admin sign-in request list is 404 while off" 404 "$CODE"
 has "feature_disabled code" "$BODY" "feature_disabled"
 admin GET "/clients"
+eq "client list answers" 200 "$CODE"
 hasnt "client payload carries no browser-login field" "$BODY" "browser_login"
 req POST "$B/mcp" -H "X-API-Key: $API_KEY" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d "$INIT"
 eq "API-key /mcp works" 200 "$CODE"
 stop_proxy
-for bucket in oauth_registrations oauth_grants oauth_grant_access_index oauth_client_bindings oauth_login_ever_used; do
-	if grep -a -q -F "$bucket" "$DATA/config.db"; then bad "config.db contains $bucket while the feature never ran"; else ok "no $bucket in config.db"; fi
-done
+# "Nothing stored" holds for off AND never used only: a registration alone persists a row.
+if [ -r "$DATA/config.db" ] && [ -s "$DATA/config.db" ]; then
+	ok "config.db exists and is readable ($(wc -c < "$DATA/config.db" | tr -d ' ') bytes)"
+	for bucket in oauth_registrations oauth_grants oauth_grant_access_index oauth_client_bindings oauth_login_ever_used; do
+		grep -a -q -F "$bucket" "$DATA/config.db"
+		case $? in
+		1) ok "no $bucket in config.db" ;;
+		0) bad "config.db contains $bucket while the feature never ran" ;;
+		*) bad "could not scan config.db for $bucket" ;;
+		esac
+	done
+else
+	bad "config.db missing or unreadable at $DATA/config.db: cannot check the buckets"
+fi
 
 #############################################################################
 step "2. on: discovery"
@@ -280,7 +321,7 @@ eq "fixed client id" cursor "$(printf %s "$BODY" | jq -r .data.client.id)"
 admin GET "/oauth/authorizations"
 has "pending list names the request" "$BODY" "$RID"
 req GET "$B/api/v1/oauth/authorizations/$RID"
-[ "$CODE" = 401 ] || [ "$CODE" = 403 ] && ok "admin REST refuses a call without the key (HTTP $CODE)" || bad "admin REST answered $CODE without the key"
+eq "admin REST refuses a call without the key" 401 "$CODE"
 approve "$RID" '{"client":{"id":"cursor"},"mode":"switchable","profile":""}'
 eq "approve answers 200" 200 "$CODE"
 [ -n "$CODE_VAL" ] && ok "approve returned a code" || bad "no code in redirect_url"
@@ -322,6 +363,7 @@ exchange "$CID_A" "$CODE_VAL" /mcp/oauth/cursor
 eq "fresh login after the replay" 200 "$CODE"
 AT_C="$AT"; RT_C="$RT"
 admin GET "/clients/cursor"
+eq "client payload answers" 200 "$CODE"
 GRANT_C=$(printf %s "$BODY" | jq -r '[.data.credentials[]? | select(.kind=="browser_login" and .state=="active")][0].grant_id // empty')
 [ -n "$GRANT_C" ] && ok "active login listed on the client (kind browser_login)" || bad "no active login on the client"
 eq "browser_login_disabled false while on" false "$(printf %s "$BODY" | jq -r .data.browser_login_disabled)"
@@ -338,8 +380,15 @@ eq "tools/list answers 200" 200 "$CODE"
 NT=$(printf %s "$BODY" | jq -r '.result.tools | length' 2>/dev/null)
 [ "${NT:-0}" -gt 0 ] 2>/dev/null && ok "tools/list returned $NT tools" || bad "tools/list had no tools: ${BODY:0:200}"
 has "retrieve_tools is offered" "$BODY" "retrieve_tools"
-admin GET "/clients/cursor"
-eq "initialize name recorded as observed name" e2e-client "$(printf %s "$BODY" | jq -r '[.data.credentials[]? | select(.state=="active")][0].observed_name // empty')"
+# observed_name is written off the request path: poll with a bounded deadline.
+OBS=""
+for _ in $(seq 1 50); do
+	admin GET "/clients/cursor"
+	OBS=$(printf %s "$BODY" | jq -r '[.data.credentials[]? | select(.state=="active")][0].observed_name // empty')
+	[ "$OBS" = e2e-client ] && break
+	sleep 0.2
+done
+eq "initialize name recorded as observed name (polled up to 10 s)" e2e-client "$OBS"
 
 #############################################################################
 step "6. wrong doors"
@@ -351,7 +400,7 @@ eq "cursor token on the generic address" 401 "$CODE"
 req POST "$B/mcp" -H "Authorization: Bearer $AT_C" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d "$INIT"
 eq "access token on classic /mcp (require_mcp_auth on)" 401 "$CODE"
 req POST "http://localhost:$PORT/mcp/oauth/cursor" -H "Authorization: Bearer $AT_C" -H 'Content-Type: application/json' -d "$INIT"
-[ "$CODE" = 401 ] || [ "$CODE" = 404 ] && ok "token replayed against localhost instead of 127.0.0.1 refused (HTTP $CODE)" || bad "localhost answered $CODE"
+eq "token replayed against localhost instead of 127.0.0.1 refused" 401 "$CODE"
 req POST "$B/mcp/oauth/cursor" -H "X-API-Key: $API_KEY" -H 'Content-Type: application/json' -d "$INIT"
 eq "API key header on the OAuth address" 401 "$CODE"
 req POST "$B/mcp/oauth/cursor?apikey=$API_KEY" -H 'Content-Type: application/json' -d "$INIT"
@@ -394,7 +443,8 @@ eq "grant listed as revoked" revoked "$(printf %s "$BODY" | jq -r --arg g "$GRAN
 step "8. revoke one login, forget a client"
 full_login "Cursor again" cursor
 eq "fresh cursor login" 200 "$CODE"
-AT_R="$AT"; CID_R="$CID"; GRANT_R="$GRANT"
+AT_R="$AT"; RT_R="$RT"; CID_R="$CID"; GRANT_R="$GRANT"
+[ -n "$RT_R" ] && ok "the login's real refresh token is kept for the post-revoke check" || bad "no refresh token to test with"
 mcp_init "$B/mcp/oauth/cursor" "$AT_R"
 [ -n "$SID" ] && ok "session open on the new login" || bad "could not open a session"
 admin DELETE "/clients/cursor/logins/$GRANT_R"
@@ -403,8 +453,9 @@ mcp_post "$B/mcp/oauth/cursor" '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' 
 eq "open session refused right after the revoke" 401 "$CODE"
 mcp_post "$B/mcp/oauth/cursor" "$INIT" -H "Authorization: Bearer $AT_R"
 eq "new session refused after the revoke" 401 "$CODE"
-refresh "$CID_R" "none" /mcp/oauth/cursor
-eq "refresh refused after the revoke" 400 "$CODE"
+refresh "$CID_R" "$RT_R" /mcp/oauth/cursor
+eq "the real refresh token is refused after the revoke" 400 "$CODE"
+has "...as invalid_grant" "$BODY" "invalid_grant"
 admin DELETE "/clients/cursor/logins/no-such-grant"
 eq "revoking an unknown login is 404" 404 "$CODE"
 full_login "Claude Code" claude-code
@@ -508,6 +559,12 @@ eq "browser_login_disabled false again" false "$(printf %s "$BODY" | jq -r .data
 stop_proxy
 
 #############################################################################
+step "12. isolation and control"
+# control for the phase-1 scan: after real use the same scan must find the buckets
+for bucket in oauth_registrations oauth_grants oauth_client_bindings oauth_login_ever_used; do
+	if grep -a -q -F "$bucket" "$DATA/config.db"; then ok "$bucket present after use (the phase-1 scan can see buckets)"; else bad "$bucket missing after use"; fi
+done
+
 echo
 echo "passed: $PASS  failed: $FAIL"
 if [ "$FAIL" -ne 0 ]; then

@@ -12,13 +12,14 @@ const REDIRECT = process.argv[3] || 'http://127.0.0.1:54321/callback';
 const NAME = process.argv[4] || 'sdk-client';
 const mask = (s) => String(s).replace(/mcp_o[ar]t_[A-Za-z0-9_-]+/g, '<token>').replace(/(code_verifier|code|refresh_token)=[^&\s"]+/g, '$1=<x>');
 
-let info, tokens, verifier, authCode;
+let info, tokens, verifier, authCode, refreshOK = false;
 const log = (...a) => console.log(...a);
 
 const loggedFetch = async (url, init = {}) => {
   const u = String(url);
   const body = init.body ? mask(init.body instanceof URLSearchParams ? init.body.toString() : init.body) : '';
   const res = await fetch(url, init);
+  if (u.endsWith('/oauth/token') && body.includes('grant_type=refresh_token') && res.status === 200) refreshOK = true;
   log(`  ${init.method || 'GET'} ${mask(u)} -> ${res.status}${body ? '  body: ' + body.slice(0, 300) : ''}`);
   return res;
 };
@@ -76,15 +77,25 @@ await client.connect(transport);
 const tl = await client.listTools();
 log('tools/list OK:', tl.tools.map((t) => t.name).join(','));
 // refresh through the SDK path: expire the token locally and call again
+const before = tokens.access_token;
 tokens = { ...tokens, access_token: 'expired' };
+refreshOK = false;
 transport = mk();
 client = new Client({ name: NAME, version: '1.0.0' });
+let failed = '';
 try {
   await client.connect(transport);
   const tl2 = await client.listTools();
-  log('after bad access token, SDK refreshed and tools/list OK:', tl2.tools.length, 'tools');
+  if (!refreshOK) failed = 'no successful refresh_token response was seen';
+  else if (!tokens.access_token || tokens.access_token === 'expired' || tokens.access_token === before) failed = 'refresh did not yield a new access token';
+  else if (!tl2.tools.length) failed = 'tools/list after refresh returned no tools';
+  else log('refresh OK (200 on refresh_token grant, new access token) and tools/list OK:', tl2.tools.length, 'tools');
 } catch (e) {
-  log('after bad access token: error', e.constructor.name, e.message);
+  failed = `${e.constructor.name}: ${e.message}`;
+}
+if (failed) {
+  console.error('REFRESH FAILED:', failed);
+  process.exit(1);
 }
 await client.close();
 process.exit(0);

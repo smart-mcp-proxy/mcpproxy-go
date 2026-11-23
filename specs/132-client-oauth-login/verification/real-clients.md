@@ -29,7 +29,7 @@ Request order the SDK sent, identical for each address:
 5. Authorize URL parameters: `response_type=code`, `client_id`, `code_challenge`, `code_challenge_method=S256`, `redirect_uri`, **`resource=<origin>/mcp/oauth[/<client>]`**. It sent **no `state` and no `scope`**.
 6. `POST /oauth/token` (`authorization_code`) with `code`, `code_verifier`, `redirect_uri`, **`resource`**, `client_id` -> `200`, `token_type: Bearer`, `expires_in: 3600`, refresh token present.
 7. Session: `initialize` -> `200`, `notifications/initialized` -> `202`, `GET` SSE stream `200`, `tools/list` -> `200`.
-8. With an invalid access token the SDK re-ran steps 1-3 (metadata fetched again), refreshed with `grant_type=refresh_token` + `resource` + `client_id` -> `200`, and continued.
+8. (Re-run 2026-11-23 with the hardened harness: it now exits non-zero unless a `refresh_token` grant answered 200, the access token changed and a following `tools/list` returned tools. All three addresses exited 0 with that proof.) With an invalid access token the SDK re-ran steps 1-3 (metadata fetched again), refreshed with `grant_type=refresh_token` + `resource` + `client_id` -> `200`, and continued.
 
 Findings that matter for the design:
 

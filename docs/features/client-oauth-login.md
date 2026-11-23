@@ -37,8 +37,12 @@ personal edition (`mcpproxy`); the server edition answers `404` on all of these 
 or `MCPPROXY_MCP_OAUTH_ENABLED=true` for one process (never persisted). The setting is
 read live, so a config change needs no restart; the environment variable is read at start.
 
-With the setting off and never used, nothing changes: the OAuth paths behave as they did
-before, and no storage bucket is created. `scripts/test-client-oauth-e2e.sh` checks both.
+With the setting off **and never used**, nothing changes: the OAuth paths behave as they did
+before, and no storage bucket is created. Once the feature has been on, records exist (a
+client registration is stored as soon as a client registers, before any login), so "off" then
+means the OAuth paths answer `404` and the records are kept (see [Turning it off](#turning-it-off)).
+`scripts/test-client-oauth-e2e.sh` checks the off-and-never-used case before it switches the
+feature on.
 
 ## Addresses
 
@@ -86,8 +90,9 @@ curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
 ```
 
 The answer is `{"data":{"redirect_url":"..."}}`; the client receives the code when its
-browser is sent there. Approval stores nothing: the login is stored when the client
-exchanges the code, after the binding and guard are checked again. `.../deny` ends the
+browser is sent there. Approval writes an audit activity row but stores no login and no
+binding: the login is stored when the client exchanges the code, after the binding and guard
+are checked again. (The client's registration was already stored when it registered.) `.../deny` ends the
 request with `access_denied`; `.../preview` shows the guard verdict without writing.
 Full contract: [REST API](../api/rest-api.md).
 
@@ -108,8 +113,8 @@ is off after use. API-key access is never affected. A login can still be revoked
 
 ## Downgrade
 
-Browser-login records live in their own storage buckets, created only when the first login
-is stored. A binary that does not know the feature does not serve the OAuth paths, so the
+Browser-login records live in their own storage buckets, created lazily on the first write
+(a client registration, then the first stored login). A binary that does not know the feature does not serve the OAuth paths, so the
 logins simply stop being usable.
 
 ## Plain HTTP
