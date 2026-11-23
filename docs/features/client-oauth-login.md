@@ -218,8 +218,10 @@ What Connect does with `--auth oauth` (REST `auth: "oauth"`, preview `?auth=oaut
   `mcpproxy client revoke-login <id> <grant-id>`).
 - Disconnect, Undo and the status read recognise an entry written this way. Undo of an oauth
   connect restores the earlier config and revokes nothing, since the connect minted nothing.
-  Undo trusts a digest of the file recorded when Connect wrote it (not a replay), so any edit of the
-  address, in either direction, is a conflict.
+  Undo of a browser-login connect trusts a digest of the file recorded in a sidecar beside the backup
+  (`<config>.undo.<timestamp>`, removed on a successful Undo or Disconnect), so any edit of the
+  address, in either direction, is a conflict. An API-key connect writes no sidecar and is undone
+  exactly as before.
 - `GET /api/v1/connect` and `GET /api/v1/connect/{client}` report `supports_browser_login` and
   `browser_login_available` (the client is in the table **and** the feature is on, this is the
   personal edition and the listener is loopback or a wildcard). Both fields are absent otherwise,

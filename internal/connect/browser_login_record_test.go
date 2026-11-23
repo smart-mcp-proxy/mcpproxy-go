@@ -5,6 +5,7 @@ package connect
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -65,8 +66,8 @@ func TestUndo_LegacyBackupWithoutARecordUsesTheKeyReplay(t *testing.T) {
 	if err != nil || !res.Success {
 		t.Fatal(err)
 	}
-	if err := os.Remove(recordFor(svc, home, res)); err != nil {
-		t.Fatalf("the connect must have written a record: %v", err)
+	if _, err := os.Stat(recordFor(svc, home, res)); err == nil {
+		t.Fatal("a key connect writes no record: its backup is a legacy one")
 	}
 	if undone, err := svc.Undo("claude-code", "", baseName(res.BackupPath)); err != nil || undone.Action != "restored" {
 		t.Fatalf("untouched legacy: %v %+v", err, undone)
@@ -83,7 +84,11 @@ func TestUndo_LegacyBackupWithoutARecordUsesTheKeyReplay(t *testing.T) {
 	}
 }
 
-// Without a record, a browser-login entry is never accepted by the key replay.
+// Without a record the backup is treated as a legacy one (key-path replay). An
+// untouched browser-login entry is not what that replay writes, so it conflicts.
+// The one remaining gap is deliberate: if the record is deleted by hand AND the
+// entry is edited to the plain keyless endpoint, the key replay matches and the
+// backup is restored (it needs two deliberate acts, and cannot happen by accident).
 func TestUndo_OAuthEntryWithoutItsRecordIsAConflict(t *testing.T) {
 	svc, home := testService(t)
 	oauthOn(svc)
@@ -100,9 +105,10 @@ func TestUndo_OAuthEntryWithoutItsRecordIsAConflict(t *testing.T) {
 func TestUndo_BadRecordsAreAConflict(t *testing.T) {
 	good := func(t *testing.T) (*Service, string, *ConnectResult) {
 		svc, home := testService(t)
+		oauthOn(svc)
 		withFakeMinter(svc)
 		seedClientConfig(t, home, "claude-code")
-		res, err := svc.ConnectWithOptions("claude-code", "", ConnectOptions{})
+		res, err := svc.ConnectWithOptions("claude-code", "", ConnectOptions{Auth: AuthOAuth})
 		if err != nil || !res.Success {
 			t.Fatal(err)
 		}
@@ -153,15 +159,18 @@ func TestUndo_BadRecordsAreAConflict(t *testing.T) {
 // record name can never be passed off as a backup.
 func TestUndoRecord_PlacementAndPermissions(t *testing.T) {
 	svc, home := testService(t)
+	oauthOn(svc)
+	withFakeMinter(svc)
 	seedClientConfig(t, home, "claude-code")
 	_ = os.Chmod(ConfigPath("claude-code", home), 0o640)
-	res, _ := svc.ConnectWithOptions("claude-code", "", ConnectOptions{})
+	res, _ := svc.ConnectWithOptions("claude-code", "", ConnectOptions{Auth: AuthOAuth})
 	rp := recordFor(svc, home, res)
 	if filepath.Dir(rp) != filepath.Dir(res.BackupPath) {
 		t.Fatalf("record %s not beside backup %s", rp, res.BackupPath)
 	}
 	info, err := os.Stat(rp)
-	if err != nil || info.Mode().Perm() != 0o640 {
+	// Windows reports 0666 for any writable file, so the mode is a Unix check.
+	if err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o640) {
 		t.Fatalf("record perms: %v %v", err, info)
 	}
 	if _, err := svc.Undo("claude-code", "", baseName(rp)); err == nil {

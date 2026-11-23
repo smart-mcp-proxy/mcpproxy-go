@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// Parity pin (Undo compares the file with the digest recorded at write time): what the API-key path does when the listener changes after a
-// connect, so the oauth path can be held to the same behaviour.
+// Pin: what the API-key path does when the listener changes after a connect.
+// Its Undo is the original replay, which browser login does not touch.
 func TestKeyPath_ListenerChangeAfterConnect(t *testing.T) {
 	svc, home := testService(t)
 	seedClientConfig(t, home, "claude-code")
@@ -17,12 +17,13 @@ func TestKeyPath_ListenerChangeAfterConnect(t *testing.T) {
 	}
 	svc.listenAddr = "127.0.0.1:9999"
 	st, _ := svc.GetStatus("claude-code")
-	t.Logf("key path after a port change: connected=%v match=%q server=%q", st.Connected, st.EndpointMatch, st.ServerName)
 	undone, err := svc.Undo("claude-code", "my-proxy", baseName(res.BackupPath))
-	t.Logf("key path undo: err=%v action=%q", err, undone.Action)
-	// Status loses the entry under a custom name; Undo, which compares the file
-	// with the digest recorded at write time, still restores an untouched file.
-	if st.Connected || undone.Action != "restored" {
-		t.Fatalf("pin: the key path loses the entry in Status and Undo restores; got connected=%v action=%q", st.Connected, undone.Action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unchanged from the tray branch: Status loses the entry under a custom name
+	// and Undo's replay no longer matches, so it reports a conflict.
+	if st.Connected || undone.Action != "conflict" {
+		t.Fatalf("pin: the key path loses the entry in Status and Undo conflicts; got connected=%v action=%q", st.Connected, undone.Action)
 	}
 }

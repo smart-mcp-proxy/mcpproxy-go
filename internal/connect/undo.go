@@ -209,6 +209,7 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 		if err := os.Remove(cfgPath); err != nil {
 			return nil, fmt.Errorf("remove created config: %w", err)
 		}
+		removeUndoRecord(undoRecordPath(cfgPath, backupPath))
 		res := &ConnectResult{
 			Success:    true,
 			Client:     client.ID,
@@ -231,6 +232,7 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 	if err := atomicWriteFile(cfgPath, backupRaw, perm, nil); err != nil {
 		return nil, fmt.Errorf("restore from backup: %w", err)
 	}
+	removeUndoRecord(undoRecordPath(cfgPath, backupPath))
 
 	res := &ConnectResult{
 		Success:    true,

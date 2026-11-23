@@ -624,6 +624,9 @@ hasnt "the admin API key is not in the written config" "$CLAUDE_BODY" "$API_KEY"
 hasnt "no credential line in the output" "$OUT" "Credential:"
 has "the output says it is a browser sign-in" "$OUT" "Sign-in: browser"
 has "the output says the API key is not revoked" "$OUT" "does not revoke"
+# an oauth connect leaves one undo record beside the backup; nothing else is new
+UNDO_N="$(ls "$CLAUDE_CFG".undo.* 2>/dev/null | wc -l | tr -d ' ')"
+eq "an oauth connect writes one undo record" 1 "$UNDO_N"
 # an unsupported client is refused and its config is left alone
 connect_cli true cursor --auth oauth
 [ "$CODE" -ne 0 ] && ok "connect cursor --auth oauth is refused (exit $CODE)" || bad "connect cursor --auth oauth exited 0"
@@ -640,6 +643,11 @@ connect_cli true claude-code --auth oauth
 env HOME="$HOME_DIR" USERPROFILE="$HOME_DIR" MCPPROXY_TELEMETRY=false "$BIN" disconnect claude-code --config "$WORK/config.json" >"$WORK/disconnect.out" 2>&1 < /dev/null
 eq "disconnect exits 0" 0 "$?"
 hasnt "the entry is gone after disconnect" "$(cat "$CLAUDE_CFG")" "/mcp/oauth"
+eq "disconnect leaves no undo record behind" 0 "$(ls "$CLAUDE_CFG".undo.* 2>/dev/null | wc -l | tr -d ' ')"
+# a key connect writes exactly the files it always wrote: no undo record
+connect_cli true cursor
+eq "connect cursor (API key) exits 0" 0 "$CODE"
+eq "a key connect leaves no undo record" 0 "$(ls "$CURSOR_CFG".undo.* 2>/dev/null | wc -l | tr -d ' ')"
 REAL_SUM_AFTER="$(shasum "$REAL_CLAUDE" 2>/dev/null | awk '{print $1}')"
 eq "the real ~/.claude.json was not touched" "$REAL_SUM_BEFORE" "$REAL_SUM_AFTER"
 

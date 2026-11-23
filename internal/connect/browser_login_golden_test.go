@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -57,6 +58,9 @@ func goldenPayloads(t *testing.T) []byte {
 }
 
 func TestFeatureOffPayloadsAreUnchanged(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the golden holds Unix config paths")
+	}
 	got := goldenPayloads(t)
 	if p := os.Getenv("GOLDEN_RECORD"); p != "" {
 		if err := os.WriteFile(p, got, 0o644); err != nil {

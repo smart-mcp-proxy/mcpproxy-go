@@ -59,11 +59,8 @@ func fileDigest(b []byte) string {
 
 // writeUndoRecord records what the connect is about to write. It runs before
 // the config is replaced, so a failure leaves the config untouched.
-func writeUndoRecord(cfgPath, backupPath, clientID, serverName string, written []byte, oauth bool, perm os.FileMode) (string, error) {
-	rec := undoRecord{Version: undoRecordVersion, Client: clientID, Server: serverName, Auth: AuthKey, SHA256: fileDigest(written)}
-	if oauth {
-		rec.Auth = AuthOAuth
-	}
+func writeUndoRecord(cfgPath, backupPath, clientID, serverName string, written []byte, perm os.FileMode) (string, error) {
+	rec := undoRecord{Version: undoRecordVersion, Client: clientID, Server: serverName, Auth: AuthOAuth, SHA256: fileDigest(written)}
 	if backupPath != "" {
 		rec.Backup = filepath.Base(backupPath)
 	}
@@ -116,4 +113,28 @@ func checkUndoRecord(cfgPath, backupPath, clientID, serverName string, current [
 		return undoConflict, ""
 	}
 	return undoUntouched, rec.Auth
+}
+
+// removeUndoRecord deletes one record, best effort ("" is a no-op).
+func removeUndoRecord(path string) {
+	if path != "" {
+		_ = os.Remove(path)
+	}
+}
+
+// removeUndoRecords deletes the records of clientID's entry serverName beside
+// cfgPath once the entry is gone (Disconnect), so no stray file outlives it.
+// Records of other clients or entries, and anything unreadable, are left alone.
+func removeUndoRecords(cfgPath, clientID, serverName string) {
+	matches, _ := filepath.Glob(cfgPath + ".undo.*")
+	for _, m := range matches {
+		raw, err := os.ReadFile(m)
+		if err != nil {
+			continue
+		}
+		var rec undoRecord
+		if json.Unmarshal(raw, &rec) == nil && rec.Client == clientID && rec.Server == serverName {
+			_ = os.Remove(m)
+		}
+	}
 }
