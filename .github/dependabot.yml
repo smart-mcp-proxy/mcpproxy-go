@@ -54,6 +54,14 @@ updates:
       # each new release and drop this once one passes `npm run type-check`.
       - dependency-name: "vue-tsc"
         versions: ["3.3.12", "3.3.13", "3.3.14"]
+      # vue-chartjs 5.3.6 (published 2026-11-19, superseded by 5.3.7 the next
+      # day) shipped without dist/index.js / index.cjs and with
+      # `standard-version` as a runtime dependency. `vue-tsc` still passes
+      # (the .d.ts files are there) but `vite build` and every vitest file that
+      # imports it fail with "Failed to resolve import vue-chartjs" (#1998),
+      # and the stray dependency tree trips dependency-review. 5.3.7 is clean.
+      - dependency-name: "vue-chartjs"
+        versions: ["5.3.6"]
     groups:
       frontend-dependencies:
         patterns:
