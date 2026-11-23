@@ -67,6 +67,16 @@ type ConnectPreview struct {
 	// reason instead of letting the user discover it by clicking (Spec 091
 	// FR-003). Empty means connectable.
 	ConnectRefusal string `json:"connect_refusal,omitempty"`
+
+	// Auth is "oauth" when this preview describes the browser login address
+	// (no credential, nothing masked); empty for an API-key entry (Spec 132).
+	Auth string `json:"auth,omitempty"`
+	// AuthNote says what the write leaves alone: an oauth connect does not
+	// revoke the client's existing API key.
+	AuthNote string `json:"auth_note,omitempty"`
+	// BrowserLoginAvailable repeats ClientStatus.BrowserLoginAvailable so a
+	// preview form needs no second request to know whether to offer the choice.
+	BrowserLoginAvailable bool `json:"browser_login_available,omitempty"`
 }
 
 // Preview computes the exact entry a Connect would write for the given client,
@@ -99,9 +109,16 @@ func (s *Service) PreviewWithIntent(clientID, serverName string, intent Credenti
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
 
-	mint, err := s.planCredential(intent)
+	oauth, err := s.planAuth(clientID, intent)
 	if err != nil {
 		return nil, err
+	}
+	mint := false
+	if !oauth {
+		mint, err = s.planCredential(intent)
+		if err != nil {
+			return nil, err
+		}
 	}
 	credential := ""
 	if mint {
@@ -113,6 +130,11 @@ func (s *Service) PreviewWithIntent(clientID, serverName string, intent Credenti
 	// write uses). A resolution error (an unknown profile) falls back to the
 	// intent, because the write refuses it with the same 400.
 	prof, mode := deref(intent.Profile), previewMode(intent)
+	if oauth {
+		// A browser login has no config credential and no binding to echo: the
+		// access is chosen on the consent page.
+		prof, mode = "", ""
+	}
 	if mint && s.minter != nil {
 		if p, m, err := s.minter.PreviewBinding(clientID, intent); err == nil {
 			prof, mode = p, m
@@ -138,7 +160,7 @@ func (s *Service) PreviewWithIntent(clientID, serverName string, intent Credenti
 	// credential masked for display. Because the real write also calls
 	// buildServerEntry, the masked entry differs from the written entry only in
 	// the credential value — the carrier, shape, and every other field match.
-	maskedEntry := buildServerEntry(clientID, s.entryParams(credential))
+	maskedEntry := buildServerEntry(clientID, s.entryParamsFor(clientID, oauth, credential))
 
 	entryText, err := renderEntrySnippet(client, serverName, maskedEntry)
 	if err != nil {
@@ -146,23 +168,26 @@ func (s *Service) PreviewWithIntent(clientID, serverName string, intent Credenti
 	}
 
 	return &ConnectPreview{
-		Client:               clientID,
-		ConfigPath:           cfgPath,
-		DisplayPath:          DisplayPath(cfgPath, s.homeDir),
-		Format:               client.Format,
-		ServerKey:            client.ServerKey,
-		ServerName:           serverName,
-		Entry:                maskedEntry,
-		EntryText:            entryText,
-		EntryExists:          pre.existing != nil,
-		ContainsAPIKey:       false,
-		Credential:           credential,
-		Profile:              prof,
-		Mode:                 mode,
-		Keyless:              intent.Keyless,
-		Bridge:               client.Bridge,
-		AccessState:          pre.accessState,
-		ExistingEntrySummary: existingSummary,
+		Client:                clientID,
+		ConfigPath:            cfgPath,
+		DisplayPath:           DisplayPath(cfgPath, s.homeDir),
+		Format:                client.Format,
+		ServerKey:             client.ServerKey,
+		ServerName:            serverName,
+		Entry:                 maskedEntry,
+		EntryText:             entryText,
+		EntryExists:           pre.existing != nil,
+		ContainsAPIKey:        false,
+		Credential:            credential,
+		Profile:               prof,
+		Mode:                  mode,
+		Keyless:               intent.Keyless,
+		Auth:                  map[bool]string{true: AuthOAuth}[oauth],
+		AuthNote:              authNote(oauth),
+		BrowserLoginAvailable: s.browserLoginAvailable(client),
+		Bridge:                client.Bridge,
+		AccessState:           pre.accessState,
+		ExistingEntrySummary:  existingSummary,
 		// The token binds THIS preview to the operation it described — this
 		// client, this file, this requested entry name — and to the state it
 		// just observed, over the unmasked pending entry the write would

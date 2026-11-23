@@ -1379,6 +1379,15 @@ profile; `409 binding_bypassable_without_auth` (`bindings`, `fixes`) when the
 binding would be bypassable while `require_mcp_auth` is off; `409` with
 `conflicting_token` when `client-<id>` is held by a regular agent token.
 
+**Browser login (Spec 132).** The body also accepts `auth`: `"key"` (default) or
+`"oauth"`. `"oauth"` writes only the client's sign-in address
+(`http://127.0.0.1:8080/mcp/oauth/<client>`), no header and no credential, and never calls the
+credential store; the result carries `auth: "oauth"` and an `auth_note` saying the client's
+existing API key is not revoked. Refused with `400` and nothing written while `mcp_oauth_enabled`
+is off, for a client without `supports_browser_login`, in the server edition, with an unknown
+value, and together with `keyless`, `profile` or `mode`. See
+[Browser Login for MCP Clients](../features/client-oauth-login.md#connecting-a-client-to-browser-login).
+
 #### PUT /api/v1/clients/{client}/binding
 
 Reassigns a client's profile and/or mode (personal edition, administrator
@@ -1410,6 +1419,13 @@ an overwrite of a same-named entry. Reads the config on demand to classify creat
 so on macOS this may raise an App-Data prompt; a denial returns `403` +
 remediation. Optional `?server_name=` mirrors the name a subsequent connect
 would use.
+
+`?auth=oauth` previews the browser-login entry (Spec 132): `auth: "oauth"`, no `credential`,
+`auth_note`, and `browser_login_available`; the same refusals as the write answer `400`. The
+`precondition_token` binds the choice. `GET /api/v1/connect` and `GET /api/v1/connect/{client}`
+carry `supports_browser_login` (the client passed a real-client check) and
+`browser_login_available` (and the feature is on in this edition); the per-client read adds
+`auth: "oauth"` when the entry holds the sign-in address. All three are omitted when false.
 
 Spec 091 adds three response fields:
 

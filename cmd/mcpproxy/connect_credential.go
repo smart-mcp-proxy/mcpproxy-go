@@ -33,6 +33,7 @@ var (
 	connectLock       bool
 	connectSwitchable bool
 	connectKeyless    bool
+	connectAuth       = connect.AuthKey
 )
 
 func addConnectCredentialFlags(cmd *cobra.Command) {
@@ -42,6 +43,9 @@ func addConnectCredentialFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&connectLock, "lock", false, "Lock the client to its profile: it can never switch (default for a named profile)")
 	cmd.Flags().BoolVar(&connectSwitchable, "switchable", false, "Let the client switch profiles within its profile's switchable_to (default for all servers)")
 	cmd.Flags().BoolVar(&connectKeyless, "keyless", false, "Write an entry with no credential (only while require_mcp_auth is off; the client is unidentified)")
+	cmd.Flags().StringVar(&connectAuth, "auth", connect.AuthKey,
+		`How the client signs in: "key" writes an API-key entry, "oauth" writes only the client's browser sign-in address `+
+			`(no credential; needs mcp_oauth_enabled and a client that supports it, currently claude-code)`)
 	cmd.MarkFlagsMutuallyExclusive("lock", "switchable")
 }
 
@@ -49,6 +53,16 @@ func addConnectCredentialFlags(cmd *cobra.Command) {
 // the combinations that cannot work before anything is read or written.
 func connectIntentFromFlags(cmd *cobra.Command) (connect.CredentialIntent, error) {
 	intent := connect.CredentialIntent{Keyless: connectKeyless, Surface: string(profile.SurfaceCLI)}
+	switch connectAuth {
+	case connect.AuthKey:
+	case connect.AuthOAuth:
+		if connectKeyless || connectLock || connectSwitchable || cmd.Flags().Changed("profile") {
+			return intent, newFlagValidationError("--auth oauth cannot be combined with --profile, --lock, --switchable or --keyless: the access is chosen on the consent page")
+		}
+		intent.Auth = connect.AuthOAuth
+	default:
+		return intent, newFlagValidationError("--auth must be key or oauth, got %q", connectAuth)
+	}
 	profileGiven := cmd.Flags().Changed("profile")
 	if profileGiven {
 		p := connectProfile
@@ -108,11 +122,13 @@ type connectRequestBody struct {
 	Profile    *string `json:"profile,omitempty"`
 	Mode       *string `json:"mode,omitempty"`
 	Keyless    bool    `json:"keyless,omitempty"`
+	Auth       string  `json:"auth,omitempty"`
 }
 
 func (d *daemonConnectBackend) connect(clientID, serverName string, force bool, intent connect.CredentialIntent) (*connect.ConnectResult, error) {
 	body, err := json.Marshal(connectRequestBody{
 		ServerName: serverName, Force: force, Profile: intent.Profile, Mode: intent.Mode, Keyless: intent.Keyless,
+		Auth: intent.Auth,
 	})
 	if err != nil {
 		return nil, err
@@ -128,7 +144,14 @@ func (d *daemonConnectBackend) connect(clientID, serverName string, force bool, 
 	if err != nil {
 		return nil, err
 	}
-	return parseConnectResponse(resp.StatusCode, raw, clientID)
+	res, perr := parseConnectResponse(resp.StatusCode, raw, clientID)
+	if perr != nil && intent.Auth == connect.AuthOAuth && resp.StatusCode == http.StatusBadRequest {
+		// A refused auth choice is the caller's input, not a config error: its
+		// text mentions the config switch, which the exit-code heuristics
+		// would otherwise read as a config-file failure.
+		return nil, flagValidationError{perr}
+	}
+	return res, perr
 }
 
 // disconnect asks the daemon to remove the entry; the daemon also revokes the
@@ -243,6 +266,7 @@ func newOfflineConnectBackend(cfg *config.Config) (*offlineConnectBackend, error
 	})
 	svc := connect.NewService(cfg.Listen, cfg.APIKey).
 		WithRequireMCPAuth(config.EffectiveRequireMCPAuth(cfg)).
+		WithMCPOAuthEnabled(func() bool { return cfg.MCPOAuthEnabled }).
 		WithCredentialMinter(clients.ConnectMinter())
 	clients.SetConfigReader(svc)
 	return &offlineConnectBackend{sm: sm, svc: svc, clients: clients}, nil
@@ -305,10 +329,13 @@ func describeConnectFailure(err error, clientID string) error {
 	var guardErr *runtime.BindingGuardError
 	var conflict *connectConflictError
 	var val *runtime.ValidationError
+	var authChoice *connect.AuthChoiceError
 	var busy *runtime.ConnectInProgressError
 	var superseded *runtime.CredentialSupersededError
 	var b strings.Builder
 	switch {
+	case errors.As(err, &authChoice):
+		b.WriteString(authChoice.Error())
 	case errors.As(err, &busy):
 		b.WriteString(busy.Error())
 	case errors.As(err, &superseded):
@@ -344,6 +371,16 @@ func guardFixText(fix runtime.GuardFix, guardErr *runtime.BindingGuardError) str
 		name = guardErr.Bindings[0].Profile
 	}
 	return guardFixLine(fix, name)
+}
+
+// connectAuthLine is the line a browser-login connect prints in place of the
+// credential line: the config holds only the sign-in address. Empty for an
+// API-key entry.
+func connectAuthLine(r *connect.ConnectResult) string {
+	if r.Auth != connect.AuthOAuth {
+		return ""
+	}
+	return "Sign-in: browser (the config holds only the address; no credential was written)"
 }
 
 // connectCredentialLine is the credential line of a successful connect:

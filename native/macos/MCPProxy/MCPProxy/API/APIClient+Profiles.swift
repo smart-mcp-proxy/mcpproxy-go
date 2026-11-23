@@ -21,11 +21,16 @@ struct ConnectBinding: Equatable {
     var profile: String?
     var mode: BindingMode?
     var keyless: Bool
+    /// Spec 132: write only the client's browser sign-in address (`auth=oauth`),
+    /// no credential. Carries no profile or mode: the access is chosen on the
+    /// consent page.
+    var oauth: Bool
 
-    init(profile: String? = nil, mode: BindingMode? = nil, keyless: Bool = false) {
+    init(profile: String? = nil, mode: BindingMode? = nil, keyless: Bool = false, oauth: Bool = false) {
         self.profile = profile
         self.mode = mode
         self.keyless = keyless
+        self.oauth = oauth
     }
 
     /// Nothing specified: the legacy, parameter-free connect.
@@ -37,6 +42,7 @@ struct ConnectBinding: Equatable {
         if let profile { items.append(URLQueryItem(name: "profile", value: profile)) }
         if let mode { items.append(URLQueryItem(name: "mode", value: mode.wire)) }
         if keyless { items.append(URLQueryItem(name: "keyless", value: "true")) }
+        if oauth { items.append(URLQueryItem(name: "auth", value: "oauth")) }
         return items
     }
 
@@ -46,6 +52,7 @@ struct ConnectBinding: Equatable {
         if let profile { body["profile"] = profile }
         if let mode { body["mode"] = mode.wire }
         if keyless { body["keyless"] = true }
+        if oauth { body["auth"] = "oauth" }
         return body
     }
 }

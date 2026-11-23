@@ -1569,6 +1569,16 @@ components:
         action:
           description: '"created", "updated", "already_exists", "removed", "not_found"'
           type: string
+        auth:
+          description: |-
+            Auth is "oauth" when the entry holds the per-client browser login
+            address and no credential (Spec 132). Empty for an API-key entry.
+          type: string
+        auth_note:
+          description: |-
+            AuthNote says what Connect left alone: an oauth write does not revoke the
+            client's existing API key.
+          type: string
         backup_path:
           type: string
         client:
@@ -4733,6 +4743,16 @@ components:
       type: object
     httpapi.ConnectRequest:
       properties:
+        auth:
+          description: |-
+            Auth is "key" (default) or "oauth" (Spec 132): "oauth" writes the
+            client's browser login address and no credential. It is refused while
+            mcp_oauth_enabled is off, for a client that does not support it, in the
+            server edition, and together with keyless, profile or mode.
+          enum:
+          - key
+          - oauth
+          type: string
         force:
           description: Overwrite existing entry
           type: boolean
@@ -8609,7 +8629,7 @@ paths:
             schema:
               $ref: '#/components/schemas/httpapi.ConnectRequest'
         description: Optional connection parameters (server_name, force, precondition_token,
-          profile, mode, keyless)
+          profile, mode, keyless, auth)
       responses:
         "200":
           content:
@@ -8624,7 +8644,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
           description: Bad request; field names the offending input (profile, mode,
-            keyless)
+            keyless); an auth=oauth write is refused with 400 while mcp_oauth_enabled
+            is off, for a client that does not support browser login, in the server
+            edition, or together with keyless, profile or mode
         "403":
           content:
             application/json:
@@ -8715,6 +8737,15 @@ paths:
         name: keyless
         schema:
           type: boolean
+      - description: 'key (default) or oauth: preview the browser login address (Spec
+          132; refused while mcp_oauth_enabled is off or for a client without support)'
+        in: query
+        name: auth
+        schema:
+          enum:
+          - key
+          - oauth
+          type: string
       responses:
         "200":
           content:

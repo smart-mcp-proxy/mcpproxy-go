@@ -425,9 +425,18 @@ actor APIClient {
         /// Spec 108-c (108-k K21): what the client's connection carries. Nil for
         /// a core that predates client credentials.
         let credentialState: CredentialState?
+        /// Spec 132: the client passed a real-client check of the browser login
+        /// flow, and whether the core would accept `auth=oauth` for it right now
+        /// (supported AND `mcp_oauth_enabled` on AND personal edition). The form
+        /// offers the choice only for `browserLoginAvailable == true`; nil from a
+        /// core that predates the feature.
+        let supportsBrowserLogin: Bool?
+        let browserLoginAvailable: Bool?
 
         enum CodingKeys: String, CodingKey {
             case credentialState = "credential_state"
+            case supportsBrowserLogin = "supports_browser_login"
+            case browserLoginAvailable = "browser_login_available"
             case clientId = "id"
             case name
             case configPath = "config_path"

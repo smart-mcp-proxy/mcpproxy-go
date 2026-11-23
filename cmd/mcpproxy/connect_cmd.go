@@ -39,11 +39,20 @@ existing binding unless you pass --profile. With require_mcp_auth off, a named
 binding is refused unless an anonymous caller could not reach more than the
 client (the refusal lists the fixes); --keyless writes no credential.
 
+--auth oauth (Spec 132, experimental) writes only the client's browser sign-in
+address, <mcp-url>/oauth/<client-id>, with no header and no credential; the
+client signs in through the browser and you approve it on the consent page.
+It is refused while mcp_oauth_enabled is off, for a client that has not passed a
+real-client check (today only claude-code), in the server edition, and together
+with --profile, --lock, --switchable or --keyless. Connect never revokes the
+client's existing API key. To switch an existing entry, add --force.
+
 Examples:
   mcpproxy connect --list                    # Show all clients and their status
   mcpproxy connect claude-code               # Register in Claude Code
   mcpproxy connect cursor --profile ro       # Bind Cursor to profile "ro" (locked)
   mcpproxy connect cursor --profile work --switchable
+  mcpproxy connect claude-code --auth oauth  # Browser sign-in address only, no credential (needs mcp_oauth_enabled)
   mcpproxy connect cursor --force            # Overwrite existing entry
   mcpproxy connect codex --name my-proxy     # Custom server name
   mcpproxy connect opencode                  # Register in OpenCode
@@ -94,7 +103,8 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	svc := connect.NewService(cfg.Listen, cfg.APIKey).WithRequireMCPAuth(cfg.RequireMCPAuth)
+	svc := connect.NewService(cfg.Listen, cfg.APIKey).WithRequireMCPAuth(cfg.RequireMCPAuth).
+		WithMCPOAuthEnabled(func() bool { return cfg.MCPOAuthEnabled })
 
 	format := clioutput.ResolveFormat(globalOutputFormat, globalJSONOutput)
 	formatter, err := clioutput.NewFormatter(format)
@@ -343,6 +353,12 @@ func printConnectResult(result *connect.ConnectResult, formatter clioutput.Outpu
 			// and what it is bound to — never the secret.
 			if line := connectCredentialLine(result); line != "" {
 				fmt.Println(line)
+			}
+			if line := connectAuthLine(result); line != "" {
+				fmt.Println(line)
+				if result.AuthNote != "" {
+					fmt.Printf("Note: %s\n", result.AuthNote)
+				}
 			}
 			if line := disconnectCredentialLine(result); line != "" {
 				fmt.Println(line)

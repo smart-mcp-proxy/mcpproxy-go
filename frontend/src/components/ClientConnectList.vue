@@ -216,10 +216,46 @@
                 class="text-[11px] font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-success px-2 py-1.5 leading-relaxed"
               >{{ previews[client.id]!.entry_text }}</pre>
             </div>
+            <!-- Spec 132: how the client signs in. Offered only while browser
+                 login is on and this client passed a real-client check; it sits
+                 after the diff and backup notice, before the Connect button. -->
+            <fieldset v-if="client.browser_login_available" class="space-y-1" :data-test="`connect-auth-choice-${client.id}`">
+              <legend class="text-xs font-medium mb-1">How {{ client.name }} signs in</legend>
+              <label class="label cursor-pointer justify-start gap-2 py-0">
+                <input
+                  v-model="formFor(client.id).auth"
+                  type="radio"
+                  value="key"
+                  class="radio radio-xs"
+                  :name="`connect-auth-${client.id}`"
+                  :data-test="`connect-auth-key-${client.id}`"
+                  @change="onAuthChange(client.id)"
+                />
+                <span class="label-text text-xs">API key</span>
+              </label>
+              <label class="label cursor-pointer justify-start gap-2 py-0">
+                <input
+                  v-model="formFor(client.id).auth"
+                  type="radio"
+                  value="oauth"
+                  class="radio radio-xs"
+                  :name="`connect-auth-${client.id}`"
+                  :data-test="`connect-auth-oauth-${client.id}`"
+                  @change="onAuthChange(client.id)"
+                />
+                <span class="label-text text-xs">Sign in with browser</span>
+              </label>
+            </fieldset>
+            <div v-if="formFor(client.id).auth === 'oauth'" class="space-y-1" :data-test="`connect-auth-oauth-notice-${client.id}`">
+              <p class="text-xs leading-relaxed">
+                No credential is written. {{ client.name }} gets only the sign-in address; the first time it connects, your browser opens a page where you approve it.
+              </p>
+              <p v-if="previews[client.id]!.auth_note" class="text-xs opacity-70 leading-relaxed" :data-test="`connect-auth-note-${client.id}`">{{ previews[client.id]!.auth_note }}</p>
+            </div>
             <!-- Spec 108-i I15 (T042w): every connect mints the client its OWN
                  credential, bound to a profile. The admin API key is never
                  written, so there is no API-key notice any more. -->
-            <div v-if="!formFor(client.id).keyless" class="space-y-2" :data-test="`client-preview-credential-${client.id}`">
+            <div v-if="!formFor(client.id).keyless && formFor(client.id).auth !== 'oauth'" class="space-y-2" :data-test="`client-preview-credential-${client.id}`">
               <p class="text-xs leading-relaxed" :data-test="`connect-credential-notice-${client.id}`">
                 MCPProxy writes a client credential for {{ client.name }}. The admin API key is never written.
               </p>
@@ -264,7 +300,7 @@
               >{{ MGMT_NOTICE }}</p>
             </div>
             <!-- Keyless (unidentified client): only while authentication is off. -->
-            <details v-if="requireMcpAuth === false" class="text-xs" :data-test="`connect-advanced-${client.id}`">
+            <details v-if="requireMcpAuth === false && formFor(client.id).auth !== 'oauth'" class="text-xs" :data-test="`connect-advanced-${client.id}`">
               <summary class="cursor-pointer opacity-70">Advanced</summary>
               <label class="label cursor-pointer justify-start gap-2">
                 <input v-model="formFor(client.id).keyless" type="checkbox" class="checkbox checkbox-xs" :data-test="`connect-keyless-${client.id}`" @change="onBindingToggle(client.id)" />
@@ -606,7 +642,8 @@ const requireMcpAuth = ref<boolean | null>(null)
 // `touched` is set once the operator changes a binding control. Until then the
 // request carries no profile/mode/keyless at all, so a fresh connect is All
 // servers and a reconnect keeps the credential's current binding (Spec 108-c2).
-interface ConnectForm { profile: string; locked: boolean; keyless: boolean; touched: boolean }
+// `auth` is Spec 132's choice of how the client signs in; 'key' is today's connect.
+interface ConnectForm { profile: string; locked: boolean; keyless: boolean; touched: boolean; auth: 'key' | 'oauth' }
 const forms = reactive<Record<string, ConnectForm>>({})
 const connectRefusal = ref<Record<string, ApiError>>({})
 const bulkForm = reactive({ profile: '', locked: false, touched: false })
@@ -793,7 +830,7 @@ async function fetchClients() {
 function initialForm(clientId: string): ConnectForm {
   const row = clientsStore.clients.find(c => c.id === clientId)
   const bound = row?.credential_state === 'client'
-  return { profile: bound ? (row?.profile ?? '') : '', locked: bound ? row?.profile_mode === 'locked' : false, keyless: false, touched: false }
+  return { profile: bound ? (row?.profile ?? '') : '', locked: bound ? row?.profile_mode === 'locked' : false, keyless: false, touched: false, auth: 'key' }
 }
 
 function formFor(clientId: string): ConnectForm {
@@ -801,9 +838,11 @@ function formFor(clientId: string): ConnectForm {
   return forms[clientId]
 }
 
-type Intent = { profile?: string; mode?: 'locked' | 'switchable'; keyless?: boolean }
+type Intent = { profile?: string; mode?: 'locked' | 'switchable'; keyless?: boolean; auth?: 'oauth' }
 function intentFor(clientId: string): Intent {
   const form = formFor(clientId)
+  // A browser login carries no binding: the access is chosen on the consent page.
+  if (form.auth === 'oauth') return { auth: 'oauth' }
   if (!form.touched) return {}
   if (form.keyless) return { keyless: true }
   return { profile: form.profile, mode: form.profile && form.locked ? 'locked' : 'switchable' }
@@ -851,6 +890,12 @@ function setRefusal(clientId: string, err: ApiError | null) {
 // The preview is fetched with the intent only when there is one.
 function fetchPreview(clientId: string, intent: Intent) {
   return Object.keys(intent).length ? api.getConnectPreview(clientId, intent) : api.getConnectPreview(clientId)
+}
+
+// Spec 132: the sign-in choice changes what would be written, so the preview and
+// its precondition token are fetched again for it.
+async function onAuthChange(clientId: string) {
+  await refreshPreview(clientId)
 }
 
 // Lock and keyless toggles come through here; they are binding changes.

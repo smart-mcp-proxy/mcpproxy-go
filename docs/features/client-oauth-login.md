@@ -3,7 +3,7 @@ id: client-oauth-login
 title: Browser Login for MCP Clients
 sidebar_label: Browser Login for MCP Clients
 sidebar_position: 7
-description: Let MCP clients sign in to MCPProxy through the browser (OAuth 2.1 with PKCE) next to API keys. Opt-in, loopback only, personal edition. Backend and admin REST only in this release.
+description: Let MCP clients sign in to MCPProxy through the browser (OAuth 2.1 with PKCE) next to API keys. Opt-in, loopback only, personal edition. Connect can write the sign-in address for clients that passed a real-client check (Claude Code so far).
 keywords: [oauth, browser login, mcp client, pkce, dynamic client registration, rfc 9728, rfc 8414, rfc 8707, cursor, claude code, vscode]
 ---
 
@@ -180,6 +180,64 @@ consent page can approve one. See [credential lifecycle over MCP](./mcp-credenti
 with `DELETE /api/v1/clients/<id>/logins/<grant_id>`; the next request on that login,
 including on an open session, is refused. Forgetting a client removes all its logins.
 
+## Connecting a client to browser login
+
+Connect can write the sign-in address instead of an API key. The client is given only
+`http://127.0.0.1:8080/mcp/oauth/<client-id>`; there is no header, no bridge argument and no
+credential in its config file, and the client credential store is not touched.
+
+```bash
+mcpproxy connect claude-code --auth oauth          # key is the default: --auth key
+mcpproxy connect claude-code --auth oauth --force  # switch an entry that is already there
+```
+
+In the Web UI and the macOS app, the Connect form shows **API key** (selected) or **Sign in
+with browser** after the diff and the backup notice, and before the Connect button. It is
+shown only while browser login is on and only for a client in the table below; while the
+switch is off the form is the one it always was. Choosing the browser shows the exact entry
+that will be written and the note below, and hides the profile and keyless controls: the
+access is chosen on the consent page.
+
+What Connect does with `--auth oauth` (REST `auth: "oauth"`, preview `?auth=oauth`):
+
+- It is **refused**, with nothing written, while `mcp_oauth_enabled` is off, for a client that
+  is not in the table, in the server edition, and together with `--profile`, `--lock`,
+  `--switchable` or `--keyless`.
+- The preview and the result carry `auth: "oauth"`, no credential and no masked value. The
+  preview token binds the choice, so a key write cannot ride an oauth preview.
+- **Reconnecting replaces the one entry, it never adds a second.** Key to browser and
+  browser to key both need `--force` (the Web UI and the app do this when you confirm the
+  replace).
+- **Connect never revokes an API key.** After switching to the browser the client's existing
+  key keeps working until you revoke it (Revoke API key on the Clients page). The preview and
+  the result say so. `mcpproxy disconnect <client>` removes the entry and revokes the client's
+  API key as before; it does not revoke browser logins (use the Clients page or
+  `mcpproxy client revoke-login <id> <grant-id>`).
+- Disconnect, Undo and the status read recognise an entry written this way. Undo of an oauth
+  connect restores the earlier config and revokes nothing, since the connect minted nothing.
+- `GET /api/v1/connect` and `GET /api/v1/connect/{client}` report `supports_browser_login`
+  (the client is in the table) and `browser_login_available` (it is in the table **and** the
+  feature is on in this edition). A status read of a client whose entry holds the address
+  reports `auth: "oauth"`.
+
+### Clients checked so far
+
+A client is marked as supporting browser login only after a recorded check with the real
+client (`specs/132-client-oauth-login/verification/real-clients.md`). Passing the MCP SDK is
+not enough.
+
+| Client | Offered by Connect | What was verified |
+|---|---|---|
+| Claude Code | **yes** (`claude-code`) | Claude Code CLI 2.1.318 on macOS completed the login flow over plain HTTP loopback: it accepted the `http://127.0.0.1` issuer, registered itself, sent the authorize request for the per-client address (`resource` equal to it), and after approval reported "Connected" and made MCP calls with the token. **Not** verified: token refresh, the order of the metadata requests, the browser-and-callback path (the check pasted the redirect URL at the CLI prompt), tool calls inside an interactive session, the generic `/mcp/oauth` address, Windows and Linux |
+| Cursor | no | not verified (needs its real config and a GUI) |
+| VS Code, GitHub Copilot | no | not verified (needs its real settings and a GUI) |
+| MCP Inspector | not a Connect client | not verified (needs a TTY and a browser) |
+| MCP TypeScript SDK 1.32.2 | not a Connect client | login, refresh and tool calls verified with a script |
+| Every other Connect client | no | not checked |
+
+Until a client is checked, use its API key. A client can still be pointed at an address by
+hand; Connect just does not offer it.
+
 ## Turning it off
 
 Set `mcp_oauth_enabled` back to `false` (or the variable to `false`). After the feature has
@@ -200,4 +258,4 @@ The issuer is `http://127.0.0.1:<port>`, not HTTPS. The specifications ask for H
 non-loopback issuers; loopback HTTP is the common local-tool case. Client behaviour is
 checked in `specs/132-client-oauth-login/verification/real-clients.md`; the MCP
 TypeScript SDK client flow and the Claude Code CLI login flow are verified so far (Cursor, VS
-Code and MCP Inspector are not).
+Code and MCP Inspector are not; see [Clients checked so far](#clients-checked-so-far)).

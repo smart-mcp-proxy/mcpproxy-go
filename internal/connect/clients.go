@@ -45,6 +45,12 @@ type ClientDef struct {
 	// a live client in this environment); see the per-client comment for its
 	// source.
 	ReloadHint string
+	// SupportsBrowserLogin marks a client that Connect may point at its
+	// per-client browser login address (`/mcp/oauth/<client-id>`, Spec 132).
+	// A client is added here only after a recorded real-client check of its
+	// login flow (specs/132-client-oauth-login/verification/real-clients.md);
+	// the MCP SDK passing is not enough. Every other client stays false.
+	SupportsBrowserLogin bool
 }
 
 // allClients defines all known MCP client applications.
@@ -59,6 +65,9 @@ var allClients = []ClientDef{
 		// clientInfo.name observed from Claude Code's own MCP client.
 		ClientInfoNames: []string{"claude-code"},
 		ReloadHint:      "Run /mcp in Claude Code (or restart it) to load MCPProxy",
+		// Claude Code CLI 2.1.318 completed the login flow over plain HTTP
+		// loopback (real-clients.md). The only client that has.
+		SupportsBrowserLogin: true,
 	},
 	{
 		ID:        "claude-desktop",

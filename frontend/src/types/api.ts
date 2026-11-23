@@ -1354,6 +1354,14 @@ export interface ClientStatus {
   // This instance's own MCP endpoint. Config-derived, so it is present on both
   // the stat-only listing and the on-demand per-client read.
   proxy_url?: string
+  // Spec 132: the client passed a real-client check of the browser login flow
+  // (registry property), and whether Connect would accept auth=oauth right now
+  // (supported AND mcp_oauth_enabled on AND personal edition). A UI offers the
+  // choice only for `browser_login_available`. `auth` is 'oauth' when the
+  // client's existing entry holds the sign-in address.
+  supports_browser_login?: boolean
+  browser_login_available?: boolean
+  auth?: 'oauth'
   // The endpoint the client's existing entry actually points at, projected
   // through the same sanitizer as a connect preview's entry summary: scheme,
   // host and path only (query — the ?apikey= carrier — userinfo and fragment
@@ -1375,6 +1383,9 @@ export interface ConnectOptions {
   profile?: string
   mode?: 'locked' | 'switchable'
   keyless?: boolean
+  // Spec 132: 'oauth' writes only the client's browser sign-in address. Omitted
+  // (never 'key') for the default, so an API-key connect sends what it always sent.
+  auth?: 'oauth'
   precondition_token?: string
 }
 
@@ -1400,6 +1411,8 @@ export interface ConnectResult {
   profile?: string
   mode?: 'locked' | 'switchable'
   keyless?: boolean
+  auth?: 'oauth'
+  auth_note?: string
   rotation?: string
   credential_revoked?: string
   credential_revoke_error?: string
@@ -1431,6 +1444,11 @@ export interface ConnectPreview {
   precondition_token?: string
   bridge?: boolean
   access_state?: AccessState
+  // Spec 132: 'oauth' when this preview shows the browser sign-in address (no
+  // credential); `auth_note` says what the write leaves alone (an existing API key).
+  auth?: 'oauth'
+  auth_note?: string
+  browser_login_available?: boolean
 }
 
 // Onboarding wizard types (Spec 046)

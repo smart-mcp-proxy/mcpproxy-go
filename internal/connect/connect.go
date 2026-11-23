@@ -75,6 +75,13 @@ type ConnectResult struct {
 	// the credential is still active and `mcpproxy client forget <id>`
 	// retries the revoke.
 	CredentialRevokeError string `json:"credential_revoke_error,omitempty" yaml:"credential_revoke_error,omitempty"`
+
+	// Auth is "oauth" when the entry holds the per-client browser login
+	// address and no credential (Spec 132). Empty for an API-key entry.
+	Auth string `json:"auth,omitempty" yaml:"auth,omitempty"`
+	// AuthNote says what Connect left alone: an oauth write does not revoke the
+	// client's existing API key.
+	AuthNote string `json:"auth_note,omitempty" yaml:"auth_note,omitempty"`
 }
 
 // ClientStatus describes the current state of a client's configuration
@@ -144,6 +151,18 @@ type ClientStatus struct {
 	//   "unknown" — the entry has no comparable endpoint (e.g. a stdio command)
 	// Empty when Connected is false or nothing was read.
 	EndpointMatch string `json:"endpoint_match,omitempty" yaml:"endpoint_match,omitempty"`
+
+	// SupportsBrowserLogin is true for a client that passed a real-client check
+	// of the browser login flow and may be given the per-client sign-in address
+	// (Spec 132). A registry property: it does not depend on the feature switch.
+	SupportsBrowserLogin bool `json:"supports_browser_login,omitempty" yaml:"supports_browser_login,omitempty"`
+	// BrowserLoginAvailable is true when Connect would accept auth=oauth for this
+	// client right now: SupportsBrowserLogin, mcp_oauth_enabled on, personal
+	// edition. A UI offers the choice only when this is true.
+	BrowserLoginAvailable bool `json:"browser_login_available,omitempty" yaml:"browser_login_available,omitempty"`
+	// Auth is "oauth" when the client's existing entry holds a browser login
+	// address. Resolved only by GetStatus; empty for an API-key entry.
+	Auth string `json:"auth,omitempty" yaml:"auth,omitempty"`
 }
 
 // EndpointMatch values for ClientStatus.EndpointMatch.
@@ -197,6 +216,10 @@ type Service struct {
 	// (ErrNoCredentialMinter) while it is on — it NEVER falls back to the
 	// admin API key, which has no remaining write path (plan D10).
 	minter CredentialMinter
+
+	// mcpOAuthEnabled reports the live mcp_oauth_enabled switch (Spec 132). Nil
+	// counts as off, so a service nobody wired never offers browser login.
+	mcpOAuthEnabled func() bool
 }
 
 // WithRequireMCPAuth sets whether the /mcp endpoint requires authentication,
@@ -419,6 +442,9 @@ func (s *Service) GetAllStatus() []ClientStatus {
 			ReloadHint:   c.ReloadHint,
 			AccessState:  accessUnknown,
 			ProxyURL:     proxyURL,
+
+			SupportsBrowserLogin:  c.SupportsBrowserLogin,
+			BrowserLoginAvailable: s.browserLoginAvailable(&c),
 		}
 
 		// Metadata-only existence check (no content read).
@@ -469,6 +495,9 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 		ReloadHint:   c.ReloadHint,
 		AccessState:  accessUnknown,
 		ProxyURL:     s.baseURL(),
+
+		SupportsBrowserLogin:  c.SupportsBrowserLogin,
+		BrowserLoginAvailable: s.browserLoginAvailable(c),
 	}
 
 	if _, err := s.stat(cfgPath); err == nil {
@@ -499,6 +528,9 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 		status.ServerName = loc.Name
 		status.RegisteredURL = loc.Endpoint
 		status.EndpointMatch = classifyEndpointMatch(loc)
+		if s.entryIsOAuth(loc.Entry) {
+			status.Auth = AuthOAuth
+		}
 		// What the entry carries, from the same single read. The secret itself
 		// is classified and dropped here; it is never stored on the status.
 		secret, _ := extractEntryCredential(c.ID, loc.Entry)
@@ -545,6 +577,9 @@ type ConnectOptions struct {
 	Force             bool
 	PreconditionToken string
 	Intent            CredentialIntent
+	// Auth is AuthKey (default, "") or AuthOAuth (Spec 132): the browser login
+	// address with no credential. When set it overrides Intent.Auth.
+	Auth string
 }
 
 // ConnectWithPrecondition is ConnectWithOptions with the default credential
@@ -576,6 +611,9 @@ func (s *Service) ConnectWithPrecondition(clientID, serverName string, force boo
 // back and the old secret keeps working, FR-021a).
 func (s *Service) ConnectWithOptions(clientID, serverName string, opts ConnectOptions) (res *ConnectResult, err error) {
 	force, preconditionToken := opts.Force, opts.PreconditionToken
+	if opts.Auth != "" {
+		opts.Intent.Auth = opts.Auth
+	}
 	client := FindClient(clientID)
 
 	// FR-037/FR-042: every ConnectResult this call produces — success,
@@ -606,9 +644,16 @@ func (s *Service) ConnectWithOptions(clientID, serverName string, opts ConnectOp
 	}
 	// Pure input validation (no I/O): keyless with auth on or with a profile,
 	// or auth on with no minter, is refused before anything is read or written.
-	mint, err := s.planCredential(opts.Intent)
+	oauth, err := s.planAuth(clientID, opts.Intent)
 	if err != nil {
 		return nil, err
+	}
+	mint := false
+	if !oauth {
+		mint, err = s.planCredential(opts.Intent)
+		if err != nil {
+			return nil, err
+		}
 	}
 	// Resolve the pre-write state ONCE for the whole operation. The token
 	// check and the write must cover the SAME read — re-resolving per step is
@@ -682,7 +727,7 @@ func (s *Service) ConnectWithOptions(clientID, serverName string, opts ConnectOp
 	// res/err are the function's named returns — deliberately NOT re-declared
 	// with `var` here, which would shadow them and leave the deferred
 	// DisplayPath/ReloadHint fill-in above looking at a permanently-nil res.
-	cred := &credentialHandle{svc: s, clientID: clientID, intent: opts.Intent, mint: mint}
+	cred := &credentialHandle{svc: s, clientID: clientID, intent: opts.Intent, mint: mint, oauth: oauth}
 	if client.Format == "toml" {
 		res, err = s.connectTOML(client, cfgPath, serverName, force, pre, cred)
 	} else {
@@ -709,7 +754,9 @@ type credentialHandle struct {
 	clientID string
 	intent   CredentialIntent
 	mint     bool
-	issued   *IssuedCredential
+	// oauth: the write holds the browser login address and no credential.
+	oauth  bool
+	issued *IssuedCredential
 	// wrote is set once the config write itself succeeded. A failure after
 	// that point (a verification re-read) is ambiguous — the file may hold the
 	// new secret — so it must NOT abort the mint: a fresh credential is left
@@ -726,7 +773,7 @@ func (h *credentialHandle) secret() (string, error) {
 	if !h.mint {
 		// A keyless write mints nothing but still rewrites the client's config:
 		// refuse while another connect holds the in-flight claim (FR-021a).
-		if h.intent.Keyless && h.svc.minter != nil {
+		if (h.intent.Keyless || h.oauth) && h.svc.minter != nil {
 			if err := h.svc.minter.CheckIdle(h.clientID); err != nil {
 				return "", err
 			}
@@ -770,6 +817,12 @@ func (h *credentialHandle) settle(res *ConnectResult, writeErr error) error {
 // describe fills the credential fields of a successful result: the masked
 // credential, token name, binding and rotation outcome — never the secret.
 func (h *credentialHandle) describe(res *ConnectResult, intent CredentialIntent) {
+	if h.oauth {
+		res.Auth = AuthOAuth
+		res.AuthNote = authNote(true)
+		res.Message = fmt.Sprintf("MCPProxy registered in %s as %q with its browser sign-in address", displayClientName(res.Client), res.ServerName)
+		return
+	}
 	if h.issued == nil {
 		if !h.mint {
 			res.Keyless = true
@@ -1091,7 +1144,7 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 
 	// Build the entry with the per-client credential (empty for a keyless
 	// entry). The admin API key is never a credential source.
-	entry := buildServerEntry(client.ID, s.entryParams(secret))
+	entry := buildServerEntry(client.ID, s.entryParamsFor(client.ID, cred.oauth, secret))
 	serversMap[serverName] = entry
 	setServersMap(client, data, serversMap)
 
@@ -1285,7 +1338,7 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 
 	// Build Codex entry via the shared constructor so what connect writes is
 	// exactly what preview renders (Spec 078 FR-002).
-	entry := buildServerEntry(client.ID, s.entryParams(secret))
+	entry := buildServerEntry(client.ID, s.entryParamsFor(client.ID, cred.oauth, secret))
 	serversMap[serverName] = entry
 	setServersMap(client, data, serversMap)
 
@@ -1531,7 +1584,7 @@ func findEquivalentJSONServerName(serversMap map[string]interface{}, baseURL, re
 			if !ok {
 				continue
 			}
-			if entryURL == baseURL || strings.HasPrefix(entryURL, baseURL+"?") {
+			if urlPointsHere(entryURL, baseURL) {
 				return name, true
 			}
 		}
@@ -1604,7 +1657,7 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLoc
 		// Check various URL fields used by different clients
 		for _, field := range []string{"url", "serverUrl", "httpUrl"} {
 			if u, ok := entry[field].(string); ok {
-				if u == baseURL || strings.HasPrefix(u, baseURL+"?") {
+				if urlPointsHere(u, baseURL) {
 					return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}, true, true
 				}
 			}
@@ -1869,7 +1922,7 @@ func (s *Service) findEntryTOMLBytes(raw []byte) (loc entryLocation, found, pars
 			continue
 		}
 		if u, ok := entry["url"].(string); ok {
-			if u == baseURL || strings.HasPrefix(u, baseURL+"?") {
+			if urlPointsHere(u, baseURL) {
 				return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}, true, true
 			}
 		}

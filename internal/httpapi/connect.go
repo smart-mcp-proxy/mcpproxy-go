@@ -45,6 +45,12 @@ type ConnectRequest struct {
 	Profile *string `json:"profile,omitempty"`
 	Mode    *string `json:"mode,omitempty"`
 	Keyless bool    `json:"keyless,omitempty"`
+
+	// Auth is "key" (default) or "oauth" (Spec 132): "oauth" writes the
+	// client's browser login address and no credential. It is refused while
+	// mcp_oauth_enabled is off, for a client that does not support it, in the
+	// server edition, and together with keyless, profile or mode.
+	Auth string `json:"auth,omitempty" enums:"key,oauth"`
 }
 
 // ClientCredentialConflictResponse is the 409 body when the token name
@@ -175,6 +181,7 @@ func (s *Server) handleGetConnectClientStatus(w http.ResponseWriter, r *http.Req
 // @Param       profile     query string false "Profile the client credential would bind to (empty = All servers); mirror POST connect"
 // @Param       mode        query string false "locked|switchable; mirror POST connect" Enums(locked, switchable)
 // @Param       keyless     query bool   false "Preview a credential-less entry (only while require_mcp_auth is off)"
+// @Param       auth        query string false "key (default) or oauth: preview the browser login address (Spec 132; refused while mcp_oauth_enabled is off or for a client without support)" Enums(key, oauth)
 // @Success     200    {object} contracts.APIResponse "ConnectPreview"
 // @Failure     400    {object} ClientBindingErrorResponse "Invalid intent (field names the input; keyless with auth on or with a profile)"
 // @Failure     403    {object} contracts.ErrorResponse "Administrator credentials required or access denied by macOS App Data"
@@ -245,9 +252,9 @@ func (s *Server) handleConnectClientPreview(w http.ResponseWriter, r *http.Reque
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
 // @Param       client path   string         true  "Client ID (claude-code, claude-desktop, copilot, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
-// @Param       body   body   ConnectRequest false "Optional connection parameters (server_name, force, precondition_token, profile, mode, keyless)"
+// @Param       body   body   ConnectRequest false "Optional connection parameters (server_name, force, precondition_token, profile, mode, keyless, auth)"
 // @Success     200    {object} contracts.APIResponse "ConnectResult (credential is the masked mcp_cli_ value, with token_name, profile, mode, keyless and rotation)"
-// @Failure     400    {object} ClientBindingErrorResponse "Bad request; field names the offending input (profile, mode, keyless)"
+// @Failure     400    {object} ClientBindingErrorResponse "Bad request; field names the offending input (profile, mode, keyless); an auth=oauth write is refused with 400 while mcp_oauth_enabled is off, for a client that does not support browser login, in the server edition, or together with keyless, profile or mode"
 // @Failure     403    {object} contracts.ErrorResponse "Permission denied (macOS App-Data block)"
 // @Failure     404    {object} contracts.ErrorResponse "Unknown client"
 // @Failure     409    {object} ConnectConflictResponse "Conflict: action=already_exists (use force=true) or action=precondition_failed (preview is stale; re-preview); or binding_bypassable_without_auth (BindingGuardResponse); or conflicting_token (ClientCredentialConflictResponse); or connect_in_progress (another connect of this client is mid-write) or credential_superseded (the written credential was replaced or revoked before it could be finalized; reconnect)"
@@ -278,7 +285,7 @@ func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
 		Force:             req.Force,
 		PreconditionToken: req.PreconditionToken,
 		Intent: connect.CredentialIntent{
-			Profile: req.Profile, Mode: req.Mode, Keyless: req.Keyless,
+			Profile: req.Profile, Mode: req.Mode, Keyless: req.Keyless, Auth: req.Auth,
 			ActorKind: actor.Kind, ActorName: actor.Name, Surface: string(actor.Surface),
 		},
 	})
@@ -656,7 +663,7 @@ func (s *Server) writeIfAccessDenied(w http.ResponseWriter, r *http.Request, err
 // ?mode=locked|switchable and ?keyless=true.
 func previewIntent(r *http.Request) connect.CredentialIntent {
 	q := r.URL.Query()
-	intent := connect.CredentialIntent{Keyless: q.Get("keyless") == "true"}
+	intent := connect.CredentialIntent{Keyless: q.Get("keyless") == "true", Auth: q.Get("auth")}
 	if q.Has("profile") {
 		p := q.Get("profile")
 		intent.Profile = &p
