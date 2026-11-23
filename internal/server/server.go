@@ -10,6 +10,7 @@ import (
 	"net/http"
 	httppprof "net/http/pprof"
 	"os"
+	"path"
 	"path/filepath"
 	gruntime "runtime"
 	"strings"
@@ -810,7 +811,9 @@ func (s *Server) createSelectiveWebUIProtectedHandler(handler http.Handler) http
 	// receive API requests. The one addition: the sign-in consent page (Spec 132)
 	// is never framed, so a hostile page cannot overlay its Approve button.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if p := r.URL.Path; p == "/ui/authorize" || strings.HasPrefix(p, "/ui/authorize/") {
+		// Vue Router matches case-insensitively and the SPA answers unknown
+		// paths, so compare the cleaned path without regard to case.
+		if p := strings.ToLower(path.Clean("/" + r.URL.Path)); p == "/ui/authorize" || strings.HasPrefix(p, "/ui/authorize/") {
 			w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 			w.Header().Set("X-Frame-Options", "DENY")
 		}

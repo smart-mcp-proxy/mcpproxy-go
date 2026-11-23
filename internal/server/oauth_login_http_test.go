@@ -64,7 +64,10 @@ func TestOAuthLoginHTTP_MetadataAndChallenge(t *testing.T) {
 func TestOAuthLoginHTTP_AuthorizePageIsNeverFramed(t *testing.T) {
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("spa")) })
 	h := (&Server{}).createSelectiveWebUIProtectedHandler(inner)
-	for _, path := range []string{"/ui/authorize", "/ui/authorize?request=abc", "/ui/authorize/"} {
+	for _, path := range []string{
+		"/ui/authorize", "/ui/authorize?request=abc", "/ui/authorize/", "/ui/authorize/x",
+		"/ui/Authorize?request=abc", "/ui/AUTHORIZE/", "/ui/Authorize/X", "/ui//authorize", "/ui/./authorize", "/ui/x/../authorize",
+	} {
 		rec := httptestGet(h, path)
 		assert.Equal(t, "frame-ancestors 'none'", rec.Header().Get("Content-Security-Policy"), path)
 		assert.Equal(t, "DENY", rec.Header().Get("X-Frame-Options"), path)

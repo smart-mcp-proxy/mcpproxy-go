@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -446,7 +445,30 @@ func (s *OAuthLoginService) displayNameOf(id string, all []auth.AgentToken, bind
 	return id
 }
 
-var parenSuffix = regexp.MustCompile(`^(.*\S)\s*\([^()]*\)$`)
+// stripTrailingGroup removes one balanced trailing parenthesised group
+// ("Claude Code (my (dev) server)" -> "Claude Code") and returns the trimmed
+// text before it. ok is false when the text does not end with a balanced group
+// or nothing is left before it.
+func stripTrailingGroup(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	if !strings.HasSuffix(s, ")") {
+		return "", false
+	}
+	depth := 0
+	for i := len(s) - 1; i >= 0; i-- {
+		switch s[i] {
+		case ')':
+			depth++
+		case '(':
+			depth--
+			if depth == 0 {
+				base := strings.TrimSpace(s[:i])
+				return base, base != ""
+			}
+		}
+	}
+	return "", false
+}
 
 // suggestExistingClient compares the sanitised reported name, trimmed and
 // without regard to case, with each offered client's id, display name and (for
@@ -455,23 +477,21 @@ var parenSuffix = regexp.MustCompile(`^(.*\S)\s*\([^()]*\)$`)
 // are counted by distinct client id: exactly one client yields a suggestion,
 // none or several yield nil. Pure advice, computed on read, never stored.
 func suggestExistingClient(reported string, clients []ExistingClientView) *SuggestedExisting {
-	name := strings.ToLower(strings.TrimSpace(reported))
+	name := strings.TrimSpace(reported)
 	if name == "" {
 		return nil
 	}
 	forms := []string{name}
-	if m := parenSuffix.FindStringSubmatch(name); m != nil {
-		if base := strings.TrimSpace(m[1]); base != "" && base != name {
-			forms = append(forms, base)
-		}
+	if base, ok := stripTrailingGroup(name); ok {
+		forms = append(forms, base)
 	}
 	eq := func(candidate string) bool {
-		c := strings.ToLower(strings.TrimSpace(candidate))
+		c := strings.TrimSpace(candidate)
 		if c == "" {
 			return false
 		}
 		for _, f := range forms {
-			if f == c {
+			if strings.EqualFold(f, c) {
 				return true
 			}
 		}
