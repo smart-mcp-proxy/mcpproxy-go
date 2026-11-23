@@ -568,7 +568,10 @@ func SaveConfigWithEdits(cfg, mergeBase *Config, path string) error {
 	}
 	saveConfigMu.Lock()
 	defer saveConfigMu.Unlock()
-	persisted := PersistableConfigWithEdits(cfg, mergeBase, path)
+	persisted, err := persistableConfigWithEdits(cfg, mergeBase, path)
+	if err != nil {
+		return err
+	}
 	if saveConfigTestHook != nil {
 		saveConfigTestHook()
 	}

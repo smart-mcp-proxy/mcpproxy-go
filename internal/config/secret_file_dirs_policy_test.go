@@ -81,6 +81,31 @@ func TestSecretFileDirsManagementEditRefused_MissingFileComparesWithUnset(t *tes
 	assert.False(t, SecretFileDirsManagementEditRefused(path, &Config{DataDir: dir}))
 }
 
+// Cross-review R1 (PR #1884): the guard can decode the file and the save can
+// then fail to (the file changed in between). The save must not fall back to
+// the in-memory secret_file_dirs, which may carry an edit.
+func TestSaveConfig_UndecodableFileRefusesSecretFileDirs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ConfigFileName)
+	garbage := []byte("{not json")
+	require.NoError(t, os.WriteFile(path, garbage, 0o600))
+
+	wild := SecretFileDirs{"*"}
+	err := SaveConfig(&Config{DataDir: dir, Listen: ":8080", SecretFileDirs: &wild}, path)
+	require.ErrorIs(t, err, ErrSecretFileDirsUnverified)
+	got, rerr := os.ReadFile(path)
+	require.NoError(t, rerr)
+	assert.Equal(t, garbage, got, "nothing written")
+
+	// A config that leaves secret_file_dirs unset still saves (it writes the
+	// restrictive default, never a wider list).
+	require.NoError(t, SaveConfig(&Config{DataDir: dir, Listen: ":8080"}, path))
+
+	// A missing file is created as before.
+	other := filepath.Join(dir, "new.json")
+	require.NoError(t, SaveConfig(&Config{DataDir: dir, Listen: ":8080", SecretFileDirs: &wild}, other))
+}
+
 func TestApplyPatchMap_RejectsSecretFileDirs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ConfigFileName)

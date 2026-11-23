@@ -1,6 +1,8 @@
 package config
 
 import (
+	"errors"
+	"io/fs"
 	"reflect"
 	"sort"
 	"sync"
@@ -492,18 +494,42 @@ func PersistableConfig(effective *Config, path string) *Config {
 // indistinguishable from a round trip and is not persisted — unreachable
 // from the Web UI, which already shows the override as the current value.
 func PersistableConfigWithEdits(effective, mergeBase *Config, path string) *Config {
+	out, _ := persistableConfigWithEdits(effective, mergeBase, path)
+	return out
+}
+
+// ErrSecretFileDirsUnverified is returned by a save when the config file
+// exists but cannot be decoded while the config to be written sets
+// secret_file_dirs: only the file can vouch for that value (management
+// surfaces cannot change it), so nothing is written rather than persist a
+// value the file never held.
+var ErrSecretFileDirsUnverified = errors.New("config file cannot be decoded; refusing to save secret_file_dirs it does not hold")
+
+// persistableConfigWithEdits is PersistableConfigWithEdits for the save path:
+// it fails closed (ErrSecretFileDirsUnverified) where the comparison helper
+// would fall back to the in-memory value. A missing file is not an error (the
+// save creates it).
+func persistableConfigWithEdits(effective, mergeBase *Config, path string) (*Config, error) {
 	if effective == nil {
-		return nil
+		return nil, nil
 	}
 	processOverridesMu.RLock()
 	overrides := effectiveOverridesLocked()
 	processOverridesMu.RUnlock()
 
 	var base *Config
+	var unverified bool
 	if path != "" {
-		if onDisk, err := DecodeConfigFile(path); err == nil {
+		onDisk, err := DecodeConfigFile(path)
+		switch {
+		case err == nil:
 			base = onDisk
+		case !errors.Is(err, fs.ErrNotExist):
+			unverified = effective.SecretFileDirs != nil
 		}
+	}
+	if unverified {
+		return effective, ErrSecretFileDirsUnverified
 	}
 
 	out := *effective
@@ -512,9 +538,9 @@ func PersistableConfigWithEdits(effective, mergeBase *Config, path string) *Conf
 	}
 	if len(overrides) == 0 {
 		if base != nil && !SecretFileDirsEqual(effective.SecretFileDirs, out.SecretFileDirs) {
-			return &out
+			return &out, nil
 		}
-		return effective
+		return effective, nil
 	}
 	for _, o := range overrides {
 		if mergeBase != nil && o.movedBetween(mergeBase, effective) {
@@ -522,5 +548,5 @@ func PersistableConfigWithEdits(effective, mergeBase *Config, path string) *Conf
 		}
 		o.restore(&out, base)
 	}
-	return &out
+	return &out, nil
 }
