@@ -62,7 +62,7 @@ func NewApplicationContext(cfg *config.Config, logConfig *config.LogConfig, logg
 	}
 
 	// Initialize upstream manager
-	secretResolver := config.BuildSecretResolver(cfg, "", secret.ScopeUpstream)
+	secretResolver := upstreamSecretResolver(cfg)
 	baseUpstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
 	upstreamManager := &UpstreamManagerAdapter{Manager: baseUpstreamManager}
 
@@ -190,4 +190,11 @@ func (ctx *ApplicationContext) GetLogManager() LogManager {
 // GetCacheManager returns the cache manager interface
 func (ctx *ApplicationContext) GetCacheManager() CacheManager {
 	return ctx.CacheManager
+}
+
+// upstreamSecretResolver builds the upstream-scoped resolver with the deny
+// list naming the config file the process actually loaded (--config), not the
+// default under data_dir.
+func upstreamSecretResolver(cfg *config.Config) *secret.Resolver {
+	return config.BuildSecretResolver(cfg, cfg.ConfigFilePathForPolicy(), secret.ScopeUpstream)
 }
