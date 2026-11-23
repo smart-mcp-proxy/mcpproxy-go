@@ -78,15 +78,21 @@ func uniqueAbsPaths(paths []string) []string {
 	return out
 }
 
-func (p *FilePolicy) deniedByHandleAtRead(info os.FileInfo) bool {
+func (p *FilePolicy) deniedByHandleAtRead(f *os.File, info os.FileInfo) bool {
 	if info == nil || p == nil || p.Scope != ScopeUpstream {
 		return false
 	}
-	if matchesSupersededProxyFile(info) {
+	// The opened file's identity, read from the handle (fail closed when it
+	// cannot be read).
+	id, ok := identityOfHandle(f, info)
+	if !ok {
+		return true
+	}
+	if matchesSupersededProxyFile(f, info) {
 		return true
 	}
 	for _, path := range p.denyPathsAtRead() {
-		if id, ok := StatDenyIdentity(path); ok && id.Matches(info) {
+		if d, ok := StatDenyIdentity(path); ok && d.matches(id) {
 			return true
 		}
 	}

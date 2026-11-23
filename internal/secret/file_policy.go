@@ -254,7 +254,7 @@ func readOpenedSecret(policy *FilePolicy, f *os.File, labelPath string) (string,
 		}
 		return "", fmt.Errorf("secret file %q is not a regular file", labelPath)
 	}
-	if policy != nil && policy.deniedByHandleAtRead(info) {
+	if policy != nil && policy.deniedByHandleAtRead(f, info) {
 		return "", ErrSecretFileDenied
 	}
 	// An upstream read refuses a file with more than one hard link. The
