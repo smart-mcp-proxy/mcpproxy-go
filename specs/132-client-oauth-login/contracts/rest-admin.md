@@ -29,14 +29,15 @@ Pending requests, newest first: `[{id, client_label, created_at, expires_at}]`. 
   "suggested_client": { "id": "cursor", "matched": "display_name" }, // generic only; present when the reported name equals exactly one entry of existing_clients (matched: id | display_name | known_name); absent otherwise
   "profiles": [ { "name": "dev-readonly" } ],
   "profile_required": true,               // profiles exist and the client has no binding
-  "previous_login": { "grant_id": "…", "approved_at": "…" }, // same registration signed in before
+  "previous_login": { "grant_id": "…", "client_id": "cursor", "approved_at": "…" }, // same registration signed in before: its newest live login
+  "previous_logins": [ { "grant_id": "…", "client_id": "cursor", "approved_at": "…" } ], // newest live login of this registration under each client (a per-client address lists only that client)
   "guard": null                           // only when the address fixes a client that has a binding; else absent, use preview
 }
 ```
 
 `404` for an unknown, expired, decided or cancelled id (one uniform answer).
 
-`suggested_client` is advice for the page only. It is computed on read from the sanitised reported name (trimmed, compared without regard to case) against each entry of `existing_clients`: its id, its display name and, for a connect-registry client, its known client names. The whole name is tried and, when it ends with a parenthesised suffix, also the part before it. Matches are collected over all fields and counted by distinct client id; exactly one distinct client → present, none or several → absent. `matched` names the first field that matched in the order `id`, `display_name`, `known_name`. Preview and approve take the client from their own body and never fall back to the suggestion: on the generic address, preview without a client answers `200 {"complete": false}` with no `access` and no `guard`, and approve without a client answers `422 client_required`.
+`suggested_client` is advice for the page only. It is computed on read from the sanitised reported name (trimmed, compared without regard to case) against each entry of `existing_clients`: its id, its display name and, for a connect-registry client, its known client names. The whole name is tried and, when it ends with a parenthesised suffix, also the part before it. Matches are collected over all fields and counted by distinct client id; exactly one distinct client → present, none or several → absent. `matched` names the first field that matched in the order `id`, `display_name`, `known_name`. The reported name and a new client's display name are stored without Unicode format characters (category Cf: bidi controls, zero-width characters), and so is the name observed at `initialize`; the page shows every such name in an isolated element. Preview and approve take the client from their own body and never fall back to the suggestion: on the generic address, preview without a client answers `200 {"complete": false}` with no `access` and no `guard`, and approve without a client answers `422 client_required`.
 
 ### `POST /oauth/authorizations/{id}/preview`
 
@@ -61,7 +62,7 @@ Records the decision and issues the code. The login itself is stored when the cl
   "profile": "dev-readonly",                       // "" = All servers; ignored when the client has a binding
   "mode": "locked",
   "binding_revision": "b1f3…",                     // required when the client has a binding
-  "replace_grant": "…"                             // optional: the previous_login grant id
+  "replace_grant": "…"                             // optional: the grant id of the previous login under the chosen client (previous_logins)
 }
 ```
 
@@ -69,7 +70,7 @@ Records the decision and issues the code. The login itself is stored when the cl
 - `409 already_decided`.
 - `409 binding_changed`: the binding differs from `binding_revision`; reload.
 - `409 binding_bypassable_without_auth`: body as the existing guard refusal.
-- `422 client_required` (generic address, no client in the body), `422 profile_required`, `422 client_fixed` (a client other than the one in the address), `422 identity_exists` / `reserved_identity` for a new client id, `404 profile_not_found`.
+- `422 client_required` (generic address, no client in the body), `422 profile_required`, `422 client_fixed` (a client other than the one in the address), `422 identity_exists` / `reserved_identity` for a new client id, `422 invalid_replace_grant` (a live login of this registration that belongs to another client; a grant of another registration is ignored), `404 profile_not_found`, `404 client_not_found` (the chosen client no longer exists; the request itself is still pending).
 
 ### `POST /oauth/authorizations/{id}/deny`
 
