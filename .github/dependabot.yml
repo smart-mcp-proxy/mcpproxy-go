@@ -45,11 +45,23 @@ updates:
       # vue-tsc fails on TS 7's package exports (see PR #869).
       - dependency-name: "typescript"
         versions: ["7.x"]
-      # vue-tsc 3.3.12/3.3.13 mis-type the props bound to the inline
-      # FunctionalComponent ClientRow in OnboardingWizard.vue (28 bogus TS7053/
-      # TS18047 errors; 3.3.11 is clean). Drop this once a release fixes it.
+      # vue-tsc 3.3.12-3.3.14 emit `x.value` for any setup binding that the
+      # template reads in a narrowing position (`rec[id]`, `store.prop`) and
+      # type it with an intersection that clobbers index-signature types, so
+      # `reactive<Record<string, T>>` bindings in OnboardingWizard.vue become
+      # `Boolean`/`ConnectPreview` and the Pinia store loses its members (28
+      # bogus TS7053/TS18047/TS2339 errors, #1976). 3.3.11 is clean. Re-test
+      # each new release and drop this once one passes `npm run type-check`.
       - dependency-name: "vue-tsc"
-        versions: ["3.3.12", "3.3.13"]
+        versions: ["3.3.12", "3.3.13", "3.3.14"]
+      # vue-chartjs 5.3.6 (published 2026-11-19, superseded by 5.3.7 the next
+      # day) shipped without dist/index.js / index.cjs and with
+      # `standard-version` as a runtime dependency. `vue-tsc` still passes
+      # (the .d.ts files are there) but `vite build` and every vitest file that
+      # imports it fail with "Failed to resolve import vue-chartjs" (#1998),
+      # and the stray dependency tree trips dependency-review. 5.3.7 is clean.
+      - dependency-name: "vue-chartjs"
+        versions: ["5.3.6"]
     groups:
       frontend-dependencies:
         patterns:
@@ -143,6 +155,13 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(deps-scanners)"
+    ignore:
+      # Python 3.15 is not usable for this image yet: yara-python (and other
+      # cisco-ai-mcp-scanner deps) publish no cp315 wheels, so pip builds them
+      # from source. The Dockerfile has a gcc builder stage for that, but 3.15
+      # was never verified (#1898); drop this once the scanner builds on it.
+      - dependency-name: "python"
+        versions: ["3.15.x"]
   - package-ecosystem: docker
     directory: "/docker/scanners/proximity"
     schedule:
@@ -164,6 +183,13 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(deps-scanners)"
+    ignore:
+      # python:3.15-slim breaks `pip install snyk-agent-scan`: pyjson5 ships no
+      # cp315 wheel, so pip builds it from source and fails because the -slim
+      # image has no g++ (#1897, scanner-images `build (snyk)`). Drop this once
+      # pyjson5 publishes cp315 wheels, or if the image installs a compiler.
+      - dependency-name: "python"
+        versions: ["3.15.x"]
   - package-ecosystem: docker
     directory: "/docker/scanners/trivy"
     schedule:

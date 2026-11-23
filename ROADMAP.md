@@ -1261,7 +1261,7 @@ graph LR
 | MCP protocol upgrade to 2026-07-28 revision | In progress | P1 | 40/81 (49%) | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Spec 108 profiles v3: scoped profiles, client binding, scope-aware observability | In progress | P1 | 194/195 (99%) | [108-profiles-v3](./specs/108-profiles-v3/) |  |
 | Spec 109 navigation, scope filters and cross-surface UX consistency | In progress | P1 | 257/258 (100%) | [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/) |  |
-| Spec 124 work sessions and the failure timeline | In progress | P1 | 0/74 (0%) | [124-session-failure-timeline](./specs/124-session-failure-timeline/) |  |
+| Spec 124 work sessions and the failure timeline | In progress | P1 | 40/74 (54%) | [124-session-failure-timeline](./specs/124-session-failure-timeline/) |  |
 | Spec 125 Skills over MCP: catalog, approval gate, read-only agent tools | In progress | P1 | 51/51 (100%) | [125-skills-over-mcp](./specs/125-skills-over-mcp/) |  |
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
@@ -1438,10 +1438,11 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [120-scan-structural-gate](./specs/120-scan-structural-gate/) | — | — |
 | [122-scanner-skillspector-checks](./specs/122-scanner-skillspector-checks/) | `shipped` | 31/31 (100%) |
 | [123-oauth-token-encryption](./specs/123-oauth-token-encryption/) | `drafted` | 0/56 (0%) |
-| [124-session-failure-timeline](./specs/124-session-failure-timeline/) | `drafted` | 0/74 (0%) |
+| [124-session-failure-timeline](./specs/124-session-failure-timeline/) | `in-flight` | 40/74 (54%) |
 | [125-skills-over-mcp](./specs/125-skills-over-mcp/) | `shipped` | 51/51 (100%) |
 | [127-profile-argument-rules](./specs/127-profile-argument-rules/) | — | — |
 | [128-server-list-outcomes](./specs/128-server-list-outcomes/) | — | — |
 | [129-per-user-upstream-credentials](./specs/129-per-user-upstream-credentials/) | — | — |
 | [130-skills-review-ux](./specs/130-skills-review-ux/) | `shipped` | 9/9 (100%) |
 | [131-skills-card-ux](./specs/131-skills-card-ux/) | `shipped` | 7/7 (100%) |
+| [132-client-oauth-login](./specs/132-client-oauth-login/) | `in-flight` | 8/72 (11%) |
