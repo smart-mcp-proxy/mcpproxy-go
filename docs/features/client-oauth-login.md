@@ -96,6 +96,29 @@ are checked again. (The client's registration was already stored when it registe
 request with `access_denied`; `.../preview` shows the guard verdict without writing.
 Full contract: [REST API](../api/rest-api.md).
 
+### The consent page
+
+The request opens in the Web UI at `/ui/authorize?request=<id>` (the page is never framed:
+`frame-ancestors 'none'` and `X-Frame-Options: DENY`). It shows the name the app reports,
+labelled as unverified, where the browser returns to, and one sentence on whose access is being
+handed over. Everything the app reports is shown as plain text.
+
+- **Per-client address**: the client is fixed. A client that has a profile binding shows it,
+  without asking; a client with none and configured profiles needs a profile chosen before
+  Approve is enabled. "Replace the previous browser login" appears only when this same
+  registration signed in before.
+- **Generic address**: the page opens with a client selected and you can change it. When the
+  reported name equals exactly one existing client's id, display name or known client name
+  (`Claude Code (my-server)` is also tried as `Claude Code`), that client is pre-selected with
+  the note `Suggested because the app calls itself "<name>". MCPProxy cannot verify that.`
+  Otherwise "New client" is selected, with an editable id and name filled from the reported name.
+  The suggestion decides nothing: approval carries the client the page sent, and a request with
+  no client is refused (`client_required`).
+- The binding guard's verdict is fetched through the preview call whenever the choice is
+  complete or changes; a refusal is shown with its fixes and Approve stays disabled.
+- Without the admin API key in this browser the page asks you to open the request from the
+  MCPProxy tray or paste the key, and makes no request until then.
+
 ## Seeing and revoking logins
 
 `GET /api/v1/clients` and `GET /api/v1/clients/<id>` list each login under `credentials`

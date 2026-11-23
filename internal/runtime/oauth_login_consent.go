@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -213,6 +214,15 @@ type SuggestedClient struct {
 	DisplayName string `json:"display_name"`
 }
 
+// SuggestedExisting is the page's advice for the generic address: the one
+// existing client the reported name equals. Matched is the first field that
+// matched: "id", "display_name" or "known_name". Advice only: the server never
+// applies it (preview and approve take the client from their own body).
+type SuggestedExisting struct {
+	ID      string `json:"id"`
+	Matched string `json:"matched"`
+}
+
 // ProfileChoice names a profile the page may offer.
 type ProfileChoice struct {
 	Name string `json:"name"`
@@ -251,6 +261,7 @@ type AuthorizationView struct {
 	Client             *AuthorizationClientView `json:"client,omitempty"`
 	ExistingClients    []ExistingClientView     `json:"existing_clients,omitempty"`
 	SuggestedNewClient *SuggestedClient         `json:"suggested_new_client,omitempty"`
+	SuggestedClient    *SuggestedExisting       `json:"suggested_client,omitempty"`
 	Profiles           []ProfileChoice          `json:"profiles"`
 	ProfileRequired    bool                     `json:"profile_required"`
 	PreviousLogin      *PreviousLogin           `json:"previous_login,omitempty"`
@@ -402,6 +413,7 @@ func (s *OAuthLoginService) Describe(ctx context.Context, requestID string) (*Au
 		}
 		v.ProfileRequired = len(v.Profiles) > 0
 		v.SuggestedNewClient = s.suggestNewClient(reg.ReportedName, ids)
+		v.SuggestedClient = suggestExistingClient(reg.ReportedName, v.ExistingClients)
 	}
 	return v, nil
 }
@@ -432,6 +444,67 @@ func (s *OAuthLoginService) displayNameOf(id string, all []auth.AgentToken, bind
 		return b.DisplayName
 	}
 	return id
+}
+
+var parenSuffix = regexp.MustCompile(`^(.*\S)\s*\([^()]*\)$`)
+
+// suggestExistingClient compares the sanitised reported name, trimmed and
+// without regard to case, with each offered client's id, display name and (for
+// a connect-registry client) known client names. The whole name is tried and,
+// when it ends with a parenthesised suffix, also the part before it. Matches
+// are counted by distinct client id: exactly one client yields a suggestion,
+// none or several yield nil. Pure advice, computed on read, never stored.
+func suggestExistingClient(reported string, clients []ExistingClientView) *SuggestedExisting {
+	name := strings.ToLower(strings.TrimSpace(reported))
+	if name == "" {
+		return nil
+	}
+	forms := []string{name}
+	if m := parenSuffix.FindStringSubmatch(name); m != nil {
+		if base := strings.TrimSpace(m[1]); base != "" && base != name {
+			forms = append(forms, base)
+		}
+	}
+	eq := func(candidate string) bool {
+		c := strings.ToLower(strings.TrimSpace(candidate))
+		if c == "" {
+			return false
+		}
+		for _, f := range forms {
+			if f == c {
+				return true
+			}
+		}
+		return false
+	}
+	var found *SuggestedExisting
+	for i := range clients {
+		c := &clients[i]
+		matched := ""
+		switch {
+		case eq(c.ID):
+			matched = "id"
+		case eq(c.DisplayName):
+			matched = "display_name"
+		default:
+			if def := connect.FindClient(c.ID); def != nil {
+				for _, n := range def.ClientInfoNames {
+					if eq(n) {
+						matched = "known_name"
+						break
+					}
+				}
+			}
+		}
+		if matched == "" {
+			continue
+		}
+		if found != nil {
+			return nil // several distinct clients
+		}
+		found = &SuggestedExisting{ID: c.ID, Matched: matched}
+	}
+	return found
 }
 
 // suggestNewClient derives an id from the reported name: lower-case slug of

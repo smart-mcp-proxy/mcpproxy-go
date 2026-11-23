@@ -249,6 +249,53 @@ func TestOAuthLoginREST_GenericAddress(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
 }
 
+// T049a: the generic address carries suggested_client when the reported name
+// equals exactly one existing client; the server never applies it.
+func TestOAuthLoginREST_SuggestedClient(t *testing.T) {
+	h := newOAuthHarness(t, true)
+	h.mint("cursor", "ro")
+	h.mint("codex", "ro")
+	begin := func(name, client string) string {
+		reg, rerr, err := h.svc.Register(mcplogin.RegistrationRequest{RedirectURIs: []string{oauthTestRedirect}, ClientName: name})
+		require.NoError(t, err)
+		require.Nil(t, rerr)
+		regID, _ := reg["client_id"].(string)
+		sum := sha256.Sum256([]byte(strings.Repeat("v", 43)))
+		id, aerr := h.svc.BeginAuthorization(internalRuntime.AuthorizeInput{
+			Origin: oauthTestOrigin, ClientID: regID, RedirectURI: oauthTestRedirect, State: "st",
+			CodeChallenge: base64.RawURLEncoding.EncodeToString(sum[:]), Method: "S256",
+			Resource: oauthTestOrigin + mcplogin.ResourcePath(client), ResponseType: "code",
+		})
+		require.Nil(t, aerr)
+		return id
+	}
+
+	id := begin("Cursor (my-server)", "")
+	w := h.call(http.MethodGet, "/api/v1/oauth/authorizations/"+id, "", bindingAdminKey)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	d := dataOf(t, w)
+	sc, _ := d["suggested_client"].(map[string]interface{})
+	require.NotNil(t, sc, w.Body.String())
+	assert.Equal(t, "cursor", sc["id"])
+	assert.Equal(t, "id", sc["matched"])
+
+	w = h.call(http.MethodPost, "/api/v1/oauth/authorizations/"+id+"/preview", `{}`, bindingAdminKey)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	pv := dataOf(t, w)
+	assert.Equal(t, false, pv["complete"])
+	assert.NotContains(t, pv, "access")
+	assert.Nil(t, pv["guard"])
+	w = h.call(http.MethodPost, "/api/v1/oauth/authorizations/"+id+"/approve", `{"profile":"ro"}`, bindingAdminKey)
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	assert.Equal(t, "client_required", decodeBody(t, w)["code"])
+
+	// No match: absent. Per-client address: absent.
+	d = dataOf(t, h.call(http.MethodGet, "/api/v1/oauth/authorizations/"+begin("Something Else", ""), "", bindingAdminKey))
+	assert.NotContains(t, d, "suggested_client")
+	d = dataOf(t, h.call(http.MethodGet, "/api/v1/oauth/authorizations/"+begin("codex", "cursor"), "", bindingAdminKey))
+	assert.NotContains(t, d, "suggested_client")
+}
+
 // T042: client payloads and the per-credential revokes.
 func TestOAuthLoginREST_ClientCredentialsPayloadAndRevokes(t *testing.T) {
 	h := newOAuthHarness(t, true)

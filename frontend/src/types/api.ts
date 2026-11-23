@@ -1569,6 +1569,61 @@ export interface BindingRef { client_id: string; token_name: string; profile: st
 /** One fix of a binding-guard refusal (`require_mcp_auth` | `set_anonymous_profile`). */
 export interface GuardFix { kind: string; target?: string }
 
+// --- Spec 132: browser login for MCP clients (consent page) ----------------------
+// Everything named by the app (`reported_name`, `suggested_new_client`) is
+// untrusted text: render it with mustaches, never as HTML.
+
+export interface OAuthBindingView { profile: string; mode: string; revision: string }
+
+export interface OAuthAuthorizationClient {
+  id: string
+  display_name: string
+  exists: boolean
+  has_api_key: boolean
+  logins: number
+  binding?: OAuthBindingView
+}
+
+export interface OAuthExistingClient { id: string; display_name: string; binding?: OAuthBindingView }
+
+export interface OAuthGuardVerdict { code: string; bindings: BindingRef[]; fixes: GuardFix[] }
+
+export interface OAuthAuthorization {
+  id: string
+  status: string
+  expires_at: string
+  reported_name: string
+  redirect_uri: string
+  resource: string
+  address_kind: 'client' | 'generic'
+  client?: OAuthAuthorizationClient
+  existing_clients?: OAuthExistingClient[]
+  suggested_new_client?: { id: string; display_name: string }
+  /** Advice only; present on the generic address when the reported name equals exactly one existing client. */
+  suggested_client?: { id: string; matched: 'id' | 'display_name' | 'known_name' }
+  profiles: Array<{ name: string }>
+  profile_required: boolean
+  previous_login?: { grant_id: string; approved_at: string }
+  guard: OAuthGuardVerdict | null
+}
+
+export interface OAuthApprovalBody {
+  client?: { id?: string; new?: { id: string; display_name?: string } }
+  /** Omitted = not chosen; '' = All servers. */
+  profile?: string
+  mode?: 'locked' | 'switchable'
+  binding_revision?: string
+  replace_grant?: string
+}
+
+export interface OAuthPreview {
+  complete: boolean
+  access?: { client: string; profile: string; mode: string; same_access_as_existing_client: boolean }
+  guard: OAuthGuardVerdict | null
+}
+
+export interface OAuthDecision { redirect_url: string }
+
 export interface BulkAssignResponse {
   moved: string[]
   skipped: Array<{ client_id: string; code: string; error?: string }>

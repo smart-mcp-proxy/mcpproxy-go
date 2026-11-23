@@ -35,6 +35,8 @@ const router = createRouter({
         title: 'Usage Analytics',
       },
     },
+    // Spec 132: consent page for a browser sign-in request (`?request=<id>`).
+    { path: '/authorize', name: 'authorize', component: () => import('@/views/AuthorizeRequest.vue'), meta: { title: 'Sign-in request' } },
     { path: '/clients', name: 'clients', component: () => import('@/views/Clients.vue'), meta: { title: 'Clients' } },
     // Spec 108-i I4: two SIBLING top-level routes. The Spec 109-i gate on the
     // sidebar item, the Add menu item and the palette action compares
