@@ -2835,8 +2835,11 @@ func (s *Server) stopServer(run *serverRun) error {
 		return nil
 	}
 
-	// Capture httpServer reference while holding the lock
+	// Capture httpServer reference while holding the lock, and the run being
+	// stopped: a StartServer that lands while this stop is still cleaning up
+	// installs a new context, which the tail below must not cancel or unmark.
 	httpServer := s.httpServer
+	stoppingCtx, stoppingCancel := s.serverCtx, s.serverCancel
 	s.mu.Unlock()
 
 	// Notify about server stopping
@@ -2905,9 +2908,16 @@ func (s *Server) stopServer(run *serverRun) error {
 	// STEP 3: Cancel the server context to signal other components
 	s.logger.Info("STOPSERVER - Cancelling server context")
 	_ = s.logger.Sync()
+	if stoppingCancel != nil {
+		stoppingCancel()
+	}
 	s.mu.Lock()
-	if s.serverCancel != nil {
-		s.serverCancel()
+	if s.serverCtx != stoppingCtx {
+		// A newer run started while this one was being stopped; its state is
+		// not this stop's to clear.
+		s.mu.Unlock()
+		s.logger.Info("STOPSERVER - A newer run started during the stop, leaving its state alone")
+		return nil
 	}
 
 	// Set running to false immediately after server is shut down
