@@ -355,11 +355,11 @@ func (p *MCPProxyServer) runCredentialsOperation(ctx context.Context, args map[s
 		kind, _ := str("kind")
 		prof, _ := str("profile")
 		state, _ := str("state")
-		if kind != "" && kind != "client" && kind != "token" && kind != "all" {
-			return recorded, nil, nil, &credentialsToolError{profile.CredentialErrorCodeInvalidArgument, `invalid argument "kind": must be client, token or all`, "kind"}
+		if kind != "" && kind != "client" && kind != "token" && kind != "browser_login" && kind != "all" {
+			return recorded, nil, nil, &credentialsToolError{profile.CredentialErrorCodeInvalidArgument, `invalid argument "kind": must be client, token, browser_login or all`, "kind"}
 		}
-		if state != "" && state != "active" && state != "expired" && state != "revoked" && state != "all" {
-			return recorded, nil, nil, &credentialsToolError{profile.CredentialErrorCodeInvalidArgument, `invalid argument "state": must be active, expired, revoked or all`, "state"}
+		if state != "" && state != "active" && state != "expired" && state != "lapsed" && state != "revoked" && state != "all" {
+			return recorded, nil, nil, &credentialsToolError{profile.CredentialErrorCodeInvalidArgument, `invalid argument "state": must be active, expired, lapsed, revoked or all`, "state"}
 		}
 		rows, err := cs.List(runtime.CredentialFilter{Kind: kind, Profile: prof, State: state, ExcludeClients: !clientsSupported})
 		if err != nil {
@@ -375,13 +375,28 @@ func (p *MCPProxyServer) runCredentialsOperation(ctx context.Context, args map[s
 		if client != "" && !clientsSupported {
 			return recorded, nil, nil, unsupported
 		}
-		ref := runtime.CredentialRef{Client: client, Token: token, EnforceWriteGates: op == "revoke"}
+		grant, _ := str("grant")
+		if grant != "" && client == "" {
+			return recorded, nil, nil, &credentialsToolError{profile.CredentialErrorCodeInvalidArgument, "revoke: grant requires client", "grant"}
+		}
+		ref := runtime.CredentialRef{Client: client, Token: token, Grant: grant, EnforceWriteGates: op == "revoke"}
 		if op == "get" {
 			v, err := cs.Get(ref)
 			if err != nil {
 				return recorded, nil, nil, err
 			}
-			return recorded, map[string]any{"credential": v, "links": delivery.CredentialUILinks(client, token, v.Profile)}, nil, nil
+			out := map[string]any{"credential": v, "links": delivery.CredentialUILinks(client, token, v.Profile)}
+			if client != "" {
+				// Spec 132: the client's browser logins ride along; none = no key.
+				logins, lerr := cs.ClientLogins(client)
+				if lerr != nil {
+					return recorded, nil, nil, lerr
+				}
+				if len(logins) > 0 {
+					out["logins"] = logins
+				}
+			}
+			return recorded, out, nil, nil
 		}
 		res, err := cs.Revoke(ctx, actor, ref, false)
 		if err != nil {

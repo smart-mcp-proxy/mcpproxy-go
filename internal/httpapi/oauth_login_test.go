@@ -109,6 +109,10 @@ func TestOAuthLoginREST_AdministratorOnly(t *testing.T) {
 		{http.MethodPost, "/api/v1/oauth/authorizations/" + id + "/deny", ``},
 		{http.MethodDelete, "/api/v1/clients/cursor/logins/whatever", ``},
 		{http.MethodDelete, "/api/v1/clients/cursor/api-key", ``},
+		// Spec 132 PR-2b: the credentials list (logins, reported names, redirect
+		// hosts) is part of these reads.
+		{http.MethodGet, "/api/v1/clients", ""},
+		{http.MethodGet, "/api/v1/clients/cursor", ""},
 	} {
 		w := h.call(rt.method, rt.path, rt.body, secret)
 		assert.Equal(t, http.StatusForbidden, w.Code, rt.method+" "+rt.path)

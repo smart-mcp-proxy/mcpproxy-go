@@ -1,5 +1,5 @@
 import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, StatusResponse, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, CatalogSearchResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivityRecord, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, AttentionResponse, ReviewQueueResponse, ServerReviewResponse } from '@/types'
-import type { ProfileConfig, ProfileList, ProfileView, ProfileWriteResult, ProfileRenameResult, ProfileDeleteResult, EffectiveToolsResult, TryProfileResponse, AccessExplanation, ExplainSubjectQuery, ClientView, ClientsResponse, BulkAssignResponse, CustomClientResponse, RotateResponse, UpgradePreview, UpgradeApplyResult, ForgetClientResponse, ConnectOptions, OAuthAuthorization, OAuthApprovalBody, OAuthPreview, OAuthDecision, SkillsListResponse, SkillContentResponse, SkillCopy, SkillsResponse } from '@/types/api'
+import type { ProfileConfig, ProfileList, ProfileView, ProfileWriteResult, ProfileRenameResult, ProfileDeleteResult, EffectiveToolsResult, TryProfileResponse, AccessExplanation, ExplainSubjectQuery, ClientView, ClientsResponse, BulkAssignResponse, CustomClientResponse, RotateResponse, UpgradePreview, UpgradeApplyResult, ForgetClientResponse, RevokeCredentialResponse, ConnectOptions, OAuthAuthorization, OAuthApprovalBody, OAuthPreview, OAuthDecision, SkillsListResponse, SkillContentResponse, SkillCopy, SkillsResponse } from '@/types/api'
 
 import { joinHoldEvidence, type HoldEvidenceSource } from '@/utils/holdEvidence'
 
@@ -1528,6 +1528,16 @@ class APIService {
 
   forgetClient(id: string, opts: { disconnect?: boolean } = {}): Promise<ForgetClientResponse> {
     return this.data<ForgetClientResponse>(`/api/v1/clients/${encodeURIComponent(id)}${queryString({ disconnect: opts.disconnect ? 'true' : undefined })}`, { method: 'DELETE' })
+  }
+
+  // Spec 132: revoke one browser login, or the API key alone (the client's logins
+  // and binding stay). Administrator only.
+  revokeClientLogin(id: string, grantId: string): Promise<RevokeCredentialResponse> {
+    return this.data<RevokeCredentialResponse>(`/api/v1/clients/${encodeURIComponent(id)}/logins/${encodeURIComponent(grantId)}`, { method: 'DELETE' })
+  }
+
+  revokeClientAPIKey(id: string): Promise<RevokeCredentialResponse> {
+    return this.data<RevokeCredentialResponse>(`/api/v1/clients/${encodeURIComponent(id)}/api-key`, { method: 'DELETE' })
   }
 
   // Spec 132 sign-in requests (administrator only). All throw an ApiError whose

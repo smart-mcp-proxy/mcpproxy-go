@@ -1721,7 +1721,10 @@ reference: the Spec 132 contracts.
 - `GET /api/v1/clients` and `GET /api/v1/clients/{client}` gain `credentials[]`
   (the API key and each browser login: `kind`, `prefix`, `grant_id`, `state`,
   times, `reported_name`, `redirect_host`, `observed_name`, `name_mismatch`) and
-  `browser_login_disabled` once browser login was used.
+  `browser_login_disabled` once browser login was used. Both reads are
+  administrator-only (an agent token or client credential gets `403`), so the
+  reported names and redirect hosts never reach a scoped caller. The strings a
+  client reported are untrusted text: render them as text.
 - `DELETE /api/v1/clients/{client}/logins/{grant_id}` revokes one login (also
   while the feature is off after use); `DELETE /api/v1/clients/{client}/api-key`
   revokes the API key alone.
