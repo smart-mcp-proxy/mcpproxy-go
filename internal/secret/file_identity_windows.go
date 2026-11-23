@@ -5,6 +5,7 @@ package secret
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"syscall"
 )
 
@@ -41,9 +42,15 @@ func identityFromHandle(h syscall.Handle) (fileIdentity, error) {
 
 // identityOfPathErr opens path (following links) with attribute-only access
 // and every share flag, and reads its identity from the handle. A missing
-// file reports an error matching fs.ErrNotExist.
+// file reports an error matching fs.ErrNotExist. The path is made absolute
+// and given the \\?\ prefix first: syscall.CreateFile, unlike the os package,
+// does not do that itself, so a path longer than MAX_PATH would fail.
 func identityOfPathErr(path string) (fileIdentity, error) {
-	p, err := syscall.UTF16PtrFromString(path)
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fileIdentity{}, &os.PathError{Op: "abs", Path: path, Err: err}
+	}
+	p, err := syscall.UTF16PtrFromString(windowsExtendedLengthPath(abs))
 	if err != nil {
 		return fileIdentity{}, err
 	}

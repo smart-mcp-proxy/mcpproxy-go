@@ -45,6 +45,24 @@ func TestFileIdentity_WindowsEagerAcrossRename(t *testing.T) {
 	}
 }
 
+// Cross-review R3 (PR #1884): a config path longer than MAX_PATH must still
+// be captured (CreateFile needs the \\?\ form for it).
+func TestFileIdentity_WindowsLongPath(t *testing.T) {
+	dir := t.TempDir()
+	deep := dir
+	for len(deep) < 300 {
+		deep = filepath.Join(deep, "abcdefghijklmnopqrstuvwxyz")
+	}
+	require.NoError(t, os.MkdirAll(deep, 0o700))
+	cfgPath := filepath.Join(deep, "mcp_config.json")
+	require.Greater(t, len(cfgPath), 260)
+	require.NoError(t, os.WriteFile(cfgPath, []byte("cfg"), 0o600))
+
+	_, err := identityOfPathErr(cfgPath)
+	require.NoError(t, err)
+	require.NoError(t, NoteSupersededProxyFile(cfgPath))
+}
+
 // Cross-review R2 (PR #1884): another process may hold the config open with
 // DELETE access. os.Open does not share DELETE and fails with a sharing
 // violation; the identity capture must share every mode and still succeed.
