@@ -51,14 +51,16 @@ var guardedRoutes = map[string]string{
 
 // exemptRoutes: why each cannot change a binding's reach.
 var exemptRoutes = map[string]string{
-	"POST /api/v1/clients/{client}/rotate":          "keeps the binding; only swaps the secret",
-	"POST /api/v1/clients/{client}/rotate/finalize": "promotes a pending secret; the binding is untouched",
-	"DELETE /api/v1/clients/{client}":               "revokes a credential: a binding can only disappear",
-	"DELETE /api/v1/connect/{client}":               "removes a config entry; never grants",
-	"POST /api/v1/connect/{client}/undo":            "restores the previous entry and only revokes a credential the restored config no longer holds",
-	"POST /api/v1/profiles/try":                     "nothing is written: a draft is searched, not stored",
-	"PUT /api/v1/profiles/active":                   "a UI default only; never enforcement (a live session's selection and every credential's binding are separate)",
-	"POST /api/v1/config/validate":                  "validation only; nothing is written",
+	"POST /api/v1/clients/{client}/rotate":              "keeps the binding; only swaps the secret",
+	"POST /api/v1/clients/{client}/rotate/finalize":     "promotes a pending secret; the binding is untouched",
+	"DELETE /api/v1/clients/{client}":                   "revokes a credential: a binding can only disappear",
+	"DELETE /api/v1/clients/{client}/api-key":           "revokes the API key alone: the browser logins and the binding stay (Spec 132)",
+	"DELETE /api/v1/clients/{client}/logins/{grant_id}": "revokes one browser login: a login can only disappear (Spec 132)",
+	"DELETE /api/v1/connect/{client}":                   "removes a config entry; never grants",
+	"POST /api/v1/connect/{client}/undo":                "restores the previous entry and only revokes a credential the restored config no longer holds",
+	"POST /api/v1/profiles/try":                         "nothing is written: a draft is searched, not stored",
+	"PUT /api/v1/profiles/active":                       "a UI default only; never enforcement (a live session's selection and every credential's binding are separate)",
+	"POST /api/v1/config/validate":                      "validation only; nothing is written",
 }
 
 func inGuardedFamily(route string) bool {

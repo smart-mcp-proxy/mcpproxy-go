@@ -1687,6 +1687,34 @@ profile, anonymous is required`, `400 use client=<id> for a client credential`
 (a `client-` token name), `400 access/explain covers upstream tools (server:tool)
 only`, `404` for an unknown client, token or profile.
 
+### Browser login for MCP clients (personal edition, opt-in)
+
+Off by default (`mcp_oauth_enabled`). With it off and never used none of this
+exists and every payload is unchanged. All routes are administrator-only (an
+agent token or a client credential gets `403`); with the feature off the
+sign-in request routes answer `404` with `code: feature_disabled`. Full
+reference: the Spec 132 contracts.
+
+- `GET /api/v1/oauth/authorizations`, `GET /api/v1/oauth/authorizations/{id}`:
+  pending sign-in requests and the data the consent view needs. One uniform `404`
+  for an unknown, expired, decided or cancelled id.
+- `POST /api/v1/oauth/authorizations/{id}/preview`: read-only verdict for a
+  proposed client, profile and mode. `POST .../approve` and `POST .../deny` answer
+  `{redirect_url}`; approve refuses with `409 already_decided`, `409 binding_changed`,
+  `409 binding_bypassable_without_auth`, `422 profile_required`, `client_fixed`,
+  `identity_exists`, `reserved_identity` and `404 profile_not_found`.
+- `GET /api/v1/clients` and `GET /api/v1/clients/{client}` gain `credentials[]`
+  (the API key and each browser login: `kind`, `prefix`, `grant_id`, `state`,
+  times, `reported_name`, `redirect_host`, `observed_name`, `name_mismatch`) and
+  `browser_login_disabled` once browser login was used.
+- `DELETE /api/v1/clients/{client}/logins/{grant_id}` revokes one login (also
+  while the feature is off after use); `DELETE /api/v1/clients/{client}/api-key`
+  revokes the API key alone.
+
+The public OAuth endpoints (`/oauth/register`, `/oauth/authorize`,
+`/oauth/token`, `/.well-known/oauth-*`, `/mcp/oauth[/<client>]`) are loopback-only
+and are not part of the `/api/v1` API.
+
 ### Tokens
 
 `GET /api/v1/tokens` rows add `kind` (`agent` or `client`), `client_id`,

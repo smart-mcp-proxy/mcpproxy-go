@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/netip"
 
@@ -42,13 +41,28 @@ func peerIsLoopback(r *http.Request) bool {
 	return ap.Addr().Unmap().IsLoopback()
 }
 
+// hasProxyHeaders reports whether the request carries a header a reverse
+// proxy or tunnel adds. A proxy on the same host presents as a loopback peer,
+// so such a request is not a local one and the OAuth routes answer 404.
+func hasProxyHeaders(r *http.Request) bool {
+	for _, h := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Real-IP"} {
+		if _, ok := r.Header[http.CanonicalHeaderKey(h)]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // oauthLoginEverUsedNow reports whether browser login has ever been used on
-// this install. It is injectable for tests.
-// TODO(Spec 132): read the storage marker `oauth_login_ever_used` once the
-// storage slice lands; until then the feature can never have been used.
+// this install: the storage marker `oauth_login_ever_used`, read through the
+// service (only a positive answer is cached; a read never writes). It is
+// injectable for tests.
 func (s *Server) oauthLoginEverUsedNow() bool {
 	if s.oauthLoginEverUsed != nil {
 		return s.oauthLoginEverUsed()
+	}
+	if svc := s.oauthLoginSvc(); svc != nil {
+		return svc.EverUsed()
 	}
 	return false
 }
@@ -71,7 +85,7 @@ func (s *Server) oauthLoginGate(prev, served http.Handler) http.Handler {
 			prev.ServeHTTP(w, r)
 			return
 		}
-		if !peerIsLoopback(r) || !httpx.IsLoopbackHost(r.Host) || !oauthLoginEditionSupported {
+		if !peerIsLoopback(r) || !httpx.IsLoopbackHost(r.Host) || !oauthLoginEditionSupported || hasProxyHeaders(r) {
 			http.NotFound(w, r)
 			return
 		}
@@ -79,28 +93,17 @@ func (s *Server) oauthLoginGate(prev, served http.Handler) http.Handler {
 	})
 }
 
-// oauthLoginNotImplemented is the `served` stub of this slice.
-func oauthLoginNotImplemented() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotImplemented)
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"error":             "not_implemented",
-			"error_description": "browser login (mcp_oauth_enabled) is not functional in this release",
-		})
-	})
-}
-
 // registerOAuthLoginRoutes registers the browser-login patterns on mux.
 // mcpHandler is the existing /mcp/ catch-all chain, rootHandler the existing
-// "/" handler; each is the off-state fallback of its patterns.
-func (s *Server) registerOAuthLoginRoutes(mux *http.ServeMux, mcpHandler, rootHandler http.Handler) {
-	served := oauthLoginNotImplemented()
-	mcpGate := s.oauthLoginGate(mcpHandler, served)
+// "/" handler; each is the off-state fallback of its patterns. oauthMCP is the
+// MCP chain served on /mcp/oauth* while the feature is on (it authenticates
+// mcp_oat_ access tokens itself, see oauthResourceAuth).
+func (s *Server) registerOAuthLoginRoutes(mux *http.ServeMux, mcpHandler, rootHandler, oauthMCP http.Handler) {
+	mcpGate := s.oauthLoginGate(mcpHandler, oauthMCP)
 	for _, p := range oauthLoginMCPPatterns {
 		mux.Handle(p, mcpGate)
 	}
-	rootGate := s.oauthLoginGate(rootHandler, served)
+	rootGate := s.oauthLoginGate(rootHandler, s.oauthLoginPublicHandler())
 	for _, p := range oauthLoginRootPatterns {
 		mux.Handle(p, rootGate)
 	}

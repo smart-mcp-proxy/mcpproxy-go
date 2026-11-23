@@ -3,6 +3,7 @@ package runtime
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -105,6 +106,9 @@ type OAuthLoginService struct {
 	testHookBeforeRotateLock  func()
 	testHookInRotate          func()
 
+	// disableEpoch counts switch-offs (beginDisable); see DisableEpoch.
+	disableEpoch atomic.Uint64
+
 	everUsed  bool // positive results only
 	everMu    sync.Mutex
 	touchMu   sync.Mutex
@@ -192,6 +196,11 @@ func (r *Runtime) OAuthLoginService() *OAuthLoginService { return r.oauthLoginSe
 // SetNotifier installs the live-session notifier (the server).
 func (s *OAuthLoginService) SetNotifier(n BindingNotifier) { s.notifier = n }
 
+// DisableEpoch is the number of times the feature was switched off since the
+// process started. A request authenticated at an older epoch predates a
+// switch-off, even when the feature is on again. A lock-free read.
+func (s *OAuthLoginService) DisableEpoch() uint64 { return s.disableEpoch.Load() }
+
 // Enabled reports whether the feature is on in the live configuration.
 func (s *OAuthLoginService) Enabled() bool {
 	c := s.cfg()
@@ -199,7 +208,8 @@ func (s *OAuthLoginService) Enabled() bool {
 }
 
 // EverUsed reports whether a browser login was ever stored. Only a positive
-// answer is cached: the marker is never cleared, a negative one can change.
+// answer is cached: the marker is never cleared, a negative one can change. A
+// storage read error answers true (fail closed, never cached).
 func (s *OAuthLoginService) EverUsed() bool {
 	s.everMu.Lock()
 	defer s.everMu.Unlock()
@@ -208,8 +218,10 @@ func (s *OAuthLoginService) EverUsed() bool {
 	}
 	used, err := s.store.OAuthLoginEverUsed()
 	if err != nil {
-		s.logger.Warn("cannot read the browser-login marker", zap.Error(err))
-		return false
+		// Fail closed: an unreadable marker is read as "used", so a used and
+		// switched-off install never falls back to the previous behaviour.
+		s.logger.Warn("cannot read the browser-login marker; treating the feature as used", zap.Error(err))
+		return true
 	}
 	s.everUsed = used
 	return used
@@ -260,9 +272,20 @@ func (s *OAuthLoginService) CancelAll(reason string) int {
 // (and it is cancelled here) or waits and then sees the switch off.
 func (s *OAuthLoginService) beginDisable(reason string) (release func()) {
 	s.lifecycleMu.Lock()
+	// Pending and approved sign-in requests are cancelled here, before the new
+	// configuration is published. If the publish then FAILS the feature stays on
+	// and those requests stay cancelled: acceptable, the client starts again.
 	s.cancelAllLocked(reason)
 	return s.lifecycleMu.Unlock
 }
+
+// disablePublished counts a switch-off once the disabled configuration is
+// visible. The commit calls it after a SUCCESSFUL publish only (a failed one
+// leaves the feature on and must not end live streams). A request that
+// authenticated under the previous, enabled configuration therefore captured an
+// epoch lower than the one read after this point, even across a quick off -> on.
+// An atomic, read without any lock.
+func (s *OAuthLoginService) disablePublished() { s.disableEpoch.Add(1) }
 
 // cancelAllLocked snapshots the pending ids and cancels everything in one
 // request-store critical section (s.lifecycleMu held).

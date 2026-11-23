@@ -164,6 +164,12 @@ func (s *OAuthLoginService) clientExists(clientID string) bool {
 	return s.hasClientRecords(clientID)
 }
 
+// ClientExists reports whether clientID names a client a browser-login address
+// may fix: a connect-registry id (supported or not), or a client with an
+// API-key record or a browser-login binding. The HTTP layer answers 404 for
+// any other per-client address (Spec 132 FR-015).
+func (s *OAuthLoginService) ClientExists(clientID string) bool { return s.clientExists(clientID) }
+
 // hasClientRecords: the client has an API-key record or a browser-login entry
 // (a registry id alone does not count).
 func (s *OAuthLoginService) hasClientRecords(clientID string) bool {

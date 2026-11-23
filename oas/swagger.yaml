@@ -4656,6 +4656,37 @@ components:
           type: array
           uniqueItems: false
       type: object
+    httpapi.ClientCredential:
+      properties:
+        approved_at:
+          type: string
+        expires_at:
+          type: string
+        grant_id:
+          description: GrantID names a browser login.
+          type: string
+        kind:
+          description: Kind is api_key or browser_login.
+          type: string
+        last_used_at:
+          type: string
+        name_mismatch:
+          type: boolean
+        observed_name:
+          description: ObservedName is the name the client sent at initialize (advisory).
+          type: string
+        prefix:
+          type: string
+        redirect_host:
+          type: string
+        reported_name:
+          type: string
+        state:
+          description: |-
+            State is active|expired|revoked for an API key and active|lapsed|revoked
+            for a login.
+          type: string
+      type: object
     httpapi.ClientSnippet:
       properties:
         generic_http:
@@ -5051,6 +5082,38 @@ components:
         working_dir:
           type: string
       type: object
+    httpapi.OAuthApprovalBody:
+      properties:
+        binding_revision:
+          type: string
+        client:
+          $ref: '#/components/schemas/httpapi.OAuthClientChoice'
+        mode:
+          type: string
+        profile:
+          type: string
+        replace_grant:
+          type: string
+      type: object
+    httpapi.OAuthClientChoice:
+      properties:
+        id:
+          type: string
+        new:
+          $ref: '#/components/schemas/httpapi.OAuthNewClient'
+      type: object
+    httpapi.OAuthDecisionResponse:
+      properties:
+        redirect_url:
+          type: string
+      type: object
+    httpapi.OAuthNewClient:
+      properties:
+        display_name:
+          type: string
+        id:
+          type: string
+      type: object
     httpapi.OnboardingMarkRequest:
       properties:
         connect_step_status:
@@ -5333,6 +5396,11 @@ components:
         new_name:
           type: string
       type: object
+    httpapi.RevokeCredentialResponse:
+      properties:
+        changed:
+          type: boolean
+      type: object
     httpapi.RotateClientRequest:
       properties:
         precondition_token:
@@ -5500,6 +5568,8 @@ components:
           type: integer
         blocked_24h:
           type: integer
+        browser_login_disabled:
+          type: boolean
         calls_24h:
           type: integer
         config_path:
@@ -5512,6 +5582,18 @@ components:
           type: string
         credential_state:
           $ref: '#/components/schemas/profile.CredentialState'
+        credentials:
+          description: |-
+            Spec 132: the client's credentials (API key and browser logins) and
+            whether browser login is off right now. Both exist only once browser
+            login was used on this install; until then a row is exactly what it was.
+
+            Credentials is a pointer so that once the feature was used a row with no
+            credential serialises "credentials": [] instead of omitting the field.
+          items:
+            $ref: '#/components/schemas/httpapi.ClientCredential'
+          type: array
+          uniqueItems: false
         display_name:
           type: string
         display_path:
@@ -7628,6 +7710,60 @@ paths:
       summary: Get one client
       tags:
       - clients
+  /api/v1/clients/{client}/api-key:
+    delete:
+      description: 'Revokes the client''s mcp_cli_ credential alone: its browser logins
+        and its binding stay. 404 no_client_credential when the client has no active
+        API key. Writes a revoke record. Administrator only.'
+      parameters:
+      - description: Client id
+        in: path
+        name: client
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: The key was revoked
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid client id
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: no_client_credential
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Revoke a client's API key only
+      tags:
+      - clients
   /api/v1/clients/{client}/binding:
     put:
       description: |-
@@ -7704,6 +7840,62 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Reassign a client's profile and/or mode
+      tags:
+      - clients
+  /api/v1/clients/{client}/logins/{grant_id}:
+    delete:
+      description: 'Revokes the login (reason admin): its access token stops authenticating
+        on the next request, live sessions are told to re-list, and a revoke record
+        names the administrator. Works while browser login is on and while it is off
+        after use. An already revoked login answers changed:false; an unknown login
+        (or one of another client) is 404. Administrator only.'
+      parameters:
+      - description: Client id
+        in: path
+        name: client
+        required: true
+        schema:
+          type: string
+      - description: Login id
+        in: path
+        name: grant_id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Whether the login changed
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: login not found
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Revoke one browser login of a client
       tags:
       - clients
   /api/v1/clients/{client}/rotate:
@@ -8837,6 +9029,249 @@ paths:
       summary: Get server information
       tags:
       - status
+  /api/v1/oauth/authorizations:
+    get:
+      description: 'Pending browser-login requests, newest first: id, a sanitised
+        client label and the times. Used by the tray and Home. 404 feature_disabled
+        while browser login is off. Administrator only.'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: Pending requests
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: feature_disabled
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: List pending sign-in requests
+      tags:
+      - clients
+  /api/v1/oauth/authorizations/{id}:
+    get:
+      description: 'Everything the consent view needs: the reported (unverified) name,
+        the redirect URI, the resource, how the address fixes the client, the profiles,
+        whether a profile must be chosen, the previous login of the same registration
+        and, for a fixed client that has a binding, the guard verdict. One uniform
+        404 for an unknown, expired, decided or cancelled id. Administrator only.'
+      parameters:
+      - description: Request id
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: The request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: request_not_found or feature_disabled
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Read one sign-in request
+      tags:
+      - clients
+  /api/v1/oauth/authorizations/{id}/approve:
+    post:
+      description: Records the decision and issues the code; the login itself is stored
+        when the client exchanges the code. 409 already_decided, 409 binding_changed
+        (the binding differs from binding_revision), 409 binding_bypassable_without_auth
+        (with the guard's fixes), 422 profile_required, client_fixed, identity_exists,
+        reserved_identity, 404 profile_not_found. Writes an approve record naming
+        the administrator. Administrator only.
+      parameters:
+      - description: Request id
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.OAuthApprovalBody'
+        description: client, profile, mode, binding_revision, replace_grant
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Where the page navigates
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: request_not_found, profile_not_found or feature_disabled
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: already_decided, binding_changed or binding_bypassable_without_auth
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: profile_required, client_fixed, identity_exists, reserved_identity
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Approve a sign-in request
+      tags:
+      - clients
+  /api/v1/oauth/authorizations/{id}/deny:
+    post:
+      description: The redirect carries error=access_denied. 409 already_decided.
+        Writes a deny record naming the administrator. Administrator only.
+      parameters:
+      - description: Request id
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Where the page navigates
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: request_not_found or feature_disabled
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: already_decided
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Deny a sign-in request
+      tags:
+      - clients
+  /api/v1/oauth/authorizations/{id}/preview:
+    post:
+      description: 'Read-only: for a proposed client (existing or new), profile and
+        mode, returns whether the choice is complete, the access sentence and the
+        binding guard''s verdict with its fixes. Writes nothing. The same 422 codes
+        as approve for an invalid choice. Administrator only.'
+      parameters:
+      - description: Request id
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.OAuthApprovalBody'
+        description: client, profile, mode
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: The preview
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: request_not_found, profile_not_found or feature_disabled
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: client_fixed, identity_exists, reserved_identity
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Preview a sign-in decision
+      tags:
+      - clients
   /api/v1/onboarding/mark:
     post:
       description: |-

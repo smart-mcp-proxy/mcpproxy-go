@@ -131,7 +131,7 @@ func TestClientViews_ListCredentialsOnceUsed(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, *got.BrowserLoginDisabled)
 	codex2, _ := fx.clients.Get("codex")
-	assert.False(t, *codex2.BrowserLoginDisabled, "only a client that has logins is flagged")
+	assert.True(t, *codex2.BrowserLoginDisabled, "browser_login_disabled reflects the install-wide switch, not whether the client has logins")
 
 	// A lapsed login says so.
 	fx.clock.Advance(OAuthRefreshTokenTTL + time.Hour)
