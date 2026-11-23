@@ -138,8 +138,11 @@ type Server struct {
 	// testHookAfterEpochCapture pauses oauthResourceAuth between the switch-off
 	// epoch capture and the authentication (tests only; nil in production).
 	testHookAfterEpochCapture func()
-	oauthLimiterOnce          sync.Once
-	oauthLimiter              *mcplogin.Limiter
+	// testHookRunWatcher pauses the context watcher of a server run right after
+	// its context was cancelled (tests only; nil in production).
+	testHookRunWatcher func()
+	oauthLimiterOnce   sync.Once
+	oauthLimiter       *mcplogin.Limiter
 	// createAfterConfigRead is a Spec 116 test seam (nil in production): it
 	// runs in the create path after the runtime configuration was read and
 	// before the new server is published.
@@ -1394,9 +1397,14 @@ func (s *Server) Start(ctx context.Context) error {
 	// Handle graceful shutdown when context is cancelled (for full application shutdown only)
 	go func() {
 		<-ctx.Done()
+		if h := s.testHookRunWatcher; h != nil {
+			h()
+		}
 		s.logger.Info("Main context cancelled, shutting down server")
-		// First shutdown the HTTP server
-		if err := s.StopServer(); err != nil {
+		// First shutdown the HTTP server. Bound to this run: after StopServer
+		// and a new StartServer in the same process, "the server" is a newer
+		// run with its own context and its own watcher, and is left alone.
+		if err := s.stopServer(&serverRun{ctx: ctx}); err != nil {
 			s.logger.Error("Error stopping server during context cancellation", zap.Error(err))
 		}
 		// Then shutdown the rest (only for full application shutdown, not server restarts)
@@ -2734,11 +2742,19 @@ func (s *Server) StartServer(ctx context.Context) error {
 		go s.runMetricsBridge(s.serverCtx, s.observability.Metrics())
 	}
 
+	runCtx := s.serverCtx
 	go func() {
 		var serverError error
 
 		defer func() {
+			// After StopServer and a new StartServer in the same process this
+			// run can finish after the next one has started. The state below
+			// then belongs to that newer run: leave it alone.
 			s.mu.Lock()
+			if s.serverCtx != runCtx {
+				s.mu.Unlock()
+				return
+			}
 			s.running = false
 			s.listenAddr = ""
 			s.mu.Unlock()
@@ -2761,7 +2777,7 @@ func (s *Server) StartServer(ctx context.Context) error {
 		// Notify about server start
 		s.updateStatus(runtime.PhaseStarting, "Server is starting...")
 
-		serverError = s.Start(s.serverCtx)
+		serverError = s.Start(runCtx)
 		if serverError != nil && !errors.Is(serverError, context.Canceled) {
 			s.logger.Error("Server error during background start", zap.Error(serverError))
 			s.updateStatus(runtime.PhaseError, fmt.Sprintf("Server error: %v", serverError))
@@ -2788,6 +2804,15 @@ func (s *Server) ServeErr() <-chan error {
 
 // StopServer stops the server if it's running
 func (s *Server) StopServer() error {
+	return s.stopServer(nil)
+}
+
+// serverRun names one StartServer run by the context it was started with.
+type serverRun struct{ ctx context.Context }
+
+// stopServer stops the server. With a non-nil run it stops only that run and
+// does nothing when a newer run is current.
+func (s *Server) stopServer(run *serverRun) error {
 	s.logger.Info("STOPSERVER CALLED - STARTING SHUTDOWN SEQUENCE")
 	_ = s.logger.Sync()
 
@@ -2796,6 +2821,11 @@ func (s *Server) StopServer() error {
 	if s.shutdown {
 		s.mu.Unlock()
 		s.logger.Debug("Server shutdown already in progress via Shutdown(), skipping StopServer")
+		return nil
+	}
+	if run != nil && s.serverCtx != run.ctx {
+		s.mu.Unlock()
+		s.logger.Debug("Server stop requested for a previous run, a newer run is current")
 		return nil
 	}
 	if !s.running {
