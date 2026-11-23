@@ -86,10 +86,6 @@ func writeUndoRecord(cfgPath, backupPath, clientID, serverName string, written [
 	}
 	path := undoRecordPath(cfgPath, backupPath)
 	if backupPath == "" {
-		// The file did not exist, so any earlier created-file record of this entry
-		// describes a file that is gone: stale by definition, and never to be
-		// matched against the file this connect is about to create.
-		removeCreatedFileRecords(cfgPath, clientID, serverName)
 		var rnd [8]byte
 		if _, err := rand.Read(rnd[:]); err != nil {
 			return "", fmt.Errorf("undo record name: %w", err)
@@ -137,6 +133,7 @@ const (
 	undoLegacy    undoVerdict = iota // no record: a backup from before records existed
 	undoUntouched                    // the file is exactly what the connect wrote
 	undoConflict                     // edited, or the record cannot be trusted
+	undoForeign                      // a created-file record of another client or entry
 )
 
 // checkUndoRecord compares the current file with the record of the connect
@@ -149,7 +146,7 @@ const (
 func checkUndoRecord(cfgPath, backupPath, clientID, serverName string, current []byte) (undoVerdict, string, string) {
 	paths := []string{undoRecordPath(cfgPath, backupPath)}
 	if backupPath == "" {
-		paths, _ = filepath.Glob(cfgPath + undoNewPrefix + "*")
+		paths = recordFilesWithPrefix(cfgPath, undoNewPrefix)
 		if len(paths) == 0 {
 			return undoLegacy, "", ""
 		}
@@ -157,12 +154,15 @@ func checkUndoRecord(cfgPath, backupPath, clientID, serverName string, current [
 	verdict, auth, matched := undoLegacy, "", ""
 	for _, p := range paths {
 		v, a := checkUndoRecordFile(p, backupPath, clientID, serverName, current)
+		if v == undoForeign {
+			continue // another client's or entry's record says nothing about this file
+		}
 		switch v {
 		case undoUntouched:
 			return v, a, p
 		case undoConflict:
 			verdict = undoConflict
-		case undoLegacy:
+		case undoLegacy, undoForeign:
 		}
 	}
 	return verdict, auth, matched
@@ -184,7 +184,13 @@ func checkUndoRecordFile(path, backupPath, clientID, serverName string, current 
 	if backupPath != "" {
 		wantBackup = filepath.Base(backupPath)
 	}
-	if rec.Client != clientID || rec.Server != serverName || rec.Backup != wantBackup {
+	if rec.Client != clientID || rec.Server != serverName {
+		if backupPath == "" {
+			return undoForeign, ""
+		}
+		return undoConflict, ""
+	}
+	if rec.Backup != wantBackup {
 		return undoConflict, ""
 	}
 	if subtle.ConstantTimeCompare([]byte(rec.SHA256), []byte(fileDigest(current))) != 1 {
@@ -200,28 +206,69 @@ func removeUndoRecord(path string) {
 	}
 }
 
+// recordFilesWithPrefix lists the files beside cfgPath named
+// `<config basename><suffix>…`. It reads the literal directory: cfgPath is never
+// used as a glob pattern, so a home directory containing [ ] * ? hides nothing.
+func recordFilesWithPrefix(cfgPath, suffix string) []string {
+	dir, prefix := filepath.Dir(cfgPath), filepath.Base(cfgPath)+suffix
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix) {
+			out = append(out, filepath.Join(dir, e.Name()))
+		}
+	}
+	return out
+}
+
 // removeCreatedFileRecords deletes every created-file record (see undoNewPrefix)
-// of clientID's entry serverName beside cfgPath.
-func removeCreatedFileRecords(cfgPath, clientID, serverName string) {
-	matches, _ := filepath.Glob(cfgPath + undoNewPrefix + "*")
-	for _, m := range matches {
+// of clientID's entry serverName beside cfgPath. It reports a record it could
+// not remove; with no such record it reads the directory and writes nothing.
+func removeCreatedFileRecords(cfgPath, clientID, serverName string) error {
+	var firstErr error
+	for _, m := range recordFilesWithPrefix(cfgPath, undoNewPrefix) {
 		raw, err := os.ReadFile(m)
 		if err != nil {
 			continue
 		}
 		var rec undoRecord
 		if json.Unmarshal(raw, &rec) == nil && rec.Client == clientID && rec.Server == serverName {
-			_ = os.Remove(m)
+			if err := os.Remove(m); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
+	return firstErr
+}
+
+// retireStaleUndoRecords runs for EVERY connect that writes the config, key
+// connects included, before it writes: a record describes one file, and this
+// write replaces (or creates) that file. It removes the created-file records of
+// the entry and, when the connect took a backup, any record already sitting at
+// that backup's record name (the name of a deleted backup can be reused). It
+// writes nothing, and with no record present is a directory read only, so an
+// install that never used browser login is untouched. A record that cannot be
+// removed fails the connect: a stale record must never survive to be matched.
+func retireStaleUndoRecords(cfgPath, backupPath, clientID, serverName string) error {
+	if err := removeCreatedFileRecords(cfgPath, clientID, serverName); err != nil {
+		return fmt.Errorf("retire stale undo record: %w", err)
+	}
+	if backupPath != "" {
+		if err := os.Remove(undoRecordPath(cfgPath, backupPath)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("retire stale undo record: %w", err)
+		}
+	}
+	return nil
 }
 
 // removeUndoRecords deletes the records of clientID's entry serverName beside
 // cfgPath once the entry is gone (Disconnect), so no stray file outlives it.
 // Records of other clients or entries, and anything unreadable, are left alone.
 func removeUndoRecords(cfgPath, clientID, serverName string) {
-	matches, _ := filepath.Glob(cfgPath + ".undo.*")
-	for _, m := range matches {
+	for _, m := range recordFilesWithPrefix(cfgPath, ".undo.") {
 		raw, err := os.ReadFile(m)
 		if err != nil {
 			continue

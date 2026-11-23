@@ -1471,7 +1471,9 @@ Safety semantics:
   digest still equals it, and the sidecar is removed when the undo succeeds or
   the entry is disconnected) — it never clobbers later edits. A record that is
   malformed, unreadable or bound to another client, entry or backup is also a
-  conflict. An API-key connect writes no sidecar and, like a backup that has
+  conflict. Any connect that writes the config, an API-key one included, first
+  retires the records of that entry that describe a file it is replacing (a
+  directory read only when there is none). An API-key connect writes no sidecar and, like a backup that has
   none, is checked by replaying the key-path write, exactly as before. Fall back to
   `DELETE /connect/{client}` for a surgical entry removal.
 - A vanished backup returns `404`; a `backup_name` that is a path (contains a

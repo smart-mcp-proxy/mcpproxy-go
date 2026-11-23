@@ -1173,8 +1173,13 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	// gap open, per round 5. The permission bits also come from currentPerm's
 	// fresh re-stat rather than the mode captured all the way back in
 	// parseOrCreateJSON, for the same reason (see currentPerm's doc comment).
-	// Only a browser-login connect records its write (see undo_record.go): a key
-	// connect writes exactly the files it always wrote.
+	// Stale records of this entry go first, for every connect (see
+	// retireStaleUndoRecords). Only a browser-login connect then records its own
+	// write (see undo_record.go): a key connect writes exactly the files it
+	// always wrote.
+	if err := retireStaleUndoRecords(cfgPath, backupPath, client.ID, serverName); err != nil {
+		return nil, err
+	}
 	recPath := ""
 	if cred.oauth {
 		var recErr error
@@ -1371,8 +1376,13 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 	// than a call from here, and why the permission bits come from
 	// currentPerm's fresh re-stat rather than the mode parseOrCreateTOML
 	// captured earlier.
-	// Only a browser-login connect records its write (see undo_record.go): a key
-	// connect writes exactly the files it always wrote.
+	// Stale records of this entry go first, for every connect (see
+	// retireStaleUndoRecords). Only a browser-login connect then records its own
+	// write (see undo_record.go): a key connect writes exactly the files it
+	// always wrote.
+	if err := retireStaleUndoRecords(cfgPath, backupPath, client.ID, serverName); err != nil {
+		return nil, err
+	}
 	recPath := ""
 	if cred.oauth {
 		var recErr error
