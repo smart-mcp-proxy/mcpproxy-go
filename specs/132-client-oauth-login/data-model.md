@@ -7,7 +7,7 @@ All persistent records live in `config.db` in buckets created on first write. No
 | Field | Type | Rule |
 |---|---|---|
 | `client_id` | string | 22 random base62 chars, server-generated |
-| `reported_name` | string | `client_name` after `clientidentity.SanitizeDisplay`, at most 128 bytes; display only |
+| `reported_name` | string | `client_name` after `clientidentity.SanitizeDisplay`, at most 128 bytes; display, plus the generic-address suggestion (`suggested_client`, computed on read, never stored) |
 | `redirect_uris` | []string | 1 to 5; each loopback `http` or `https`; no fragment |
 | `software_id`, `software_version` | string | optional, sanitised, display only |
 | `token_endpoint_auth_method` | string | always `none` |

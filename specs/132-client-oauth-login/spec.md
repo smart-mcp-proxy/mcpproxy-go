@@ -90,10 +90,12 @@ The user types the generic browser-login address into a client that Connect does
 **Acceptance Scenarios**:
 
 1. **Given** a sign-in request on the generic address whose reported name matches no known client, or more than one, **Then** "New client" is selected with the name filled from the reported name, and the user can pick an existing client instead.
-4. **Given** a sign-in request on the generic address whose reported name matches exactly one known client, **Then** that client is selected, the page says the selection comes from an unverified name, and the user can change it before approving.
-5. **Given** a suggested client that has a profile, **When** the user approves without changing anything, **Then** the login belongs to that client; **When** the user picks another client first, **Then** the login belongs to the client the user picked.
-2. **Given** the user picks an existing client, **Then** the page states that the app receives that client's access before Approve is enabled.
-3. **Given** an address that names a client id that does not exist, **Then** every step answers "not found" and no client is created.
+2. **Given** a sign-in request on the generic address whose reported name matches exactly one known client, **Then** that client is selected, the page says the selection comes from an unverified name, and the user can change it before approving.
+3. **Given** a suggested client that has a profile, **When** the user approves without changing anything and the app completes the sign-in, **Then** the stored login belongs to the suggested client with that client's profile.
+4. **Given** a suggested client, **When** the user picks another existing client, approves, and the app completes the sign-in, **Then** the stored login belongs to the client the user picked.
+5. **Given** a suggested client, **When** the user picks "New client", approves, and the app completes the sign-in, **Then** a new client is created and the suggested client is unchanged.
+6. **Given** an existing client is selected, by suggestion or by the user, **Then** the page states that the app receives that client's access before Approve is enabled.
+7. **Given** an address that names a client id that does not exist, **Then** every step answers "not found" and no client is created.
 
 ---
 

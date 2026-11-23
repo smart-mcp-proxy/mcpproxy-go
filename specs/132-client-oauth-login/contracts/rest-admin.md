@@ -36,7 +36,7 @@ Pending requests, newest first: `[{id, client_label, created_at, expires_at}]`. 
 
 `404` for an unknown, expired, decided or cancelled id (one uniform answer).
 
-`suggested_client` is advice for the page only. It is computed on read from the sanitised reported name (trimmed, compared without regard to case) against each entry of `existing_clients`: its id, its display name and, for a connect-registry client, its known client names. No match or more than one match → absent. Preview and approve take the client from their own body and never fall back to the suggestion.
+`suggested_client` is advice for the page only. It is computed on read from the sanitised reported name (trimmed, compared without regard to case) against each entry of `existing_clients`: its id, its display name and, for a connect-registry client, its known client names. The whole name is tried and, when it ends with a parenthesised suffix, also the part before it. Matches are collected over all fields and counted by distinct client id; exactly one distinct client → present, none or several → absent. `matched` names the first field that matched in the order `id`, `display_name`, `known_name`. Preview and approve take the client from their own body and never fall back to the suggestion: on the generic address, preview without a client answers `200 {"complete": false}` with no `access` and no `guard`, and approve without a client answers `422 client_required`.
 
 ### `POST /oauth/authorizations/{id}/preview`
 
@@ -69,7 +69,7 @@ Records the decision and issues the code. The login itself is stored when the cl
 - `409 already_decided`.
 - `409 binding_changed`: the binding differs from `binding_revision`; reload.
 - `409 binding_bypassable_without_auth`: body as the existing guard refusal.
-- `422 profile_required`, `422 client_fixed` (a client other than the one in the address), `422 identity_exists` / `reserved_identity` for a new client id, `404 profile_not_found`.
+- `422 client_required` (generic address, no client in the body), `422 profile_required`, `422 client_fixed` (a client other than the one in the address), `422 identity_exists` / `reserved_identity` for a new client id, `404 profile_not_found`.
 
 ### `POST /oauth/authorizations/{id}/deny`
 

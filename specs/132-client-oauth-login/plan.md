@@ -5,7 +5,7 @@
 
 ## Summary
 
-MCPProxy becomes an optional OAuth 2.1 authorization server for its own MCP endpoint. A client given only `/mcp/oauth/<client-id>` (or the generic `/mcp/oauth`) registers itself, the administrator approves on a consent page, and the client gets short-lived tokens. The address fixes which client it is; nothing is inferred from the reported name. A browser login is one more credential under an existing Clients hub row and uses that client's single profile binding. The feature is off by default and, until first used, leaves every existing answer unchanged.
+MCPProxy becomes an optional OAuth 2.1 authorization server for its own MCP endpoint. A client given only `/mcp/oauth/<client-id>` (or the generic `/mcp/oauth`) registers itself, the administrator approves on a consent page, and the client gets short-lived tokens. The address fixes which client it is; the reported name decides nothing (on the generic address it may pre-select a client on the consent page, which the administrator confirms or changes). A browser login is one more credential under an existing Clients hub row and uses that client's single profile binding. The feature is off by default and, until first used, leaves every existing answer unchanged.
 
 Technical approach: one new stdlib-only leaf package for the protocol logic, lazy bbolt buckets in `internal/storage`, one runtime service next to `ClientsService`, HTTP handlers registered once and gated per request, a small extension of `mcpAuthMiddleware`, then the UI and Connect surfaces.
 
