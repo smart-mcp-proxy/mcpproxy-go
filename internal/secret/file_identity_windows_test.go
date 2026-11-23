@@ -5,6 +5,7 @@ package secret
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -42,4 +43,31 @@ func TestFileIdentity_WindowsEagerAcrossRename(t *testing.T) {
 	if os.SameFile(lazy, newInfo) {
 		t.Log("os.Stat FileInfo resolved lazily to the new file, as the eager identity avoids")
 	}
+}
+
+// Cross-review R2 (PR #1884): another process may hold the config open with
+// DELETE access. os.Open does not share DELETE and fails with a sharing
+// violation; the identity capture must share every mode and still succeed.
+func TestFileIdentity_WindowsCaptureWhileHeldWithDeleteAccess(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "mcp_config.json")
+	require.NoError(t, os.WriteFile(cfgPath, []byte("cfg"), 0o600))
+
+	p, err := syscall.UTF16PtrFromString(cfgPath)
+	require.NoError(t, err)
+	const deleteAccess = 0x00010000 // DELETE
+	held, err := syscall.CreateFile(p, syscall.GENERIC_READ|deleteAccess,
+		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
+		nil, syscall.OPEN_EXISTING, syscall.FILE_ATTRIBUTE_NORMAL, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = syscall.CloseHandle(held) })
+
+	if f, oerr := os.Open(cfgPath); oerr == nil {
+		_ = f.Close()
+		t.Log("os.Open succeeded here; the sharing violation it can hit is not reproduced on this runner")
+	}
+
+	_, err = identityOfPathErr(cfgPath)
+	require.NoError(t, err, "identity capture shares DELETE")
+	require.NoError(t, NoteSupersededProxyFile(cfgPath))
 }

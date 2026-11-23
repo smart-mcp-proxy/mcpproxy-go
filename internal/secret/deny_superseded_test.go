@@ -34,3 +34,15 @@ func TestNoteSupersededProxyFile_KeepsReplacedIdentity(t *testing.T) {
 	require.True(t, matches(link), "the replaced inode is remembered")
 	require.False(t, matches(cfgPath), "the new config is not the superseded one")
 }
+
+// A missing file is the first save (nothing to record, no error); any other
+// failure to capture the identity is reported so the caller can warn.
+func TestNoteSupersededProxyFile_ReportsCaptureFailure(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, NoteSupersededProxyFile(filepath.Join(dir, "missing.json")))
+	require.NoError(t, NoteSupersededProxyFile(""))
+
+	err := NoteSupersededProxyFile(dir) // a directory: no file identity to record
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "api_key")
+}

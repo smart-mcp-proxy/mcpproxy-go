@@ -3,6 +3,7 @@
 package secret
 
 import (
+	"errors"
 	"os"
 	"syscall"
 )
@@ -12,6 +13,8 @@ import (
 type fileIdentity struct {
 	dev, ino uint64
 }
+
+var errIdentityNotRegular = errors.New("not a regular file")
 
 func identityFromInfo(info os.FileInfo) (fileIdentity, bool) {
 	if info == nil {
@@ -24,13 +27,26 @@ func identityFromInfo(info os.FileInfo) (fileIdentity, bool) {
 	return fileIdentity{dev: uint64(st.Dev), ino: uint64(st.Ino)}, true //nolint:unconvert // widths differ by platform
 }
 
-// identityOfPath stats path (following symlinks) and returns its identity.
-func identityOfPath(path string) (fileIdentity, bool) {
+// identityOfPathErr stats path (following symlinks) and returns its identity.
+// A missing file reports an error matching fs.ErrNotExist.
+func identityOfPathErr(path string) (fileIdentity, error) {
 	fi, err := os.Stat(path)
-	if err != nil || !fi.Mode().IsRegular() {
-		return fileIdentity{}, false
+	if err != nil {
+		return fileIdentity{}, err
 	}
-	return identityFromInfo(fi)
+	if !fi.Mode().IsRegular() {
+		return fileIdentity{}, errIdentityNotRegular
+	}
+	id, ok := identityFromInfo(fi)
+	if !ok {
+		return fileIdentity{}, errors.New("file identity unavailable")
+	}
+	return id, nil
+}
+
+func identityOfPath(path string) (fileIdentity, bool) {
+	id, err := identityOfPathErr(path)
+	return id, err == nil
 }
 
 // identityOfHandle returns the identity of an opened file from its fstat info.

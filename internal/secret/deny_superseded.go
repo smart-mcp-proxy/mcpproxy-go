@@ -1,6 +1,8 @@
 package secret
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"sync"
 )
@@ -23,24 +25,31 @@ var (
 // entries). Upstream reads refuse every identity recorded here for the life of
 // the process. The identity is captured now (device and inode, or volume
 // serial and file index read from a handle on Windows), never from a retained
-// FileInfo. A path that does not exist or is not a regular file records
-// nothing.
+// FileInfo. A path that does not exist records nothing and is not an error
+// (the first save creates the file).
+//
+// Any other failure to read the identity is returned, and nothing is
+// recorded: the caller should warn, since a hardlink to the replaced file will
+// not be refused. The error names the path and the reason, never content.
 //
 // Best effort: the record is in memory only, so a restart, a save by another
 // process (a separate CLI invocation) or more than maxSupersededProxyFiles
 // later saves forget it.
-func NoteSupersededProxyFile(path string) {
+func NoteSupersededProxyFile(path string) error {
 	if path == "" {
-		return
+		return nil
 	}
-	id, ok := identityOfPath(path)
-	if !ok {
-		return
+	id, err := identityOfPathErr(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
 	}
 	supersededMu.Lock()
 	defer supersededMu.Unlock()
 	if _, known := supersededSet[id]; known {
-		return
+		return nil
 	}
 	if len(supersededFiles) >= maxSupersededProxyFiles {
 		delete(supersededSet, supersededFiles[0])
@@ -48,6 +57,7 @@ func NoteSupersededProxyFile(path string) {
 	}
 	supersededFiles = append(supersededFiles, id)
 	supersededSet[id] = struct{}{}
+	return nil
 }
 
 // matchesSupersededProxyFile reports whether the opened file is one recorded
