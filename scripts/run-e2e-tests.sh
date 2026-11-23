@@ -97,7 +97,7 @@ if [ "$COVER" = "true" ] && [ -f "$COVERAGE_FILE" ]; then
     echo -e "${YELLOW}Generating coverage report...${NC}"
     go tool cover -html="$COVERAGE_FILE" -o "$COVERAGE_HTML"
     echo -e "${GREEN}Coverage report generated: $COVERAGE_HTML${NC}"
-    
+
     # Show coverage summary
     go tool cover -func="$COVERAGE_FILE" | tail -1
 fi
@@ -116,4 +116,4 @@ if [ $E2E_EXIT_CODE -eq 0 ]; then
 else
     echo -e "${RED}Some tests failed${NC}"
     exit 1
-fi 
+fi
