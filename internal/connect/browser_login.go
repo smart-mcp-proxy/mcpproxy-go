@@ -163,28 +163,45 @@ func (s *Service) entryParamsFor(clientID string, oauth bool, credential string)
 }
 
 // urlPointsHere reports whether a URL found in a client config addresses this
-// instance: the MCP endpoint itself (with or without a legacy ?apikey= query)
-// or one of its browser login addresses (`<base>/oauth`, `<base>/oauth/<id>`).
-func (s *Service) urlPointsHere(u, baseURL string) bool {
+// instance for clientID: the MCP endpoint itself (with or without a legacy
+// ?apikey= query) or exactly that client's browser login address.
+func (s *Service) urlPointsHere(u, baseURL, clientID string) bool {
 	if u == baseURL || strings.HasPrefix(u, baseURL+"?") {
 		return true
 	}
-	return s.isOAuthURL(u)
+	return s.isOAuthURL(u, clientID)
 }
 
-// isOAuthURL reports whether u is a browser login address of this instance:
-// under the key-path endpoint, or under the dialable oauth endpoint.
-//
-// The scheme is not compared: like the key path, recognition does not depend on
-// tls.enabled, so an entry written before TLS was switched on or off is still
-// this instance's. Host and port are compared, as the key path does.
-func (s *Service) isOAuthURL(u string) bool {
-	u = stripScheme(u)
-	if isOAuthAddress(u, stripScheme(s.baseURL())) {
-		return true
+// canonicalOAuthURLs are the only addresses Connect writes for a client's
+// browser login, for either scheme (the scheme follows tls.enabled, which may
+// have been toggled since): exactly `<host:port>/mcp/oauth/<client-id>` with no
+// query, fragment, userinfo or extra path. Host and port are the current ones,
+// as for the key path.
+func (s *Service) canonicalOAuthURLs(clientID string) []string {
+	bases := []string{stripScheme(s.baseURL())}
+	if base, err := s.oauthEndpoint(); err == nil && stripScheme(base) != bases[0] {
+		bases = append(bases, stripScheme(base))
 	}
-	if base, err := s.oauthEndpoint(); err == nil {
-		return isOAuthAddress(u, stripScheme(base))
+	var out []string
+	for _, scheme := range []string{"http", "https"} {
+		for _, b := range bases {
+			out = append(out, scheme+"://"+b+oauthPathSegment+"/"+clientID)
+		}
+	}
+	return out
+}
+
+// isOAuthURL reports whether u is exactly one of clientID's canonical browser
+// login addresses. Anything else (another client's id, an extra path segment, a
+// query, a fragment, userinfo) is not: it is somebody's edit, never ours.
+func (s *Service) isOAuthURL(u, clientID string) bool {
+	if clientID == "" {
+		return false
+	}
+	for _, c := range s.canonicalOAuthURLs(clientID) {
+		if u == c {
+			return true
+		}
 	}
 	return false
 }
@@ -198,32 +215,11 @@ func stripScheme(u string) string {
 	return u
 }
 
-// entryOAuthURL is the browser login address a parsed client entry holds, or ""
-// when it holds none.
-func (s *Service) entryOAuthURL(entry map[string]interface{}) string {
+// entryIsOAuth reports whether a parsed client entry carries clientID's
+// canonical browser login address in one of the URL fields clients use.
+func (s *Service) entryIsOAuth(entry map[string]interface{}, clientID string) bool {
 	for _, field := range []string{"url", "serverUrl", "httpUrl"} {
-		if u, ok := entry[field].(string); ok && s.isOAuthURL(u) {
-			return u
-		}
-	}
-	return ""
-}
-
-// isOAuthAddress reports whether u is a browser login address of the instance
-// at baseURL.
-func isOAuthAddress(u, baseURL string) bool {
-	prefix := baseURL + oauthPathSegment
-	if u == prefix {
-		return true
-	}
-	return strings.HasPrefix(u, prefix+"/") || strings.HasPrefix(u, prefix+"?")
-}
-
-// entryIsOAuth reports whether a parsed client entry carries a browser login
-// address of this instance in one of the URL fields clients use.
-func (s *Service) entryIsOAuth(entry map[string]interface{}) bool {
-	for _, field := range []string{"url", "serverUrl", "httpUrl"} {
-		if u, ok := entry[field].(string); ok && s.isOAuthURL(u) {
+		if u, ok := entry[field].(string); ok && s.isOAuthURL(u, clientID) {
 			return true
 		}
 	}

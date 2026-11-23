@@ -532,7 +532,7 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 		status.ServerName = loc.Name
 		status.RegisteredURL = loc.Endpoint
 		status.EndpointMatch = classifyEndpointMatch(loc)
-		if s.entryIsOAuth(loc.Entry) {
+		if s.entryIsOAuth(loc.Entry, c.ID) {
 			status.Auth = AuthOAuth
 		}
 		// What the entry carries, from the same single read. The secret itself
@@ -1661,7 +1661,7 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLoc
 		// Check various URL fields used by different clients
 		for _, field := range []string{"url", "serverUrl", "httpUrl"} {
 			if u, ok := entry[field].(string); ok {
-				if s.urlPointsHere(u, baseURL) {
+				if s.urlPointsHere(u, baseURL, client.ID) {
 					return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}, true, true
 				}
 			}
@@ -1926,7 +1926,7 @@ func (s *Service) findEntryTOMLBytes(raw []byte) (loc entryLocation, found, pars
 			continue
 		}
 		if u, ok := entry["url"].(string); ok {
-			if s.urlPointsHere(u, baseURL) {
+			if s.urlPointsHere(u, baseURL, "") {
 				return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}, true, true
 			}
 		}

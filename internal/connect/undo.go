@@ -172,19 +172,40 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 	currentSecret, _ := entryCredentialFromRaw(client, currentRaw, serverName)
 	credentialOK := currentSecret == "" ||
 		(s.minter != nil && s.minter.HeldByRecord(client.ID, currentSecret))
-	// A browser login connect holds the sign-in address and no credential.
-	// The replay uses the address actually written (the live scheme or listener
-	// may have changed since); the whole-file drift check below is unchanged.
-	oauthURL := s.rawEntryOAuthURL(client, currentRaw, serverName)
-	oauthEntry := oauthURL != ""
-	var expected []byte
+	// Replay the connect from the backup and accept the file only if it is
+	// byte-equal to the result. An API-key connect has one possible result per
+	// credential. A browser-login connect has the canonical addresses of this
+	// client (one per scheme, since tls.enabled may have been toggled since); the
+	// address is never taken from the file, so an edited one is a conflict.
+	var expectations [][]byte
+	oauthMatch := false
 	if credentialOK {
-		expected, err = s.replayConnectWriteAs(client, serverName, backupRaw, currentSecret, oauthURL)
+		expected, err := s.replayConnectWrite(client, serverName, backupRaw, currentSecret)
 		if err != nil {
 			return nil, err
 		}
+		expectations = append(expectations, expected)
 	}
-	if !credentialOK || !bytes.Equal(currentRaw, expected) {
+	matched := false
+	for _, e := range expectations {
+		if bytes.Equal(currentRaw, e) {
+			matched = true
+		}
+	}
+	if !matched && credentialOK && currentSecret == "" {
+		for _, u := range s.canonicalOAuthURLs(client.ID) {
+			e, err := s.replayConnectWriteAs(client, serverName, backupRaw, "", u)
+			if err != nil {
+				return nil, err
+			}
+			if bytes.Equal(currentRaw, e) {
+				matched, oauthMatch = true, true
+				break
+			}
+		}
+	}
+	oauthEntry := oauthMatch
+	if !credentialOK || !matched {
 		return &ConnectResult{
 			Success:    false,
 			Client:     client.ID,
@@ -345,23 +366,4 @@ func (s *Service) replayConnectWriteAs(client *ClientDef, serverName string, bac
 	serversMap[serverName] = buildServerEntry(client.ID, params)
 	setServersMap(client, data, serversMap)
 	return marshalJSONIndent(data)
-}
-
-// rawEntryIsOAuth reports whether serverName's entry in a raw client config
-// holds a browser login address of this instance.
-func (s *Service) rawEntryOAuthURL(client *ClientDef, raw []byte, serverName string) string {
-	data := make(map[string]interface{})
-	if client.Format == "toml" {
-		if _, err := toml.Decode(string(raw), &data); err != nil {
-			return ""
-		}
-	} else if err := unmarshalLenientJSON(raw, &data); err != nil {
-		return ""
-	}
-	serversMap, _ := getServersMap(client, data)
-	entry, ok := serversMap[serverName].(map[string]interface{})
-	if !ok {
-		return ""
-	}
-	return s.entryOAuthURL(entry)
 }
