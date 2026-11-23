@@ -112,6 +112,7 @@
           The client's access changed while this page was open. It was reloaded: review it and approve again.
         </div>
         <div v-if="errorText" class="alert alert-error text-sm" role="alert" data-test="authorize-error">{{ errorText }}</div>
+        <button v-if="previewFailed && !busy" type="button" class="btn btn-sm btn-outline self-start" data-test="authorize-retry" @click="retryPreview">Check again</button>
 
         <div class="card-actions justify-end">
           <button type="button" class="btn" :disabled="busy" data-test="authorize-deny" @click="deny">Deny</button>
@@ -347,12 +348,12 @@ async function runPreview(id: string, key: string) {
   errorText.value = ''
   try {
     const p = await api.previewOAuthAuthorization(id, JSON.parse(key))
-    if (seq !== previewSeq) return
+    if (seq !== previewSeq || busy.value) return
     accepted.value = { key, preview: p }
     previewFailed.value = false
     guardOverride.value = null
   } catch (e) {
-    if (seq !== previewSeq) return
+    if (seq !== previewSeq || busy.value) return
     accepted.value = null
     if (e instanceof ApiError && e.status === 404 && e.code !== 'profile_not_found') {
       phase.value = 'gone'
@@ -392,6 +393,7 @@ async function decide(call: (id: string) => Promise<OAuthDecision>) {
   // An answer for a request that was left (new id, unmount) is obsolete: it
   // must not navigate, hide, disable or release anything on the page now shown.
   const gen = loadGen
+  previewSeq++ // a preview still in flight is obsolete once a decision starts
   try {
     const res = await call(loadedId.value)
     if (gen !== loadGen) return
@@ -401,7 +403,16 @@ async function decide(call: (id: string) => Promise<OAuthDecision>) {
     if (gen !== loadGen) return
     submitting.value = false
     await handleDecisionError(e)
+    // The preview that was cut off when the decision started is run again.
+    if (gen === loadGen && phase.value === 'ready' && !current.value) retryPreview()
   }
+}
+
+// Runs the preview again for the current request and choice (also the
+// "Check again" button after a failed preview).
+function retryPreview() {
+  const key = previewKey.value
+  if (key !== null && loadedId.value && !busy.value) void runPreview(loadedId.value, key)
 }
 
 function approve() {
