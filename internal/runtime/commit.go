@@ -956,6 +956,18 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 		h(reason)
 	}
 
+	// Spec 132 R15: a commit in which browser login goes from on to off cancels
+	// every pending and approved sign-in request BEFORE the new configuration
+	// becomes visible, on the API update path and the file-reload path alike
+	// (both end here). It does not depend on config.reloaded, which is
+	// asynchronous and may be dropped. The lifecycle lock taken here is held until
+	// the function returns, that is, past the publish below and the r.cfg swap, so
+	// a BeginAuthorization either created its request before this ran or sees the
+	// switch off. See the lock-order note on OAuthLoginService.
+	if base.Config != nil && base.Config.MCPOAuthEnabled && !tx.next.MCPOAuthEnabled && r.oauthLoginService != nil {
+		defer r.oauthLoginService.beginDisable("feature_disabled")()
+	}
+
 	// Step 8: publish.
 	snap, perr := r.configSvc.Publish(prepared)
 	if perr != nil {

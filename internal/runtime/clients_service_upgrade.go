@@ -260,8 +260,13 @@ func (s *ClientsService) upgradeGuard(rows []UpgradeRow, req UpgradeRequest) err
 		return err
 	}
 	cfg := s.cfg()
-	current := GuardState{Config: cfg, Tokens: guardedOnly(all)}
+	oauth, err := s.loadOAuthBindings()
+	if err != nil {
+		return err
+	}
+	current := GuardState{Config: cfg, Tokens: guardedOnly(all), OAuthBindings: oauth}
 	tokens := guardedOnly(all)
+	candOAuth := oauth
 	now := s.now().UTC()
 	for _, r := range rows {
 		next := auth.AgentToken{
@@ -269,8 +274,9 @@ func (s *ClientsService) upgradeGuard(rows []UpgradeRow, req UpgradeRequest) err
 			ProfilePin: *req.Profile, ProfileMode: mode, CreatedAt: now, ExpiresAt: now.Add(clientCredentialTTL),
 		}
 		tokens = candidateTokens(tokens, r.ClientID, &next)
+		candOAuth = repinOAuthClient(candOAuth, r.ClientID, next.ProfilePin, next.ProfileMode)
 	}
-	return CheckBindingGuard(s.guard(), current, GuardState{Config: cfg, Tokens: tokens})
+	return CheckBindingGuard(s.guard(), current, GuardState{Config: cfg, Tokens: tokens, OAuthBindings: candOAuth})
 }
 
 // PreviewAdminKeyUpgrade classifies every supported client that holds the admin

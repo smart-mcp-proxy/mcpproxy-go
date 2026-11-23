@@ -178,6 +178,10 @@ var adminConfigEventTypes = map[internalRuntime.EventType]struct{}{
 	// A credential lifecycle invalidation names identities and their
 	// profiles (Spec 115 FR-024): administrator-only, like the binding event.
 	internalRuntime.EventTypeCredentialsChanged: {},
+	// A browser sign-in request names a client and the label it reported
+	// (Spec 132): administrator-only, like the credential invalidation.
+	internalRuntime.EventTypeOAuthAuthorizationPending: {},
+	internalRuntime.EventTypeOAuthAuthorizationDecided: {},
 	// A skills catalog change carries per-state counts of every skill of a
 	// server, available or not (Spec 125 FR-019a): until agents are offered
 	// skills it is an administrator-only invalidation.

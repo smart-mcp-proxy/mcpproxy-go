@@ -101,32 +101,21 @@ func TestUpdateClientCredentialBinding_ErrorTextUnchangedForAPIKeyOnly(t *testin
 // in ONE list in bbolt key order, whether regular token or client, so `before`
 // and the hook order are what they were before Spec 132.
 func TestRepinProfile_KeepsKeyOrderForRecordsAndHooks(t *testing.T) {
-	m, cleanup := setupTestStorageForAgentTokens(t)
-	defer cleanup()
-	mintTestClient(t, m, "cursor", auth.ProfileModeLocked, "p")
-
-	keyOrder := func() []string {
-		var names []string
-		require.NoError(t, m.db.db.View(func(tx *bbolt.Tx) error {
-			return tx.Bucket([]byte(AgentTokensBucket)).ForEach(func(_, v []byte) error {
-				var tk auth.AgentToken
-				require.NoError(t, jsonUnmarshal(v, &tk))
-				names = append(names, tk.Name)
-				return nil
-			})
-		}))
-		return names
-	}
-	// Add agent tokens pinned to p until the client record sits in the middle.
-	for i := 0; i < 30; i++ {
-		tok, raw := makeTestToken("agent-" + string(rune('a'+i)))
-		tok.ProfilePin = "p"
-		require.NoError(t, m.CreateAgentToken(tok, raw, testHMACKey))
-		names := keyOrder()
-		if len(names) >= 3 && names[0] != "client-cursor" && names[len(names)-1] != "client-cursor" {
+	// Keys are token hashes, so where the client record lands among the tokens
+	// is random, and the token count is capped. A store that leaves the client
+	// first or last (a few percent of runs) is thrown away and rebuilt.
+	var m *Manager
+	var keyOrder func() []string
+	for attempt := 0; attempt < 50; attempt++ {
+		mgr, cleanup := setupTestStorageForAgentTokens(t)
+		t.Cleanup(cleanup)
+		order, ok := repinOrderFixture(t, mgr)
+		if ok {
+			m, keyOrder = mgr, order
 			break
 		}
 	}
+	require.NotNil(t, m, "no store put the client record between two tokens")
 	want := keyOrder()
 	require.NotEqual(t, "client-cursor", want[0])
 	require.NotEqual(t, "client-cursor", want[len(want)-1])
@@ -263,4 +252,35 @@ func TestRepinProfile_FailureKeepsErrorTextAndRollsBack(t *testing.T) {
 	require.ErrorIs(t, err, boom)
 	pin, _, _, _, _, _ := bindings(t, m, "cursor")
 	assert.Equal(t, "p", pin)
+}
+
+// repinOrderFixture mints one client and agent tokens pinned to p until the
+// client record sits between two tokens in bbolt key order. ok is false when
+// it never does.
+func repinOrderFixture(t *testing.T, m *Manager) (keyOrder func() []string, ok bool) {
+	t.Helper()
+	mintTestClient(t, m, "cursor", auth.ProfileModeLocked, "p")
+
+	keyOrder = func() []string {
+		var names []string
+		require.NoError(t, m.db.db.View(func(tx *bbolt.Tx) error {
+			return tx.Bucket([]byte(AgentTokensBucket)).ForEach(func(_, v []byte) error {
+				var tk auth.AgentToken
+				require.NoError(t, jsonUnmarshal(v, &tk))
+				names = append(names, tk.Name)
+				return nil
+			})
+		}))
+		return names
+	}
+	for i := 0; i < 30; i++ {
+		tok, raw := makeTestToken("agent-" + string(rune('a'+i)))
+		tok.ProfilePin = "p"
+		require.NoError(t, m.CreateAgentToken(tok, raw, testHMACKey))
+		names := keyOrder()
+		if len(names) >= 3 && names[0] != "client-cursor" && names[len(names)-1] != "client-cursor" {
+			return keyOrder, true
+		}
+	}
+	return keyOrder, false
 }

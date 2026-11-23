@@ -90,6 +90,10 @@ type SessionInfo struct {
 	// no request context read it back so an event carries the same ownership
 	// proof the SSE renderer checks (name AND prefix).
 	TokenPrefix string
+	// GrantID is the browser-login grant that authenticated the session (Spec
+	// 132), set once at initialize like TokenName; empty for every other
+	// credential. INTERNAL: it only feeds activity attribution.
+	GrantID string
 
 	// Anonymous marks a session that presented no credential (Spec 108-f F10):
 	// its base is the snapshot's anonymous_profile, read at notify time. Memory

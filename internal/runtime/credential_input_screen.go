@@ -10,6 +10,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/mcplogin"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 )
@@ -117,7 +118,8 @@ func (c *CredentialScreen) SecretShaped(s string) bool {
 		return false
 	}
 	lower := strings.ToLower(s)
-	if strings.Contains(lower, auth.TokenPrefixStr) || strings.Contains(lower, auth.ClientTokenPrefixStr) {
+	if strings.Contains(lower, auth.TokenPrefixStr) || strings.Contains(lower, auth.ClientTokenPrefixStr) ||
+		strings.Contains(lower, mcplogin.AccessTokenPrefix) || strings.Contains(lower, mcplogin.RefreshTokenPrefix) {
 		return true
 	}
 	// Every nonempty configured key is compared, whatever its length (A24):

@@ -35,6 +35,10 @@ type ActivityAttribution struct {
 	// scoped caller recognises its own policy_decision and prompt_get rows),
 	// never in any API shape, export or SSE frame for another caller.
 	TokenPrefix string
+	// GrantID is the browser-login grant that authenticated the request (Spec
+	// 132): it lands as metadata.grant_id so two logins of one client can be
+	// told apart. Not a secret.
+	GrantID string
 
 	// WorkSessionID is the work session of the request (Spec 124 D1). It is
 	// resolved at the emit site because only the request knows the credential,
@@ -85,6 +89,7 @@ func (a ActivityAttribution) payload() map[string]any {
 	set("client_version", a.ClientVersion)
 	set("token_name", a.TokenName)
 	set("_token_prefix", a.TokenPrefix)
+	set("grant_id", a.GrantID)
 	set("_work_session_id", a.WorkSessionID)
 	set("_user_id", a.UserID)
 	set("run_name", a.RunName)
@@ -114,6 +119,7 @@ func attributionFromPayload(payload map[string]any) ActivityAttribution {
 		ClientVersion: getStringPayload(m, "client_version"),
 		TokenName:     getStringPayload(m, "token_name"),
 		TokenPrefix:   getStringPayload(m, "_token_prefix"),
+		GrantID:       getStringPayload(m, "grant_id"),
 		WorkSessionID: getStringPayload(m, "_work_session_id"),
 		UserID:        getStringPayload(m, "_user_id"),
 		RunName:       getStringPayload(m, "run_name"),
@@ -175,6 +181,7 @@ func applyAttribution(rec *storage.ActivityRecord, a ActivityAttribution) {
 	}
 	setMetadataIfAbsent("client_name", a.ClientName)
 	setMetadataIfAbsent("client_version", a.ClientVersion)
+	setMetadataIfAbsent("grant_id", a.GrantID)
 }
 
 // NewUsageAggregate returns an empty aggregate at the current admission
