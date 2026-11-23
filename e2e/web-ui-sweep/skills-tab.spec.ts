@@ -18,7 +18,10 @@
 //      the open review by the live skills.changed event alone: its stale
 //      banner appears by itself;
 //   7. block and unblock;
-//   8. no uncaught page error anywhere.
+//   8. reload through the Skills deep link;
+//   9. a skill-only Review queue action opens only held skills;
+//  10. selecting a skill puts its detail beside the desktop list;
+//  11. compact keyboard selection opens the detail and Back restores row focus.
 //
 // Normally run by scripts/run-skills-tab-sweep.sh, which starts everything and
 // sets the environment (docs/development/web-ui-verification.md):
@@ -60,7 +63,7 @@ function url(route: string): string {
 test.use({ trace: 'off' })
 
 async function shot(page: Page, name: string, focus?: string) {
-  // The detail pane sits below the list; scroll the part worth seeing into view.
+  // Bring a specific viewer or diff into view when the scenario needs it.
   if (focus) await page.locator(focus).first().scrollIntoViewIfNeeded()
   const body = await page.screenshot({ fullPage: false })
   await test.info().attach(`skills-tab-${name}`, { body, contentType: 'image/png' })
@@ -117,14 +120,20 @@ test('the Skills tab lists the fixture skills as awaiting review', async ({ page
 test('views SKILL.md, pages a large file, and does not offer a binary file', async ({ page }) => {
   await page.goto(url(`/servers/${SERVER}?tab=skills`))
   await row(page, 'plain').click()
-  await page.locator('[data-test="skill-view-SKILL.md"]').click()
+  const shortcut = page.getByRole('button', { name: 'Read SKILL.md', exact: true })
+  await shortcut.press('Enter')
   await expect(page.locator('[data-test="skill-viewer-text"]')).toContainText('name: plain')
+  const heading = page.locator('[data-test="skill-viewer-heading"]')
+  await expect(heading).toBeFocused()
+  await expect(heading).toBeInViewport()
   await shot(page, '02-viewer', '[data-test="skill-viewer"]')
+  await page.locator('[data-test="skill-viewer-close"]').click()
+  await expect(shortcut).toBeFocused()
 
   await row(page, 'big').click()
   // The listed digest and size of data/large.txt in the copy being viewed (the
-  // current copy: View opens it), from the core's own listing; the file row on
-  // screen must name the same digest (its title holds the full value).
+  // current copy: View opens it), from the core's own listing. File hashes
+  // shows the full digest when expanded.
   const FILE = 'data/large.txt'
   const listingRes = await fetch(`${BASE}/api/v1/servers/${SERVER}/skills`, { headers: { 'X-API-Key': KEY } })
   expect(listingRes.status, 'GET /skills').toBe(200)
@@ -132,7 +141,13 @@ test('views SKILL.md, pages a large file, and does not offer a binary file', asy
   const bigSkill = (listingBody.data ?? listingBody).skills.find((k: { path: string }) => k.path === 'big')
   const listedFile = (bigSkill?.files ?? []).find((f: { path: string }) => f.path === FILE)
   expect(listedFile?.digest, `the listing names ${FILE} in the current copy of big`).toBeTruthy()
-  await expect(page.locator(`[data-test="skill-file-${FILE}"] span.font-mono`)).toHaveAttribute('title', listedFile.digest)
+  const hashes = page.locator('[data-test="skill-file-hashes"]')
+  const digest = hashes.locator(`[data-test="skill-hash-${FILE}"]`)
+  await expect(hashes).toHaveJSProperty('open', false)
+  await expect(digest).toBeHidden()
+  await hashes.locator('summary').click()
+  await expect(digest).toBeVisible()
+  await expect(digest).toHaveText(listedFile.digest)
   // Every part is awaited as a response, and its text as a rendered update: the
   // Load more button is hidden while a part loads, so its absence alone is not
   // the end of the file. The end is a part with no next_offset. Each part must
@@ -191,6 +206,14 @@ test('approve turns the chip to Approved', async ({ page }) => {
   await expect(chip(page, 'plain')).toHaveText('Approved')
   await expect(page.locator('[data-test="skills-notice"]')).toContainText(/approved/i)
   await expect(page.locator('[data-test="skill-approve"]')).toHaveCount(0)
+  const unchanged = page.locator('[data-test="skill-unchanged-files"]')
+  const rootFile = unchanged.locator('[data-test="skill-diff-SKILL.md"]')
+  await expect(unchanged).toHaveJSProperty('open', false)
+  await expect(rootFile).toBeHidden()
+  await unchanged.locator('summary').click()
+  await expect(rootFile).toHaveText('SKILL.md')
+  await expect(rootFile).toBeVisible()
+  await unchanged.locator('summary').click()
   await saveState('approve')
   await shot(page, '04-approved')
 })
@@ -292,5 +315,97 @@ test('the tab survives a reload through ?tab=skills and no page error was thrown
   await expect(page.locator('[data-test="skills-panel"]')).toBeVisible()
   await page.reload()
   await expect(page.locator('[data-test="skills-tab"]')).toHaveClass(/tab-active/)
+  expect(pageErrors, 'uncaught page errors').toEqual([])
+})
+
+// The manual-trust fixture also has a pending echo tool. Check its mixed
+// queue row first, then approve echo to exercise the skill-only row as well.
+test('the mixed and skill-only Review queue actions open only held skills', async ({ page }) => {
+  await page.goto(url('/review'))
+  const queueRow = page.locator(`[data-test="servers-review-row-${SERVER}"]`)
+  const skills = queueRow.locator(`[data-test="servers-review-skills-link-${SERVER}"]`)
+  const review = queueRow.locator(`[data-test="servers-review-link-${SERVER}"]`)
+  const expectHeldSkills = async () => {
+    await expect(page).toHaveURL(url(`/servers/${SERVER}?tab=skills&state=needs-review`))
+    const filter = page.locator('[data-test="skills-filter-needs-review"]')
+    await expect(filter).toHaveAttribute('aria-pressed', 'true')
+    await expect(filter).toHaveText('Needs review (2)')
+    await expect(row(page, 'with-files')).toBeVisible()
+    await expect(row(page, 'big')).toBeVisible()
+    await expect(row(page, 'plain')).toHaveCount(0)
+  }
+
+  await skills.click()
+  await expectHeldSkills()
+
+  await page.goto(url('/review'))
+  await review.click()
+  await expect(page).toHaveURL(url(`/review/${SERVER}`))
+  const echo = page.locator('[data-test="review-tool-echo"]')
+  await echo.getByRole('button', { name: 'Approve', exact: true }).click()
+  await expect(echo.locator('[data-test="review-tool-state-echo"]')).toHaveText('Approved')
+
+  await page.goto(url('/review'))
+  await expect(queueRow).toBeVisible()
+  await expect(skills).toHaveCount(0)
+  await review.click()
+  await expectHeldSkills()
+  await shot(page, '07-queue-needs-review')
+})
+
+test('selecting a skill reveals its detail beside the desktop list', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(url(`/servers/${SERVER}?tab=skills`))
+  await expect(page.locator('[data-test="skills-filter-all"]')).toHaveAttribute('aria-pressed', 'true')
+  const list = page.locator('[data-test="skills-list"]')
+  await row(page, 'with-files').click()
+  const detail = page.locator('[data-test="skill-detail"]')
+  const heading = detail.locator('[data-test="skill-name"]')
+  await expect(heading).toHaveText('with-files')
+  await expect(heading).toBeInViewport()
+  const listBox = await list.boundingBox()
+  const detailBox = await detail.boundingBox()
+  expect(listBox).not.toBeNull()
+  expect(detailBox).not.toBeNull()
+  expect(detailBox!.x, 'detail begins to the right of the list').toBeGreaterThan(listBox!.x + listBox!.width - 2)
+  await shot(page, '08-desktop-detail')
+})
+
+test('compact keyboard selection opens detail and Back restores row focus', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(url(`/servers/${SERVER}?tab=skills`))
+  const selected = row(page, 'with-files')
+  await expect(selected).toBeVisible()
+  await selected.focus()
+  await selected.press('Enter')
+
+  const heading = page.locator('[data-test="skill-name"]')
+  const back = page.locator('[data-test="skill-back-to-list"]')
+  await expect(heading).toHaveText('with-files')
+  await expect(heading).toBeFocused()
+  await expect(heading).toBeInViewport()
+  await expect(back).toBeInViewport()
+  await expect(selected).toBeHidden()
+  const scan = await page.locator('[data-test="skill-scan"]').boundingBox()
+  const approve = await page.locator('[data-test="skill-approve"]').boundingBox()
+  expect(scan && approve && scan.y + scan.height <= approve.y, 'scan evidence precedes Approve').toBe(true)
+  await shot(page, '09-mobile-detail')
+
+  const read = page.getByRole('button', { name: 'Read SKILL.md', exact: true })
+  await read.press('Enter')
+  const viewerHeading = page.locator('[data-test="skill-viewer-heading"]')
+  await expect(viewerHeading).toBeFocused()
+  await expect(viewerHeading).toBeInViewport()
+  await expect(page.locator('[data-test="skill-viewer-text"]')).toContainText('name: with-files')
+  await page.locator('[data-test="skill-viewer-close"]').click()
+  await expect(read).toBeFocused()
+  await heading.focus()
+
+  await page.keyboard.press('Shift+Tab')
+  await expect(back).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(selected).toBeVisible()
+  await expect(selected).toBeFocused()
+  await expect(page.locator('[data-test="skill-detail"]')).toHaveCount(0)
   expect(pageErrors, 'uncaught page errors').toEqual([])
 })

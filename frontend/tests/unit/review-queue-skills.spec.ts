@@ -31,8 +31,8 @@ describe('review queue rows with held skills (helpers)', () => {
     expect(reviewQueueRowSubtitle({ server: 'q', kind: 'server_review', quarantined: true })).toBe('Server awaiting review')
   })
 
-  it('links a skill-only row to the server Skills tab and a tool row to its review', () => {
-    expect(reviewQueueRowLink(skillOnly)).toEqual({ path: '/servers/io.github.o%2Fhf', query: { tab: 'skills' } })
+  it('links a skill-only row to the filtered Skills tab and a tool row to its review', () => {
+    expect(reviewQueueRowLink(skillOnly)).toEqual({ path: '/servers/io.github.o%2Fhf', query: { tab: 'skills', state: 'needs-review' } })
     expect(reviewQueueRowLink(toolsAndSkills, 'pending')).toEqual({ path: '/review/alpha', query: { change: 'pending' } })
     expect(reviewQueueRowLink(toolsOnly)).toEqual({ path: '/review/bravo', query: {} })
   })
@@ -65,15 +65,15 @@ describe('Review queue page with held skills', () => {
     return wrapper
   }
 
-  it('shows the skill counts and links the skill-only row to the Skills tab', async () => {
+  it('shows the skill counts and filters the Skills tab from both queue links', async () => {
     const wrapper = await open()
     expect(wrapper.get('[data-test="review-count-badge"]').text()).toBe('3')
     const row = wrapper.get('[data-test="servers-review-row-io.github.o/hf"]')
     expect(row.text()).toContain('4 skills awaiting review · 1 changed')
-    expect(wrapper.get('[data-test="servers-review-link-io.github.o/hf"]').attributes('href')).toBe('/servers/io.github.o%2Fhf?tab=skills')
+    expect(wrapper.get('[data-test="servers-review-link-io.github.o/hf"]').attributes('href')).toBe('/servers/io.github.o%2Fhf?tab=skills&state=needs-review')
     expect(wrapper.get('[data-test="servers-review-row-alpha"]').text()).toContain('2 skills awaiting review')
     expect(wrapper.get('[data-test="servers-review-link-alpha"]').attributes('href')).toBe('/review/alpha')
-    expect(wrapper.get('[data-test="servers-review-skills-link-alpha"]').attributes('href')).toBe('/servers/alpha?tab=skills')
+    expect(wrapper.get('[data-test="servers-review-skills-link-alpha"]').attributes('href')).toBe('/servers/alpha?tab=skills&state=needs-review')
     expect(wrapper.find('[data-test="servers-review-skills-link-bravo"]').exists()).toBe(false)
   })
 

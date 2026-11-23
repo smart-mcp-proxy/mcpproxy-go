@@ -241,7 +241,9 @@ func approvedRT05Server() *mcpserver.StreamableHTTPServer {
 // approved contract. The notification must not be dropped by the in-progress
 // dedup: the in-flight owner runs one follow-up verification that sees the
 // armed contract. Periodic discovery skips quarantined servers, so nothing
-// else would. Deterministic: one outer trigger, one notification, no polling.
+// else would. One notification is delivered from the hook; the follow-up's
+// effect is awaited with Eventually, because the outer call is not guaranteed
+// to be the discovery owner (#1984).
 func TestRT05_ListChangedDuringInFlightVerification_IsFollowedUp(t *testing.T) {
 	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
 	mcpSrv := mcpserver.NewMCPServer("stage", "0.0.1", mcpserver.WithToolCapabilities(true))
@@ -274,27 +276,41 @@ func TestRT05_ListChangedDuringInFlightVerification_IsFollowedUp(t *testing.T) {
 	// at once — it must be coalesced, not dropped.
 	var notified atomic.Int32
 	var coalescedReturned atomic.Bool
+	var hookBusy atomic.Bool
+	var hookErr atomic.Value
 	rt.quarantinedCaptureBeforePersist = func() {
 		if !notified.CompareAndSwap(0, 1) {
 			return
 		}
 		mcpSrv.DeleteTools("calendar_get_events")
 		mcpSrv.AddTool(mcp.NewTool("calendar_get_events", mcp.WithDescription("armed definition")), handler)
+		// The hook may run on a background goroutine: record results, assert
+		// in the test goroutine.
 		_, busy := rt.discoveryInProgress.Load("quarantined")
-		require.True(t, busy, "the notification must race an in-flight verification")
-		require.NoError(t, rt.onUpstreamToolsListChanged(context.Background(), "quarantined"))
+		hookBusy.Store(busy)
+		if err := rt.onUpstreamToolsListChanged(context.Background(), "quarantined"); err != nil {
+			hookErr.Store(err.Error())
+		}
 		coalescedReturned.Store(true)
 	}
 
 	require.NoError(t, rt.onUpstreamToolsListChanged(context.Background(), "quarantined"))
-	require.True(t, coalescedReturned.Load(), "the single notification was delivered during the in-flight verification")
+	require.Eventually(t, coalescedReturned.Load, 10*time.Second, 20*time.Millisecond,
+		"the single notification was delivered during the in-flight verification")
 	assert.Equal(t, int32(1), notified.Load())
+	assert.True(t, hookBusy.Load(), "the notification must race an in-flight verification")
+	assert.Nil(t, hookErr.Load(), "the notification handler returned an error")
 
-	// No polling: the outer call returns only after its follow-up ran.
-	rec, err = rt.storageManager.GetToolApproval("quarantined", "calendar_get_events")
-	require.NoError(t, err)
-	assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "the coalesced notification triggered an automatic follow-up verification")
-	assert.Equal(t, "armed definition", rec.CurrentDescription)
+	// The outer call is not guaranteed to be the discovery owner: a background
+	// pass (sweep or reconnect) may hold the marker when it runs, in which case
+	// the outer call only coalesces and returns at once while that owner runs
+	// the follow-up (#1984). The follow-up is awaited by its owner, not by this
+	// call, so wait for its effect rather than sampling right after the return.
+	require.Eventually(t, func() bool {
+		rec, err := rt.storageManager.GetToolApproval("quarantined", "calendar_get_events")
+		return err == nil && rec != nil &&
+			rec.Status == storage.ToolApprovalStatusChanged && rec.CurrentDescription == "armed definition"
+	}, 10*time.Second, 20*time.Millisecond, "the coalesced notification triggered an automatic follow-up verification")
 	assert.True(t, rt.serverIsQuarantined("quarantined"))
 	indexed, err := rt.indexManager.GetToolsByServer("quarantined")
 	require.NoError(t, err)

@@ -49,15 +49,15 @@ export function reviewQueueRowSubtitle(row: ReviewQueueRow): string {
   return skills ? `${tools} · ${skills}` : tools
 }
 
-// Where a held skill is reviewed: the server page's Skills tab.
-export function serverSkillsLink(server: string) {
-  return { path: `/servers/${encodeURIComponent(server)}`, query: { tab: 'skills' } }
+// A queue action opens the Skills tab with the same scope as the queue.
+export function serverSkillsReviewLink(server: string) {
+  return { path: `/servers/${encodeURIComponent(server)}`, query: { tab: 'skills', state: 'needs-review' } }
 }
 
 // The row's Review link: a skill-only row opens the Skills tab, every other
 // row the tool review (keeping a ?change= filter).
 export function reviewQueueRowLink(row: ReviewQueueRow, change?: string) {
-  if (row.kind === REVIEW_KIND_SKILL_REVIEW) return serverSkillsLink(row.server)
+  if (row.kind === REVIEW_KIND_SKILL_REVIEW) return serverSkillsReviewLink(row.server)
   return { path: `/review/${encodeURIComponent(row.server)}`, query: { ...(change ? { change } : {}) } }
 }
 

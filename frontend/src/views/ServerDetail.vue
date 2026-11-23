@@ -749,7 +749,12 @@
         <!-- Rendered only once the check says the tab is offered: until then a
              ?tab=skills link waits, and a tab that is not offered falls back to Tools. -->
         <div v-if="activeTab === 'skills' && !isTenant && skillsTabVisible">
-          <SkillsPanel :server-name="server.name" />
+          <SkillsPanel
+            :server-name="server.name"
+            :needs-review="route.query.state === 'needs-review'"
+            :server-reviewable="server.enabled && !server.quarantined"
+            @filter="setSkillsFilter"
+          />
         </div>
         <div v-else-if="activeTab === 'skills' && !skillsTabChecked" class="text-center py-8" data-test="skills-tab-checking">
           <span class="loading loading-spinner"></span>
@@ -1720,12 +1725,23 @@ let viewMounted = true
 function urlIsThisView(): boolean {
   return viewMounted && route.params.serverName === props.serverName
 }
+function setSkillsFilter(needsReview: boolean) {
+  if (!urlIsThisView()) return
+  void router.replace({ query: { ...route.query, state: needsReview ? 'needs-review' : undefined } })
+}
+function writeTabToQuery(tab: typeof activeTab.value) {
+  if (!urlIsThisView()) return
+  const query = { ...route.query }
+  query.tab = tab
+  if (tab !== 'skills' && query.state === 'needs-review') delete query.state
+  void router.replace({ query })
+}
 function leaveSkillsTabIfNotOffered() {
   if (!skillsTabRefused()) return
   if (activeTab.value === 'skills') activeTab.value = 'tools'
   // activeTab may already read 'tools' (readTabFromQuery set it in the same
   // tick), in which case the watch does not fire: write the URL here.
-  else if (route.query.tab === 'skills' && urlIsThisView()) void router.replace({ query: { ...route.query, tab: 'tools' } })
+  else if (route.query.tab === 'skills') writeTabToQuery('tools')
 }
 async function checkSkillsTab(reset = true) {
   // A failed background re-check (reset=false, after skills.changed) never
@@ -1766,12 +1782,10 @@ async function checkSkillsTab(reset = true) {
 }
 // Spec 109 FR-016: every tab change (click, or a programmatic jump such as
 // the auto-approve flow landing on Security) is reflected in `?tab=`, keeping
-// every other query param, so the active tab survives a reload or a shared
-// link. The initial value is read from `?tab=` in onMounted below; this watch
-// only ever writes forward from there.
+// unrelated query params, so the active tab survives reloads and shared links.
+// Leaving Skills clears its queue filter so an ordinary tab click opens All skills.
 watch(activeTab, (tab) => {
-  if (route.query.tab === tab || !urlIsThisView()) return
-  void router.replace({ query: { ...route.query, tab } })
+  if (route.query.tab !== tab) writeTabToQuery(tab)
 })
 // Sets activeTab from `?tab=` (or resets it to the default when absent),
 // shared by onMounted and the props.serverName watch below. App.vue's
