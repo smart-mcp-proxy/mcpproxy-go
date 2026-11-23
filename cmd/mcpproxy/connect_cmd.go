@@ -364,6 +364,9 @@ func printConnectResult(result *connect.ConnectResult, formatter clioutput.Outpu
 			if line := disconnectCredentialLine(result); line != "" {
 				fmt.Println(line)
 			}
+			if result.CleanupError != "" {
+				fmt.Printf("Cleanup: the entry was removed but its undo records could not be removed (%s)\n", result.CleanupError)
+			}
 			// FR-037: Config shows the home-shortened display_path; the full
 			// path is still available via -o json's config_path.
 			fmt.Printf("Config: %s\n", connectResultDisplayPath(result))

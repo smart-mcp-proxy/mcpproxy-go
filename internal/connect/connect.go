@@ -75,6 +75,10 @@ type ConnectResult struct {
 	// the credential is still active and `mcpproxy client forget <id>`
 	// retries the revoke.
 	CredentialRevokeError string `json:"credential_revoke_error,omitempty" yaml:"credential_revoke_error,omitempty"`
+	// CleanupError is set when a disconnect removed the entry but could not list
+	// the config's directory to remove the undo records of a browser-login
+	// connect (Spec 132). The disconnect still succeeded.
+	CleanupError string `json:"cleanup_error,omitempty" yaml:"cleanup_error,omitempty"`
 
 	// Auth is "oauth" when the entry holds the per-client browser login
 	// address and no credential (Spec 132). Empty for an API-key entry.
@@ -932,7 +936,10 @@ func (s *Service) Disconnect(clientID, serverName string) (res *ConnectResult, e
 		}
 	}
 	if err == nil && res != nil && res.Success {
-		removeUndoRecords(res.ConfigPath, clientID, serverName)
+		if cerr := removeUndoRecords(res.ConfigPath, clientID, serverName); cerr != nil {
+			// The entry is gone; only the cleanup of its undo records failed.
+			res.CleanupError = cerr.Error()
+		}
 	}
 	return res, s.asAccessError(client, cfgPath, err)
 }
@@ -1144,7 +1151,14 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	}
 
 	// Create backup before modifying
-	backupPath, err := backupFile(cfgPath)
+	// A browser-login connect must be able to see the directory's undo records
+	// before it writes anything.
+	if cred.oauth {
+		if _, err := recordFilesWithPrefix(cfgPath, undoNewPrefix); err != nil {
+			return nil, fmt.Errorf("undo records: %w", err)
+		}
+	}
+	backupPath, err := backupFileAvoiding(cfgPath, backupNameTaken(cfgPath, client.ID, serverName, cred.oauth))
 	if err != nil {
 		return nil, fmt.Errorf("backup failed: %w", err)
 	}
@@ -1177,7 +1191,7 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	// retireStaleUndoRecords). Only a browser-login connect then records its own
 	// write (see undo_record.go): a key connect writes exactly the files it
 	// always wrote.
-	if err := retireStaleUndoRecords(cfgPath, backupPath, client.ID, serverName); err != nil {
+	if err := retireStaleUndoRecords(cfgPath, backupPath, client.ID, serverName, cred.oauth); err != nil {
 		return nil, err
 	}
 	recPath := ""
@@ -1353,7 +1367,12 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 	}
 
 	// Backup
-	backupPath, err := backupFile(cfgPath)
+	if cred.oauth {
+		if _, err := recordFilesWithPrefix(cfgPath, undoNewPrefix); err != nil {
+			return nil, fmt.Errorf("undo records: %w", err)
+		}
+	}
+	backupPath, err := backupFileAvoiding(cfgPath, backupNameTaken(cfgPath, client.ID, serverName, cred.oauth))
 	if err != nil {
 		return nil, fmt.Errorf("backup failed: %w", err)
 	}
@@ -1380,7 +1399,7 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 	// retireStaleUndoRecords). Only a browser-login connect then records its own
 	// write (see undo_record.go): a key connect writes exactly the files it
 	// always wrote.
-	if err := retireStaleUndoRecords(cfgPath, backupPath, client.ID, serverName); err != nil {
+	if err := retireStaleUndoRecords(cfgPath, backupPath, client.ID, serverName, cred.oauth); err != nil {
 		return nil, err
 	}
 	recPath := ""

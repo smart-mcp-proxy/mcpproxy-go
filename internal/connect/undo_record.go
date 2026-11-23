@@ -146,7 +146,13 @@ const (
 func checkUndoRecord(cfgPath, backupPath, clientID, serverName string, current []byte) (undoVerdict, string, string) {
 	paths := []string{undoRecordPath(cfgPath, backupPath)}
 	if backupPath == "" {
-		paths = recordFilesWithPrefix(cfgPath, undoNewPrefix)
+		var err error
+		paths, err = recordFilesWithPrefix(cfgPath, undoNewPrefix)
+		if err != nil {
+			// Records may exist that cannot be seen: never fall back to the key
+			// replay, which could accept an edited browser-login file.
+			return undoConflict, "", ""
+		}
 		if len(paths) == 0 {
 			return undoLegacy, "", ""
 		}
@@ -209,11 +215,17 @@ func removeUndoRecord(path string) {
 // recordFilesWithPrefix lists the files beside cfgPath named
 // `<config basename><suffix>…`. It reads the literal directory: cfgPath is never
 // used as a glob pattern, so a home directory containing [ ] * ? hides nothing.
-func recordFilesWithPrefix(cfgPath, suffix string) []string {
+//
+// Only "the directory does not exist" means there are no records; any other
+// failure to list it is returned, so a caller can fail closed.
+func recordFilesWithPrefix(cfgPath, suffix string) ([]string, error) {
 	dir, prefix := filepath.Dir(cfgPath), filepath.Base(cfgPath)+suffix
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, &listError{err}
 	}
 	var out []string
 	for _, e := range entries {
@@ -221,15 +233,43 @@ func recordFilesWithPrefix(cfgPath, suffix string) []string {
 			out = append(out, filepath.Join(dir, e.Name()))
 		}
 	}
-	return out
+	return out, nil
+}
+
+// listError marks a failure to enumerate the config's directory, as opposed to
+// a failure to remove a record that was seen.
+type listError struct{ error }
+
+func (e *listError) Unwrap() error { return e.error }
+
+// inspectRecord reports whether a record file exists at path and whether it is
+// bound to clientID's entry serverName. A record that is malformed counts as
+// existing and not belonging to the caller. Only "does not exist" is absence.
+func inspectRecord(path, clientID, serverName string) (exists, belongs bool, err error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	var rec undoRecord
+	if json.Unmarshal(raw, &rec) != nil {
+		return true, false, nil
+	}
+	return true, rec.Client == clientID && rec.Server == serverName, nil
 }
 
 // removeCreatedFileRecords deletes every created-file record (see undoNewPrefix)
 // of clientID's entry serverName beside cfgPath. It reports a record it could
 // not remove; with no such record it reads the directory and writes nothing.
 func removeCreatedFileRecords(cfgPath, clientID, serverName string) error {
+	files, err := recordFilesWithPrefix(cfgPath, undoNewPrefix)
+	if err != nil {
+		return err
+	}
 	var firstErr error
-	for _, m := range recordFilesWithPrefix(cfgPath, undoNewPrefix) {
+	for _, m := range files {
 		raw, err := os.ReadFile(m)
 		if err != nil {
 			continue
@@ -252,32 +292,76 @@ func removeCreatedFileRecords(cfgPath, clientID, serverName string) error {
 // writes nothing, and with no record present is a directory read only, so an
 // install that never used browser login is untouched. A record that cannot be
 // removed fails the connect: a stale record must never survive to be matched.
-func retireStaleUndoRecords(cfgPath, backupPath, clientID, serverName string) error {
+//
+// strict is true for a browser-login connect, which must be able to see the
+// directory before it publishes a record. An API-key connect is not strict: if
+// the directory cannot be listed there is nothing it could retire that it can
+// see, so it skips retirement and proceeds exactly as it did before records
+// existed (it must never newly fail on an install that never used them).
+func retireStaleUndoRecords(cfgPath, backupPath, clientID, serverName string, strict bool) error {
+	var le *listError
 	if err := removeCreatedFileRecords(cfgPath, clientID, serverName); err != nil {
-		return fmt.Errorf("retire stale undo record: %w", err)
+		if !errors.As(err, &le) || strict {
+			return fmt.Errorf("retire stale undo record: %w", err)
+		}
 	}
 	if backupPath != "" {
-		if err := os.Remove(undoRecordPath(cfgPath, backupPath)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		rp := undoRecordPath(cfgPath, backupPath)
+		exists, belongs, err := inspectRecord(rp, clientID, serverName)
+		switch {
+		case err != nil && strict:
 			return fmt.Errorf("retire stale undo record: %w", err)
+		case err != nil, !exists:
+			// nothing visible to retire
+		case !belongs:
+			// backupFileAvoiding never hands out a name with a foreign record.
+			return fmt.Errorf("retire stale undo record: %s belongs to another entry", filepath.Base(rp))
+		default:
+			if err := os.Remove(rp); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("retire stale undo record: %w", err)
+			}
 		}
 	}
 	return nil
 }
 
+// backupNameTaken is the predicate for backupFileAvoiding: a candidate backup
+// name is taken when a record already sits at its record name and belongs to
+// another client or entry (or cannot be told). A record of this very entry is
+// stale and is retired instead. Only a strict (browser-login) connect treats an
+// unreadable record as taken.
+func backupNameTaken(cfgPath, clientID, serverName string, strict bool) func(string) bool {
+	return func(candidate string) bool {
+		exists, belongs, err := inspectRecord(undoRecordPath(cfgPath, candidate), clientID, serverName)
+		if err != nil {
+			return strict
+		}
+		return exists && !belongs
+	}
+}
+
 // removeUndoRecords deletes the records of clientID's entry serverName beside
 // cfgPath once the entry is gone (Disconnect), so no stray file outlives it.
 // Records of other clients or entries, and anything unreadable, are left alone.
-func removeUndoRecords(cfgPath, clientID, serverName string) {
-	for _, m := range recordFilesWithPrefix(cfgPath, ".undo.") {
+func removeUndoRecords(cfgPath, clientID, serverName string) error {
+	files, err := recordFilesWithPrefix(cfgPath, ".undo.")
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, m := range files {
 		raw, err := os.ReadFile(m)
 		if err != nil {
 			continue
 		}
 		var rec undoRecord
 		if json.Unmarshal(raw, &rec) == nil && rec.Client == clientID && rec.Server == serverName {
-			_ = os.Remove(m)
+			if err := os.Remove(m); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
+	return firstErr
 }
 
 // recordWrite writes a record's bytes into its staging file. A seam, as the

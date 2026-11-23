@@ -1581,6 +1581,12 @@ components:
           type: string
         backup_path:
           type: string
+        cleanup_error:
+          description: |-
+            CleanupError is set when a disconnect removed the entry but could not list
+            the config's directory to remove the undo records of a browser-login
+            connect (Spec 132). The disconnect still succeeded.
+          type: string
         client:
           type: string
         config_path:
