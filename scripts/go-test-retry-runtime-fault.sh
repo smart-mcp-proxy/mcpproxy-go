@@ -3,7 +3,8 @@
 # failed package died of a Go runtime fault (issue #1794: `unexpected fault
 # address 0xffffffffffffffff / fatal error: fault` inside
 # internal/testlog.Getenv on windows-latest, a Go/Windows runtime bug —
-# golang/go#81189, #81238), re-run those packages, once.
+# golang/go#81189, #81238; and #1986: `fatal error: found pointer to free
+# object` from the GC sweeper on the same runner), re-run those packages, once.
 #
 # A package is retried only when its own output block carries a runtime-fault
 # line AND no sign of a genuine failure: no `--- FAIL:`, no `panic: test timed
@@ -80,6 +81,7 @@ classified="$(awk '
     /^unexpected fault address 0x/ { fault = 1 }
     /^fatal error: fault\r?$/ { fault = 1 }
     /^fatal error: unexpected signal during runtime execution/ { fault = 1 }
+    /^fatal error: found pointer to free object\r?$/ { fault = 1 }
     /^Exception 0x[cC]0000005/ { fault = 1 }
     /^[ \t]*--- FAIL: / { hard = 1 }
     /^panic: test timed out/ { hard = 1 }
@@ -117,7 +119,7 @@ if [ "${#retry[@]}" -eq 0 ]; then
     exit "$status"
 fi
 
-echo "::warning title=Go runtime fault, retrying once (issue #1794)::${retry[*]}"
+echo "::warning title=Go runtime fault, retrying once (issues #1794, #1986)::${retry[*]}"
 echo "go-test-retry: runtime fault in the first run; re-running ${#retry[@]} package(s) once: ${retry[*]}" >&2
 
 retry_flags=()
