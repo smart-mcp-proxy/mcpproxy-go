@@ -26,7 +26,7 @@ What it gives you:
 - API keys keep working unchanged on `/mcp` and everywhere else.
 
 It is served to loopback peers and loopback `Host` values only, and only by the
-personal edition (`mcpproxy`); the server edition answers `404` on all of these paths.
+personal edition (`mcpproxy`). In the server edition the feature is unavailable: with the switch on, the OAuth paths answer `404`; with it off and never used, nothing changes, as in the personal edition.
 
 ## Enabling
 
