@@ -81,15 +81,17 @@ The client opens the user's default browser, which has never held MCPProxy's adm
 
 ### User Story 5 - A client MCPProxy has never seen (Priority: P2)
 
-The user types the generic browser-login address into a client that Connect does not know. On the consent page the user chooses "New client", keeps or edits the suggested name, picks a profile, and approves. The client appears in the Clients hub.
+The user types the generic browser-login address into a client that Connect does not know. The consent page opens with "New client" selected and the name filled in; the user keeps or edits the name, picks a profile, and approves. When the name the app reports matches exactly one client MCPProxy already knows, that client is selected instead and the user confirms or changes it. The client appears in the Clients hub.
 
-**Why this priority**: Keeps the feature useful beyond the supported-client list, without name guessing.
+**Why this priority**: Keeps the feature useful beyond the supported-client list, while the reported name only suggests and never decides.
 
 **Independent Test**: Run the flow on the generic address with an unknown client name; confirm the new client row, its profile and its activity attribution.
 
 **Acceptance Scenarios**:
 
-1. **Given** a sign-in request on the generic address, **Then** the user must choose between "New client" and an existing client; no existing client is pre-selected.
+1. **Given** a sign-in request on the generic address whose reported name matches no known client, or more than one, **Then** "New client" is selected with the name filled from the reported name, and the user can pick an existing client instead.
+4. **Given** a sign-in request on the generic address whose reported name matches exactly one known client, **Then** that client is selected, the page says the selection comes from an unverified name, and the user can change it before approving.
+5. **Given** a suggested client that has a profile, **When** the user approves without changing anything, **Then** the login belongs to that client; **When** the user picks another client first, **Then** the login belongs to the client the user picked.
 2. **Given** the user picks an existing client, **Then** the page states that the app receives that client's access before Approve is enabled.
 3. **Given** an address that names a client id that does not exist, **Then** every step answers "not found" and no client is created.
 
@@ -164,8 +166,8 @@ The user tried browser login and turns it off. Browser-login clients stop workin
 **Which client it is**
 
 - **FR-012**: A per-client address MUST identify the client. On such a request the consent page MUST show that client as fixed.
-- **FR-013**: On the generic address the user MUST choose "New client" or an existing client. No existing client may be pre-selected.
-- **FR-014**: The name an app reports about itself MUST be shown as unverified and MUST NOT select a client, a profile or any access. It may pre-fill the name field of a new client.
+- **FR-013**: On the generic address the page MUST offer "New client" and every existing client, and the user MUST be able to change the selection before approving. An existing client may be pre-selected only when the reported name matches exactly one known client (id, display name or known client name, compared without regard to case); the page MUST then say that the selection comes from an unverified name. Otherwise "New client" is selected.
+- **FR-014**: The name an app reports about itself MUST be shown as unverified and MUST NOT grant a client, a profile or any access by itself: a login is stored only for the client the administrator approved. It may pre-fill the name field of a new client and, on the generic address, pre-select a client under FR-013. On a per-client address it MUST NOT affect the selection.
 - **FR-015**: A per-client address whose id is neither a supported client nor an existing custom client MUST answer "not found" at every step. Typing an address MUST NOT create a client.
 - **FR-016**: When the same registration signs in again, the page MUST say so and offer to replace its earlier login. Otherwise a new login is added beside existing ones.
 
@@ -220,7 +222,7 @@ The user tried browser login and turns it off. Browser-login clients stop workin
 - **SC-001**: With the feature at its default, 100% of the existing test suites pass unchanged and the comparison against the previous release shows no difference on any address.
 - **SC-002**: A user connects a supported client by browser login in under one minute and with one click on the consent page when the client already has a profile.
 - **SC-003**: No secret is written to a client's config file in the browser-login path.
-- **SC-004**: In every tested flow the client shown on the consent page is the one named by the address, or the one the user chose. Zero cases depend on the reported name.
+- **SC-004**: In every tested flow the client shown on the consent page is the one named by the address, or the one selected on the page when the user approved. On a per-client address zero cases depend on the reported name; on the generic address the reported name changes only what is pre-selected, never the stored result of an approval.
 - **SC-005**: Each client on the supported list completes the whole flow, including renewal, in a recorded real-client check before that client is offered in Connect: at least Claude Code, Cursor, VS Code and MCP Inspector are attempted, and only those that pass are listed.
 - **SC-006**: A revoked login is refused on its next request in 100% of tested cases, including on an open session.
 - **SC-007**: After the feature was used and turned off, zero requests to a browser-login address are served.

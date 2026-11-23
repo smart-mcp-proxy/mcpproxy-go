@@ -26,6 +26,7 @@ Pending requests, newest first: `[{id, client_label, created_at, expires_at}]`. 
   },
   "existing_clients": [ /* address_kind = generic: {id, display_name, binding} */ ],
   "suggested_new_client": { "id": "acme-agent", "display_name": "Acme Agent" },
+  "suggested_client": { "id": "cursor", "matched": "display_name" }, // generic only; present when the reported name equals exactly one entry of existing_clients (matched: id | display_name | known_name); absent otherwise
   "profiles": [ { "name": "dev-readonly" } ],
   "profile_required": true,               // profiles exist and the client has no binding
   "previous_login": { "grant_id": "…", "approved_at": "…" }, // same registration signed in before
@@ -34,6 +35,8 @@ Pending requests, newest first: `[{id, client_label, created_at, expires_at}]`. 
 ```
 
 `404` for an unknown, expired, decided or cancelled id (one uniform answer).
+
+`suggested_client` is advice for the page only. It is computed on read from the sanitised reported name (trimmed, compared without regard to case) against each entry of `existing_clients`: its id, its display name and, for a connect-registry client, its known client names. No match or more than one match → absent. Preview and approve take the client from their own body and never fall back to the suggestion.
 
 ### `POST /oauth/authorizations/{id}/preview`
 

@@ -57,8 +57,9 @@ The feature is **off by default** in its first release. With it off, nothing cha
 
 How the page is pre-filled was revised the same day, after Algis asked for it to be reliable:
 
-- **3a. Guess from the reported name** (registry list of OAuth registration names, plus learning from earlier approvals). Rejected: clients register under names nobody controls, the list needs upkeep, and a wrong guess puts the wrong client on the page.
+- **3a. Guess from the reported name** (registry list of OAuth registration names, plus learning from earlier approvals). Rejected as the way to decide which client a login belongs to: clients register under names nobody controls, the list needs upkeep, and a wrong guess puts the wrong client on the page.
 - **3b. Per-client address (chosen).** Connect already knows which client it is configuring, so it writes that into the URL. The server reads the client from the path. Deterministic, no list to maintain, no secret in the config file.
+- **3c. Name suggestion on the generic address (added 2026-11-23).** The issue author asked for the consent page to be pre-filled from the client name, with the user able to change it. Algis approved. It applies only where the user has to choose anyway (the generic address): the reported name may pre-select one client on the page. It decides nothing by itself. See "Name suggestion" below.
 
 ## How it works
 
@@ -90,7 +91,7 @@ Two kinds of address, both under `/mcp/oauth`:
 | Address | Who writes it | Client on the consent page |
 |---|---|---|
 | `/mcp/oauth/<client-id>` | Connect, or the "Add browser login" action on a Clients row, or the user by hand | **Fixed**: that client. Not selectable |
-| `/mcp/oauth` | the user by hand, for a client MCPProxy has never seen | **Chosen by the user**: "New client" (name field pre-filled from the reported name) or an existing client from a list. Nothing is pre-selected among existing clients |
+| `/mcp/oauth` | the user by hand, for a client MCPProxy has never seen | **Chosen by the user**: "New client" (name field pre-filled from the reported name) or an existing client from a list. An existing client is pre-selected only by the name suggestion below; otherwise "New client" is |
 
 - `<client-id>` is the Clients hub id: a connect-registry id (`cursor`, `claude-code`) or a custom client's id. The path is the `resource` the client sends at authorize (RFC 8707), so the server knows the client before the page is shown.
 - An id that is neither in the registry nor an existing custom client answers 404 on every step. Clients are not created by typing a new path.
@@ -117,7 +118,8 @@ Profile   dev-readonly (locked)
 Rules for the page:
 
 - **Per-client address**: the client is fixed. If it already has a binding, the profile is shown, not asked. If it is new, the profile rule below applies.
-- **Generic address**: the user picks the client first.
+- **Generic address**: the page opens with a client already selected, and the user can change it before approving.
+- **Name suggestion** (generic address only): the sanitised reported name is compared, case-insensitively and after trimming, with the id, the display name and the known client names (connect registry) of every client the page offers. Exactly one match pre-selects that client, and the page says why: `Suggested because the app calls itself "Cursor". MCPProxy cannot verify that.` No match, or more than one, pre-selects "New client" with the name field filled from the reported name. The profile then follows from the selected client exactly as it does without a suggestion: a bound client shows its profile; an unbound one follows the profile rule below. The server never applies a suggestion: approval carries the client the page sent, and a request without one is refused as before. A per-client address ignores the reported name for selection.
 - **Profile for a client with no binding yet**: if no profiles are configured, "All servers", stored the way it is today for a client credential (no pin, `switchable`; a locked credential with an empty profile is invalid under `ValidateTokenInvariants` and stays so). If profiles exist, nothing is pre-selected and Approve stays disabled until the user picks one; a named profile defaults to `locked`. Same rule as `profile_required` in the `credentials` tool.
 - **Replace previous login** is pre-checked only when this exact `client_id` already has a grant. Otherwise the new login is added next to the existing ones.
 - **No admin key in this browser**: the page cannot load the request. It shows "Open this request from the MCPProxy tray, or paste the API key". The core emits an SSE event for a new authorization request; the tray shows a notification and a menu item "Approve sign-in for Cursor…" that opens the same URL with the key, the way it opens the Web UI today.
@@ -217,13 +219,14 @@ Each PR is test-first. End to end: a scripted public client runs the whole flow 
 
 - OAuth and API keys both stay; the user chooses per client.
 - Suggest and confirm on the consent page.
+- On the generic address the reported name may pre-select a client; the user confirms or changes it (2026-11-23, after the issue author's reply on #1971).
 - Which client a login belongs to must be reliable, not guessed from names (2026-11-22).
 - Off by default in the first release; an update needs no action and changes nothing for existing users (2026-11-22).
 
 ## Calls made here (not decided by Algis)
 
 - Readable per-client address (`/mcp/oauth/<client-id>`) instead of a random one: it carries no authority, so it need not be secret.
-- A generic-address login never pre-selects an existing client.
+- The name suggestion needs exactly one match and is limited to the generic address; a bound client's profile is still shown, not asked, on the consent page (it is changed in the Clients hub, because it also governs that client's API key).
 - Consent every time, with no silent re-approval.
 - Token lifetimes (1 hour / 30 days sliding) and the numeric limits above.
 - Default Connect choice stays "API key".
