@@ -185,7 +185,7 @@ func (s *OAuthLoginService) Touch(grantID, observedName string) {
 	if grantID == "" {
 		return
 	}
-	observed := clientidentity.SanitizeDisplay(observedName)
+	observed := clientidentity.SanitizeDisplay(mcplogin.StripFormat(observedName))
 	now := s.now()
 	s.touchMu.Lock()
 	last, seen := s.lastTouch[grantID]
@@ -358,6 +358,7 @@ func (s *OAuthLoginService) recheckGuard(cfg *config.Config, d mcplogin.Decision
 // observed name never mismatches. It takes no part in selection or
 // authorization.
 func OAuthNameMismatch(observed, reportedName, clientID string) bool {
+	observed = mcplogin.StripFormat(observed) // same normalisation as the registered name
 	norm := clientidentity.NormalizeRaw(observed)
 	if norm == "" {
 		return false

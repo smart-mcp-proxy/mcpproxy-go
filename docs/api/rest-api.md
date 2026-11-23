@@ -1697,11 +1697,26 @@ reference: the Spec 132 contracts.
 
 - `GET /api/v1/oauth/authorizations`, `GET /api/v1/oauth/authorizations/{id}`:
   pending sign-in requests and the data the consent view needs. One uniform `404`
-  for an unknown, expired, decided or cancelled id.
+  for an unknown, expired, decided or cancelled id. On the generic address the view
+  may carry `suggested_client` (`{id, matched}`, `matched` is `id`, `display_name` or
+  `known_name`): present only when the sanitised reported name (trimmed, any case; a
+  trailing parenthesised suffix is also tried without it) equals exactly one existing
+  client's id, display name or known client name, absent otherwise and never on a
+  per-client address. It is advice for the page, computed on read and never stored: preview
+  without a `client` answers `200 {"complete": false}` (no `access`, no `guard`) and
+  approve without one answers `422 client_required`. `previous_login` is
+  `{grant_id, client_id, approved_at}`: `client_id` is the client that owns that
+  login (the newest live login of this registration overall). `previous_logins` lists
+  the newest live login of this registration under each client, so the page can offer
+  replacement for whichever client is selected on the generic address. Names a client
+  reports are stripped of Unicode format characters (bidi controls, zero-width
+  characters) at registration and in a new client's display name. Preview and approve refuse (`422`, field `replace_grant`) a `replace_grant`
+  that is a live login of this registration owned by another client than the one
+  chosen; the page offers replacement only for the owning client.
 - `POST /api/v1/oauth/authorizations/{id}/preview`: read-only verdict for a
   proposed client, profile and mode. `POST .../approve` and `POST .../deny` answer
   `{redirect_url}`; approve refuses with `409 already_decided`, `409 binding_changed`,
-  `409 binding_bypassable_without_auth`, `422 profile_required`, `client_fixed`,
+  `409 binding_bypassable_without_auth`, `422 client_required`, `profile_required`, `client_fixed`,
   `identity_exists`, `reserved_identity` and `404 profile_not_found`.
 - `GET /api/v1/clients` and `GET /api/v1/clients/{client}` gain `credentials[]`
   (the API key and each browser login: `kind`, `prefix`, `grant_id`, `state`,

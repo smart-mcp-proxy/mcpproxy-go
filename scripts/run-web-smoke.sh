@@ -239,7 +239,10 @@ JSON
 # developer with their own key exported would otherwise leave the server
 # demanding that key while the sweep probes with this one — a 46s readiness
 # timeout with nothing but 401s in the log.
-HEADLESS=1 DO_NOT_TRACK=1 MCPPROXY_API_KEY="$API_KEY" "$BINARY_PATH" serve \
+# MCPPROXY_MCP_OAUTH_ENABLED: browser login (Spec 132) is off by default; the
+# sweep turns it on so client-oauth-consent.spec.ts drives the consent page
+# instead of skipping.
+HEADLESS=1 DO_NOT_TRACK=1 MCPPROXY_API_KEY="$API_KEY" MCPPROXY_MCP_OAUTH_ENABLED=true "$BINARY_PATH" serve \
   --config "$CONFIG_PATH" --listen "$LISTEN" >"$LOG_PATH" 2>&1 &
 SERVER_PID=$!
 
@@ -344,7 +347,7 @@ set +e
   MCPPROXY_API_KEY="$API_KEY" \
   SWEEP_SERVER_NAME="$SWEEP_SERVER_NAME" \
   SWEEP_REPORT_DIR="$REPORT_DIR" \
-    "$PLAYWRIGHT_BIN" test web-ui-sweep.spec.ts visual-a11y-sweep.spec.ts navigation-consistency.spec.ts profiles-clients.spec.ts profiles-scope.spec.ts profiles-unhide.spec.ts demo-ux-fixes.spec.ts usertest-web-fixes.spec.ts
+    "$PLAYWRIGHT_BIN" test client-oauth-consent.spec.ts web-ui-sweep.spec.ts visual-a11y-sweep.spec.ts navigation-consistency.spec.ts profiles-clients.spec.ts profiles-scope.spec.ts profiles-unhide.spec.ts demo-ux-fixes.spec.ts usertest-web-fixes.spec.ts
 )
 PLAYWRIGHT_STATUS=$?
 set -e

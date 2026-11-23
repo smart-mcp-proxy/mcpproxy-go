@@ -10,6 +10,7 @@ import (
 	"net/http"
 	httppprof "net/http/pprof"
 	"os"
+	"path"
 	"path/filepath"
 	gruntime "runtime"
 	"strings"
@@ -809,9 +810,18 @@ func credentialKindContext(ac *auth.AuthContext, kind auth.CredentialKind) *auth
 // that should be served without authentication to allow the SPA to work properly.
 // API endpoints are protected separately by the httpAPIServer middleware.
 func (s *Server) createSelectiveWebUIProtectedHandler(handler http.Handler) http.Handler {
-	// Simply pass through all requests without authentication
-	// The handler is only mounted on /ui/* so it won't receive API requests
-	return handler
+	// No authentication here; the handler is only mounted on /ui/* so it won't
+	// receive API requests. The one addition: the sign-in consent page (Spec 132)
+	// is never framed, so a hostile page cannot overlay its Approve button.
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Vue Router matches case-insensitively and the SPA answers unknown
+		// paths, so compare the cleaned path without regard to case.
+		if p := strings.ToLower(path.Clean("/" + r.URL.Path)); p == "/ui/authorize" || strings.HasPrefix(p, "/ui/authorize/") {
+			w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+			w.Header().Set("X-Frame-Options", "DENY")
+		}
+		handler.ServeHTTP(w, r)
+	})
 }
 
 // GetStatus returns the current server status

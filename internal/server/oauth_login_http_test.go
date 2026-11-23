@@ -4,6 +4,7 @@ package server
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -56,6 +57,33 @@ func TestOAuthLoginHTTP_MetadataAndChallenge(t *testing.T) {
 	} {
 		assert.Equal(t, http.StatusNotFound, f.get(path, nil).Code, path)
 	}
+}
+
+// T053: the consent page is never framed. The headers are set before the SPA
+// handler runs, on the page and anything under it, and on no other UI path.
+func TestOAuthLoginHTTP_AuthorizePageIsNeverFramed(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("spa")) })
+	h := (&Server{}).createSelectiveWebUIProtectedHandler(inner)
+	for _, path := range []string{
+		"/ui/authorize", "/ui/authorize?request=abc", "/ui/authorize/", "/ui/authorize/x",
+		"/ui/Authorize?request=abc", "/ui/AUTHORIZE/", "/ui/Authorize/X", "/ui//authorize", "/ui/./authorize", "/ui/x/../authorize",
+	} {
+		rec := httptestGet(h, path)
+		assert.Equal(t, "frame-ancestors 'none'", rec.Header().Get("Content-Security-Policy"), path)
+		assert.Equal(t, "DENY", rec.Header().Get("X-Frame-Options"), path)
+		assert.Equal(t, "spa", rec.Body.String(), path)
+	}
+	for _, path := range []string{"/ui/", "/ui/clients", "/ui/authorized"} {
+		rec := httptestGet(h, path)
+		assert.Empty(t, rec.Header().Get("Content-Security-Policy"), path)
+		assert.Empty(t, rec.Header().Get("X-Frame-Options"), path)
+	}
+}
+
+func httptestGet(h http.Handler, target string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+	return rec
 }
 
 // T034: register.
