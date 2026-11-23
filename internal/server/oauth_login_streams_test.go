@@ -94,7 +94,8 @@ func TestOAuthStreams_ShutdownJoinsWatcher(t *testing.T) {
 	srv := newOAuthLoginTestServer(t, func(c *config.Config) { c.MCPOAuthEnabled = true })
 	interrupted := make(chan struct{})
 	var once sync.Once
-	release := srv.trackOAuthRequest("g1", time.Now().Add(time.Hour), srv.oauthLoginSvc().DisableEpoch(), func() { once.Do(func() { close(interrupted) }) })
+	release, ok := srv.trackOAuthRequest("g1", time.Now().Add(time.Hour), srv.oauthLoginSvc().DisableEpoch(), func() { once.Do(func() { close(interrupted) }) })
+	require.True(t, ok)
 	defer release()
 	reg := srv.oauthStreams.Load()
 	require.NotNil(t, reg)
@@ -115,14 +116,13 @@ func TestOAuthStreams_ShutdownJoinsWatcher(t *testing.T) {
 	assert.False(t, reg.running, "no watcher goroutine is left")
 	reg.mu.Unlock()
 
-	late := make(chan struct{})
-	var onceLate sync.Once
-	srv.trackOAuthRequest("g2", time.Now().Add(time.Hour), 0, func() { onceLate.Do(func() { close(late) }) })
-	select {
-	case <-late:
-	default:
-		t.Fatal("a request tracked after shutdown must be ended at once")
-	}
+	// Tracking after the stop is refused: nothing is registered, no watcher starts.
+	_, ok = srv.trackOAuthRequest("g2", time.Now().Add(time.Hour), 0, func() {})
+	assert.False(t, ok, "a request tracked after shutdown is refused")
+	reg.mu.Lock()
+	assert.False(t, reg.running)
+	assert.Len(t, reg.entries, 1, "only the request tracked before the stop (released by its owner)")
+	reg.mu.Unlock()
 	srv.stopOAuthStreams() // idempotent
 }
 
@@ -315,4 +315,89 @@ func TestOAuthStreams_ClientRevokeForgetAndReplayEndStreams(t *testing.T) {
 	}
 
 	require.True(t, streamOpen(bystanderStream, time.Second), "an unrelated client's stream stays open")
+}
+
+// Item 3: a stop with no registry still marks the run stopped; a late request is
+// refused without allocating a registry or starting a watcher, and the MCP
+// handler is not invoked.
+func TestOAuthStreams_StopWithoutRegistryRefusesLateTracking(t *testing.T) {
+	srv := newOAuthLoginTestServer(t, func(c *config.Config) { c.MCPOAuthEnabled = true })
+	require.Nil(t, srv.oauthStreams.Load(), "nothing is allocated before the first OAuth request")
+	srv.stopOAuthStreams()
+	require.Nil(t, srv.oauthStreams.Load(), "stopping allocates nothing")
+
+	_, ok := srv.trackOAuthRequest("g", time.Now().Add(time.Hour), 0, func() {})
+	assert.False(t, ok)
+	assert.Nil(t, srv.oauthStreams.Load(), "no registry, hence no watcher")
+
+	called := false
+	rec := httptest.NewRecorder()
+	srv.serveTracked(rec, httptest.NewRequest(http.MethodGet, "/mcp/oauth/cursor", http.NoBody),
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }), "g", time.Now().Add(time.Hour), 0)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.False(t, called, "the MCP handler is not invoked while stopping")
+}
+
+// Item 2: a new server run gets a fresh tracking lifecycle.
+func TestOAuthStreams_StopThenStartTracksAgain(t *testing.T) {
+	d := newStreamDaemon(t)
+	access, _, _ := d.login("cursor")
+	first := d.openStream("cursor", access)
+	require.True(t, streamOpen(first, 500*time.Millisecond))
+
+	require.NoError(t, d.env.proxyServer.StopServer())
+	d.requireEnds(first, "the server stopping")
+	require.NoError(t, d.env.proxyServer.StartServer(context.Background()))
+	d.env.waitForServerReady()
+
+	access2, _, _ := d.login("windsurf")
+	second := d.openStream("windsurf", access2)
+	require.True(t, streamOpen(second, 2500*time.Millisecond), "after stop and start an authenticated stream works normally")
+	_ = access
+}
+
+// Item 1: a request that authenticated under the pre-disable configuration
+// across a quick off -> on is older than the epoch and is ended.
+func TestOAuthStreams_RequestPausedAcrossQuickOffOnIsEnded(t *testing.T) {
+	f := newOAuthFlow(t, nil)
+	srv := f.srv
+	ended := make(chan struct{})
+	started := make(chan struct{})
+	ts := httptest.NewServer(srv.oauthResourceAuth(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+		close(ended)
+	})))
+	defer ts.Close()
+	f.host = strings.TrimPrefix(ts.URL, "http://")
+	_, tok := f.login("cursor")
+
+	paused, resume := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	srv.testHookAfterEpochCapture = func() {
+		once.Do(func() { close(paused); <-resume })
+	}
+	go func() {
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/mcp/oauth/cursor", http.NoBody)
+		req.Header.Set("Authorization", "Bearer "+tok.access)
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	}()
+	<-paused
+	f.setEnabled(false)
+	f.setEnabled(true)
+	close(resume)
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the paused request never authenticated")
+	}
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a request authenticated before the switch-off survived the off -> on")
+	}
 }

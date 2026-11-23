@@ -131,9 +131,14 @@ type Server struct {
 	// oauthStreams tracks authenticated browser-login requests so a revoke or
 	// a switch-off ends what is already open (oauth_login_streams.go); nil
 	// until the first one.
-	oauthStreams     atomic.Pointer[oauthStreamRegistry]
-	oauthLimiterOnce sync.Once
-	oauthLimiter     *mcplogin.Limiter
+	oauthStreams         atomic.Pointer[oauthStreamRegistry]
+	oauthStreamsMu       sync.Mutex // guards oauthStreamsStopping and the registry's creation
+	oauthStreamsStopping bool       // set by stopOAuthStreams, cleared by a new run
+	// testHookAfterEpochCapture pauses oauthResourceAuth between the switch-off
+	// epoch capture and the authentication (tests only; nil in production).
+	testHookAfterEpochCapture func()
+	oauthLimiterOnce          sync.Once
+	oauthLimiter              *mcplogin.Limiter
 	// createAfterConfigRead is a Spec 116 test seam (nil in production): it
 	// runs in the create path after the runtime configuration was read and
 	// before the new server is published.
@@ -2720,6 +2725,8 @@ func (s *Server) StartServer(ctx context.Context) error {
 	}
 
 	s.serverCtx, s.serverCancel = context.WithCancel(ctx)
+	// Spec 132: a fresh browser-login stream-tracking lifecycle for this run.
+	s.resetOAuthStreams()
 
 	// MCP-32: project runtime events onto Prometheus metrics while running.
 	if s.observability != nil && s.observability.Metrics() != nil {

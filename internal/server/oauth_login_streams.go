@@ -64,15 +64,14 @@ type oauthStreamRegistry struct {
 	wg      sync.WaitGroup
 }
 
-// oauthStreamsRegistry returns the registry, creating it on first use.
-func (s *Server) oauthStreamsRegistry() *oauthStreamRegistry {
-	if r := s.oauthStreams.Load(); r != nil {
-		return r
-	}
-	s.oauthStreams.CompareAndSwap(nil, &oauthStreamRegistry{
-		entries: map[uint64]*oauthStream{}, wake: make(chan struct{}, 1), stop: make(chan struct{}),
-	})
-	return s.oauthStreams.Load()
+// resetOAuthStreams starts a fresh tracking lifecycle for a new server run: the
+// previous run's registry (already stopped and joined by stopOAuthStreams) is
+// dropped, and tracking is accepted again. Allocation stays lazy.
+func (s *Server) resetOAuthStreams() {
+	s.oauthStreamsMu.Lock()
+	s.oauthStreamsStopping = false
+	s.oauthStreams.Store(nil)
+	s.oauthStreamsMu.Unlock()
 }
 
 // wakeOAuthStreams asks the watcher to re-check now. It allocates nothing and
@@ -88,16 +87,25 @@ func (s *Server) wakeOAuthStreams() {
 
 // trackOAuthRequest registers an authenticated request of grantID, authenticated
 // at switch-off epoch. interrupt ends it (context cancelled, transport I/O
-// interrupted). The returned release must be called when the request ends.
-func (s *Server) trackOAuthRequest(grantID string, expiresAt time.Time, epoch uint64, interrupt func()) (release func()) {
-	reg := s.oauthStreamsRegistry()
+// interrupted). The returned release must be called when the request ends. ok is
+// false when the server is stopping: nothing is tracked and no watcher starts,
+// and the caller must not serve the request.
+func (s *Server) trackOAuthRequest(grantID string, expiresAt time.Time, epoch uint64, interrupt func()) (release func(), ok bool) {
 	st := &oauthStream{grantID: grantID, expiresAt: expiresAt, epoch: epoch, interrupt: interrupt}
-	reg.mu.Lock()
-	if reg.stopped {
-		reg.mu.Unlock()
-		st.end()
-		return func() {}
+	// The stopping flag, the registry's creation and the entry's insertion are
+	// one critical section: a track after stopOAuthStreams has marked the run
+	// stopped is refused, whether or not a registry ever existed.
+	s.oauthStreamsMu.Lock()
+	if s.oauthStreamsStopping {
+		s.oauthStreamsMu.Unlock()
+		return func() {}, false
 	}
+	reg := s.oauthStreams.Load()
+	if reg == nil {
+		reg = &oauthStreamRegistry{entries: map[uint64]*oauthStream{}, wake: make(chan struct{}, 1), stop: make(chan struct{})}
+		s.oauthStreams.Store(reg)
+	}
+	reg.mu.Lock()
 	reg.next++
 	id := reg.next
 	reg.entries[id] = st
@@ -107,6 +115,8 @@ func (s *Server) trackOAuthRequest(grantID string, expiresAt time.Time, epoch ui
 		reg.wg.Add(1)
 	}
 	reg.mu.Unlock()
+	s.oauthStreamsMu.Unlock()
+
 	if d := time.Until(expiresAt); d > 0 {
 		st.timer = time.AfterFunc(d, st.end)
 	} else {
@@ -125,7 +135,7 @@ func (s *Server) trackOAuthRequest(grantID string, expiresAt time.Time, epoch ui
 			st.timer.Stop()
 		}
 		st.mu.Unlock()
-	}
+	}, true
 }
 
 // watchOAuthStreams re-validates the tracked requests until none is left or the
@@ -179,7 +189,10 @@ func (s *Server) watchOAuthStreams(reg *oauthStreamRegistry) {
 // waits for it. It runs at server shutdown, before the HTTP server waits for
 // its active handlers. Nothing is tracked afterwards.
 func (s *Server) stopOAuthStreams() {
+	s.oauthStreamsMu.Lock()
+	s.oauthStreamsStopping = true // also with no registry: late tracking is refused
 	reg := s.oauthStreams.Load()
+	s.oauthStreamsMu.Unlock()
 	if reg == nil {
 		return
 	}
@@ -209,7 +222,7 @@ func (s *Server) serveTracked(w http.ResponseWriter, r *http.Request, next http.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	rc := http.NewResponseController(w)
-	release := s.trackOAuthRequest(grantID, expiresAt, epoch, func() {
+	release, ok := s.trackOAuthRequest(grantID, expiresAt, epoch, func() {
 		cancel()
 		// Interrupt blocked transport I/O too; errors (a writer that cannot
 		// take deadlines) are ignored, the context cancel still applies.
@@ -217,6 +230,11 @@ func (s *Server) serveTracked(w http.ResponseWriter, r *http.Request, next http.
 		_ = rc.SetReadDeadline(now)
 		_ = rc.SetWriteDeadline(now)
 	})
+	if !ok {
+		// The server is stopping: the MCP handler is not invoked.
+		oauthJSONError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "the server is shutting down")
+		return
+	}
 	defer release()
 	next.ServeHTTP(w, r.WithContext(ctx))
 }

@@ -272,11 +272,17 @@ func (s *OAuthLoginService) CancelAll(reason string) int {
 // (and it is cancelled here) or waits and then sees the switch off.
 func (s *OAuthLoginService) beginDisable(reason string) (release func()) {
 	s.lifecycleMu.Lock()
-	// A quick off -> on must still end what was open before the switch-off, so
-	// the boundary counts itself (an atomic, read without any lock).
-	s.disableEpoch.Add(1)
 	s.cancelAllLocked(reason)
-	return s.lifecycleMu.Unlock
+	return func() {
+		// The epoch counts the switch-off only once the disabled configuration
+		// is visible (the caller runs release after publishing it, inside the
+		// serialized config commit). A request that authenticated under the
+		// previous, enabled configuration therefore captured an epoch lower
+		// than the one read after this point, even across a quick off -> on.
+		// An atomic, read without any lock.
+		s.disableEpoch.Add(1)
+		s.lifecycleMu.Unlock()
+	}
 }
 
 // cancelAllLocked snapshots the pending ids and cancels everything in one

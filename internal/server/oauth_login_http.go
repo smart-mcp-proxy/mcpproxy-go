@@ -378,6 +378,9 @@ func (s *Server) oauthResourceAuth(next http.Handler) http.Handler {
 		// The switch-off epoch is read BEFORE authenticating, so a switch-off
 		// that lands in between makes this request older than the epoch.
 		epoch := svc.DisableEpoch()
+		if h := s.testHookAfterEpochCapture; h != nil {
+			h()
+		}
 		ac, grant, err := svc.Authenticate(token, origin, r.URL.Path, time.Now())
 		if err != nil {
 			unauthorized()

@@ -29,7 +29,10 @@ func TestDisableEpoch_CountsSwitchOffs(t *testing.T) {
 	fx := newOAuthFx(t)
 	svc := NewOAuthLoginService(OAuthLoginDeps{Store: fx.sm})
 	assert.Zero(t, svc.DisableEpoch())
-	svc.beginDisable("test")()
+	release := svc.beginDisable("test")
+	assert.Zero(t, svc.DisableEpoch(), "not counted before the disabled config is published")
+	release()
+	assert.Equal(t, uint64(1), svc.DisableEpoch())
 	svc.beginDisable("test")()
 	assert.Equal(t, uint64(2), svc.DisableEpoch())
 }
