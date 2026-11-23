@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/json"
 	"sort"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
@@ -44,41 +43,15 @@ func UpstreamFileRefsOutsideAllowList(cfg *Config) []string {
 	return names
 }
 
+// serverHasFileRefOutside checks the ${file:} references in exactly the
+// fields the upstream resolver expands (secret.StructFileRefPaths walks what
+// ExpandStructSecretsCollectErrors walks), so an opaque block it never reads
+// does not produce a warning.
 func serverHasFileRefOutside(sc *ServerConfig, policy *secret.FilePolicy) bool {
-	raw, err := json.Marshal(sc)
-	if err != nil {
-		return false
-	}
-	var tree any
-	if err := json.Unmarshal(raw, &tree); err != nil {
-		return false
-	}
-	found := false
-	walkJSONStrings(tree, func(s string) {
-		if found {
-			return
-		}
-		for _, ref := range secret.FindSecretRefs(s) {
-			if ref.Type == secret.SecretTypeFile && !policy.PathWithinAllowList(ref.Name) {
-				found = true
-				return
-			}
-		}
-	})
-	return found
-}
-
-func walkJSONStrings(v any, fn func(string)) {
-	switch t := v.(type) {
-	case string:
-		fn(t)
-	case []any:
-		for _, e := range t {
-			walkJSONStrings(e, fn)
-		}
-	case map[string]any:
-		for _, e := range t {
-			walkJSONStrings(e, fn)
+	for _, path := range secret.StructFileRefPaths(CopyServerConfig(sc)) {
+		if !policy.PathWithinAllowList(path) {
+			return true
 		}
 	}
+	return false
 }

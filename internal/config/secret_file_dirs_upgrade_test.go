@@ -1,10 +1,12 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,4 +42,24 @@ func TestUpstreamFileRefsOutsideAllowList(t *testing.T) {
 	none := SecretFileDirs{}
 	cfg.SecretFileDirs = &none
 	assert.Equal(t, []string{"args-outside", "env-outside", "header-outside", "ok"}, UpstreamFileRefsOutsideAllowList(cfg))
+}
+
+// Cross-review R1 (PR #1884): only the fields the upstream resolver expands
+// count. A ${file:} inside an opaque block it never walks (auth_broker in the
+// personal build) must not warn on every start.
+func TestUpstreamFileRefsOutsideAllowList_OnlyResolvedFields(t *testing.T) {
+	dir := t.TempDir()
+	allowed := filepath.Join(dir, "allowed")
+	dirs := SecretFileDirs{allowed}
+
+	var sc ServerConfig
+	require.NoError(t, json.Unmarshal([]byte(`{"name":"broker","url":"http://127.0.0.1:9/mcp",
+		"auth_broker":{"mode":"oauth_connect","client_secret":"${file:/outside/secret}"}}`), &sc))
+	cfg := &Config{DataDir: filepath.Join(dir, "data"), SecretFileDirs: &dirs, Servers: []*ServerConfig{&sc}}
+
+	want := []string(nil)
+	if refs := secret.StructFileRefPaths(CopyServerConfig(&sc)); len(refs) > 0 {
+		want = []string{"broker"} // server build: auth_broker is a typed struct the resolver walks
+	}
+	assert.Equal(t, want, UpstreamFileRefsOutsideAllowList(cfg))
 }
