@@ -1,0 +1,9 @@
+{
+  "authorization_servers": [
+    "http://127.0.0.1:8080"
+  ],
+  "bearer_methods_supported": [
+    "header"
+  ],
+  "resource": "http://127.0.0.1:8080/mcp/oauth/cursor"
+}
