@@ -82,6 +82,9 @@ func (p *FilePolicy) deniedByHandleAtRead(info os.FileInfo) bool {
 	if info == nil || p == nil || p.Scope != ScopeUpstream {
 		return false
 	}
+	if matchesSupersededProxyFile(info) {
+		return true
+	}
 	for _, path := range p.denyPathsAtRead() {
 		if id, ok := StatDenyIdentity(path); ok && id.Matches(info) {
 			return true

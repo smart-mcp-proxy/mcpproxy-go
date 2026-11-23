@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 )
 
 const (
@@ -525,6 +527,10 @@ func atomicWriteFileMode(path string, data []byte, perm os.FileMode, exactMode b
 		return fmt.Errorf("failed to close temp file: %w", err)
 	}
 	tmpFile = nil // Prevent deferred cleanup
+
+	// The inode being replaced stays readable through any hardlink made to it
+	// earlier; upstream ${file:} reads refuse it from now on (#1721).
+	secret.NoteSupersededProxyFile(path)
 
 	// Atomic rename (POSIX guarantees atomicity, Windows is best-effort)
 	if err := os.Rename(tmpPath, path); err != nil {

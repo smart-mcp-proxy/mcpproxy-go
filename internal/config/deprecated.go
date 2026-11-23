@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 )
 
 // DeprecatedField describes a deprecated configuration field.
@@ -113,6 +115,7 @@ func CleanDeprecatedFields(configPath string) ([]DeprecatedField, error) {
 	if err := os.WriteFile(tmpPath, cleaned, perm); err != nil {
 		return nil, fmt.Errorf("writing cleaned config: %w", err)
 	}
+	secret.NoteSupersededProxyFile(configPath)
 	if err := os.Rename(tmpPath, configPath); err != nil {
 		os.Remove(tmpPath) // best-effort cleanup
 		return nil, fmt.Errorf("replacing config: %w", err)
