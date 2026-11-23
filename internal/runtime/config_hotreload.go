@@ -326,6 +326,14 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "aggregate_upstream_prompts")
 	}
 
+	// Upstream skills (spec 125 - hot-reloadable, opt-in). A lone enable_skills
+	// toggle must be reported as a hot-applied change, not swallowed as "no
+	// changes detected" and not classified restart-required. The consumer
+	// arrives in a later slice.
+	if oldCfg.EnableSkills != newCfg.EnableSkills {
+		result.ChangedFields = append(result.ChangedFields, "enable_skills")
+	}
+
 	// Discovery & health-check cadence (spec 074 — hot-reloadable). The health
 	// loop (managed client) and indexing loop (runtime) re-resolve their interval
 	// each cycle, and ApplyConfig propagates the new global config to the upstream
@@ -610,7 +618,7 @@ func (r *ConfigApplyResult) FormatChangedFields() string {
 // adopted into the live config, and reported by its JSON key.
 var undiffedHotConfigFields = []string{
 	"EnableTray", "TopK", "MaxResultSizeChars", "InitTimeout", "ForwardProxyEnv",
-	"RequireMCPAuth", "MCPRejectQueryAPIKey", "CheckServerRepo", "DockerRecovery",
+	"RequireMCPAuth", "MCPRejectQueryAPIKey", "MCPOAuthEnabled", "CheckServerRepo", "DockerRecovery",
 	"RegistriesLocked", "AllowPrivateRegistryFetch", "Features",
 	"ToolResponseSessionRiskWarning", "OAuthExpiryWarningHours",
 	"ActivityRetentionDays", "ActivityMaxRecords", "ActivityMaxSizeMB",
@@ -622,7 +630,11 @@ var undiffedHotConfigFields = []string{
 }
 
 // restartGatedConfigFields are bound once at startup; see pinRestartGated.
-var restartGatedConfigFields = []string{"TrayEndpoint", "EnableSocket", "DebugSearch", "Tokenizer", "EnablePrompts", "Instructions"}
+// OAuthTokenEncryptionKey (Spec 123 FR-023) is resolved once when config.db
+// is opened; adopting a new key mid-process would split oauth_tokens between
+// two keys. SessionRetentionDays (Spec 124) sets the work-session window once
+// in Runtime.New (ActivityService.SetSessionWindow).
+var restartGatedConfigFields = []string{"TrayEndpoint", "EnableSocket", "DebugSearch", "Tokenizer", "EnablePrompts", "Instructions", "OAuthTokenEncryptionKey", "SessionRetentionDays"}
 
 func configFieldValue(cfg *config.Config, goName string) interface{} {
 	return reflect.ValueOf(cfg).Elem().FieldByName(goName).Interface()

@@ -1271,7 +1271,7 @@ func init() {
 	activityCmd.AddCommand(activityExportCmd)
 
 	// List command flags
-	activityListCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated for multiple): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, preflight, profile_change")
+	activityListCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated for multiple): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, preflight, profile_change, upstream_event")
 	activityListCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 	activityListCmd.Flags().StringVar(&activityTool, "tool", "", "Filter by tool name")
 	activityListCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status: success, error, blocked, rejected")
@@ -1299,7 +1299,7 @@ func init() {
 	activityListCmd.Flags().StringVar(&activityTo, "to", "", "Filter records before this time (RFC3339 or relative); alias of --end-time")
 
 	// Watch command flags
-	activityWatchCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, preflight, profile_change")
+	activityWatchCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, preflight, profile_change, upstream_event")
 	activityWatchCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 	// Spec 109-k: view + --from/--to
 	registerActivityScopeFlags(activityWatchCmd)
@@ -1326,7 +1326,7 @@ func init() {
 	activityExportCmd.Flags().StringVarP(&activityExportFormat, "format", "f", "json", "Export file format: json (JSON Lines), csv")
 	activityExportCmd.Flags().BoolVar(&activityIncludeBodies, "include-bodies", false, "Include full request/response bodies")
 	// Reuse list filter flags for export
-	activityExportCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, preflight, profile_change")
+	activityExportCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, preflight, profile_change, upstream_event")
 	activityExportCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 	activityExportCmd.Flags().StringVar(&activityTool, "tool", "", "Filter by tool name")
 	activityExportCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status: success, error, blocked, rejected")

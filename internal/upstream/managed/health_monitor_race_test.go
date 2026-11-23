@@ -171,7 +171,7 @@ func newStoppedLoopClient(t *testing.T, name string) (*Client, <-chan struct{}) 
 
 	upstream := mcpserver.NewMCPServer("stopped-loop", "0.0.1", mcpserver.WithToolCapabilities(true))
 	ts := servertest.NewTestStreamableHTTPServer(upstream)
-	t.Cleanup(ts.Close)
+	t.Cleanup(func() { closeHTTPFixture(ts) })
 
 	cfg := &config.ServerConfig{Name: name, Protocol: "streamable-http", URL: ts.URL, Enabled: true}
 	mc, err := NewClient(name, cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())

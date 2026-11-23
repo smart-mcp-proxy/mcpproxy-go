@@ -25,6 +25,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpx"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/launch"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
@@ -289,6 +290,23 @@ type ServerController interface {
 	BlockAllTools(serverName string, blockedBy string) (int, error)
 	GetToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error)
 
+	// Skills over MCP (Spec 125, PR-1). Administrator-only reads of the skills
+	// catalog and a refresh trigger; nothing here is offered to agents yet.
+	SkillsStatus(serverName string) internalRuntime.SkillsServerStatus
+	ListSkillRecords(serverName string) ([]*storage.SkillApprovalRecord, error)
+	SkillFileText(serverName, skillPath, relPath string, approvedCopy bool) ([]byte, storage.SkillFile, error)
+	SkillAvailable(serverName string, rec *storage.SkillApprovalRecord) bool
+	// Scoped callers (PR-3): approved copies of available skills only.
+	ListAvailableSkills(serverName string) ([]*internalRuntime.AvailableSkill, error)
+	// EmitActivitySkillAccess records a scoped caller's read of skills (FR-024).
+	EmitActivitySkillAccess(a internalRuntime.SkillAccessActivity)
+	AvailableSkillFile(serverName, skillPath, relPath string) ([]byte, storage.SkillFile, *internalRuntime.AvailableSkill, error)
+	RefreshServerSkills(ctx context.Context, serverName string) error
+	// Spec 125 PR-2: the approval gate. Both are review- and
+	// incarnation-bound in the runtime; ctx carries the actor.
+	ApproveSkillsReviewedAt(ctx context.Context, serverName string, skillPaths []string, expected map[string]string, approvedBy string, expectedIncarnation int64) (int, error)
+	SetSkillsBlockedAt(ctx context.Context, serverName string, skillPaths []string, blocked bool, by string, expectedIncarnation int64) (int, error)
+
 	// Onboarding wizard (Spec 046)
 	GetOnboardingState() (*storage.OnboardingState, error)
 	SaveOnboardingState(state *storage.OnboardingState) error
@@ -307,7 +325,11 @@ type ServerController interface {
 
 // Server provides HTTP API endpoints with chi router
 type Server struct {
-	controller ServerController
+	// eventsSince is when this core process started (processStart); upstream
+	// events from before it are no evidence about a server's state now
+	// (Spec 124, release QA F2). A field so tests can move it.
+	eventsSince time.Time
+	controller  ServerController
 	// patchAfterParse is a Spec 116 test seam (nil in production): it runs in
 	// PATCH /api/v1/servers/{id} after the body was parsed and validated.
 	patchAfterParse   func(serverName string)
@@ -461,6 +483,7 @@ func NewServer(controller ServerController, logger *zap.SugaredLogger, obs *obse
 	}
 
 	s := &Server{
+		eventsSince:      processStart,
 		controller:       controller,
 		logger:           logger,
 		httpLogger:       httpLogger,
@@ -848,6 +871,12 @@ func (s *Server) correlationIDMiddleware() func(http.Handler) http.Handler {
 			ctx := reqcontext.WithCorrelationID(r.Context(), correlationID)
 			ctx = reqcontext.WithRequestSource(ctx, reqcontext.SourceRESTAPI)
 
+			// Spec 124 FR-002/FR-003: a REST call has no MCP connection, so
+			// its work session is derived from the request. The surface names
+			// the client, and the optional run name splits the caller's work.
+			ctx = reqcontext.WithClientSurface(ctx, restClientSurface(r))
+			ctx = reqcontext.WithRunHeader(ctx, r.Header.Get(reqcontext.RunNameHeader))
+
 			// Add correlation ID to response headers for client tracking
 			w.Header().Set("X-Correlation-ID", correlationID)
 
@@ -1145,6 +1174,14 @@ func (s *Server) setupRoutes() {
 			// operation (issue #873): pure rediscover + reindex, no state change.
 			r.Post("/refresh", s.requireServerOp(auth.ServerOpRefresh, s.handleRefreshServer))
 			r.Get("/tools", s.handleGetServerTools)
+			// Spec 125 PR-1: skills catalog, administrator-only.
+			r.Get("/skills", s.handleGetServerSkills)
+			r.Get("/skills/content", s.handleGetServerSkillContent)
+			r.Post("/skills/refresh", s.handleRefreshServerSkills)
+			// Spec 125 PR-2: the approval gate, administrator-only.
+			r.Post("/skills/approve", s.handleApproveServerSkills)
+			r.Post("/skills/block", s.handleBlockServerSkills)
+			r.Post("/skills/unblock", s.handleUnblockServerSkills)
 			r.Get("/review", s.handleGetServerReview)
 			r.Get("/logs", s.handleGetServerLogs)
 			// Spec 044: per-server diagnostics with stable error_code.
@@ -1228,6 +1265,13 @@ func (s *Server) setupRoutes() {
 		r.Get("/sessions", s.handleGetSessions)
 		r.Get("/sessions/{id}", s.handleGetSessionDetail)
 
+		// Spec 124: work sessions and their failure timeline. Scoped, unlike
+		// /sessions above: the caller sees its own sessions, narrowed to the
+		// servers in its reach.
+		r.Get("/work-sessions", s.handleListWorkSessions)
+		r.Get("/work-sessions/{id}", s.handleGetWorkSession)
+		r.Get("/work-sessions/{id}/timeline", s.handleWorkSessionTimeline)
+
 		// Tool execution
 		r.Post("/tools/call", s.handleCallTool)
 
@@ -1294,7 +1338,7 @@ func (s *Server) setupRoutes() {
 		})
 
 		// Feedback submission (Spec 036)
-		r.Post("/feedback", s.handleFeedback)
+		r.With(s.requireAdminReadMiddleware("Admin credentials required to submit feedback")).Post("/feedback", s.handleFeedback)
 
 		// Client connect/disconnect. Config reads disclose local paths and
 		// connection state; writes can modify user-owned client files or embed
@@ -2232,6 +2276,10 @@ type AddServerRequest struct {
 	// a nil pointer means "leave unchanged" on PATCH (and "inherit the default
 	// aggregate behavior" on create); a present value (including false) is applied.
 	ExposePrompts *bool `json:"expose_prompts,omitempty"`
+	// ExposeSkills is the per-server skills override (MCP skills extension).
+	// Tri-state *bool mirroring config.ServerConfig.ExposeSkills: nil means
+	// "leave unchanged" on PATCH and "inherit" on create.
+	ExposeSkills *bool `json:"expose_skills,omitempty"`
 	// ForwardHeaders is the per-server allowlist of inbound MCP client header
 	// NAMES forwarded to this server on tools/call (Spec 112). Names only, never
 	// values. On PATCH a nil slice (field omitted) leaves the stored allowlist
@@ -2596,6 +2644,9 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	if req.ExposePrompts != nil {
 		serverConfig.ExposePrompts = req.ExposePrompts
 	}
+	if req.ExposeSkills != nil {
+		serverConfig.ExposeSkills = req.ExposeSkills
+	}
 	// Spec 112: carry the forward_headers allowlist through on create, after
 	// validating the names (write-time layer of FR-005).
 	if len(req.ForwardHeaders) > 0 {
@@ -2901,6 +2952,13 @@ func resolveServerPatch(serverName string, req *AddServerRequest, existingSrv *c
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.ExposePrompts = existingSrv.ExposePrompts
+	}
+	// expose_skills: same tri-state preserve-the-existing-pointer rule.
+	if req.ExposeSkills != nil {
+		updates.ExposeSkills = req.ExposeSkills
+		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.ExposeSkills = existingSrv.ExposeSkills
 	}
 	// Spec 112: forward_headers preserves the existing allowlist when the
 	// request omits it (nil slice); a non-nil slice replaces it and an empty
@@ -3828,6 +3886,13 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Spec 123: the stored OAuth row cannot be decrypted; no login can
+		// help until the key is restored or the row is deleted.
+		if oauth.IsTokenUndecryptable(err) {
+			s.writeError(w, r, http.StatusConflict, fmt.Sprintf("%s: %v", diagnostics.OAuthTokenUndecryptable, err))
+			return
+		}
+
 		// Map errors to HTTP status codes (T019)
 		if strings.Contains(err.Error(), "management disabled") || strings.Contains(err.Error(), "read-only") {
 			s.writeError(w, r, http.StatusForbidden, err.Error())
@@ -4509,6 +4574,15 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Subscribe before the first flush. The client treats the initial comment as
+	// proof that the stream is ready and may publish events immediately; if the
+	// subscription is created after that flush, events in the gap are lost.
+	statusCh := s.controller.StatusChannel()
+	eventsCh := s.controller.SubscribeEvents()
+	if eventsCh != nil {
+		defer s.controller.UnsubscribeEvents(eventsCh)
+	}
+
 	// Write headers explicitly to establish response
 	w.WriteHeader(http.StatusOK)
 
@@ -4529,27 +4603,18 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 	// Add small delay to ensure browser processes the connection
 	time.Sleep(100 * time.Millisecond)
 
-	// Get status channel (shared)
-	statusCh := s.controller.StatusChannel()
-
-	// Create per-client event subscription to avoid competing for events
-	// Each SSE client gets its own channel so all clients receive all events
-	eventsCh := s.controller.SubscribeEvents()
-	if eventsCh != nil {
-		defer s.controller.UnsubscribeEvents(eventsCh)
-	}
-
 	s.logger.Debugw("SSE connection established",
 		"status_channel_nil", statusCh == nil,
 		"events_channel_nil", eventsCh == nil)
 
 	// FR-006: attention.changed is suppressed for THIS subscriber when its
-	// narrowed id set is unchanged since the last frame it received — a
-	// scoped caller's own view is what matters, not the shared event's raw
-	// id set (two scoped subscribers with different scopes must each get
-	// their own suppression decision). nil (not an empty set) so the very
-	// first frame is never suppressed.
-	var lastAttentionIDs map[string]struct{}
+	// narrowed id set did not move — a scoped caller's own view is what
+	// matters, not the shared event's raw id set (two scoped subscribers with
+	// different scopes must each get their own suppression decision).
+	// lastAttentionItems is the whole list as of the last event (seeded at
+	// connect, never sent); each event narrows it and the new list with the
+	// caller as it is then.
+	var lastAttentionItems []internalRuntime.AttentionEventItem
 
 	// Create heartbeat ticker to keep connection alive
 	heartbeat := time.NewTicker(sseHeartbeatInterval)
@@ -4581,6 +4646,33 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logger.Debug("Initial SSE status event sent successfully")
+
+	callerCtx, err = refreshCallerContext()
+	if err != nil {
+		s.logger.Warnw("Closing SSE stream before initial attention snapshot", "error", err)
+		return
+	}
+	// Send the same scoped snapshot used for duplicate suppression. An update
+	// queued during setup may already be reflected in this snapshot.
+	allAttention := s.controller.Attention()
+	lastAttentionItems = internalRuntime.AttentionEventItems(allAttention)
+	visibleAttention := filterAttentionItems(callerCtx, allAttention)
+	initialIDs := make([]string, 0, len(visibleAttention))
+	for _, item := range visibleAttention {
+		initialIDs = append(initialIDs, item.ID)
+	}
+	// Administrators also follow content changes with stable ids (a count in
+	// a summary; Spec 125 review round 2). For an administrator the visible
+	// list is the whole list, so this equals the runtime's fingerprint of it.
+	lastAttentionFingerprint := internalRuntime.AttentionFingerprint(visibleAttention)
+	initialAttention := map[string]interface{}{
+		"payload":   map[string]interface{}{"count": len(initialIDs), "ids": initialIDs},
+		"timestamp": time.Now().Unix(),
+	}
+	if err := s.writeSSEEvent(w, flusher, canFlush, string(internalRuntime.EventTypeAttentionChanged), initialAttention); err != nil {
+		s.logger.Errorw("Failed to write initial SSE attention event", "error", err)
+		return
+	}
 
 	// Stream updates
 	for {
@@ -4664,14 +4756,28 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 			// coalesced change is meaningful to show).
 			if evt.Type == internalRuntime.EventTypeAttentionChanged {
 				ids, _ := rendered["ids"].([]string)
-				current := make(map[string]struct{}, len(ids))
-				for _, id := range ids {
-					current[id] = struct{}{}
+				current := attentionIDSet(ids)
+				// Spec 125 review round 3: the previous list is narrowed with
+				// the caller as it is NOW, not as it was at the last frame. A
+				// reach change (re-pin, profile edit) publishes nothing, so a
+				// set remembered under the old reach would differ from any
+				// new narrowing and let the next unrelated event through.
+				previous := attentionIDSet(attentionEventIDsFor(callerCtx, lastAttentionItems))
+				items, _ := evt.Payload["items"].([]internalRuntime.AttentionEventItem)
+				lastAttentionItems = items
+				// An administrator also gets a frame when the content moved
+				// with the same ids; a scoped caller only when its own
+				// narrowed ids moved (FR-019a: the fingerprint covers items
+				// it cannot see).
+				admin := !auth.IsScopedCaller(callerCtx)
+				fingerprint, _ := evt.Payload[internalRuntime.AttentionFingerprintKey].(string)
+				contentMoved := admin && fingerprint != "" && fingerprint != lastAttentionFingerprint
+				if admin && fingerprint != "" {
+					lastAttentionFingerprint = fingerprint
 				}
-				if lastAttentionIDs != nil && attentionIDSetsEqual(lastAttentionIDs, current) {
+				if attentionIDSetsEqual(previous, current) && !contentMoved {
 					continue
 				}
-				lastAttentionIDs = current
 			}
 
 			eventPayload := map[string]interface{}{
@@ -4701,10 +4807,9 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 // fields, and (b) be an unsynchronised concurrent map write, which Go turns
 // into a fatal error that takes the whole core down for every client.
 //
-// Three narrowings, all only for servers.changed — every OTHER event type that
-// names a server is dropped for a scoped caller before it reaches this
-// function, by eventVisibleToCaller (sse_scope.go), which also explains why
-// this one type is rendered instead of dropped:
+// review.changed batches keep only the server names visible to a scoped
+// subscriber. eventVisibleToCaller has already suppressed empty scoped batches.
+// For servers.changed, there are three further narrowings:
 //
 //   - #1166 - the coalescer extras that NAME a server ("server": "beta") are
 //     removed when the caller may not enumerate it. That extra survived the
@@ -4729,6 +4834,17 @@ func (s *Server) renderEventPayloadForCaller(ctx context.Context, evt internalRu
 	}
 	if evt.Type == internalRuntime.EventTypeActiveProfileChanged {
 		return s.renderActiveProfileChangedForCaller(ctx, payload)
+	}
+	if evt.Type == internalRuntime.EventTypeReviewChanged && auth.IsScopedCaller(ctx) {
+		if names, ok := payload["servers"].([]string); ok {
+			var visible []string
+			for _, name := range names {
+				if canSeeReviewServer(ctx, name) {
+					visible = append(visible, name)
+				}
+			}
+			return map[string]any{"servers": visible}
+		}
 	}
 	if evt.Type != internalRuntime.EventTypeServersChanged || len(payload) == 0 {
 		return payload
@@ -5704,6 +5820,7 @@ func (s *Server) maskToolCallRecord(record *contracts.ToolCallRecord) {
 // @Success      200      {object}  contracts.ReplayToolCallResponse    "Tool call replayed successfully"
 // @Failure      400      {object}  contracts.ErrorResponse             "Tool call ID required or invalid JSON payload"
 // @Failure      401      {object}  contracts.ErrorResponse             "Unauthorized - missing or invalid API key"
+// @Failure      403      {object}  contracts.ErrorResponse             "Replay refused: tool quarantined or not callable, server quarantined, outside the profile policy, or the token lacks the tool's permission tier"
 // @Failure      405      {object}  contracts.ErrorResponse             "Method not allowed"
 // @Failure      429      {object}  contracts.ErrorResponse             "Shed by a concurrency limit or an agent token call rate limit (Retry-After header carries the wait hint)"
 // @Failure      500      {object}  contracts.ErrorResponse             "Failed to replay tool call"
@@ -5869,7 +5986,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	// one, so a client cannot widen its own read by staging the flag and
 	// re-reading before the restart, and (#1167) it is ANDed with the caller's
 	// identity so only an authenticated admin can exercise the opt-out.
-	published := cfg
+	var published *config.Config
 	if !s.revealSecrets(r.Context()) {
 		published = oauth.RedactedConfig(cfg)
 		if published == nil {
@@ -5879,6 +5996,11 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusInternalServerError, "Failed to get configuration")
 			return
 		}
+	} else if published = oauth.WithMaskedOAuthTokenKey(cfg); published == nil {
+		// reveal_secret_headers never reveals the OAuth token encryption key.
+		s.logger.Errorw("Failed to redact configuration for publication")
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to get configuration")
+		return
 	}
 
 	// Convert config to contracts type for consistent API response

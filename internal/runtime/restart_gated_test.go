@@ -52,6 +52,14 @@ func TestPinRestartGatedCoversEveryRestartGatedField(t *testing.T) {
 		// re-read: a PATCH must report requires_restart, not applied.
 		"enable_prompts": func(c *config.Config) { c.EnablePrompts = !c.EnablePrompts },
 		"instructions":   func(c *config.Config) { c.Instructions = "changed instructions" },
+		// Spec 123 FR-023: the OAuth token key is bound when config.db is
+		// opened; a key change mid-process would split the bucket between
+		// two keys.
+		"oauth_token_encryption_key": func(c *config.Config) { c.OAuthTokenEncryptionKey = "${file:/run/secrets/other-key}" },
+		// Spec 124: the work-session window is set once at startup
+		// (Runtime.New → SetSessionWindow); both settings UIs mark it
+		// restart-gated (review round 14, D1).
+		"session_retention_days": func(c *config.Config) { c.SessionRetentionDays = c.SessionRetentionDays + 23 },
 	}
 
 	for name, mutate := range mutations {

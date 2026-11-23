@@ -107,6 +107,23 @@ var allClients = []ClientDef{
 		ReloadHint:      "Run \"MCP: List Servers\" → Restart (or reload the window) in VS Code to load MCPProxy",
 	},
 	{
+		ID:        "copilot",
+		Name:      "GitHub Copilot (VS Code, Copilot CLI)",
+		Format:    "json",
+		ServerKey: "mcpServers",
+		Supported: true,
+		Icon:      "vscode",
+		// VS Code's Copilot agent harness reads its MCP servers from
+		// ~/.copilot/mcp-config.json, the file the Copilot CLI reads as well,
+		// and not from Code/User/mcp.json. That file belongs to the older
+		// Local harness, which the "vscode" client above still serves (#1896).
+		//
+		// Presence is matched exactly against clientInfo.name: the Copilot CLI
+		// sends "copilot-cli", other Copilot hosts "github-copilot-developer".
+		ClientInfoNames: []string{"copilot-cli", "github-copilot-developer", "copilot"},
+		ReloadHint:      "Reload the VS Code window (or restart Copilot CLI) to load MCPProxy",
+	},
+	{
 		ID:        "codex",
 		Name:      "Codex CLI",
 		Format:    "toml",
@@ -189,10 +206,76 @@ func FindClient(clientID string) *ClientDef {
 	return nil
 }
 
+// copilotHomeOverride returns the directory COPILOT_HOME names, or "" when the
+// default ~/.copilot applies. Copilot CLI and VS Code read their user config
+// from $COPILOT_HOME/mcp-config.json when the variable is set and do not also
+// check ~/.copilot, so an entry written to the default would be ignored.
+//
+// A relative value is not followed: it resolves against the working directory
+// of the process reading it, and the core does not share the client's.
+func copilotHomeOverride() string {
+	dir := strings.TrimSpace(os.Getenv("COPILOT_HOME"))
+	if dir == "" || !filepath.IsAbs(dir) {
+		return ""
+	}
+	return filepath.Clean(dir)
+}
+
+// connectGOOS is the OS the Claude Desktop path is resolved for; a variable so
+// tests can exercise the Windows branch of ConfigPath on any host.
+var connectGOOS = runtime.GOOS
+
+// claudeDesktopWindowsConfigPath resolves the Claude Desktop config on Windows.
+// Classic installs use %APPDATA%\Claude; installs such as the WinGet one in
+// issue #1957 keep it at %LOCALAPPDATA%\Claude-Data\claude_<id>\ and the app
+// ignores the roaming file. An existing Claude-Data config wins (the newest
+// when several exist), then the roaming one; with neither present the roaming
+// path is returned. Precedence is deliberately NOT cross-location mtime:
+// earlier MCPProxy versions wrote the roaming file the WinGet app ignores, so a
+// newer roaming file is exactly the broken state of issue #1957. Known
+// tradeoff: someone who moved from a WinGet to a classic install and kept the
+// old Claude-Data dir gets the stale path. Not windows-tagged so it is
+// testable on any OS.
+func claudeDesktopWindowsConfigPath(homeDir, appData, localAppData string) string {
+	if appData == "" {
+		appData = filepath.Join(homeDir, "AppData", "Roaming")
+	}
+	if localAppData == "" {
+		localAppData = filepath.Join(homeDir, "AppData", "Local")
+	}
+	const file = "claude_desktop_config.json"
+	// ReadDir, not Glob: LOCALAPPDATA is env-derived and may contain glob
+	// metacharacters ('[' is legal in a Windows user name).
+	entries, _ := os.ReadDir(filepath.Join(localAppData, "Claude-Data"))
+	best, bestMod := "", int64(0)
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(strings.ToLower(e.Name()), "claude_") {
+			continue
+		}
+		m := filepath.Join(localAppData, "Claude-Data", e.Name(), file)
+		fi, err := os.Stat(m)
+		if err != nil || fi.IsDir() {
+			continue
+		}
+		if mod := fi.ModTime().UnixNano(); best == "" || mod > bestMod || (mod == bestMod && m < best) {
+			best, bestMod = m, mod
+		}
+	}
+	if best != "" {
+		return best
+	}
+	return filepath.Join(appData, "Claude", file)
+}
+
 // ConfigPath returns the expected configuration file path for the given client
 // on the current operating system. homeDir overrides os.UserHomeDir when non-empty
 // (useful for testing).
 func ConfigPath(clientID, homeDir string) string {
+	if clientID == "copilot" && homeDir == "" {
+		if dir := copilotHomeOverride(); dir != "" {
+			return filepath.Join(dir, "mcp-config.json")
+		}
+	}
 	if homeDir == "" {
 		var err error
 		homeDir, err = os.UserHomeDir()
@@ -206,15 +289,11 @@ func ConfigPath(clientID, homeDir string) string {
 		return filepath.Join(homeDir, ".claude.json")
 
 	case "claude-desktop":
-		switch runtime.GOOS {
+		switch connectGOOS {
 		case "darwin":
 			return filepath.Join(homeDir, "Library", "Application Support", "Claude", "claude_desktop_config.json")
 		case "windows":
-			appData := os.Getenv("APPDATA")
-			if appData == "" {
-				appData = filepath.Join(homeDir, "AppData", "Roaming")
-			}
-			return filepath.Join(appData, "Claude", "claude_desktop_config.json")
+			return claudeDesktopWindowsConfigPath(homeDir, os.Getenv("APPDATA"), os.Getenv("LOCALAPPDATA"))
 		default: // linux
 			return filepath.Join(homeDir, ".config", "Claude", "claude_desktop_config.json")
 		}
@@ -238,6 +317,12 @@ func ConfigPath(clientID, homeDir string) string {
 		default: // linux
 			return filepath.Join(homeDir, ".config", "Code", "User", "mcp.json")
 		}
+
+	case "copilot":
+		// The Copilot user config, read by VS Code's Copilot harness and by the
+		// Copilot CLI: a dotfile under $HOME on every OS, unless COPILOT_HOME
+		// moves it (handled above, before the home directory is resolved).
+		return filepath.Join(homeDir, ".copilot", "mcp-config.json")
 
 	case "codex":
 		return filepath.Join(homeDir, ".codex", "config.toml")
@@ -522,10 +607,10 @@ func (s *Service) checkedPaths(clientID string) []string {
 // (the default), a clean, keyless entry is written.
 func buildServerEntry(clientID string, p serverEntryParams) map[string]interface{} {
 	switch clientID {
-	case "claude-code", "vscode", "zcode":
-		// Claude Code (~/.claude.json), VS Code (mcp.json) and ZCode
-		// (~/.zcode/cli/config.json, mcp.servers) "type":"http" entries all
-		// support a "headers" object.
+	case "claude-code", "vscode", "copilot", "zcode":
+		// Claude Code (~/.claude.json), VS Code (mcp.json), its Copilot config
+		// (~/.copilot/mcp-config.json) and ZCode (~/.zcode/cli/config.json,
+		// mcp.servers) "type":"http" entries all support a "headers" object.
 		return withAPIKeyHeader(map[string]interface{}{
 			"type": "http",
 			"url":  p.baseURL,

@@ -395,6 +395,15 @@ type Config struct {
 	// Security settings
 	APIKey         string `json:"api_key,omitempty" mapstructure:"api-key"`         // API key for REST API authentication
 	RequireMCPAuth bool   `json:"require_mcp_auth" mapstructure:"require-mcp-auth"` // Require authentication on /mcp endpoint (default: false)
+	// OAuthTokenEncryptionKey seals the upstream OAuth tokens stored in
+	// config.db (Spec 123). Empty (the default) leaves them as plain JSON. It
+	// takes a secret reference (${file:/abs/path}, ${env:NAME},
+	// ${keyring:NAME}) or a literal standard-base64 32-byte key; the
+	// MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY[_FILE] variables override it. The key
+	// is resolved only where config.db is opened (ResolveOAuthTokenKey), never
+	// stored on Config, and is restart-gated, so every save writes the field
+	// as configured.
+	OAuthTokenEncryptionKey string `json:"oauth_token_encryption_key,omitempty" mapstructure:"oauth_token_encryption_key"`
 	// MCPRejectQueryAPIKey makes every MCP endpoint (/mcp*) refuse a request that
 	// carries a ?apikey= query parameter, with a 401, instead of honouring it. A credential in a URL ends up in access logs,
 	// proxy logs and browser history; MCP clients can send Authorization:
@@ -403,6 +412,11 @@ type Config struct {
 	// MCP endpoints: the Web UI and its SSE stream (/events) still use the
 	// query form. Live, no restart needed.
 	MCPRejectQueryAPIKey bool `json:"mcp_reject_query_apikey,omitempty" mapstructure:"mcp-reject-query-apikey"`
+	// MCPOAuthEnabled turns on browser login (OAuth 2.1 + PKCE) for MCP
+	// clients on the loopback listener (Spec 132). Experimental, default false:
+	// with it off nothing changes. Env override MCPPROXY_MCP_OAUTH_ENABLED is
+	// process-only and never persisted. Live, no restart needed.
+	MCPOAuthEnabled bool `json:"mcp_oauth_enabled,omitempty" mapstructure:"mcp-oauth-enabled"`
 	// TrustedHosts lists non-loopback Host header values accepted on loopback
 	// listeners (GH #898). DNS-rebinding protection rejects requests whose Host
 	// header is not a loopback address when mcpproxy listens on loopback; a
@@ -464,6 +478,12 @@ type Config struct {
 	// prompts + the prompts capability; this flag gates ONLY the upstream
 	// aggregation performed by RefreshPrompts. Hot-reloadable.
 	AggregateUpstreamPrompts bool `json:"aggregate_upstream_prompts" mapstructure:"aggregate-upstream-prompts"`
+
+	// EnableSkills, when true, makes mcpproxy read the skills that upstream
+	// servers expose through the MCP skills extension. OFF by default. Unlike
+	// EnablePrompts this is hot-reloadable. No CLI flag, no environment
+	// variable.
+	EnableSkills bool `json:"enable_skills" mapstructure:"enable-skills"`
 
 	// Repository detection settings
 	CheckServerRepo bool `json:"check_server_repo" mapstructure:"check-server-repo"`
@@ -531,7 +551,10 @@ type Config struct {
 
 	// Activity logging settings (RFC-003)
 	ActivityRetentionDays int `json:"activity_retention_days,omitempty" mapstructure:"activity-retention-days"` // Max age before pruning (default: 90)
-	ActivityMaxRecords    int `json:"activity_max_records,omitempty" mapstructure:"activity-max-records"`       // Max records before pruning (default: 100000)
+	ActivityMaxRecords    int `json:"activity_max_records,omitempty" mapstructure:"activity-max-records"`       // Max records before pruning (default: 400000)
+	// SessionRetentionDays is how long a work session is listed and kept whole
+	// in the activity log (Spec 124, default 7). Read at start.
+	SessionRetentionDays int `json:"session_retention_days,omitempty" mapstructure:"session-retention-days"`
 	// ActivityMaxSizeMB caps the total activity-log size in MB before the
 	// oldest records are pruned. Omit the key for the 256MB default; set it to
 	// 0 to disable the size cap.
@@ -777,6 +800,11 @@ type ServerConfig struct {
 	// default-aggregate behavior (included if the server advertises
 	// Capabilities.Prompts); false excludes it regardless of capability.
 	ExposePrompts *bool `json:"expose_prompts,omitempty" mapstructure:"expose-prompts"`
+
+	// ExposeSkills overrides whether this server's skills (MCP skills
+	// extension) are read when Config.EnableSkills is on. nil (default)
+	// inherits (included if the server supports skills); false excludes it.
+	ExposeSkills *bool `json:"expose_skills,omitempty" mapstructure:"expose-skills"`
 
 	// ForwardHeaders lists inbound MCP-client header NAMES (never values) that
 	// are copied into this server's upstream tools/call requests (Spec 112).
@@ -1881,6 +1909,9 @@ func DefaultConfig() *Config {
 		// Upstream prompt aggregation OFF by default (opt-in) — see field doc.
 		AggregateUpstreamPrompts: false,
 
+		// Upstream skills OFF by default (opt-in).
+		EnableSkills: false,
+
 		// Repository detection enabled by default
 		CheckServerRepo: true,
 
@@ -1936,7 +1967,8 @@ func DefaultConfig() *Config {
 
 		// Activity logging defaults (RFC-003)
 		ActivityRetentionDays:   90,     // 90 days retention
-		ActivityMaxRecords:      100000, // 100K records max
+		ActivityMaxRecords:      400000, // 400K records max (Spec 124)
+		SessionRetentionDays:    7,      // work sessions kept whole for a week
 		ActivityMaxResponseSize: 65536,  // 64KB response truncation
 
 		ToolCallMaxResponseSize:     65536, // 64KB per stored tool-call response
@@ -2459,6 +2491,9 @@ func (c *Config) ValidateDetailed() []ValidationError {
 	errors = append(errors, c.oauthRefreshReplayErrors()...)
 	errors = append(errors, c.tpaTrustRootErrors()...)
 	errors = append(errors, c.tpaRefreshErrors()...)
+	if err := checkOAuthTokenKeySyntax(c.OAuthTokenEncryptionKey); err != nil {
+		errors = append(errors, ValidationError{Field: OAuthTokenKeyField, Message: msgOAuthTokenKeyBadReference})
+	}
 	if _, err := ValidateProfiles(c); err != nil {
 		errors = append(errors, ValidationError{Field: "profiles", Message: err.Error()})
 	}
@@ -2751,6 +2786,11 @@ func NormalizeForwardHeaders(cfg *Config) []ForwardHeaderNormalization {
 	}
 	return out
 }
+
+// EnvMCPOAuthEnabled is the process-only environment override for
+// Config.MCPOAuthEnabled (Spec 132). Accepts true|1 / false|0; anything else
+// is ignored. Never persisted.
+const EnvMCPOAuthEnabled = "MCPPROXY_MCP_OAUTH_ENABLED"
 
 // EnvForwardClientHeaders is the environment kill switch for client header
 // forwarding (Spec 112 FR-003): false|0|off disables it for the process.
@@ -3223,6 +3263,14 @@ func (c *Config) Validate() error {
 		return profileErr
 	}
 	c.profileWarnings = profileWarnings
+
+	// Spec 123 FR-020/FR-022: oauth_token_encryption_key is checked for its
+	// syntax only. Nothing is read here: the key is resolved where config.db
+	// is opened, so commands that never open it and every hot reload keep
+	// working while the referenced file is not readable from this process.
+	if err := checkOAuthTokenKeySyntax(c.OAuthTokenEncryptionKey); err != nil {
+		return err
+	}
 
 	// Both key variables set is an error whether or not the config file
 	// carries an api_key: one rule, checked on every load.

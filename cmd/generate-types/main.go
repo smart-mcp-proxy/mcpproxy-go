@@ -164,6 +164,7 @@ export const AttentionKindConfigError = 'config_error' as const;
 export const AttentionKindServerError = 'server_error' as const;
 export const AttentionKindServerReview = 'server_review' as const;
 export const AttentionKindToolReview = 'tool_review' as const;
+export const AttentionKindSkillReview = 'skill_review' as const;
 export const AttentionKindClientNeverSeen = 'client_never_seen' as const;
 
 export type AttentionKind =
@@ -179,6 +180,7 @@ export type AttentionKind =
   | typeof AttentionKindServerError
   | typeof AttentionKindServerReview
   | typeof AttentionKindToolReview
+  | typeof AttentionKindSkillReview
   | typeof AttentionKindClientNeverSeen;
 
 export interface AttentionSubject {
@@ -355,6 +357,7 @@ export interface PreflightResponse {
   user_logged_out?: boolean; // True if user explicitly logged out (prevents auto-reconnection)
   health?: HealthStatus; // Unified health status calculated by the backend
   trust_mode?: string; // Per-server approval trust mode (spec 086): 'auto' | 'scan' | 'manual'; raw configured value, absent when unset (effective default: scan, spec 119)
+  expose_skills?: boolean; // Per-server skills override (MCP skills extension); absent = inherit, false = exclude this server's skills
   expose_prompts?: boolean; // F9 per-server prompt-aggregation override; absent = inherit default aggregation, false = exclude this server's prompts
   forward_headers?: string[]; // Spec 112 allowlist of inbound MCP client header names forwarded to this server on tools/call (names only, never values)
   security_scan?: SecurityScanSummary; // Latest scan summary (spec 086); ABSENT when no scan has ever run
@@ -920,6 +923,9 @@ export const ProfileChangeRotate = 'rotate' as const;
 export const ProfileChangeAnonymous = 'anonymous' as const;
 export const ProfileChangeIssue = 'issue' as const;
 export const ProfileChangeRevoke = 'revoke' as const;
+export const ProfileChangeApprove = 'approve' as const;
+export const ProfileChangeDeny = 'deny' as const;
+export const ProfileChangeReplayRevoke = 'replay_revoke' as const;
 export type ProfileChangeKind =
   | typeof ProfileChangeCreate
   | typeof ProfileChangeUpdate
@@ -933,7 +939,10 @@ export type ProfileChangeKind =
   | typeof ProfileChangeRotate
   | typeof ProfileChangeAnonymous
   | typeof ProfileChangeIssue
-  | typeof ProfileChangeRevoke;
+  | typeof ProfileChangeRevoke
+  | typeof ProfileChangeApprove
+  | typeof ProfileChangeDeny
+  | typeof ProfileChangeReplayRevoke;
 
 export const RotationFinalized = 'finalized' as const;
 export const RotationRolledBack = 'rolled_back' as const;

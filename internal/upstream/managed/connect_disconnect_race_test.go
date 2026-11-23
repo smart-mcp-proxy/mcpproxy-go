@@ -32,7 +32,7 @@ func TestConnect_DisconnectDuringDialDoesNotReportReady(t *testing.T) {
 
 	upstream := mcpserver.NewMCPServer("race-upstream", "0.0.1", mcpserver.WithToolCapabilities(true))
 	ts := servertest.NewTestStreamableHTTPServer(upstream)
-	t.Cleanup(ts.Close)
+	t.Cleanup(func() { closeHTTPFixture(ts) })
 
 	cfg := &config.ServerConfig{Name: "race-server", Protocol: "streamable-http", URL: ts.URL, Enabled: true}
 	mc, err := NewClient("race-server", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
@@ -79,7 +79,7 @@ func TestConnect_DisconnectDuringFailingDialKeepsDisconnected(t *testing.T) {
 	// A port nothing listens on: the dial fails fast.
 	ts := servertest.NewTestStreamableHTTPServer(mcpserver.NewMCPServer("gone", "0.0.1"))
 	deadURL := ts.URL
-	ts.Close()
+	closeHTTPFixture(ts)
 
 	cfg := &config.ServerConfig{Name: "race-fail", Protocol: "streamable-http", URL: deadURL, Enabled: true}
 	mc, err := NewClient("race-fail", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
@@ -116,7 +116,7 @@ func TestConnect_NewerAttemptSupersedesTheOlderOne(t *testing.T) {
 
 	upstream := mcpserver.NewMCPServer("race-upstream", "0.0.1", mcpserver.WithToolCapabilities(true))
 	ts := servertest.NewTestStreamableHTTPServer(upstream)
-	t.Cleanup(ts.Close)
+	t.Cleanup(func() { closeHTTPFixture(ts) })
 
 	cfg := &config.ServerConfig{Name: "race-newer", Protocol: "streamable-http", URL: ts.URL, Enabled: true}
 	mc, err := NewClient("race-newer", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
@@ -163,7 +163,7 @@ func TestConnect_ReconnectTeardownSupersedesADialingAttempt(t *testing.T) {
 
 	upstream := mcpserver.NewMCPServer("race-upstream", "0.0.1", mcpserver.WithToolCapabilities(true))
 	ts := servertest.NewTestStreamableHTTPServer(upstream)
-	t.Cleanup(ts.Close)
+	t.Cleanup(func() { closeHTTPFixture(ts) })
 
 	cfg := &config.ServerConfig{Name: "race-reconnect", Protocol: "streamable-http", URL: ts.URL, Enabled: true}
 	mc, err := NewClient("race-reconnect", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
@@ -225,7 +225,7 @@ func TestConnect_AttemptAdmittedAfterReconnectTeardownOwnsTheClient(t *testing.T
 
 	upstream := mcpserver.NewMCPServer("race-upstream", "0.0.1", mcpserver.WithToolCapabilities(true))
 	ts := servertest.NewTestStreamableHTTPServer(upstream)
-	t.Cleanup(ts.Close)
+	t.Cleanup(func() { closeHTTPFixture(ts) })
 
 	cfg := &config.ServerConfig{Name: "race-admitted", Protocol: "streamable-http", URL: ts.URL, Enabled: true}
 	mc, err := NewClient("race-admitted", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
@@ -263,7 +263,7 @@ func TestReconnectTeardown_ExcludesConnectAdmission(t *testing.T) {
 
 	upstream := mcpserver.NewMCPServer("race-upstream", "0.0.1", mcpserver.WithToolCapabilities(true))
 	ts := servertest.NewTestStreamableHTTPServer(upstream)
-	t.Cleanup(ts.Close)
+	t.Cleanup(func() { closeHTTPFixture(ts) })
 
 	for _, helper := range []string{"TryReconnectSync", "tryReconnect"} {
 		t.Run(helper, func(t *testing.T) {

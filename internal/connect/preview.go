@@ -219,7 +219,7 @@ type preWriteResult struct {
 	existing    *existingEntry // nil when no entry would be replaced
 	accessState string
 	raw         []byte      // exact bytes read when fileExists and readable; nil otherwise
-	perm        os.FileMode // mode to preserve on rewrite; 0644 when the file is absent
+	perm        os.FileMode // mode to preserve on rewrite; newFilePerm (0600) when the file is absent
 	// readErr is set when the file exists but its content could not be
 	// obtained for a reason other than "absent" (accessState already reflects
 	// why). A write step surfaces it instead of attempting its own read.
@@ -238,7 +238,7 @@ type preWriteResult struct {
 // an unreadable-but-not-denied or unparseable config yields the corresponding
 // access state with no resolved entry.
 func (s *Service) preWriteState(client *ClientDef, cfgPath, serverName string) (preWriteResult, error) {
-	result := preWriteResult{perm: os.FileMode(0o644)}
+	result := preWriteResult{perm: newFilePerm}
 
 	info, statErr := s.stat(cfgPath)
 	if statErr != nil {
@@ -281,13 +281,13 @@ func (s *Service) preWriteState(client *ClientDef, cfgPath, serverName string) (
 			// tokenless write starts fresh, and a caller holding a
 			// precondition token that assumed the file was there correctly
 			// sees the mismatch via fileExists. perm must self-heal to the
-			// 0o644 create default alongside fileExists — otherwise the mode
+			// newFilePerm create default alongside fileExists — otherwise the mode
 			// captured from the now-vanished file (e.g. a tightened 0400)
 			// would survive into a write that treats this as a fresh create,
 			// via currentPerm's fallback (connect.go) once the file is
 			// confirmed still absent at write time.
 			result.fileExists = false
-			result.perm = os.FileMode(0o644)
+			result.perm = newFilePerm
 			return result, nil
 		}
 		result.readErr = rerr

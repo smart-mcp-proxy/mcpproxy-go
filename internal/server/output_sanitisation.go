@@ -110,7 +110,10 @@ func (p *MCPProxyServer) applyOutputSanitisation(ctx context.Context, serverName
 	}
 
 	if d.block {
-		p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", d.reason, telemetry.BlockReasonOutputSanitisation)
+		// Spec 124 D2: every caller closes the attempt with a tool_call row
+		// after this block, so the decision is its companion, not a second
+		// counted row.
+		p.emitActivityCompanionDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", d.reason, telemetry.BlockReasonOutputSanitisation)
 		return mcp.NewToolResultError("tool output blocked by sanitisation policy: " + d.reason)
 	}
 

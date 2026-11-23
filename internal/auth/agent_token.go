@@ -7,8 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -136,6 +134,22 @@ type AgentToken struct {
 	PendingPrefix     string     `json:"pending_prefix,omitempty"`
 	RotationStartedAt *time.Time `json:"rotation_started_at,omitempty"`
 
+	// MatchedPrefix is the display prefix of the secret that authenticated
+	// this request. It is set by validation, never stored. It differs from
+	// TokenPrefix only while a staged rotation is open and the PENDING secret
+	// was presented: the record's TokenPrefix is still the old secret's until
+	// finalize promotes PendingPrefix. Spec 124 FR-009 keys a work session on
+	// the credential generation, so the request must carry the prefix of the
+	// secret it actually used, and the same value before and after finalize.
+	MatchedPrefix string `json:"-"`
+
+	// MatchedGeneration identifies the secret that authenticated this request
+	// with enough entropy to tell two secrets of one credential apart: the
+	// display prefix has four random characters, so a regenerated token can
+	// repeat it. Set by validation from the secret's hash, never stored and
+	// never shown. Empty for a token that did not come from validation.
+	MatchedGeneration string `json:"-"`
+
 	// ConnectedAt is when connect/add minted this credential.
 	ConnectedAt *time.Time `json:"connected_at,omitempty"`
 
@@ -248,6 +262,13 @@ const (
 	MaxTokenExpiry = 365 * 24 * time.Hour
 )
 
+// TokenExpiryNever is the expires_in value an admin passes over REST/CLI to
+// mint an agent token that never expires (stored as a zero ExpiresAt). It is
+// accepted only for agent tokens issued by an admin, never through the MCP
+// create_token tool or for client credentials, and ParseTokenExpiry itself
+// still rejects it.
+const TokenExpiryNever = "never"
+
 // ParseTokenExpiry is THE expiry rule for an agent token (Spec 107 FR-011,
 // contracts/entitlement-predicate.md §5): positive, at most 365 days, fixed
 // error text. Accepted formats: "30d" (days), "720h" (hours), or any Go
@@ -304,32 +325,109 @@ func ParseTokenExpiry(expiresIn string, now time.Time) (time.Time, error) {
 // OwnerRole that storage stamped on the validated token value into
 // Email/Provider/Role, so an owned token's request carries its owner's live
 // identity without a second store read. CredentialKind is always agent_token.
+// authenticatedPrefix is the prefix of the secret that authenticated, falling
+// back to the record's own for a token that did not come from validation.
+func (t *AgentToken) authenticatedPrefix() string {
+	if t.MatchedPrefix != "" {
+		return t.MatchedPrefix
+	}
+	return t.TokenPrefix
+}
+
 func (t *AgentToken) AuthContext() *AuthContext {
 	if t == nil {
 		return nil
 	}
-	return &AuthContext{
-		Type:           AuthTypeAgent,
-		AgentName:      t.Name,
-		TokenPrefix:    t.TokenPrefix,
-		AllowedServers: t.AllowedServers,
-		Permissions:    t.Permissions,
-		ProfilePin:     t.ProfilePin,
-		Email:          t.OwnerEmail,
-		Provider:       t.OwnerProvider,
-		Role:           t.OwnerRole,
-		CredentialKind: CredentialKindAgentToken,
-		TokenKind:      normalizeKind(t.Kind),
-		ClientID:       t.ClientID,
-		ProfileMode:    t.ProfileMode,
-		RateLimit:      t.RateLimit.clone(),
+	return ClientAuthContext(ClientIdentity{
+		AgentName:       t.Name,
+		TokenKind:       normalizeKind(t.Kind),
+		ClientID:        t.ClientID,
+		ProfilePin:      t.ProfilePin,
+		ProfileMode:     t.ProfileMode,
+		CredentialKind:  CredentialKindAgentToken,
+		TokenPrefix:     t.authenticatedPrefix(),
+		TokenGeneration: t.MatchedGeneration,
+		AllowedServers:  t.AllowedServers,
+		Permissions:     t.Permissions,
+		RateLimit:       t.RateLimit,
 		// UserID carries the owning tenant (server edition). Without it an
 		// agent-token request had no tenant identity at all, so its activity
 		// could not be attributed or scoped. It does NOT confer the user tier:
 		// Type stays AuthTypeAgent, so IsUser()/IsAdmin() remain false, and
 		// every per-user surface must gate on IsUser() rather than on a
 		// non-empty UserID.
-		UserID: t.UserID,
+		UserID:   t.UserID,
+		Email:    t.OwnerEmail,
+		Provider: t.OwnerProvider,
+		Role:     t.OwnerRole,
+	})
+}
+
+// ClientIdentity is everything the one AuthContext builder needs. Both the
+// stored-token path ((*AgentToken).AuthContext) and a browser login (Spec 132)
+// fill it, so no path can silently drop a field.
+type ClientIdentity struct {
+	// AgentName is the context's AgentName. Empty means ClientTokenName(ClientID)
+	// (what a client credential's record is named, so activity and filters match).
+	AgentName string
+	// TokenKind is KindAgent or KindClient. Empty means KindClient.
+	TokenKind string
+	// ClientID, ProfilePin and ProfileMode are the client binding.
+	ClientID, ProfilePin, ProfileMode string
+	// CredentialKind is the source credential (agent_token or oauth).
+	CredentialKind CredentialKind
+	// GrantID is the browser-login grant id (oauth only).
+	GrantID string
+	// TokenPrefix is the display prefix; TokenGeneration identifies the
+	// authenticated secret (a browser login uses its grant id).
+	TokenPrefix, TokenGeneration string
+	// AllowedServers and Permissions are the token's own scope. For a browser
+	// login (CredentialKindOAuth) nil means "*" and all three tiers: its
+	// reach comes from the client's profile binding only.
+	AllowedServers, Permissions []string
+	// RateLimit is the credential's own call budget (copied, never aliased).
+	RateLimit *TokenRateLimit
+	// UserID, Email, Provider and Role are the owning tenant (server edition).
+	UserID, Email, Provider, Role string
+}
+
+// ClientAuthContext is the single builder of the agent-tier AuthContext.
+func ClientAuthContext(id ClientIdentity) *AuthContext {
+	kind := id.TokenKind
+	if kind == "" {
+		kind = KindClient
+	}
+	name := id.AgentName
+	if name == "" && id.ClientID != "" {
+		name = ClientTokenName(id.ClientID)
+	}
+	servers, perms := id.AllowedServers, id.Permissions
+	if id.CredentialKind == CredentialKindOAuth {
+		if servers == nil {
+			servers = []string{"*"}
+		}
+		if perms == nil {
+			perms = []string{PermRead, PermWrite, PermDestructive}
+		}
+	}
+	return &AuthContext{
+		Type:            AuthTypeAgent,
+		AgentName:       name,
+		TokenPrefix:     id.TokenPrefix,
+		TokenGeneration: id.TokenGeneration,
+		AllowedServers:  servers,
+		Permissions:     perms,
+		ProfilePin:      id.ProfilePin,
+		Email:           id.Email,
+		Provider:        id.Provider,
+		Role:            id.Role,
+		CredentialKind:  id.CredentialKind,
+		GrantID:         id.GrantID,
+		TokenKind:       kind,
+		ClientID:        id.ClientID,
+		ProfileMode:     id.ProfileMode,
+		RateLimit:       id.RateLimit.clone(),
+		UserID:          id.UserID,
 	}
 }
 
@@ -540,37 +638,6 @@ func TokenPrefix(token string) string {
 
 // hmacKeyFile is the filename for the persisted HMAC key.
 const hmacKeyFile = ".token_key"
-
-// GetOrCreateHMACKey reads the HMAC key from <dataDir>/.token_key.
-// If the file does not exist, it generates a 32-byte random key,
-// writes it with 0600 permissions, and returns it.
-func GetOrCreateHMACKey(dataDir string) ([]byte, error) {
-	keyPath := filepath.Join(dataDir, hmacKeyFile)
-
-	// Try to read existing key
-	data, err := os.ReadFile(keyPath)
-	if err == nil && len(data) == 32 {
-		return data, nil
-	}
-
-	// Generate new key
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		return nil, fmt.Errorf("failed to generate HMAC key: %w", err)
-	}
-
-	// Ensure directory exists
-	if err := os.MkdirAll(dataDir, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create data directory: %w", err)
-	}
-
-	// Write key file with restrictive permissions
-	if err := os.WriteFile(keyPath, key, 0600); err != nil {
-		return nil, fmt.Errorf("failed to write HMAC key file: %w", err)
-	}
-
-	return key, nil
-}
 
 // ValidatePermissions checks that the given permissions list is valid.
 // It must contain "read" and only contain valid permission values.

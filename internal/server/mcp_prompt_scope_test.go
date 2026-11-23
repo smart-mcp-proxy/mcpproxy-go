@@ -19,7 +19,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 func promptNamesForTest(prompts []mcp.Prompt) []string {
@@ -251,11 +250,11 @@ func TestAggregatedPrompt_ScopeUsesCanonicalOwner(t *testing.T) {
 	qOff := false
 	proxy.config.QuarantineEnabled = &qOff
 
-	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
-	t.Cleanup(func() { um.DisconnectAll() })
+	um := newTestUpstreamManager(t, zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
 	for _, name := range []string{"a", "a__b"} {
 		testServer := servertest.NewTestStreamableHTTPServer(newTestRefreshPromptsUpstream(t))
-		t.Cleanup(testServer.Close)
+		t.Cleanup(func() { closeHTTPFixture(testServer) })
+		stopUpstreamBeforeFixtureClose(t, um, name)
 		require.NoError(t, um.AddServerConfig(name, &config.ServerConfig{
 			Name: name, Protocol: "streamable-http", URL: testServer.URL, Enabled: true,
 		}))
@@ -373,11 +372,11 @@ func TestAggregatedPrompt_LateEnableStillFiltered(t *testing.T) {
 	qOff := false
 	proxy.config.QuarantineEnabled = &qOff
 
-	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
-	t.Cleanup(func() { um.DisconnectAll() })
+	um := newTestUpstreamManager(t, zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
 	for _, name := range []string{"a", "hidden"} {
 		testServer := servertest.NewTestStreamableHTTPServer(newTestRefreshPromptsUpstream(t))
-		t.Cleanup(testServer.Close)
+		t.Cleanup(func() { closeHTTPFixture(testServer) })
+		stopUpstreamBeforeFixtureClose(t, um, name)
 		require.NoError(t, um.AddServerConfig(name, &config.ServerConfig{
 			Name: name, Protocol: "streamable-http", URL: testServer.URL, Enabled: true,
 		}))

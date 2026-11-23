@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
@@ -177,6 +178,21 @@ var adminConfigEventTypes = map[internalRuntime.EventType]struct{}{
 	// A credential lifecycle invalidation names identities and their
 	// profiles (Spec 115 FR-024): administrator-only, like the binding event.
 	internalRuntime.EventTypeCredentialsChanged: {},
+	// A browser sign-in request names a client and the label it reported
+	// (Spec 132): administrator-only, like the credential invalidation.
+	internalRuntime.EventTypeOAuthAuthorizationPending: {},
+	internalRuntime.EventTypeOAuthAuthorizationDecided: {},
+	// A skills catalog change carries per-state counts of every skill of a
+	// server, available or not (Spec 125 FR-019a): until agents are offered
+	// skills it is an administrator-only invalidation.
+	internalRuntime.EventTypeSkillsChanged: {},
+	// A skill's approval change names a skill that may be unapproved (Spec 125
+	// FR-019a); it also carries a server name, but a scoped caller must not
+	// learn of an unapproved skill even on a server it can see.
+	internalRuntime.EventTypeActivitySkillQuarantineChange: {},
+	// A skill access names the id its caller asked for, which may be a held
+	// skill: administrator-only for the same reason.
+	internalRuntime.EventTypeActivitySkillAccess: {},
 }
 
 // identityBearingEventTypes are the event types whose payload is ABOUT one
@@ -273,6 +289,17 @@ func eventVisibleToCaller(ctx context.Context, evt internalRuntime.Event) bool {
 	if _, adminOnly := adminConfigEventTypes[evt.Type]; adminOnly {
 		return false
 	}
+	// Spec 125 FR-019a: a review change caused by skills tells of held skills
+	// by its timing alone, even on a server the caller can see.
+	if isSkillsReviewChange(evt) && !skillVisibleTo(ctx) {
+		return false
+	}
+	if evt.Type == internalRuntime.EventTypeReviewChanged {
+		if batch, ok := evt.Payload["servers"]; ok {
+			names, _ := batch.([]string)
+			return slices.ContainsFunc(names, func(name string) bool { return canSeeReviewServer(ctx, name) })
+		}
+	}
 	named := false
 	for _, key := range eventServerIdentityFields {
 		name, ok := evt.Payload[key].(string)
@@ -291,6 +318,10 @@ func eventVisibleToCaller(ctx context.Context, evt internalRuntime.Event) bool {
 		return false
 	}
 	return true
+}
+
+func canSeeReviewServer(ctx context.Context, name string) bool {
+	return name != "" && canSeeServer(ctx, name)
 }
 
 // serversChangedDeliverable decides whether a coalesced servers.changed frame
@@ -421,7 +452,11 @@ func renderActivityAttributionForCaller(ctx context.Context, eventType internalR
 	if keep {
 		view := make(map[string]any, len(attr))
 		for k, v := range attr {
-			if k != "_token_prefix" {
+			// Keys that start with an underscore are internal to the
+			// activity service (the token prefix, the owning user id, the
+			// work-session id and the counting marks); no subscriber gets
+			// them.
+			if !strings.HasPrefix(k, "_") {
 				view[k] = v
 			}
 		}

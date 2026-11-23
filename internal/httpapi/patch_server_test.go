@@ -1233,3 +1233,41 @@ func TestHandlePatchServer_QuarantinedFieldMarksExplicit(t *testing.T) {
 		assert.True(t, got.Quarantined, "existing value is preserved")
 	})
 }
+
+// TestHandlePatchServer_ExposeSkills: expose_skills is reachable via PATCH
+// (explicit false applied) and omitting it preserves the existing pointer.
+func TestHandlePatchServer_ExposeSkills(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+
+	do := func(t *testing.T, existing *bool, body map[string]any) *mockPatchServerController {
+		t.Helper()
+		mockCtrl := &mockPatchServerController{
+			apiKey: "test-key",
+			existingServer: &config.ServerConfig{
+				Name: "github", Protocol: "stdio", Enabled: true, ExposeSkills: existing,
+			},
+		}
+		srv := NewServer(mockCtrl, logger, nil)
+		raw, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/github", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+		require.NotNil(t, mockCtrl.capturedUpdates)
+		return mockCtrl
+	}
+
+	t.Run("explicit false is applied", func(t *testing.T) {
+		c := do(t, nil, map[string]any{"expose_skills": false})
+		require.NotNil(t, c.capturedUpdates.ExposeSkills)
+		assert.False(t, *c.capturedUpdates.ExposeSkills)
+	})
+	t.Run("omitted preserves existing", func(t *testing.T) {
+		on := true
+		c := do(t, &on, map[string]any{"args": []string{"x"}})
+		require.NotNil(t, c.capturedUpdates.ExposeSkills)
+		assert.True(t, *c.capturedUpdates.ExposeSkills)
+	})
+}

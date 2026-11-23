@@ -20,10 +20,13 @@
           <div class="flex items-center gap-2 flex-wrap">
             <h3 class="font-bold">{{ headerTitle }}</h3>
             <span class="badge badge-sm" :class="severityBadgeClass" data-testid="error-panel-severity">
-              {{ diagnostic.severity }}
+              {{ reconnecting ? 'temporary' : diagnostic.severity }}
             </span>
             <code class="text-xs opacity-80" data-testid="error-panel-code">{{ diagnostic.code }}</code>
           </div>
+          <p v-if="reconnecting && reconnectingDetail" class="text-sm mt-1" data-testid="error-panel-reconnecting">
+            {{ reconnectingDetail }}
+          </p>
           <p v-if="diagnostic.user_message" class="text-sm mt-1" data-testid="error-panel-message">
             {{ diagnostic.user_message }}
           </p>
@@ -145,6 +148,12 @@ import { isOAuthDiagnosticCode } from '@/utils/health'
 interface Props {
   diagnostic: Diagnostic | null | undefined
   serverName: string
+  // GH #1929: the server failed on the network and mcpproxy is still retrying
+  // it on its own (health status "connecting"). The fault is shown as a
+  // temporary state, with the health detail that says when the next attempt
+  // is due, instead of a red "Server Error".
+  reconnecting?: boolean
+  reconnectingDetail?: string
 }
 
 const props = defineProps<Props>()
@@ -182,6 +191,7 @@ onBeforeUnmount(() => {
 })
 
 const severityAlertClass = computed(() => {
+  if (props.reconnecting) return 'alert-warning'
   const sev = props.diagnostic?.severity
   if (sev === 'error') return 'alert-error'
   if (sev === 'warn') return 'alert-warning'
@@ -189,6 +199,7 @@ const severityAlertClass = computed(() => {
 })
 
 const severityBadgeClass = computed(() => {
+  if (props.reconnecting) return 'badge-warning'
   const sev = props.diagnostic?.severity
   if (sev === 'error') return 'badge-error'
   if (sev === 'warn') return 'badge-warning'
@@ -196,6 +207,7 @@ const severityBadgeClass = computed(() => {
 })
 
 const headerTitle = computed(() => {
+  if (props.reconnecting) return 'Reconnecting automatically'
   const sev = props.diagnostic?.severity
   if (sev === 'error') return 'Server Error'
   if (sev === 'warn') return 'Server Warning'

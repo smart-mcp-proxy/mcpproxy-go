@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -67,6 +68,18 @@ func (c *Client) initialize(ctx context.Context) error {
 		// to stderr before dying. Non-timeout errors pass through unchanged.
 		if errors.Is(err, context.DeadlineExceeded) {
 			waited := time.Since(initStart).Round(100 * time.Millisecond)
+			// GH #1929: a remote upstream has no subprocess and no stderr, and
+			// the stdio hint below sent users after a "help banner" when their
+			// laptop had simply woken without a network. Name the host and
+			// keep the typed deadline in the chain, so the failure stays a
+			// network failure (IsNetworkError) for the retry policy.
+			if c.transportType != transportStdio {
+				// The wording deliberately avoids "did not respond to MCP
+				// initialize": the diagnostics classifier reads that sentence
+				// as the stdio handshake timeout, whatever the transport.
+				return fmt.Errorf("%s did not answer the MCP initialize request within %s (network unreachable or upstream not answering); will retry: %w",
+					c.initializeTimeoutTarget(), waited, err)
+			}
 			stderrBlock := c.formatRecentStderr()
 			if stderrBlock != "" {
 				return &childOutputError{msg: fmt.Sprintf("server did not respond to MCP initialize within %s (subprocess may have crashed or printed to stderr instead of stdout); recent stderr:\n%s", waited, stderrBlock)}
@@ -147,6 +160,18 @@ func (c *Client) initialize(ctx context.Context) error {
 // specific (it describes a local "server process" and its stderr); HTTP/SSE
 // transports share initialize() but have no subprocess, so a closed-transport
 // error there must keep its generic diagnostics. (Codex review on PR #606)
+// initializeTimeoutTarget names a remote upstream in an initialize-timeout
+// error: its host[:port] only, never the path, query or userinfo, which can
+// carry a credential (#1148).
+func (c *Client) initializeTimeoutTarget() string {
+	if c.config != nil {
+		if u, err := url.Parse(c.config.URL); err == nil && u.Host != "" {
+			return u.Host
+		}
+	}
+	return "upstream"
+}
+
 func shouldEnrichStdioPrematureExit(transportType string, err error) bool {
 	return transportType == transportStdio && isTransportClosedErr(err)
 }
@@ -211,16 +236,7 @@ func (c *Client) registerNotificationHandler() {
 		return
 	}
 
-	c.client.OnNotification(func(notification mcp.JSONRPCNotification) {
-		switch notification.Method {
-		case string(mcp.MethodNotificationToolsListChanged):
-			c.handleToolsListChangedNotification()
-		case string(mcp.MethodNotificationPromptsListChanged):
-			c.handlePromptsListChangedNotification()
-		default:
-			// Ignore all other notifications (logging, resources, progress, ...).
-		}
-	})
+	c.client.OnNotification(c.dispatchNotification)
 
 	// Log capability status after registration
 	if c.serverInfo != nil && c.serverInfo.Capabilities.Tools != nil && c.serverInfo.Capabilities.Tools.ListChanged {
@@ -229,6 +245,20 @@ func (c *Client) registerNotificationHandler() {
 	} else {
 		c.logger.Debug("Server does not advertise tool change notifications support",
 			zap.String("server", c.config.Name))
+	}
+}
+
+// dispatchNotification routes one upstream notification. mcp-go calls it for
+// notifications on a request's response stream; the standalone GET stream of a
+// streamable-HTTP upstream (GH #1910, list_changed_stream.go) calls it too.
+func (c *Client) dispatchNotification(notification mcp.JSONRPCNotification) {
+	switch notification.Method {
+	case string(mcp.MethodNotificationToolsListChanged):
+		c.handleToolsListChangedNotification()
+	case string(mcp.MethodNotificationPromptsListChanged):
+		c.handlePromptsListChangedNotification()
+	default:
+		// Ignore all other notifications (logging, resources, progress, ...).
 	}
 }
 
@@ -312,6 +342,10 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 
 	c.logger.Info("Disconnecting from upstream MCP server",
 		zap.Bool("was_connected", wasConnected))
+
+	// GH #1910: end the standalone GET stream before the transport closes.
+	// c.mu is not held here, so the wait cannot block the listener's dispatch.
+	c.stopListChangedStream(true)
 
 	if c.upstreamLogger != nil {
 		c.upstreamLogger.Info("Disconnecting from server",

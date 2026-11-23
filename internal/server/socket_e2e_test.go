@@ -76,8 +76,14 @@ func TestE2E_TrayToCore_UnixSocket(t *testing.T) {
 
 	// Start server in background
 	ctx, cancel := context.WithCancel(context.Background())
-	// Note: Not using defer cancel() to avoid race condition panic during shutdown
-	_ = cancel
+	// Shut the server down before the deferred socketE2EMutex unlock (defers
+	// run last-in first-out), so its upstream manager's network-recovery
+	// watcher does not outlive the test (TestMain leak guard). Shutdown runs
+	// first, so the context-cancel shutdown path finds it done and skips.
+	defer func() {
+		_ = srv.Shutdown()
+		cancel()
+	}()
 
 	serverReady := make(chan error, 1)
 	go func() {
@@ -214,13 +220,10 @@ func TestE2E_TrayToCore_UnixSocket(t *testing.T) {
 		assert.Contains(t, line, "SSE connection established")
 	})
 
-	// Cleanup
-	// Note: Server shutdown is handled by avoiding cancel() call above
-	// The test framework will clean up when the test exits.
 	_ = serverReady
 
 	// Socket file will be cleaned up when tmpDir is removed by test framework or system cleanup
-	t.Log("Test completed successfully - server shutdown handled by test framework")
+	t.Log("Test completed successfully")
 }
 
 // TestEndToEnd_DualListener_Concurrent tests concurrent requests over both TCP and socket
@@ -262,8 +265,14 @@ func TestE2E_DualListener_Concurrent(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	// Note: Not using defer cancel() to avoid race condition panic during shutdown
-	_ = cancel
+	// Shut the server down before the deferred socketE2EMutex unlock (defers
+	// run last-in first-out), so its upstream manager's network-recovery
+	// watcher does not outlive the test (TestMain leak guard). Shutdown runs
+	// first, so the context-cancel shutdown path finds it done and skips.
+	defer func() {
+		_ = srv.Shutdown()
+		cancel()
+	}()
 
 	go func() {
 		_ = srv.Start(ctx)
@@ -390,8 +399,14 @@ func TestE2E_SocketPermissions(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	// Note: Not using defer cancel() to avoid race condition panic during shutdown
-	_ = cancel
+	// Shut the server down before the deferred socketE2EMutex unlock (defers
+	// run last-in first-out), so its upstream manager's network-recovery
+	// watcher does not outlive the test (TestMain leak guard). Shutdown runs
+	// first, so the context-cancel shutdown path finds it done and skips.
+	defer func() {
+		_ = srv.Shutdown()
+		cancel()
+	}()
 
 	go func() {
 		_ = srv.Start(ctx)

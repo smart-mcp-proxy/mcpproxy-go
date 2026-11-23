@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"go.uber.org/zap"
@@ -68,7 +67,7 @@ func (c *Client) sseAuthStrategies() []authStrategy {
 // an oauth block as decisive over a static Authorization header).
 //
 // MCPPROXY_DISABLE_OAUTH keeps the historical chain: the ladder never consulted
-// oauth.ShouldUseOAuth, so the fixture gate has to be honoured here too.
+// oauth.ManualLoginApplicable, so the fixture gate has to be honoured here too.
 func (c *Client) oauthRequiredByConfig() bool {
 	if os.Getenv("MCPPROXY_DISABLE_OAUTH") == "true" {
 		return false
@@ -168,6 +167,9 @@ func (c *Client) runAuthStrategies(ctx context.Context, authStrategies []authStr
 
 		// Register notification handler for tools/list_changed
 		c.registerNotificationHandler()
+		// GH #1910: a streamable-HTTP upstream delivers that notification
+		// only on a standalone GET stream; open one if it advertises it.
+		c.startListChangedStream(c.client, c.serverInfo)
 
 		return nil
 	}
@@ -358,33 +360,9 @@ func (c *Client) isConfigError(err error) bool {
 // isDeprecatedEndpointError checks if error indicates a deprecated/removed endpoint (HTTP 410 Gone)
 // This helps detect when an MCP server has migrated to a new endpoint URL
 func (c *Client) isDeprecatedEndpointError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	// Check for transport.ErrEndpointDeprecated type first
-	if transport.IsEndpointDeprecatedError(err) {
-		return true
-	}
-
-	errStr := strings.ToLower(err.Error())
-	deprecationIndicators := []string{
-		"410",                            // HTTP 410 Gone
-		"gone",                           // Status text
-		"deprecated",                     // Common migration message
-		"removed",                        // Endpoint removed
-		"no longer supported",            // Common deprecation message
-		"use the http transport",         // Sentry-specific migration hint
-		"sse transport has been removed", // Sentry-specific error
-	}
-
-	for _, indicator := range deprecationIndicators {
-		if strings.Contains(errStr, indicator) {
-			return true
-		}
-	}
-
-	return false
+	// GH #1929: one classifier for both layers; a socket failure naming an
+	// address that contains "410" is not a 410 Gone.
+	return transport.LooksLikeDeprecatedEndpoint(err)
 }
 
 // isServerSideError checks if error indicates a server-side error (HTTP 5xx).

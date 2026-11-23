@@ -17,7 +17,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 // Spec 108-h T088: the tool-surface golden for `profiles`. The three existing
@@ -45,7 +44,7 @@ func newToolsListProxy(t *testing.T, configure func(*config.Config)) *MCPProxySe
 	if configure != nil {
 		configure(cfg)
 	}
-	um := upstream.NewManager(logger, cfg, nil, secret.NewTestWildcardResolver(), nil)
+	um := newTestUpstreamManager(t, logger, cfg, nil, secret.NewTestWildcardResolver(), nil)
 	cm, err := cache.NewManager(sm.GetDB(), logger)
 	require.NoError(t, err)
 	t.Cleanup(func() { cm.Close() })

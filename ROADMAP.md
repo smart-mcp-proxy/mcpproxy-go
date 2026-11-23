@@ -50,6 +50,7 @@ graph LR
   tool_graph["Tool co-occurrence graph (experimental,…"]
   telemetry_identity["Telemetry identity & data quality (mach…"]
   telemetry_v7_churn["Telemetry v7: honest funnel + churn ins…"]
+  sso["Spec 107 server edition SSO front door…"]
   profiles_v3["Spec 108 profiles v3: scoped profiles,…"]
   upstream_resilience["Spec 113 upstream resilience: OAuth ref…"]
   pending_call_outcome["Spec 114 typed pending-call outcome + c…"]
@@ -57,6 +58,14 @@ graph LR
   config_commit_consistency["Spec 116 config commit consistency: one…"]
   review_bound_approvals["Spec 117 review-bound approvals: durabl…"]
   quarantine_approval_pilot["Quarantine/approval testing pilot: inde…"]
+  auto_rescan_on_change["Spec 118 automatic rescan after a tool-…"]
+  pin_visibility_boundary["Spec 118 profile pin as the visibility…"]
+  scan_default_trust["Spec 119 scan is the default trust mode…"]
+  scan_structural_gate["Spec 120 structural change gate in fron…"]
+  skills_over_mcp["Spec 125 Skills over MCP: catalog, appr…"]
+  profile_argument_rules["Spec 127 argument rules in profiles (de…"]
+  server_list_outcomes["Spec 128 server outcomes on retrieve_to…"]
+  per_user_upstream_credentials["Spec 129 per-user upstream credentials…"]
 
   scanner_v2 --> sandbox_isolation
   ux_audit --> action_log_transparency
@@ -77,24 +86,34 @@ graph LR
   profiles_v3 --> mcp_credential_lifecycle
   config_commit_consistency --> review_bound_approvals
   review_bound_approvals --> quarantine_approval_pilot
+  review_bound_approvals --> auto_rescan_on_change
+  profiles_v3 --> pin_visibility_boundary
+  auto_rescan_on_change --> scan_default_trust
+  scan_default_trust --> scan_structural_gate
+  scan_structural_gate --> skills_over_mcp
+  profiles_v3 --> profile_argument_rules
+  pin_visibility_boundary --> server_list_outcomes
+  sso --> per_user_upstream_credentials
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
   classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class sandbox_isolation,scanner_v2,analytics_dashboard,scanner_simplification,schema_deferred,agent_scope_hardening,upstream_resilience,mcp_credential_lifecycle,config_commit_consistency,review_bound_approvals,quarantine_approval_pilot done;
-  class ux_audit,action_log_transparency,tpa_db,token_bench,telemetry_identity,telemetry_v7_churn,profiles_v3 in_progress;
+  class sandbox_isolation,scanner_v2,analytics_dashboard,scanner_simplification,schema_deferred,agent_scope_hardening,sso,upstream_resilience,mcp_credential_lifecycle,config_commit_consistency,review_bound_approvals,quarantine_approval_pilot,auto_rescan_on_change,pin_visibility_boundary,scan_default_trust,scan_structural_gate done;
+  class ux_audit,action_log_transparency,tpa_db,token_bench,telemetry_identity,telemetry_v7_churn,profiles_v3,skills_over_mcp in_progress;
   class pending_call_outcome in_review;
-  class remote_access_tunnel,auto_routing_mode,tool_graph todo;
+  class remote_access_tunnel,auto_routing_mode,tool_graph,profile_argument_rules,server_list_outcomes,per_user_upstream_credentials todo;
 ```
 
-**Independent epics** (16) — no cross-epic prerequisites; each stands alone:
+**Independent epics** (19) — no cross-epic prerequisites; each stands alone:
 
 - 🔵 **Release qualification gate (auto-QA matrix blocks the tag)** — In progress · P0
 - 🔵 **MCP protocol upgrade to 2026-07-28 revision** — In progress · P1
 - 🔵 **Spec 109 navigation, scope filters and cross-surface UX consistency** — In progress · P1
+- 🔵 **Spec 124 work sessions and the failure timeline** — In progress · P1
 - 🔵 **Planning/docs truth automation** — In progress · P2
 - 🔵 **Discovery-quality eval harness (Spec 065 second half)** — In progress · P3
+- 🟡 **Spec 121 install surfaces: registry packages, winget/scoop, agent install prompt, install-channel telemetry (E7)** — In review · P2
 - ⚪ **Windows native tray app** — Todo · P2
 - ⚫ **Server marketplace** — Todo · P3 · parked
 - ⚫ **Audit SIEM integration** — Todo · P3 · parked
@@ -104,8 +123,9 @@ graph LR
 - 🟢 **Upgrade awareness & guided update** — Done · P0
 - 🟢 **Connect step trust: preview, visible backup, one-click undo** — Done · P0
 - 🟢 **Registries — easier search + add-server** — Done · P1
+- 🟢 **Spec 122 SkillSpector-informed checks for the built-in tool scanner** — Done · P1
+- 🟢 **Spec 123 encrypt upstream OAuth tokens at rest (opt-in key, doctor section, auth tokens commands)** — Done · P1
 - 🟢 **Tray↔core decoupling: socket/REST API only, no config-file reads** — Done · P2
-- 🟢 **Spec 107 server edition SSO front door hardened for real IdPs** — Done · P2
 
 ## Epic details
 
@@ -438,6 +458,77 @@ graph LR
 </details>
 
 <details>
+<summary>🔵 Spec 124 work sessions and the failure timeline — In progress · P1</summary>
+
+> PR-1 shipped 2026-11-19; PR-2 CLI and PR-3 Web UI remain. tasks.md boxes (0/74) are not yet synced.
+
+Spec: [124-session-failure-timeline](./specs/124-session-failure-timeline/)
+
+```mermaid
+graph LR
+  session_failure_timeline_record["PR-1: record and keep (work sessions, attempt…"]
+  session_failure_timeline_cli["PR-2: CLI commands for work sessions and the…"]
+  session_failure_timeline_web["PR-3: Web UI session panel and timeline (unit…"]
+
+  session_failure_timeline_cli --> session_failure_timeline_web
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class session_failure_timeline_record done;
+  class session_failure_timeline_cli,session_failure_timeline_web todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| PR-1: record and keep (work sessions, attempt roles, upstream_event rows, session-aware retention, REST doors) | 🟢 Done | #1918 |
+| PR-2: CLI commands for work sessions and the timeline (cliclient methods, docs/cli/activity-commands.md) | ⚪ Todo | — |
+| PR-3: Web UI session panel and timeline (unit tests, Playwright sweep, docs/web-ui/) | ⚪ Todo | — |
+
+</details>
+
+<details>
+<summary>🔵 Spec 125 Skills over MCP: catalog, approval gate, read-only agent tools — In progress · P1</summary>
+
+> The catalog, approval gate and agent tools have shipped. Native discovery, the Web Skills tab and held-skill review are in review.
+
+Spec: [125-skills-over-mcp](./specs/125-skills-over-mcp/)
+
+```mermaid
+graph LR
+  skills_over_mcp_spec["Spec 125 Skills over MCP"]
+  skills_over_mcp_catalog["PR-1: administrator-only skills catalog (skil…"]
+  skills_over_mcp_gate["PR-2: hold, scan, approve and block upstream…"]
+  skills_over_mcp_agent_tools["PR-3: retrieve_skills / load_skill / read_ski…"]
+  skills_over_mcp_web["Web Skills tab for reviewing and browsing ski…"]
+  skills_over_mcp_native["Native Skills discovery and reads on single-s…"]
+  skills_over_mcp_review_queue["Review held skills from Home, the review queu…"]
+
+  skills_over_mcp_spec --> skills_over_mcp_catalog
+  skills_over_mcp_catalog --> skills_over_mcp_gate
+  skills_over_mcp_gate --> skills_over_mcp_agent_tools
+  skills_over_mcp_agent_tools --> skills_over_mcp_web
+  skills_over_mcp_agent_tools --> skills_over_mcp_native
+  skills_over_mcp_web --> skills_over_mcp_review_queue
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
+  class skills_over_mcp_spec,skills_over_mcp_catalog,skills_over_mcp_gate,skills_over_mcp_agent_tools done;
+  class skills_over_mcp_web,skills_over_mcp_native,skills_over_mcp_review_queue in_review;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Spec 125 Skills over MCP | 🟢 Done | #1919 |
+| PR-1: administrator-only skills catalog (skills/list, skills/get, bbolt buckets, REST + CLI) | 🟢 Done | #1921 |
+| PR-2: hold, scan, approve and block upstream skills | 🟢 Done | #1923 |
+| PR-3: retrieve_skills / load_skill / read_skill_file for agents | 🟢 Done | #1928 |
+| Web Skills tab for reviewing and browsing skills | 🟡 In review | #1950 |
+| Native Skills discovery and reads on single-server endpoints | 🟡 In review | #1949 |
+| Review held skills from Home, the review queue and the macOS tray | 🟡 In review | #1951 |
+
+</details>
+
+<details>
 <summary>🔵 Planning/docs truth automation — In progress · P2</summary>
 
 > Automate the consistency checks this very audit had to do by hand: roadmap vs GitHub PR state, tasks.md updates on implementation PRs, volatile CLAUDE.md/README facts, and quickstart contract tests.
@@ -502,6 +593,15 @@ PR: #1536
 </details>
 
 <details>
+<summary>🟡 Spec 121 install surfaces: registry packages, winget/scoop, agent install prompt, install-channel telemetry (E7) — In review · P2</summary>
+
+> PR #1711 open since 2026-10-25; its specs/121-install-surfaces folder lives on the PR branch only (no spec: link until it merges).
+
+PR: #1711
+
+</details>
+
+<details>
 <summary>⚪ Auto routing mode: budget-fitted tool surface per session (spec 104) — Todo · P1</summary>
 
 > routing_mode: auto measures, per session and on the catalog that session will actually see, the three candidate surfaces (direct full, direct deferred, retrieve compact — the Spec 103 bench cell names) with the real tokenizer and serves the richest rung under a 12,000-token budget, so the small-fleet developer gets the whole menu with schemas and the 1,000-tool fleet stays on search — the current default is strictly worse than no proxy for the first population. Decision record (rung, three measurements, budget, counts, scope label, reason, time) surfaces in the routing API, doctor, tray, Web UI and telemetry; hysteresis so a 1% catalog change never flips a live session. Spec: 14 astra rounds, ready-for-plan 2026-09-07; its fixed-surface corrections were split out as Spec 105 (FR-016 states the invariant 105 makes true), hence the hard dependency. P1 = US1-4 (rung selection, session stability, scoped measurement, routing API + doctor); P2 = US5-6 (hysteresis reporting, tray/Web UI rendering, telemetry).
@@ -523,6 +623,72 @@ graph LR
 | --- | --- | --- |
 | P1 (US1-4): per-session measurement of the three candidates on the scoped catalog, rung selection under the budget, stable sessions, decision record in routing API + doctor | ⚪ Todo | — |
 | P2 (US5-6): hysteresis reporting on catalog change, tray + Web UI rendering of the decision, telemetry counters | ⚪ Todo | — |
+
+</details>
+
+<details>
+<summary>⚪ Spec 127 argument rules in profiles (deny a value, narrow values, path prefix, forbid) — Todo · P1</summary>
+
+> Spec-only PR. Idea 1 of the 2026-11-19 LiteLLM MCP Gateway comparison (LiteLLM allowed_params).
+
+Spec: [127-profile-argument-rules](./specs/127-profile-argument-rules/)
+
+```mermaid
+graph LR
+  profile_argument_rules_spec["Agree on the specification"]
+
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  class profile_argument_rules_spec done;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Agree on the specification | 🟢 Done | #1943 |
+
+</details>
+
+<details>
+<summary>⚪ Spec 128 server outcomes on retrieve_tools and tools/list (unavailable servers in reach, fixed vocabulary) — Todo · P1</summary>
+
+> Spec-only PR. Idea 3 of the 2026-11-19 LiteLLM MCP Gateway comparison.
+
+Spec: [128-server-list-outcomes](./specs/128-server-list-outcomes/)
+
+```mermaid
+graph LR
+  server_list_outcomes_spec["Agree on the specification"]
+
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  class server_list_outcomes_spec done;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Agree on the specification | 🟢 Done | #1944 |
+
+</details>
+
+<details>
+<summary>⚪ Spec 129 per-user upstream credentials (server edition): user slots, RFC 8693 / Entra OBO, injected oauth_connect — Todo · P1</summary>
+
+> Spec-only PR. Idea 5 of the 2026-11-19 LiteLLM MCP Gateway comparison; the Spec 107 FR-034 Phase 2 trigger (Gcore central-proxy request). Builds on the Spec 112 per-request header seam.
+
+Spec: [129-per-user-upstream-credentials](./specs/129-per-user-upstream-credentials/)
+
+```mermaid
+graph LR
+  per_user_upstream_credentials_spec["Agree on the specification"]
+
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  class per_user_upstream_credentials_spec done;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Agree on the specification | 🟢 Done | #1945 |
 
 </details>
 
@@ -723,6 +889,33 @@ Spec: [116-config-commit-consistency](./specs/116-config-commit-consistency/) ·
 > Shipped 2026-10-12..10-13 (PR-1..3).
 
 Spec: [117-review-bound-approvals](./specs/117-review-bound-approvals/) · PR: #1604 #1605 #1609
+
+</details>
+
+<details>
+<summary>🟢 Spec 118 profile pin as the visibility boundary for agent tokens on every REST/SSE read door — Done · P0</summary>
+
+> Shipped 2026-10-19..11-03: #1684 GET /servers held to the pin, #1688 spec, #1821 pin intersected into the shared enumeration predicate (AuthContext.BoundToPinReach). Shares number 118 with auto-rescan-on-change.
+
+Spec: [118-pin-visibility-boundary](./specs/118-pin-visibility-boundary/) · PR: #1684 #1688 #1821
+
+</details>
+
+<details>
+<summary>🟢 Spec 119 scan is the default trust mode; a clean-scanned contract change auto-approves — Done · P0</summary>
+
+> Shipped 2026-10-25. Manual trust mode still holds every change.
+
+Spec: [119-scan-default-trust](./specs/119-scan-default-trust/) · PR: #1740
+
+</details>
+
+<details>
+<summary>🟢 Spec 120 structural change gate in front of the scan-mode approval — Done · P0</summary>
+
+> Shipped 2026-10-26. Hint changes, schema widening, output-schema changes and hash-equal dispatch-tier moves hold whatever the verdict.
+
+Spec: [120-scan-structural-gate](./specs/120-scan-structural-gate/) · PR: #1781
 
 </details>
 
@@ -974,6 +1167,33 @@ PR: #1619 #1631 #1634
 </details>
 
 <details>
+<summary>🟢 Spec 118 automatic rescan after a tool-definition change (clean verdict recorded as hold evidence) — Done · P1</summary>
+
+> Shipped 2026-10-20. Switch security.auto_rescan_on_change (default on) AND auto_baseline_scan. No tasks.md (spec-only folder).
+
+Spec: [118-auto-rescan-on-change](./specs/118-auto-rescan-on-change/) · PR: #1689
+
+</details>
+
+<details>
+<summary>🟢 Spec 122 SkillSpector-informed checks for the built-in tool scanner — Done · P1</summary>
+
+> Shipped 2026-11-02: refusal.directive, padding.hidden, exfil.composite, payload.reconstructed, direct-prohibition cap. Review-gate corpus detect_review_corpus_v1.json.
+
+Spec: [122-scanner-skillspector-checks](./specs/122-scanner-skillspector-checks/) · PR: #1818
+
+</details>
+
+<details>
+<summary>🟢 Spec 123 encrypt upstream OAuth tokens at rest (opt-in key, doctor section, auth tokens commands) — Done · P1</summary>
+
+> Shipped 2026-11-12 (spec, storage-location doc fix, PR-2 sealing, PR-3 operator surfaces). tasks.md boxes (0/56) are unticked but the work merged; a spec-gardener pass should sync them.
+
+Spec: [123-oauth-token-encryption](./specs/123-oauth-token-encryption/) · PR: #1886 #1887 #1888 #1891
+
+</details>
+
+<details>
 <summary>🟢 Tray↔core decoupling: socket/REST API only, no config-file reads — Done · P2</summary>
 
 > Architecture rule (CLAUDE.md): the tray holds no state and talks to the core only via socket/REST + SSE. 2026-07-11 source-of-truth re-audit + fix: Swift tray was already clean (MCPProxyApp.swift opens the config in an external editor, never parses it); the Go tray's update-check gate was already reworked to core-API gating (#805). The last violation — config.LoadFromFile in the Go tray's OAuth login path, live since ff03db92 (2026-05-18, #477) — turned out to be FUNCTIONALLY DEAD: the loaded config fed only two debug log lines, while the actual trigger was already the core-API TriggerOAuthLogin. Deleted rather than ported to REST. Bootstrap reads (socket path, config PATH without parsing, CA cert) are allowed and remain. Now enforced by a test so the rule cannot silently rot.
@@ -1041,10 +1261,16 @@ graph LR
 | MCP protocol upgrade to 2026-07-28 revision | In progress | P1 | 40/81 (49%) | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Spec 108 profiles v3: scoped profiles, client binding, scope-aware observability | In progress | P1 | 194/195 (99%) | [108-profiles-v3](./specs/108-profiles-v3/) |  |
 | Spec 109 navigation, scope filters and cross-surface UX consistency | In progress | P1 | 257/258 (100%) | [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/) |  |
+| Spec 124 work sessions and the failure timeline | In progress | P1 | 40/74 (54%) | [124-session-failure-timeline](./specs/124-session-failure-timeline/) |  |
+| Spec 125 Skills over MCP: catalog, approval gate, read-only agent tools | In progress | P1 | 51/51 (100%) | [125-skills-over-mcp](./specs/125-skills-over-mcp/) |  |
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 | Spec 114 typed pending-call outcome + call correlation for long-running stdio tool calls | In review | P2 | — |  | #1536 |
+| Spec 121 install surfaces: registry packages, winget/scoop, agent install prompt, install-channel telemetry (E7) | In review | P2 | — |  | #1711 |
 | Auto routing mode: budget-fitted tool surface per session (spec 104) | Todo | P1 | — | [104-auto-routing-mode](./specs/104-auto-routing-mode/) |  |
+| Spec 127 argument rules in profiles (deny a value, narrow values, path prefix, forbid) | Todo | P1 | — | [127-profile-argument-rules](./specs/127-profile-argument-rules/) |  |
+| Spec 128 server outcomes on retrieve_tools and tools/list (unavailable servers in reach, fixed vocabulary) | Todo | P1 | — | [128-server-list-outcomes](./specs/128-server-list-outcomes/) |  |
+| Spec 129 per-user upstream credentials (server edition): user slots, RFC 8693 / Entra OBO, injected oauth_connect | Todo | P1 | — | [129-per-user-upstream-credentials](./specs/129-per-user-upstream-credentials/) |  |
 | Windows native tray app `MCP-43` | Todo | P2 | — |  |  |
 | Remote access tunnel (feature-flagged MVP, spec 089) | Todo | P2 | — | [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) |  |
 | Tool co-occurrence graph (experimental, feature-flagged) | Todo | P2 | — |  |  |
@@ -1057,6 +1283,9 @@ graph LR
 | Connect step trust: preview, visible backup, one-click undo | Done | P0 | — | [078-connect-trust-preview](./specs/078-connect-trust-preview/) |  |
 | Spec 116 config commit consistency: one commit section, atomic removal, upstream retirement | Done | P0 | 81/124 (65%) | [116-config-commit-consistency](./specs/116-config-commit-consistency/) | #1590 #1600 #1608 #1612 #1621 |
 | Spec 117 review-bound approvals: durable baselines, hash-bound approvals, ordered tool inventories | Done | P0 | 46/50 (92%) | [117-review-bound-approvals](./specs/117-review-bound-approvals/) | #1604 #1605 #1609 |
+| Spec 118 profile pin as the visibility boundary for agent tokens on every REST/SSE read door | Done | P0 | — | [118-pin-visibility-boundary](./specs/118-pin-visibility-boundary/) | #1684 #1688 #1821 |
+| Spec 119 scan is the default trust mode; a clean-scanned contract change auto-approves | Done | P0 | — | [119-scan-default-trust](./specs/119-scan-default-trust/) | #1740 |
+| Spec 120 structural change gate in front of the scan-mode approval | Done | P0 | — | [120-scan-structural-gate](./specs/120-scan-structural-gate/) | #1781 |
 | Non-Docker sandbox isolation (Landlock) `MCP-34` | Done | P1 | — |  |  |
 | Spec 076 deterministic offline tool-scanner `MCP-3574` | Done | P1 | 22/24 (92%) | [076-deterministic-tool-scanner](./specs/076-deterministic-tool-scanner/) |  |
 | Analytics dashboard as default page | Done | P1 | 25/26 (96%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
@@ -1067,6 +1296,9 @@ graph LR
 | Spec 113 upstream resilience: OAuth refresh, discovery, call-error taxonomy, session re-init | Done | P1 | 0/100 (0%) | [113-upstream-resilience](./specs/113-upstream-resilience/) | #1495 #1498 #1499 #1501 #1502 #1504 #1510 #1650 |
 | Spec 115 admin MCP credentials tool: client credentials + agent token lifecycle | Done | P1 | 86/87 (99%) | [115-mcp-credential-lifecycle](./specs/115-mcp-credential-lifecycle/) | #1557 |
 | Quarantine/approval testing pilot: independent policy model, scenario inventory, mutation gate | Done | P1 | — |  | #1619 #1631 #1634 |
+| Spec 118 automatic rescan after a tool-definition change (clean verdict recorded as hold evidence) | Done | P1 | — | [118-auto-rescan-on-change](./specs/118-auto-rescan-on-change/) | #1689 |
+| Spec 122 SkillSpector-informed checks for the built-in tool scanner | Done | P1 | 31/31 (100%) | [122-scanner-skillspector-checks](./specs/122-scanner-skillspector-checks/) | #1818 |
+| Spec 123 encrypt upstream OAuth tokens at rest (opt-in key, doctor section, auth tokens commands) | Done | P1 | 0/56 (0%) | [123-oauth-token-encryption](./specs/123-oauth-token-encryption/) | #1886 #1887 #1888 #1891 |
 | Tray↔core decoupling: socket/REST API only, no config-file reads | Done | P2 | — |  |  |
 | Spec 107 server edition SSO front door hardened for real IdPs | Done | P2 | 126/126 (100%) | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) |  |
 
@@ -1205,3 +1437,12 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [119-scan-default-trust](./specs/119-scan-default-trust/) | — | — |
 | [120-scan-structural-gate](./specs/120-scan-structural-gate/) | — | — |
 | [122-scanner-skillspector-checks](./specs/122-scanner-skillspector-checks/) | `shipped` | 31/31 (100%) |
+| [123-oauth-token-encryption](./specs/123-oauth-token-encryption/) | `drafted` | 0/56 (0%) |
+| [124-session-failure-timeline](./specs/124-session-failure-timeline/) | `in-flight` | 40/74 (54%) |
+| [125-skills-over-mcp](./specs/125-skills-over-mcp/) | `shipped` | 51/51 (100%) |
+| [127-profile-argument-rules](./specs/127-profile-argument-rules/) | — | — |
+| [128-server-list-outcomes](./specs/128-server-list-outcomes/) | — | — |
+| [129-per-user-upstream-credentials](./specs/129-per-user-upstream-credentials/) | — | — |
+| [130-skills-review-ux](./specs/130-skills-review-ux/) | `shipped` | 9/9 (100%) |
+| [131-skills-card-ux](./specs/131-skills-card-ux/) | `shipped` | 7/7 (100%) |
+| [132-client-oauth-login](./specs/132-client-oauth-login/) | `in-flight` | 8/72 (11%) |

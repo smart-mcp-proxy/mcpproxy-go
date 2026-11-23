@@ -44,7 +44,13 @@ func NewApplicationContext(cfg *config.Config, logConfig *config.LogConfig, logg
 	}
 
 	// Initialize storage manager
-	storageManager, err := storage.NewManager(cfg.DataDir, logger.Sugar())
+	// Spec 123: the OAuth token key is resolved before config.db is opened;
+	// a resolution error is a *config.StartupError (exit 4).
+	oauthKey, _, err := config.ResolveOAuthTokenKey(cfg)
+	if err != nil {
+		return nil, err
+	}
+	storageManager, err := storage.NewManager(cfg.DataDir, logger.Sugar(), storage.WithOAuthTokenKey(oauthKey))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage manager: %w", err)
 	}

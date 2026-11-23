@@ -12,7 +12,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 // TestCallToolVariantSchemaAdvertisesArgsObject verifies that the
@@ -55,7 +54,7 @@ func TestCallToolVariantSchemaAdvertisesArgsObject(t *testing.T) {
 // path actually works, not just the schema.
 func TestHandleCallToolVariantAcceptsArgsObject(t *testing.T) {
 	mockProxy := &MCPProxyServer{
-		upstreamManager: upstream.NewManager(zap.NewNop(), config.DefaultConfig(), nil, secret.NewTestWildcardResolver(), nil),
+		upstreamManager: newTestUpstreamManager(t, zap.NewNop(), config.DefaultConfig(), nil, secret.NewTestWildcardResolver(), nil),
 		logger:          zap.NewNop(),
 		config:          &config.Config{},
 	}
@@ -96,7 +95,7 @@ func TestHandleCallToolVariantAcceptsArgsObject(t *testing.T) {
 // precedence. This preserves existing behavior so migration is gradual.
 func TestHandleCallToolVariantArgsJSONWinsWhenBothProvided(t *testing.T) {
 	mockProxy := &MCPProxyServer{
-		upstreamManager: upstream.NewManager(zap.NewNop(), config.DefaultConfig(), nil, secret.NewTestWildcardResolver(), nil),
+		upstreamManager: newTestUpstreamManager(t, zap.NewNop(), config.DefaultConfig(), nil, secret.NewTestWildcardResolver(), nil),
 		logger:          zap.NewNop(),
 		config:          &config.Config{},
 	}

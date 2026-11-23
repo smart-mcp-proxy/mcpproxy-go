@@ -34,6 +34,19 @@ const (
 	ActivityTypeConfigChange ActivityType = "config_change"
 	// ActivityTypeToolQuarantineChange represents a tool-level quarantine state change (Spec 032)
 	ActivityTypeToolQuarantineChange ActivityType = "tool_quarantine_change"
+	// ActivityTypeSkillQuarantineChange represents a skill approval state change
+	// (Spec 125). Metadata: action, skill, skill_uri, previous_hash,
+	// current_hash, reason, approved_by, actor_kind, actor_name, surface.
+	// Administrator-only: it names skills that may not be approved.
+	ActivityTypeSkillQuarantineChange ActivityType = "skill_quarantine_change"
+	// ActivityTypeSkillAccess represents one agent search, load or file read of
+	// a skill (Spec 125 FR-024). Metadata: action (search|load|read), tool,
+	// outcome (success|not_found|binary|damaged|stale_version), skill, skill_id,
+	// file, hash, offset, bytes, total_bytes, results, matches. The skill text is
+	// never stored. Administrator-only: a row names the id a caller asked for,
+	// which may be a skill that is held now or was held then, even on a server
+	// a scoped reader may see (FR-019a).
+	ActivityTypeSkillAccess ActivityType = "skill_access"
 	// ActivityTypeSecurityScan represents a security scan event (Spec 039)
 	ActivityTypeSecurityScan ActivityType = "security_scan"
 	// ActivityTypeCredentialBroker represents a per-user credential brokering
@@ -60,6 +73,11 @@ const (
 	// actor_kind, actor_name, surface, change, profile, previous_profile,
 	// client_id, token_name, diff.
 	ActivityTypeProfileChange ActivityType = "profile_change"
+	// ActivityTypeUpstreamEvent records a change in an upstream server's
+	// availability: connection lost or restored, process exited, OAuth refresh
+	// failed, login required (Spec 124 FR-020). It carries the server, the
+	// kind, the diagnostic code and its fixed message, never a raw error.
+	ActivityTypeUpstreamEvent ActivityType = "upstream_event"
 )
 
 // ValidActivityTypes is the list of all valid activity types for filtering (Spec 024)
@@ -73,11 +91,22 @@ var ValidActivityTypes = []string{
 	string(ActivityTypeInternalToolCall),
 	string(ActivityTypeConfigChange),
 	string(ActivityTypeToolQuarantineChange),
+	string(ActivityTypeSkillQuarantineChange),
+	string(ActivityTypeSkillAccess),
 	string(ActivityTypeSecurityScan),
 	string(ActivityTypeCredentialBroker),
 	string(ActivityTypePreflight),
 	string(ActivityTypePromptGet),
 	string(ActivityTypeProfileChange),
+	string(ActivityTypeUpstreamEvent),
+}
+
+// IsAdminOnlyActivityType reports whether rows of the type may be read by
+// administrators only. A skill approval row names a skill that may be
+// unapproved, even on a server a scoped caller may see, and a skill access row
+// names whatever id its caller asked for (Spec 125 FR-019a).
+func IsAdminOnlyActivityType(t ActivityType) bool {
+	return t == ActivityTypeSkillQuarantineChange || t == ActivityTypeSkillAccess
 }
 
 // Activity status vocabulary. Activity status is a CLOSED vocabulary: every
@@ -249,6 +278,29 @@ type ActivityRecord struct {
 	// unattributed.
 	WorkSessionID string `json:"work_session_id,omitempty"`
 
+	// RunName is the validated X-MCPProxy-Run label the caller sent with the
+	// request (Spec 124 FR-003). A label only, never a credential.
+	RunName string `json:"run_name,omitempty"`
+	// Surface is the REST client surface of a request that had no MCP
+	// connection (webui, tray, cli, rest). It names the session's origin in
+	// the work-session summary; Source stays the coarse "api".
+	Surface string `json:"surface,omitempty"`
+
+	// ProjectName is the display name of the project the client works in (the
+	// basename of its workspace root), when the client disclosed one. Never
+	// the path (Spec 124 FR-040).
+	ProjectName string `json:"project_name,omitempty"`
+
+	// Companion marks a blocking policy_decision that is NOT the counted row
+	// of its attempt, because a tool_call row records the same attempt
+	// (Spec 124 D2). Set by the emit site.
+	Companion bool `json:"companion,omitempty"`
+
+	// BodiesRemoved is set when retention stripped Arguments and Response from
+	// this row to stay under the size cap while keeping the row (Spec 124
+	// FR-032).
+	BodiesRemoved bool `json:"bodies_removed,omitempty"`
+
 	// Scope attribution (Spec 108 FR-029): the profile, client and token IN
 	// EFFECT when the call ran, stamped once at write time and never rewritten
 	// (a later reassignment does not touch history). First-class rather than
@@ -320,6 +372,30 @@ const (
 type ActivityIdentityOwner struct {
 	TokenName   string
 	TokenPrefix string
+}
+
+// ActivityEventViewer restricts OWNED upstream events (Spec 124 FR-025) to
+// their owner. A nil viewer on a filter means no restriction (an
+// administrator, or an internal reader).
+type ActivityEventViewer struct {
+	// UserID is the caller's own user id; empty for a caller that is no user
+	// (an agent token in the personal edition), who then sees no owned event.
+	UserID string
+}
+
+// MaySee reports whether the viewer may read the record. Every record that is
+// not an owned upstream event passes.
+func (v *ActivityEventViewer) MaySee(r *ActivityRecord) bool {
+	if v == nil || r == nil || !r.OwnedUpstreamEvent() {
+		return true
+	}
+	return v.UserID != "" && r.UserID == v.UserID
+}
+
+// OwnedUpstreamEvent reports whether the record is an upstream event about
+// one user's upstream credential.
+func (r *ActivityRecord) OwnedUpstreamEvent() bool {
+	return r.Type == ActivityTypeUpstreamEvent && r.UserID != ""
 }
 
 // Owns reports whether the record was made by this caller.
@@ -437,6 +513,10 @@ type ActivityFilter struct {
 	// SessionID above is the raw transport connection.
 	WorkSessionID string
 
+	// EventViewer limits owned upstream events to their owner (Spec 124
+	// FR-025). nil = no restriction.
+	EventViewer *ActivityEventViewer
+
 	// Sensitive data detection filters (Spec 026)
 	SensitiveData *bool  // Filter by sensitive data detection (nil=no filter, true=has detections, false=no detections)
 	DetectionType string // Filter by specific detection type (e.g., "aws_access_key", "credit_card")
@@ -476,6 +556,11 @@ type ActivityFilter struct {
 	// start/stop, config change) is likewise not matched — those are
 	// operator-plane events with no server to be entitled to.
 	AllowedServers []string
+
+	// ExcludeAdminOnlyTypes drops the record types only an administrator may
+	// read (AdminOnlyActivityTypes). Like AllowedServers it is an authorization
+	// term inside the predicate, so a page and its `total` agree.
+	ExcludeAdminOnlyTypes bool
 
 	// UserID is an AUTHORIZATION filter (Spec 107 FR-002, T086), evaluated
 	// beside AllowedServers: empty means unrestricted (every existing caller
@@ -574,7 +659,16 @@ func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 	if !f.serverAllowed(record.ServerName) {
 		return false
 	}
+	if f.ExcludeAdminOnlyTypes && IsAdminOnlyActivityType(record.Type) {
+		return false
+	}
 	if f.UserID != "" && record.UserID != f.UserID {
+		return false
+	}
+	// Spec 124 FR-025: an upstream event about one user's credential is
+	// visible only to that user and to administrators. Part of the
+	// authorization block, so it applies before counting and paging.
+	if f.EventViewer != nil && !f.EventViewer.MaySee(record) {
 		return false
 	}
 

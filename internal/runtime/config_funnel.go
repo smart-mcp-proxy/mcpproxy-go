@@ -103,13 +103,21 @@ func (r *Runtime) MutateConfig(
 		if err != nil {
 			return fail(fmt.Errorf("cannot inspect client bindings: %w", err))
 		}
+		oauthCurrent, err := r.oauthBindingSnapshot()
+		if err != nil {
+			return fail(fmt.Errorf("cannot inspect browser-login bindings: %w", err))
+		}
+		oauthCandidate := oauthCurrent
+		if tokens.active() {
+			oauthCandidate = repinOAuthBindings(oauthCurrent, tokens.From, tokens.To)
+		}
 		candidateTokens := current
 		if tokens.active() {
 			candidateTokens = rewriteClientPins(current, tokens.From, tokens.To)
 		}
 		if err := CheckBindingGuard(r.BindingGuard(),
-			GuardState{Config: r.Config(), Tokens: current},
-			GuardState{Config: desired, Tokens: candidateTokens}); err != nil {
+			GuardState{Config: r.Config(), Tokens: current, OAuthBindings: oauthCurrent},
+			GuardState{Config: desired, Tokens: candidateTokens, OAuthBindings: oauthCandidate}); err != nil {
 			return fail(err)
 		}
 
@@ -219,8 +227,12 @@ func (r *Runtime) GuardedApplyConfig(newCfg *config.Config, cfgPath string) (*Co
 	if err != nil {
 		return nil, fmt.Errorf("cannot inspect client bindings: %w", err)
 	}
-	current := GuardState{Config: r.Config(), Tokens: tokens}
-	candidate := GuardState{Config: newCfg, Tokens: tokens}
+	oauth, err := r.oauthBindingSnapshot()
+	if err != nil {
+		return nil, fmt.Errorf("cannot inspect browser-login bindings: %w", err)
+	}
+	current := GuardState{Config: r.Config(), Tokens: tokens, OAuthBindings: oauth}
+	candidate := GuardState{Config: newCfg, Tokens: tokens, OAuthBindings: oauth}
 	if err := CheckBindingGuard(r.BindingGuard(), current, candidate); err != nil {
 		return nil, err
 	}

@@ -47,9 +47,12 @@ type Client struct {
 	// connection was created even after a config hot-reload. Updated via
 	// SetExposePrompts, mirroring managed.Client's cfg pointer swap.
 	exposePrompts atomic.Pointer[bool]
-	globalConfig  *config.Config
-	storage       *storage.BoltDB
-	logger        *zap.Logger
+	// exposeSkills is the live per-server expose_skills value (Spec 125),
+	// pushed with SetExposeSkills like exposePrompts.
+	exposeSkills atomic.Pointer[bool]
+	globalConfig *config.Config
+	storage      *storage.BoltDB
+	logger       *zap.Logger
 
 	// Upstream server specific logger for debugging
 	upstreamLogger *zap.Logger
@@ -197,6 +200,31 @@ type Client struct {
 	// stdioProc is the stdio child registered with the gate (FR-025a), so a
 	// normal Disconnect can hand it back to its own teardown. Guarded by mu.
 	stdioProc *dialgate.Process
+
+	// listen is the standalone GET stream of a streamable-HTTP upstream that
+	// advertises tools.listChanged (GH #1910, list_changed_stream.go). Guarded
+	// by listenMu, never by mu: Connect holds mu while it starts one.
+	// listenClient is the connection the stream belongs to; nil once it was
+	// released, so a racing re-initialize starts nothing for it.
+	listenMu     sync.Mutex
+	listen       *listChangedStream
+	listenClient *client.Client
+
+	// unresolvedSecrets, when non-nil, names secret references in the URL,
+	// headers or OAuth settings that could not be resolved when this client
+	// was built (release QA F9). Connect, sign-in and token refresh refuse
+	// with it before any HTTP request. Set once in NewClientWithOptions; a
+	// restart builds a new client and resolves again.
+	unresolvedSecrets *UnresolvedSecretError
+}
+
+// UnresolvedSecrets returns the refusal for unresolved secret references in
+// the fields sent to the upstream, or nil.
+func (c *Client) UnresolvedSecrets() error {
+	if c.unresolvedSecrets == nil {
+		return nil
+	}
+	return c.unresolvedSecrets
 }
 
 // NewClient creates a new core MCP client
@@ -211,9 +239,14 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 	// every string field of ServerConfig and its nested structs (IsolationConfig, OAuthConfig)
 	// without an explicit per-field allowlist (FR-001 / US2).
 	resolvedServerConfig := config.CopyServerConfig(serverConfig)
+	var unresolved *UnresolvedSecretError
 	if secretResolver != nil {
 		ctx := context.Background()
 		errs := secretResolver.ExpandStructSecretsCollectErrors(ctx, resolvedServerConfig)
+		// Only an HTTP-family server sends its URL, headers and OAuth
+		// settings; a stdio server's copies of those fields are never used.
+		// Decided on the resolved copy, exactly as Connect decides.
+		overHTTP := proxytransport.DetermineTransportType(resolvedServerConfig) != proxytransport.TransportStdio
 		for _, e := range errs {
 			if secret.IsPolicyDenial(e.Err) {
 				pe := policyExpansionError(serverConfig.Name, e)
@@ -223,27 +256,44 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 					zap.String("reason", pe.Public))
 				return nil, pe
 			}
-			logger.Error("CRITICAL: Failed to resolve secret reference - field will use UNRESOLVED placeholder",
+			// Log the references only, never the field's value (release QA
+			// F9): the value may hold literal credentials around them.
+			var refNames []string
+			for _, ref := range secret.FindSecretRefs(e.Reference) {
+				refNames = append(refNames, ref.Original)
+			}
+			// e.Err names the reference and the provider's reason (not found,
+			// keyring unavailable), never a value.
+			logger.Error("Failed to resolve secret reference",
 				zap.String("server", serverConfig.Name),
 				zap.String("field", e.FieldPath),
-				zap.String("reference", e.Reference),
+				zap.Strings("references", refNames),
+				zap.Bool("blocks_connection", overHTTP && wireSecretField(e.FieldPath)),
 				zap.Error(e.Err),
-				zap.String("help", "Use Web UI (http://localhost:8080/ui/) or API to add the secret to keyring"))
+				zap.String("help", "Add the secret (mcpproxy secrets set <name>, or the Web UI), then restart the server"))
+		}
+		if overHTTP {
+			unresolved = unresolvedWireSecrets(serverConfig.Name, errs, func(ref secret.Ref) bool {
+				_, err := secretResolver.Resolve(ctx, ref)
+				return err == nil
+			})
 		}
 	}
 
 	c := &Client{
-		id:             id,
-		config:         resolvedServerConfig,
-		globalConfig:   globalConfig,
-		storage:        storage,
-		secretResolver: secretResolver, // Store resolver for future use
+		id:                id,
+		config:            resolvedServerConfig,
+		globalConfig:      globalConfig,
+		storage:           storage,
+		secretResolver:    secretResolver, // Store resolver for future use
+		unresolvedSecrets: unresolved,
 		logger: logger.With(
 			zap.String("upstream_id", id),
 			zap.String("upstream_name", serverConfig.Name),
 		),
 	}
 	c.exposePrompts.Store(resolvedServerConfig.ExposePrompts)
+	c.exposeSkills.Store(resolvedServerConfig.ExposeSkills)
 	c.retryAfter.Store(proxytransport.NewRetryAfterRecorder())
 	g := dialgate.New()
 	g.SetLogger(logger, serverConfig.Name)
@@ -847,6 +897,20 @@ func extractOAuthHandler(mcpClient *client.Client) *transport.OAuthHandler {
 // mcp-go's handler.RefreshToken when the live handler has a client id, else
 // the stored DCR credentials.
 func (c *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
+	if err := c.UnresolvedSecrets(); err != nil {
+		return err
+	}
+	// Spec 123 FR-031: an undecryptable stored row is reported with its own
+	// code whether or not a live handler exists, and the refresh never falls
+	// back to a login. Only that outcome is decided here; every other case
+	// keeps the order below.
+	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
+	if c.storage != nil {
+		if _, err := c.storage.GetOAuthTokenBound(serverKey, c.CredentialBinding()); oauth.IsTokenUndecryptable(err) {
+			return fmt.Errorf("failed to get stored token for %s: %w", c.config.Name, oauth.TokenUndecryptableError(c.config.Name, err))
+		}
+	}
+
 	handler := c.GetOAuthHandler()
 	if handler == nil {
 		return fmt.Errorf("no OAuth handler available for %s", c.config.Name)
@@ -856,7 +920,6 @@ func (c *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
 		return fmt.Errorf("no storage available for token refresh")
 	}
 
-	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
 	record, err := c.storage.GetOAuthTokenBound(serverKey, c.CredentialBinding())
 	if err != nil {
 		return fmt.Errorf("failed to get stored token for %s: %w", c.config.Name, err)
@@ -916,7 +979,8 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(data.Encode()))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create refresh request: %w", err)
+		// Nothing was sent (a malformed token endpoint, for example).
+		return nil, oauth.MarkRefreshNotSent(fmt.Errorf("failed to create refresh request: %w", err))
 	}
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")

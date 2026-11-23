@@ -26,15 +26,34 @@ const (
 	CredentialKindAPIKey     CredentialKind = "api_key"     // the global API key (header, bearer or ?apikey=)
 	CredentialKindBearerJWT  CredentialKind = "bearer_jwt"  // a user JWT minted by POST /auth/token
 	CredentialKindAgentToken CredentialKind = "agent_token" // an mcp_agt_ agent token
+	CredentialKindOAuth      CredentialKind = "oauth"       // an mcp_oat_ browser-login access token (Spec 132)
 	CredentialKindCookie     CredentialKind = "cookie"      // the mcpproxy_session cookie
 	CredentialKindAnonymous  CredentialKind = "anonymous"   // no credential (require_mcp_auth: false back-compat)
 )
 
+// IsScopedClientCredential reports whether the kind is a credential scoped by
+// an agent-token style binding: an mcp_agt_/mcp_cli_ token or a browser-login
+// access token. Every "scoped caller, not an administrator" decision that
+// would compare against CredentialKindAgentToken goes through it, so a browser
+// login is treated exactly like the same client's mcp_cli_ credential (Spec 132
+// R3).
+func (k CredentialKind) IsScopedClientCredential() bool {
+	return k == CredentialKindAgentToken || k == CredentialKindOAuth
+}
+
 // AuthContext carries authentication identity through request context.
 type AuthContext struct {
-	Type           string   // "admin", "agent", "user", or "admin_user"
-	AgentName      string   // Name of the agent token (empty for admin)
-	TokenPrefix    string   // First 12 chars of raw token (empty for admin)
+	Type        string // "admin", "agent", "user", or "admin_user"
+	AgentName   string // Name of the agent token (empty for admin)
+	TokenPrefix string // First 12 chars of raw token (empty for admin)
+	// TokenGeneration identifies the authenticated secret itself (a prefix of
+	// its hash). Internal: it keys a work session on the credential's
+	// generation (Spec 124 FR-009) and is never returned or logged.
+	TokenGeneration string
+	// GrantID is the browser-login grant that authenticated this request
+	// (Spec 132; empty for every other credential). Activity rows carry it so
+	// two logins of one client can be told apart.
+	GrantID        string
 	AllowedServers []string // Servers this token can access (nil = all for admin)
 	Permissions    []string // Permission tiers (nil = all for admin)
 	ProfilePin     string   // Profile this agent token is pinned to (Profiles v2 T3; empty if unpinned)

@@ -357,6 +357,33 @@ func (m *baseController) StreamActivities(_ context.Context, _ storage.ActivityF
 	close(ch)
 	return ch
 }
+
+// Skills over MCP (Spec 125, PR-1)
+func (m *baseController) SkillsStatus(_ string) runtime.SkillsServerStatus {
+	return runtime.SkillsServerStatus{}
+}
+func (m *baseController) ListSkillRecords(_ string) ([]*storage.SkillApprovalRecord, error) {
+	return nil, nil
+}
+func (m *baseController) SkillFileText(_, _, _ string, _ bool) ([]byte, storage.SkillFile, error) {
+	return nil, storage.SkillFile{}, runtime.ErrSkillNotFound
+}
+func (m *baseController) ListAvailableSkills(_ string) ([]*runtime.AvailableSkill, error) {
+	return nil, nil
+}
+func (m *baseController) EmitActivitySkillAccess(runtime.SkillAccessActivity) {}
+func (m *baseController) AvailableSkillFile(_, _, _ string) ([]byte, storage.SkillFile, *runtime.AvailableSkill, error) {
+	return nil, storage.SkillFile{}, nil, runtime.ErrSkillNotFound
+}
+func (m *baseController) SkillAvailable(_ string, _ *storage.SkillApprovalRecord) bool { return false }
+func (m *baseController) RefreshServerSkills(_ context.Context, _ string) error        { return nil }
+func (m *baseController) ApproveSkillsReviewedAt(_ context.Context, _ string, _ []string, _ map[string]string, _ string, _ int64) (int, error) {
+	return 0, nil
+}
+func (m *baseController) SetSkillsBlockedAt(_ context.Context, _ string, _ []string, _ bool, _ string, _ int64) (int, error) {
+	return 0, nil
+}
+
 func (m *baseController) ListToolApprovals(_ string) ([]*storage.ToolApprovalRecord, error) {
 	return nil, nil
 }

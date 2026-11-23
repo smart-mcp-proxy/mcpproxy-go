@@ -37,7 +37,10 @@
     "rotate",
     "anonymous",
     "issue",
-    "revoke"
+    "revoke",
+    "approve",
+    "deny",
+    "replay_revoke"
   ],
   "credential_error_code": [
     "secret_in_argument",

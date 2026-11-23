@@ -57,8 +57,15 @@ Config is hot-reloaded; changing `mode` does not require a restart.
 
 Key guarantees:
 
-- **Lossless on success**: a conforming `structuredContent` is forwarded
-  byte-for-byte unchanged (validation runs on a read-only view).
+- **Non-mutating on success**: a conforming `structuredContent` value is
+  forwarded unchanged; validation reads it without mutating it, and the MCP
+  server serializes the response through its normal transport encoder.
+- **Validation sees the upstream's result**: when `tool_response_limit`
+  withholds an oversize `structuredContent` from the agent (see
+  [Configuration](../configuration/config-file.md)), validation still judges the value the
+  upstream returned, so strict mode with `missing_structured_content=block`
+  does not refuse a large response. On the direct surface a tool listed with
+  an `outputSchema` always keeps its `structuredContent`.
 - **Never blocks on a bad schema**: if a tool's declared schema is itself not
   compilable, validation degrades to a no-op (logged once) — it never blocks
   traffic on the proxy's inability to compile a schema.

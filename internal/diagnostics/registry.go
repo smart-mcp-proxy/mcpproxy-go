@@ -179,6 +179,17 @@ func seedOAUTH() {
 		},
 		DocsURL: docsURL(OAuthCallbackMismatch),
 	})
+	register(CatalogEntry{
+		Code:        OAuthTokenUndecryptable,
+		Severity:    SeverityError,
+		UserMessage: "The stored OAuth token for this server cannot be decrypted with the configured encryption key. Restore the key and restart, or discard the stored token and sign in again.",
+		FixSteps: []FixStep{
+			{Type: FixStepCommand, Label: "Show the reason for each affected server", Command: "mcpproxy upstream list"},
+			{Type: FixStepCommand, Label: "Discard the stored token", Command: "mcpproxy auth logout --server=<server-name>"},
+			{Type: FixStepLink, Label: "Restoring or replacing the encryption key", URL: docsURL(OAuthTokenUndecryptable)},
+		},
+		DocsURL: docsURL(OAuthTokenUndecryptable),
+	})
 }
 
 // --- HTTP ----------------------------------------------------------------

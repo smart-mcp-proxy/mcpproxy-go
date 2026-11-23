@@ -23,7 +23,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 // preflightFixture is a proxy wired to real storage + a real Bleve index, plus
@@ -65,7 +64,7 @@ func newPreflightFixture(t *testing.T, mutate func(cfg *config.Config)) *preflig
 		mutate(cfg)
 	}
 
-	um := upstream.NewManager(logger, cfg, nil, secret.NewTestWildcardResolver(), nil)
+	um := newTestUpstreamManager(t, logger, cfg, nil, secret.NewTestWildcardResolver(), nil)
 	cm, err := cache.NewManager(sm.GetDB(), logger)
 	require.NoError(t, err)
 	t.Cleanup(func() { cm.Close() })

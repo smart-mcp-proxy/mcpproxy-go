@@ -16,7 +16,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 // createTestProxyWithRuntime builds an MCPProxyServer wired to a real Runtime so
@@ -58,7 +57,7 @@ func createTestProxyWithRuntimeCfg(t *testing.T, servers []*config.ServerConfig,
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = idx.Close() })
 
-	um := upstream.NewManager(logger, cfg, nil, secret.NewTestWildcardResolver(), nil)
+	um := newTestUpstreamManager(t, logger, cfg, nil, secret.NewTestWildcardResolver(), nil)
 
 	cm, err := cache.NewManager(sm.GetDB(), logger)
 	require.NoError(t, err)

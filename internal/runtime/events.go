@@ -54,6 +54,15 @@ const (
 	// prefix, purpose or expiry: subscribers refetch. It names identities and
 	// profiles, so it is administrator-only on SSE.
 	EventTypeCredentialsChanged EventType = "credentials.changed"
+	// EventTypeOAuthAuthorizationPending is emitted (Spec 132) when a browser
+	// sign-in request waits for an administrator. Payload: {request_id,
+	// client_id, client_label}; the label is the sanitised, unverified name the
+	// client reported. It names a client, so it is administrator-only on SSE.
+	EventTypeOAuthAuthorizationPending EventType = "oauth.authorization_pending"
+	// EventTypeOAuthAuthorizationDecided is emitted (Spec 132) when a sign-in
+	// request leaves the pending state. Payload: {request_id, status} with
+	// status approved, denied or cancelled. Administrator-only on SSE.
+	EventTypeOAuthAuthorizationDecided EventType = "oauth.authorization_decided"
 
 	// Activity logging events (RFC-003)
 	// EventTypeActivityToolCallStarted is emitted when a tool execution begins.
@@ -88,6 +97,15 @@ const (
 	// Carries no payload — RefreshPrompts re-aggregates from live state.
 	EventTypeUpstreamPromptsChanged EventType = "upstream.prompts_changed"
 
+	// EventTypeSkillsChanged is emitted when a skills refresh (or a damaged
+	// stored copy) changes a server's skill records. Payload:
+	// {server, counts{available, pending, changed, unusable, blocked}} (Spec 125).
+	// A commit that changes whether skills are read (enable_skills, a server's
+	// enabled, quarantine or expose_skills) sends ONE event for all affected
+	// servers instead: {servers: [sorted names]}, no server key.
+	// Administrator-only on SSE.
+	EventTypeSkillsChanged EventType = "skills.changed"
+
 	// Spec 026: Sensitive data detection event
 	// EventTypeSensitiveDataDetected is emitted when sensitive data is detected in a tool call.
 	EventTypeSensitiveDataDetected EventType = "sensitive_data.detected"
@@ -95,6 +113,19 @@ const (
 	// Spec 032: Tool-level quarantine events
 	// EventTypeActivityToolQuarantineChange is emitted when a tool's quarantine status changes.
 	EventTypeActivityToolQuarantineChange EventType = "activity.tool_quarantine_change"
+
+	// Spec 125: skills over MCP
+	// EventTypeActivitySkillQuarantineChange is emitted when a skill's approval
+	// state changes (an automatic transition of a refresh, or a person's
+	// approve / block / unblock). It names a skill that may be unapproved, so it
+	// is administrator-only (FR-019a).
+	EventTypeActivitySkillQuarantineChange EventType = "activity.skill_quarantine_change"
+
+	// EventTypeActivitySkillAccess is emitted for every agent search, load or
+	// file read of a skill (Spec 125 FR-024). server_name is the skill's origin
+	// server (empty for a search), so the identity-bearing scoping rule of the
+	// SSE door applies: a scoped subscriber sees only rows of servers it reaches.
+	EventTypeActivitySkillAccess EventType = "activity.skill_access"
 
 	// Spec 039: Security scanner events
 	// EventTypeSecurityScanStarted is emitted when a security scan begins.

@@ -74,7 +74,7 @@ func addConnectedTestServerWithConfig(t *testing.T, m *Manager, id string, cfg *
 
 	upstream := newTestPromptUpstreamServer(t, promptName)
 	testServer := servertest.NewTestStreamableHTTPServer(upstream)
-	t.Cleanup(testServer.Close)
+	t.Cleanup(func() { closeHTTPFixture(testServer) })
 
 	cfg.Protocol = "streamable-http"
 	cfg.URL = testServer.URL
@@ -173,7 +173,7 @@ func TestManager_ListPrompts_LogsAndSkipsClientError(t *testing.T) {
 	// Close the upstream out from under an already-connected client so the
 	// client's ListPrompts fails; the manager must log and skip it rather
 	// than fail the whole aggregation.
-	testServer.Close()
+	closeHTTPFixture(testServer)
 
 	prompts, err := m.ListPrompts(context.Background())
 	require.NoError(t, err)
@@ -303,7 +303,7 @@ func TestManager_ListPrompts_PerServerCap(t *testing.T) {
 
 	upstream := newTestPromptUpstreamServerN(t, maxPromptsPerServer+5)
 	testServer := servertest.NewTestStreamableHTTPServer(upstream)
-	t.Cleanup(testServer.Close)
+	t.Cleanup(func() { closeHTTPFixture(testServer) })
 
 	require.NoError(t, m.AddServerConfig("srv-a", &config.ServerConfig{
 		Name:     "server-a",

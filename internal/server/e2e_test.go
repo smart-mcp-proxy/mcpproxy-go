@@ -293,7 +293,7 @@ func (env *TestEnvironment) CreateMockUpstreamServer(name string, tools []mcp.To
 	time.Sleep(200 * time.Millisecond)
 
 	mockServer.stopFunc = func() error {
-		return httpServer.Shutdown(context.Background())
+		return httpServer.Close() // not Shutdown: it waits for the GH #1910 GET stream
 	}
 
 	env.mockServers[name] = mockServer
@@ -429,7 +429,7 @@ func TestE2E_ToolDiscovery(t *testing.T) {
 	require.NoError(t, err)
 
 	// Update runtime config with the unquarantined server
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
@@ -538,7 +538,7 @@ func TestE2E_ToolCalling(t *testing.T) {
 	require.NoError(t, err)
 
 	// Update runtime config with the unquarantined server
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
@@ -774,22 +774,16 @@ func TestE2E_ConcurrentOperations(t *testing.T) {
 
 // Test: SSE Events endpoint functionality
 func TestE2E_SSEEvents(t *testing.T) {
-	env := NewTestEnvironment(t)
-	defer env.Cleanup()
-
-	// Test SSE connection with the initial API key from NewTestEnvironment
-	testSSEConnection(t, env, "test-api-key-e2e")
-
-	// Now test with different API key
-	// Update config to include different API key
-	cfg := env.proxyServer.runtime.Config()
-	cfg.APIKey = "test-api-key-12345"
-
-	// Test SSE with new correct API key
-	testSSEConnection(t, env, "test-api-key-12345")
-
-	// Test SSE with incorrect API key
-	testSSEConnectionAuthFailure(t, env, "wrong-api-key")
+	for _, apiKey := range []string{"test-api-key-e2e", "test-api-key-12345"} {
+		t.Run(apiKey, func(t *testing.T) {
+			env := NewTestEnvironmentWithOptions(t, TestEnvironmentOptions{
+				Mutate: func(cfg *config.Config, _ string) { cfg.APIKey = apiKey },
+			})
+			defer env.Cleanup()
+			testSSEConnection(t, env, apiKey)
+			testSSEConnectionAuthFailure(t, env, "wrong-api-key")
+		})
+	}
 }
 
 // testSSEConnection tests SSE connection functionality
@@ -1620,7 +1614,7 @@ func TestE2E_IntentDeclarationToolVariants(t *testing.T) {
 	// Reload configuration
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
@@ -2830,7 +2824,7 @@ func TestE2E_DisableServerRemovesToolsFromSearch(t *testing.T) {
 	// Reload configuration
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
@@ -3015,7 +3009,7 @@ func TestE2E_ServerDeleteReaddDifferentTools(t *testing.T) {
 	// Reload configuration
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
@@ -3140,7 +3134,7 @@ func TestE2E_ServerDeleteReaddDifferentTools(t *testing.T) {
 	// Reload configuration
 	serversB, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfgB := env.proxyServer.runtime.Config()
+	cfgB := copyLiveConfig(t, env)
 	cfgB.Servers = serversB
 	err = env.proxyServer.runtime.CommitConfig(cfgB)
 	require.NoError(t, err)
@@ -3321,7 +3315,7 @@ func TestE2E_RetrieveToolsAnnotationsAndCallWith(t *testing.T) {
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
 
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
@@ -3470,7 +3464,7 @@ func TestE2E_SelfHealingInvalidParams(t *testing.T) {
 
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	require.NoError(t, env.proxyServer.runtime.CommitConfig(cfg))
 
@@ -3543,7 +3537,9 @@ func TestE2E_SelfHealingInvalidParams(t *testing.T) {
 
 	// Mode independence (US3 scenario 3): flip the live config to compact and
 	// re-run the identical failing call — the error must be byte-identical.
-	env.proxyServer.runtime.Config().ToolResponseMode = config.ToolResponseModeCompact
+	compactConfig := copyLiveConfig(t, env)
+	compactConfig.ToolResponseMode = config.ToolResponseModeCompact
+	require.NoError(t, env.proxyServer.runtime.CommitConfig(compactConfig))
 	compactModeErr := callInvalid()
 	assert.Equal(t, fullModeErr, compactModeErr,
 		"self-healing error must be byte-identical in full and compact mode")
@@ -3919,7 +3915,7 @@ func startDirectFixtureUpstream(t *testing.T, env *TestEnvironment, serverName s
 
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	require.NoError(t, env.proxyServer.runtime.CommitConfig(cfg))
 
@@ -4124,32 +4120,6 @@ func TestE2E_DirectDeferredSelfHealingInvalidParams(t *testing.T) {
 		"the retry must have reached the upstream tool")
 }
 
-// restartWithRoutingMode restarts the harness's HTTP listener under a different
-// routing_mode.
-//
-// routing_mode is read once, when Start builds the mux, so /mcp and the two
-// legacy aliases bound to its handler are pinned to whichever routing-mode
-// server the config named at that moment — there is no hot path for it. A
-// restart is therefore the only honest way to observe the aliases in direct
-// mode. It runs before any upstream is mounted, so the stop's ShutdownAll has
-// nothing to tear down and the fixture that follows connects exactly once.
-func restartWithRoutingMode(t *testing.T, env *TestEnvironment, mode string) {
-	t.Helper()
-
-	require.NoError(t, env.proxyServer.StopServer())
-
-	// StopServer cancels the server context on its way out, which wakes the
-	// previous Start's shutdown watchdog; that goroutine calls StopServer once
-	// more and must be allowed to observe running=false BEFORE the restart flips
-	// it back, or it would tear down the server we are about to start.
-	time.Sleep(500 * time.Millisecond)
-	require.False(t, env.proxyServer.IsRunning(), "the old listener must be down before rebinding its port")
-
-	env.proxyServer.runtime.Config().RoutingMode = mode
-	require.NoError(t, env.proxyServer.StartServer(context.Background()))
-	env.waitForServerReady()
-}
-
 // TestE2E_DirectModeLegacyAliasesFollowSerializationMode is the Spec 102 FR-003
 // E2E: /v1/tool_code and /v1/tool-code are bound to the same handler as /mcp, so
 // under routing_mode "direct" they are direct-serving routes too — and are the
@@ -4160,10 +4130,11 @@ func restartWithRoutingMode(t *testing.T, env *TestEnvironment, mode string) {
 // expectation, so the test states the actual invariant (the aliases serve the
 // SAME listing) instead of re-encoding the renderer.
 func TestE2E_DirectModeLegacyAliasesFollowSerializationMode(t *testing.T) {
-	env := NewTestEnvironment(t)
+	env := NewTestEnvironmentWithOptions(t, TestEnvironmentOptions{
+		Mutate: func(cfg *config.Config, _ string) { cfg.RoutingMode = config.RoutingModeDirect },
+	})
 	defer env.Cleanup()
 
-	restartWithRoutingMode(t, env, config.RoutingModeDirect)
 	normalizeHarnessConfigForApply(t, env)
 
 	directClient := connectDirectClient(t, env, "/mcp/all", nil)

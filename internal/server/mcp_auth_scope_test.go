@@ -19,7 +19,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 // createTestMCPProxyServer creates a minimal MCPProxyServer for testing.
@@ -44,7 +43,7 @@ func createTestMCPProxyServer(t *testing.T) *MCPProxyServer {
 	cfg.AllowServerAdd = true
 	cfg.AllowServerRemove = true
 
-	um := upstream.NewManager(logger, cfg, nil, secretResolver, nil)
+	um := newTestUpstreamManager(t, logger, cfg, nil, secretResolver, nil)
 
 	cm, err := cache.NewManager(sm.GetDB(), logger)
 	require.NoError(t, err)

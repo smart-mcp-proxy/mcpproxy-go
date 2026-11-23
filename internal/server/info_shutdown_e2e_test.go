@@ -71,12 +71,7 @@ func TestInfoEndpoint(t *testing.T) {
 	cmd.Stderr = os.Stderr
 
 	require.NoError(t, cmd.Start(), "Failed to start server")
-	defer func() {
-		if cmd.Process != nil {
-			cmd.Process.Signal(syscall.SIGTERM)
-			cmd.Wait()
-		}
-	}()
+	defer stopTestProcess(cmd, cancel)
 
 	// Wait for server to be ready
 	serverURL := fmt.Sprintf("http://%s", listenAddr)
@@ -147,6 +142,9 @@ func TestInfoEndpoint(t *testing.T) {
 func TestGracefulShutdownNoPanic(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping E2E test in short mode")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGINT process signaling is not supported on Windows")
 	}
 
 	// Build the binary first
@@ -252,6 +250,9 @@ func TestSocketInfoEndpoint(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping E2E test in short mode")
 	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix domain sockets are not supported on Windows")
+	}
 
 	// Build the binary first
 	binaryPath, cleanup := buildTestBinary(t)
@@ -289,12 +290,7 @@ func TestSocketInfoEndpoint(t *testing.T) {
 	cmd.Env = append(os.Environ(), "MCPPROXY_API_KEY=e2e-test-api-key-12345")
 
 	require.NoError(t, cmd.Start(), "Failed to start server")
-	defer func() {
-		if cmd.Process != nil {
-			cmd.Process.Signal(syscall.SIGTERM)
-			cmd.Wait()
-		}
-	}()
+	defer stopTestProcess(cmd, cancel)
 
 	// Wait for socket to be created
 	require.True(t, waitForSocket(socketPath, 10*time.Second), "Socket was not created")
@@ -326,6 +322,27 @@ func TestSocketInfoEndpoint(t *testing.T) {
 }
 
 // Helper functions
+
+// stopTestProcess stops the server the test started. On Windows `Signal` has no
+// SIGTERM, so the deferred `cmd.Wait()` used to hang: the child never exited and
+// cancel() (which would have terminated it) only ran after the wait. Canceling
+// the CommandContext first terminates the child there. On other platforms the
+// graceful SIGTERM shutdown is preserved, with cancellation as a fallback when
+// signaling fails.
+func stopTestProcess(cmd *exec.Cmd, cancel context.CancelFunc) {
+	if cmd.Process == nil {
+		cancel()
+		return
+	}
+
+	if runtime.GOOS == "windows" {
+		cancel()
+	} else if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		cancel()
+	}
+
+	_ = cmd.Wait()
+}
 
 func buildTestBinary(t *testing.T) (string, func()) {
 	t.Helper()

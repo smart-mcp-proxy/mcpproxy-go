@@ -17,7 +17,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 // openActivationDB creates a standalone BBolt DB for activation-store unit
@@ -70,7 +69,7 @@ func buildMCPProxyWithActivation(t *testing.T) (*MCPProxyServer, *runtime.Runtim
 	require.NotNil(t, idx)
 
 	secretResolver := secret.NewTestWildcardResolver()
-	um := upstream.NewManager(logger, cfg, nil, secretResolver, nil)
+	um := newTestUpstreamManager(t, logger, cfg, nil, secretResolver, nil)
 
 	cm, err := cache.NewManager(rt.StorageManager().GetDB(), logger)
 	require.NoError(t, err)

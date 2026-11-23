@@ -29,6 +29,8 @@ const (
 	ToolCalls       = "tool_call_buckets"
 	ToolApprovals   = "tool_approvals"
 	PromptApprovals = "prompt_approvals"
+	SkillApprovals  = "skill_approvals"
+	SkillFiles      = "skill_files"
 	OAuthTokens     = "oauth_tokens"
 	OAuthCompletion = "oauth_completion"
 	Baselines       = "integrity_baselines"
@@ -70,6 +72,11 @@ func Seed(t *testing.T, mgr *storage.Manager, name string) {
 		ServerName: name, PromptName: "drift", Status: "changed",
 		ApprovedHash: "p1", CurrentHash: "p2", ApprovedAt: now, ApprovedBy: "seed",
 	}), "changed prompt approval")
+	must(mgr.SaveSkillApproval(&storage.SkillApprovalRecord{
+		ServerName: name, SkillURI: "skill://seed/SKILL.md", SkillPath: "seed", Name: "seed",
+		Status: storage.SkillStatusPending, Listed: true, FirstSeen: now, UpdatedAt: now,
+	}), "skill approval")
+	must(mgr.PutSkillFile(name, strings.Repeat("a", 64), []byte("seed")), "skill file")
 	db := mgr.GetBoltDB()
 	must(db.SaveOAuthToken(&storage.OAuthTokenRecord{
 		ServerName: OAuthKey(name), DisplayName: name, AccessToken: "at-" + name,
@@ -165,6 +172,18 @@ func Counts(t *testing.T, mgr *storage.Manager, name string) map[string]int {
 				out[PromptApprovals]++
 			}
 		})
+		each(storage.SkillApprovalBucket, func(_, v []byte) {
+			var r storage.SkillApprovalRecord
+			if json.Unmarshal(v, &r) == nil && r.ServerName == name {
+				out[SkillApprovals]++
+			}
+		})
+		each(storage.SkillFileBucket, func(k, _ []byte) {
+			rest, ok := bytes.CutPrefix(k, prefix)
+			if ok && len(rest) == 64 && !bytes.Contains(rest, []byte(":")) {
+				out[SkillFiles]++
+			}
+		})
 		each(storage.OAuthTokenBucket, func(k, _ []byte) {
 			if oauthKeyIsFor(string(k), name) {
 				out[OAuthTokens]++
@@ -233,7 +252,7 @@ func AssertPurged(t *testing.T, mgr *storage.Manager, name, path string) {
 func AssertSeeded(t *testing.T, mgr *storage.Manager, name string) {
 	t.Helper()
 	c := Counts(t, mgr, name)
-	for _, bucket := range []string{Identities, ToolCalls, ToolApprovals, PromptApprovals, OAuthTokens,
+	for _, bucket := range []string{Identities, ToolCalls, ToolApprovals, PromptApprovals, SkillApprovals, SkillFiles, OAuthTokens,
 		OAuthCompletion, Baselines, ScanReports, ScanJobs, ScanJobIndex, ToolHash, ToolBaseline} {
 		if c[bucket] == 0 {
 			t.Fatalf("fixture: %s has no key of %q", bucket, name)

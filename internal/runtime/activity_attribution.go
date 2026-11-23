@@ -35,6 +35,35 @@ type ActivityAttribution struct {
 	// scoped caller recognises its own policy_decision and prompt_get rows),
 	// never in any API shape, export or SSE frame for another caller.
 	TokenPrefix string
+	// GrantID is the browser-login grant that authenticated the request (Spec
+	// 132): it lands as metadata.grant_id so two logins of one client can be
+	// told apart. Not a secret.
+	GrantID string
+
+	// WorkSessionID is the work session of the request (Spec 124 D1). It is
+	// resolved at the emit site because only the request knows the credential,
+	// the client of a 2026-07-28 request and the run name. Empty for emitters
+	// that have no request; the activity service then falls back to the
+	// connection's cached id.
+	WorkSessionID string
+	// UserID is the owning user of the calling credential (server edition).
+	// INTERNAL like TokenPrefix: it decides who may read the row.
+	UserID string
+	// RunName is the validated X-MCPProxy-Run label of the request.
+	RunName string
+	// ProjectName is the basename of the client's workspace root, when known.
+	ProjectName string
+	// Surface is where a request with no MCP connection came from: the REST
+	// client surface (webui, tray, cli, rest). Empty for an MCP connection.
+	Surface string
+
+	// Companion marks a blocking policy decision emitted next to a tool_call
+	// row of the same attempt (Spec 124 D2); it is not counted again.
+	Companion bool
+	// PolicyRefusal marks a call MCPProxy itself refused whose row has no
+	// error class of its own (builtin management refusals). The row is
+	// classified proxy_policy.
+	PolicyRefusal bool
 }
 
 // IsZero reports whether no field is set.
@@ -60,6 +89,18 @@ func (a ActivityAttribution) payload() map[string]any {
 	set("client_version", a.ClientVersion)
 	set("token_name", a.TokenName)
 	set("_token_prefix", a.TokenPrefix)
+	set("grant_id", a.GrantID)
+	set("_work_session_id", a.WorkSessionID)
+	set("_user_id", a.UserID)
+	set("run_name", a.RunName)
+	set("project_name", a.ProjectName)
+	set("_surface", a.Surface)
+	if a.Companion {
+		out["_companion"] = true
+	}
+	if a.PolicyRefusal {
+		out["_policy_refusal"] = true
+	}
 	return out
 }
 
@@ -78,6 +119,14 @@ func attributionFromPayload(payload map[string]any) ActivityAttribution {
 		ClientVersion: getStringPayload(m, "client_version"),
 		TokenName:     getStringPayload(m, "token_name"),
 		TokenPrefix:   getStringPayload(m, "_token_prefix"),
+		GrantID:       getStringPayload(m, "grant_id"),
+		WorkSessionID: getStringPayload(m, "_work_session_id"),
+		UserID:        getStringPayload(m, "_user_id"),
+		RunName:       getStringPayload(m, "run_name"),
+		ProjectName:   getStringPayload(m, "project_name"),
+		Surface:       getStringPayload(m, "_surface"),
+		Companion:     m["_companion"] == true,
+		PolicyRefusal: m["_policy_refusal"] == true,
 	}
 }
 
@@ -94,6 +143,21 @@ func applyAttribution(rec *storage.ActivityRecord, a ActivityAttribution) {
 	rec.TokenName = a.TokenName
 	rec.ClientName = a.ClientName
 	rec.TokenPrefix = a.TokenPrefix
+	// Spec 124: the request-resolved work session wins over the connection's
+	// cached one, which the builder set before this call.
+	if a.WorkSessionID != "" {
+		rec.WorkSessionID = a.WorkSessionID
+	}
+	if rec.UserID == "" {
+		rec.UserID = a.UserID
+	}
+	rec.RunName = a.RunName
+	rec.ProjectName = a.ProjectName
+	rec.Surface = a.Surface
+	rec.Companion = a.Companion && rec.Type == storage.ActivityTypePolicyDecision
+	if a.PolicyRefusal && rec.ErrorClass == "" && rec.Status != storage.ActivityStatusSuccess {
+		rec.ErrorClass = storage.ErrorClassProxyPolicy
+	}
 	if rec.ClientName == "" {
 		if name, ok := rec.Metadata["client_name"].(string); ok {
 			rec.ClientName = name
@@ -117,6 +181,7 @@ func applyAttribution(rec *storage.ActivityRecord, a ActivityAttribution) {
 	}
 	setMetadataIfAbsent("client_name", a.ClientName)
 	setMetadataIfAbsent("client_version", a.ClientVersion)
+	setMetadataIfAbsent("grant_id", a.GrantID)
 }
 
 // NewUsageAggregate returns an empty aggregate at the current admission

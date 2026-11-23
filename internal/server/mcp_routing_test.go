@@ -21,7 +21,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 func TestParseDirectToolName(t *testing.T) {
@@ -1049,10 +1048,9 @@ func TestRefreshPrompts_AggregatesBuiltinsAndUpstream(t *testing.T) {
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
 	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
-	t.Cleanup(testServer.Close)
+	t.Cleanup(func() { closeHTTPFixture(testServer) })
 
-	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
-	t.Cleanup(func() { um.DisconnectAll() })
+	um := newTestUpstreamManager(t, zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
 	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
 		Name:     "server-a",
 		Protocol: "streamable-http",
@@ -1088,10 +1086,9 @@ func TestRefreshPrompts_RugPullBaseline_WithholdsFirstSeen(t *testing.T) {
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
 	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
-	t.Cleanup(testServer.Close)
+	t.Cleanup(func() { closeHTTPFixture(testServer) })
 
-	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
-	t.Cleanup(func() { um.DisconnectAll() })
+	um := newTestUpstreamManager(t, zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
 	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
 		Name: "server-a", Protocol: "streamable-http", URL: testServer.URL, Enabled: true,
 	}))
@@ -1126,10 +1123,9 @@ func TestRefreshPrompts_AggregationDisabled_BuiltinsOnly(t *testing.T) {
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
 	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
-	t.Cleanup(testServer.Close)
+	t.Cleanup(func() { closeHTTPFixture(testServer) })
 
-	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
-	t.Cleanup(func() { um.DisconnectAll() })
+	um := newTestUpstreamManager(t, zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
 	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
 		Name:     "server-a",
 		Protocol: "streamable-http",
@@ -1177,10 +1173,9 @@ func TestRefreshPrompts_ReadsLiveAggregateFlag(t *testing.T) {
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
 	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
-	t.Cleanup(testServer.Close)
+	t.Cleanup(func() { closeHTTPFixture(testServer) })
 
-	um := upstream.NewManager(zap.NewNop(), live, nil, secret.NewTestWildcardResolver(), nil)
-	t.Cleanup(func() { um.DisconnectAll() })
+	um := newTestUpstreamManager(t, zap.NewNop(), live, nil, secret.NewTestWildcardResolver(), nil)
 	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
 		Name:     "server-a",
 		Protocol: "streamable-http",
@@ -1204,7 +1199,7 @@ func TestRefreshPrompts_ReadsLiveAggregateFlag(t *testing.T) {
 func TestRefreshPrompts_NoUpstreamClients_RegistersOnlyBuiltins(t *testing.T) {
 	proxy, _ := createTestProxyWithRuntime(t, nil)
 	proxy.config.EnablePrompts = true
-	proxy.upstreamManager = upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
+	proxy.upstreamManager = newTestUpstreamManager(t, zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
 
 	proxy.RefreshPrompts()
 
@@ -1230,10 +1225,9 @@ func TestRefreshPrompts_PopulatesRoutingModeServers(t *testing.T) {
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
 	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
-	t.Cleanup(testServer.Close)
+	t.Cleanup(func() { closeHTTPFixture(testServer) })
 
-	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
-	t.Cleanup(func() { um.DisconnectAll() })
+	um := newTestUpstreamManager(t, zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
 	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
 		Name:     "server-a",
 		Protocol: "streamable-http",

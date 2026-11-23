@@ -64,7 +64,7 @@ func TestListToolsFailureIsLoggedOnceAndNotAsError(t *testing.T) {
 
 	// Kill the upstream out from under a client that still believes it is
 	// connected — the exact shape of the transport-closed sweep miss.
-	testServer.Close()
+	closeHTTPFixture(testServer)
 	logs.TakeAll()
 
 	_, _ = m.DiscoverTools(context.Background())
@@ -121,7 +121,7 @@ func TestListToolsFailureIsStillReported(t *testing.T) {
 	defer cancel()
 	require.NoError(t, client.Connect(ctx))
 
-	testServer.Close()
+	closeHTTPFixture(testServer)
 	logs.TakeAll()
 
 	_, _ = m.DiscoverTools(context.Background())
@@ -147,7 +147,7 @@ func TestDiscoverToolsReport_ListsZeroToolServersButNotFailedOnes(t *testing.T) 
 
 	// "server-a": a prompt-only upstream — tools/list succeeds with no tools.
 	okServer := servertest.NewTestStreamableHTTPServer(newTestPromptUpstreamServer(t, "greeting"))
-	t.Cleanup(okServer.Close)
+	t.Cleanup(func() { closeHTTPFixture(okServer) })
 	require.NoError(t, m.AddServerConfig("srv-a", &config.ServerConfig{
 		Name: "server-a", Protocol: "streamable-http", URL: okServer.URL, Enabled: true,
 	}))
@@ -163,7 +163,7 @@ func TestDiscoverToolsReport_ListsZeroToolServersButNotFailedOnes(t *testing.T) 
 		require.True(t, ok)
 		require.NoError(t, client.Connect(ctx))
 	}
-	deadServer.Close()
+	closeHTTPFixture(deadServer)
 
 	tools, listed, err := m.DiscoverToolsReport(context.Background(), false)
 	require.NoError(t, err)

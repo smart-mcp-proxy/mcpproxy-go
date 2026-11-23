@@ -47,6 +47,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
@@ -109,6 +110,9 @@ func (s *Server) setSecurityScanner(svc securityScannerService) {
 type Server struct {
 	logger  *zap.Logger
 	runtime *runtime.Runtime
+	// singleServerAcquired, when set (tests only), runs after a /mcp/s/<server>
+	// request has acquired its endpoint and before it is served.
+	singleServerAcquired atomic.Pointer[func(name string)]
 	// bundleDegradedLogged is the last degraded-coverage reason already logged
 	// by bundleAdmissionSuspended (Spec 101 FR-007), so the suspension is
 	// logged once per reason rather than once per settle event.
@@ -118,6 +122,9 @@ type Server struct {
 	// mcp_reject_query_apikey warning, so a client retrying in a loop logs
 	// once per queryAPIKeyRejectLogInterval, not once per request.
 	queryAPIKeyRejectLogged atomic.Int64
+	// oauthLoginEverUsed reports whether browser login was ever used on this
+	// install (Spec 132). nil means never; tests inject it.
+	oauthLoginEverUsed func() bool
 	// createAfterConfigRead is a Spec 116 test seam (nil in production): it
 	// runs in the create path after the runtime configuration was read and
 	// before the new server is published.
@@ -140,6 +147,15 @@ type Server struct {
 
 	statusCh chan interface{}
 	eventsCh chan runtime.Event
+
+	// routingEventsCh is listenForRoutingModeRefresh's event subscription.
+	// Shutdown unsubscribes it, which closes it and ends the listener.
+	routingEventsCh chan runtime.Event
+	// listenersDone is closed by Shutdown to stop forwardRuntimeStatus. The
+	// runtime's status channel is never closed (its senders outlive no
+	// shutdown step that could close it safely), so the forwarder cannot end
+	// by ranging over it.
+	listenersDone chan struct{}
 
 	// serveErrCh delivers a fatal serve failure (startup bind error or
 	// serve-loop death) out of the async StartServer goroutine so the
@@ -345,10 +361,10 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 
 	// Initialize management service and set it on runtime
 	mgmtService := management.NewService(
-		rt,              // RuntimeOperations
-		cfg,             // Config
-		rt.ConfigPath(), // Config file path for deprecation checks
-		rt,              // EventEmitter
+		rt,                     // RuntimeOperations
+		cfg,                    // Config
+		rt.ConfigPath(),        // Config file path for deprecation checks
+		rt,                     // EventEmitter
 		rt.GetSecretResolver(), // SecretResolver
 		logger.Sugar(),
 	)
@@ -378,6 +394,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		statusCh:            make(chan interface{}, 10),
 		eventsCh:            rt.SubscribeEvents(),
 		serveErrCh:          make(chan error, 1),
+		listenersDone:       make(chan struct{}),
 		observability:       obsManager,
 		admissionScanKicked: make(map[string]bool),
 
@@ -430,6 +447,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// start below, so no removal can commit without forgetting its scan state.
 	server.forgetInformationalScansOnPurge()
 	server.registerToolChangeRescan()
+	server.registerTokenSavedDirectRebuild()
 	// Spec 101 US3 (B17, B19, B21): the refresher nudge, the refresh-cycle
 	// telemetry and the post-activation re-protection sweep. Registered here,
 	// at construction, so no activation can slip in before the observer; the
@@ -494,8 +512,8 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// servers.changed leaves the filters denying against an empty catalog and the
 	// direct surface stays blank until an unrelated reconcile. Subscribing here
 	// closes the window rather than depending on goroutine scheduling.
-	routingEvents := server.runtime.SubscribeEvents()
-	go server.listenForRoutingModeRefresh(routingEvents)
+	server.routingEventsCh = server.runtime.SubscribeEvents()
+	go server.listenForRoutingModeRefresh(server.routingEventsCh)
 
 	// Spec 105 FR-004: index every config snapshot before it is published —
 	// the observer runs on the exact *Config about to be stored — and the
@@ -600,6 +618,8 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 	// Harmless on every endpoint but /mcp/all, whose filters are the only
 	// consumers.
 	next = directRequestKindMiddleware(next)
+	// Spec 124 FR-003: the run name header, for MCP over HTTP.
+	next = runNameMiddleware(next)
 	// Spec 058 US3 (R1): drop a modern client's separately posted
 	// notifications/cancelled before mcp-go can match it against another
 	// client's in-flight request — every modern request shares session id "".
@@ -844,6 +864,15 @@ func (s *Server) GetReviewQueue(ctx context.Context) (*runtime.ReviewQueue, erro
 	return s.runtime.GetReviewQueue(ctx)
 }
 
+// GetReviewQueueWithSkills forwards the caller-aware queue read (Spec 125
+// FR-019a: a caller that may not see held skills reads no skill approvals).
+func (s *Server) GetReviewQueueWithSkills(ctx context.Context, includeSkills bool) (*runtime.ReviewQueue, error) {
+	if s.runtime == nil {
+		return nil, fmt.Errorf("runtime unavailable")
+	}
+	return s.runtime.GetReviewQueueWithSkills(ctx, includeSkills)
+}
+
 // GetServerReview forwards the scoped REST review read to the runtime.
 func (s *Server) GetServerReview(ctx context.Context, serverName string) (*runtime.ServerReview, error) {
 	if s.runtime == nil {
@@ -881,8 +910,17 @@ func (s *Server) forwardRuntimeStatus() {
 	// Emit initial snapshot so SSE clients have data immediately.
 	s.enqueueStatusSnapshot()
 
-	for range s.runtime.StatusChannel() {
-		s.enqueueStatusSnapshot()
+	statusCh := s.runtime.StatusChannel()
+	for {
+		select {
+		case <-s.listenersDone:
+			return
+		case _, ok := <-statusCh:
+			if !ok {
+				return
+			}
+			s.enqueueStatusSnapshot()
+		}
 	}
 }
 
@@ -902,6 +940,14 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 			s.warmProfileIndex()
 		}
 		switch evt.Type {
+		case runtime.EventTypeOAuthTokenRefreshed:
+			// A server that could not list its tools because its token refresh
+			// was failing can list again now; republish the direct and
+			// single-server surfaces at once instead of on the retry timer
+			// (GH #1929 release QA).
+			if s.mcpProxy != nil {
+				s.mcpProxy.RetryPendingDirectRebuild()
+			}
 		case runtime.EventTypeServersChanged:
 			s.logger.Debug("servers changed, refreshing routing mode tools",
 				zap.String("event_type", string(evt.Type)))
@@ -944,6 +990,9 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 				// until a restart. Same shape as RefreshPrompts above: cheap,
 				// idempotent, static construction on this one listener goroutine.
 				s.mcpProxy.RefreshCodeExecutionAvailability()
+				// Spec 125 FR-026: enable_skills is hot-reloadable; the skill
+				// tools follow the live switch on every surface.
+				s.mcpProxy.RefreshSkillsAvailability()
 				// Spec 102 FR-014: direct_tool_response_mode is hot-reloadable,
 				// but unlike the settings above the direct listing is
 				// REGISTERED state — reading the live config on the next call
@@ -1506,6 +1555,16 @@ func (s *Server) Shutdown() error {
 	if s.eventsCh != nil {
 		s.runtime.UnsubscribeEvents(s.eventsCh)
 	}
+	// Stop the two goroutines NewServer started. Unsubscribing closes the
+	// routing listener's channel, which ends its range loop; its own deferred
+	// UnsubscribeEvents then finds the channel gone and does nothing. The
+	// shutdown flag above makes this run once, so listenersDone is closed once.
+	if s.routingEventsCh != nil {
+		s.runtime.UnsubscribeEvents(s.routingEventsCh)
+	}
+	if s.listenersDone != nil {
+		close(s.listenersDone)
+	}
 
 	// MCP-32: flush and shut down the OTLP tracer provider so buffered spans
 	// are exported before exit.
@@ -1966,6 +2025,7 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 				um.CallStats(serverStatus.Name)
 		}
 
+		healthInput.NetworkFailure, healthInput.NetworkGaveUp, healthInput.NextRetryAt = s.runtime.NetworkRetryState(serverStatus.Name)
 		// T032: Wire refresh state into health calculation (Spec 023).
 		// Read through the runtime seam so a stale schedule for a server that
 		// no longer uses OAuth is not reported here either (GH #1172).
@@ -2375,6 +2435,9 @@ func applyServerUpdates(existing, updates *config.ServerConfig) {
 	// existing server; nil means "leave unchanged".
 	if updates.ExposePrompts != nil {
 		existing.ExposePrompts = updates.ExposePrompts
+	}
+	if updates.ExposeSkills != nil {
+		existing.ExposeSkills = updates.ExposeSkills
 	}
 	if updates.MaxConcurrentRequests != nil {
 		existing.MaxConcurrentRequests = updates.MaxConcurrentRequests
@@ -3255,8 +3318,8 @@ func (s *Server) streamingNoDeadline(next http.Handler) http.Handler {
 
 // clientFacingStreamableOptions returns the options every client-facing
 // Streamable HTTP transport must be built with. It exists so the set cannot
-// drift between the five Streamable HTTP endpoints (/mcp, /mcp/all, /mcp/code,
-// /mcp/call and /mcp/p/<slug>) — a pin applied to four of five would leave one
+// drift between the six Streamable HTTP endpoints (/mcp, /mcp/all, /mcp/code,
+// /mcp/call, /mcp/p/<slug> and /mcp/s/<server>) — a pin applied to five of six would leave one
 // door open on a different protocol era.
 //
 // SCOPE, precisely: this covers the Streamable HTTP surfaces. mcp-go offers no
@@ -3419,9 +3482,15 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux.Handle("/mcp/p/", profileHandler)
 	mux.Handle("/mcp/p", profileHandler)
 
+	// /mcp/s/<server> → one upstream's tools under their own names, with the
+	// upstream's own instructions (mcp_single_server.go). The same auth,
+	// host-validation and streaming wrappers as every other MCP route.
+	singleServerHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(http.HandlerFunc(s.serveSingleServer))))))
+	mux.Handle("/mcp/s/", singleServerHandler)
+
 	s.logger.Info("Registered routing mode MCP endpoints",
 		zap.String("default_mode", cfg.RoutingMode),
-		zap.Strings("endpoints", []string{"/mcp/all", "/mcp/code", "/mcp/call", "/mcp/p/<slug>"}))
+		zap.Strings("endpoints", []string{"/mcp/all", "/mcp/code", "/mcp/call", "/mcp/p/<slug>", "/mcp/s/<server>"}))
 
 	// Legacy endpoints for backward compatibility
 	mux.Handle("/v1/tool_code", mcpHandler)
@@ -3684,7 +3753,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	selectiveProtectedWebUIHandler := s.createSelectiveWebUIProtectedHandler(http.StripPrefix("/ui", webUIHandler))
 	mux.Handle("/ui/", selectiveProtectedWebUIHandler)
 	// Redirect root to web UI
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	rootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
 			http.Redirect(w, r, "/ui/", http.StatusFound)
 			return
@@ -3698,6 +3767,10 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		}
 		http.NotFound(w, r)
 	})
+	mux.Handle("/", rootHandler)
+	// Spec 132: opt-in browser login. Behaves exactly like the handlers above
+	// until mcp_oauth_enabled is switched on (or the feature has been used).
+	s.registerOAuthLoginRoutes(mux, mcpHandler, rootHandler)
 	s.logger.Info("Registered Web UI endpoints", zap.Strings("ui_endpoints", []string{"/ui/", "/"}))
 
 	// Determine actual TCP address for logging
@@ -4482,6 +4555,14 @@ func (s *Server) GetServerToolCalls(serverName string, limit int) ([]*contracts.
 	return s.runtime.GetServerToolCalls(serverName, limit)
 }
 
+// replayBlockReasonTokenPermission labels a replay refused for the agent
+// token's permission tier; httpapi maps *profile.ToolBlockedError to 403.
+const replayBlockReasonTokenPermission profile.BlockReason = "token_permission"
+
+// replayBlockReasonToolNotCallable labels a replay refused by the shared
+// per-tool gate or the live identity check (tool disabled / not certified).
+const replayBlockReasonToolNotCallable profile.BlockReason = "tool_not_callable"
+
 // ReplayToolCall replays a tool call with modified arguments. ctx is the
 // caller's request context: it governs the concurrency-limiter queue wait as
 // well as the upstream call (spec 093 FR-005).
@@ -4498,8 +4579,20 @@ func (s *Server) GetServerToolCalls(serverName string, limit int) ([]*contracts.
 // and no `(server, tool)` pair was ever resolved to audit.
 func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error) {
 	original, lookupErr := s.runtime.GetToolCallByID(id)
-	if lookupErr != nil || original == nil || s.mcpProxy == nil {
-		return s.runtime.ReplayToolCall(ctx, id, arguments)
+	// Fail closed for every caller: without the record or the proxy there is no
+	// gate to answer to, and the ungated runtime delegate is never reachable
+	// from here (an administrator included).
+	if lookupErr != nil {
+		return nil, lookupErr
+	}
+	if original == nil {
+		return nil, fmt.Errorf("tool call not found: %s", id)
+	}
+	if s.mcpProxy == nil {
+		return nil, &profile.ToolBlockedError{
+			Reason:  replayBlockReasonToolNotCallable,
+			Message: "Tool call replay is unavailable: the MCP proxy is not initialized",
+		}
 	}
 
 	callArgs := arguments
@@ -4533,9 +4626,37 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 			sessionIDFromContext(ctx), requestID, "blocked", profile.ErrToolOutsideProfile.Error(), telemetry.BlockReasonProfileScope)
 		return nil, profile.ErrToolOutsideProfile
 	}
+	// Agent token server access first, so a scoped caller learns nothing about
+	// a server outside its scope from the shape of any later refusal (the
+	// order handleCallToolVariant keeps: effective server scope, then the
+	// identity gate).
+	replayAuth := auth.AuthContextFromContext(ctx)
+	authCtx := auth.ScopedView(replayAuth, (replayAuth == nil || replayAuth.Anonymous) && profileResolution.anonymousConfinementActive())
+	scopedCaller := auth.IsNonAdmin(authCtx)
+	if scopedCaller && !authCtx.CanAccessServer(original.ServerName) {
+		s.mcpProxy.emitActivityPolicyDecision(ctx, original.ServerName, original.ToolName,
+			sessionIDFromContext(ctx), requestID, "blocked", profile.ErrToolOutsideProfile.Error(), telemetry.BlockReasonTokenPermission)
+		return nil, profile.ErrToolOutsideProfile
+	}
+
+	// Replay is a dispatch path, so it answers to the SAME shared per-tool gate
+	// as every other one (evaluateExactToolGate: server quarantine / disabled,
+	// tool-level quarantine, enabled_tools / disabled_tools, review-dirty) and
+	// takes the tool's identity, annotations and tier from it, never from a
+	// separate read. The stored record only names WHICH tool to replay.
+	gate := s.mcpProxy.evaluateExactToolGate(original.ServerName, original.ToolName)
+	identity := gate.identity
+	annotations, annotationsFound := identity.Annotations, identity.Found
+	if annotationsFound {
+		auditSetOperation(ctx, tierForAnnotations(annotations, annotationsFound))
+	}
+	if identity.Unresolved() {
+		message := unresolvedToolIdentityMessage(original.ServerName, original.ToolName, identity.DiscoveryDone)
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, message, telemetry.BlockReasonToolNotCallable)
+	}
+
 	if policy := profileResolution.Policy; policy != nil {
-		annotations, found := s.mcpProxy.EffectiveAnnotations(original.ServerName, original.ToolName)
-		intrinsic := profile.IntrinsicTier(annotations, found)
+		intrinsic := profile.IntrinsicTier(annotations, annotationsFound)
 		if admitted, reason, tier := policy.Decide(original.ServerName, original.ToolName, intrinsic); !admitted && reason != profile.ReasonServerNotInProfile {
 			message, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, original.ServerName, original.ToolName, profileRefusalSubject(profileResolution, profileIndex))
 			refusal := &profile.ToolBlockedError{Reason: blockReason, Message: message}
@@ -4543,6 +4664,55 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 				sessionIDFromContext(ctx), requestID, "blocked", message, telemetry.BlockReasonOther, string(blockReason))
 			return nil, refusal
 		}
+	}
+
+	// Agent token authorization: replay dispatches a real call, so a scoped
+	// credential needs the TARGET tool's permission tier (fail closed to
+	// destructive when unknown), exactly as handleCallToolVariant enforces.
+	// Exact-match, not hierarchical.
+	if scopedCaller {
+		if perm := tierForAnnotations(annotations, annotationsFound); perm != "" && !authCtx.HasPermission(perm) {
+			message := tokenTierRefusalText(perm, original.ServerName, original.ToolName)
+			return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonTokenPermission, message, telemetry.BlockReasonTokenPermission)
+		}
+	}
+
+	// The shared policy gates, in handleCallToolVariant's order of answer.
+	if refusal := s.mcpProxy.replayGateRefusal(ctx, gate, requestID); refusal != nil {
+		return nil, refusal
+	}
+	if s.mcpProxy.replayAfterGate != nil {
+		s.mcpProxy.replayAfterGate()
+	}
+
+	// Live identity. Replay is an operator convenience, not a hot path, so it
+	// is stricter than handleCallToolVariant: it dispatches only onto a
+	// CERTIFIED connection generation, and only the SAME generation every
+	// verdict above (quarantine, profile policy, token tier, audit operation)
+	// was computed from. A missing or disconnected client, a gate identity
+	// that was not certified, or a live generation that differs from the
+	// gate's is refused with zero upstream calls; the caller retries and the
+	// next replay evaluates everything against the new generation. The
+	// dispatch is pinned to that generation, so a reconnect between this
+	// check and the transport is refused by the managed client.
+	client, exists := s.mcpProxy.upstreamManager.GetClient(original.ServerName)
+	if !exists || !client.IsConnected() {
+		message := fmt.Sprintf("Server '%s' is not connected - use 'upstream_servers' tool to check server configuration", original.ServerName)
+		if exists {
+			message = fmt.Sprintf("Server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", original.ServerName, client.GetState().String())
+		}
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, message, telemetry.BlockReasonToolNotCallable)
+	}
+	discoveryWindow := unresolvedToolIdentityMessage(original.ServerName, original.ToolName, false)
+	if !identity.certified() {
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, discoveryWindow, telemetry.BlockReasonToolNotCallable)
+	}
+	certified, message, refuse := s.mcpProxy.liveIdentityRefusal(gate.serverConfig, original.ServerName, original.ToolName, identity, client)
+	if refuse {
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, message, telemetry.BlockReasonToolNotCallable)
+	}
+	if !certified.certified() || certified.DiscoveryEpoch != identity.DiscoveryEpoch {
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, discoveryWindow, telemetry.BlockReasonToolNotCallable)
 	}
 
 	// Spec 107 (round-3 cross-review finding, PR-D): the persisted record's
@@ -4558,11 +4728,30 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 	s.mcpProxy.auditAuthz(ctx, "allow", "")
 
 	startTime := time.Now()
-	result, err := s.runtime.ReplayToolCall(ctx, id, arguments)
+	ctx = s.mcpProxy.withReviewDirtyRecheck(ctx, original.ServerName)
+	result, err := s.runtime.ReplayToolCallWithOptions(ctx, id, arguments, runtime.ReplayOptions{
+		PinEpoch: true,
+		Epoch:    certified.DiscoveryEpoch,
+	})
 	durationMs := time.Since(startTime).Milliseconds()
 
 	var limitErr *limiter.LimitError
+	dirty := isReviewNotRecordedRefusal(err)
 	switch {
+	case dirty || errors.Is(err, managed.ErrConnectionGenerationChanged):
+		// The generation moved (or the review state changed) while the call
+		// waited: the managed client refused before the transport, so nothing
+		// reached the upstream. Same refusal bodies as the other dispatch
+		// paths; the allow line is closed by an error tool_call, never a
+		// second authz.
+		message := unresolvedToolIdentityMessage(original.ServerName, original.ToolName, false)
+		if dirty {
+			message = reviewNotRecordedMessage(original.ServerName)
+		}
+		s.mcpProxy.auditToolCall(ctx, "error", "", audit.ErrorClassUpstreamUnavailable, durationMs, nil, nil)
+		s.mcpProxy.emitActivityPolicyDecision(ctx, original.ServerName, original.ToolName,
+			sessionIDFromContext(ctx), requestID, "blocked", message, telemetry.BlockReasonToolNotCallable)
+		return nil, &profile.ToolBlockedError{Reason: replayBlockReasonToolNotCallable, Message: message}
 	case errors.As(err, &limitErr) && limitErr.Shed():
 		// Spec 093 FR-011: a shed never reached the upstream, so it is the
 		// tool_call half of the authz-allow pair, never a second authz —
@@ -4714,6 +4903,40 @@ func (s *Server) GetActivity(id string) (*storage.ActivityRecord, error) {
 	return s.runtime.GetActivity(id)
 }
 
+// Work-session reads (Spec 124).
+
+// ListWorkSessionSummaries returns every work-session summary.
+func (s *Server) ListWorkSessionSummaries() ([]*storage.WorkSessionSummary, error) {
+	return s.runtime.ListWorkSessionSummaries()
+}
+
+// GetWorkSessionSummary returns one work-session summary, or nil.
+func (s *Server) GetWorkSessionSummary(id string) (*storage.WorkSessionSummary, error) {
+	return s.runtime.GetWorkSessionSummary(id)
+}
+
+// WorkSessionRowRefs returns a work session's index entries in time order.
+func (s *Server) WorkSessionRowRefs(id string) ([]storage.WorkSessionRowRef, error) {
+	return s.runtime.WorkSessionRowRefs(id)
+}
+
+// WalkWorkSessionTimeline visits a work session's index entries merged with
+// the upstream events of the given servers, in time order.
+func (s *Server) WalkWorkSessionTimeline(id string, servers []string, from, to time.Time, fn func(storage.WorkSessionRowRef) bool) error {
+	return s.runtime.WalkWorkSessionTimeline(id, servers, from, to, fn)
+}
+
+// OpenUpstreamEventsBefore returns the latest unresolved upstream event of
+// each server before a time (release QA F2).
+func (s *Server) OpenUpstreamEventsBefore(kinds map[string][]string, before, until, notBefore time.Time, visible func(owner string) bool) ([]storage.WorkSessionRowRef, error) {
+	return s.runtime.OpenUpstreamEventsBefore(kinds, before, until, notBefore, visible)
+}
+
+// GetActivitiesByKeys loads activity rows by key.
+func (s *Server) GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error) {
+	return s.runtime.GetActivitiesByKeys(keys)
+}
+
 // StreamActivities returns a channel that yields activity records matching the filter.
 func (s *Server) StreamActivities(ctx context.Context, filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
 	return s.runtime.StreamActivities(ctx, filter)
@@ -4728,6 +4951,89 @@ func (s *Server) AggregateToolUsage(since time.Time) (map[string]storage.ToolUsa
 // UsageSnapshot returns the actor-owned usage aggregate snapshot (spec 069 A3).
 func (s *Server) UsageSnapshot() *runtime.UsageAggregate {
 	return s.runtime.UsageSnapshot()
+}
+
+// Skills over MCP (Spec 125, PR-1): thin forwards to the runtime catalog.
+
+// SkillsStatus returns the in-memory state of a server's last skills refresh.
+func (s *Server) SkillsStatus(serverName string) runtime.SkillsServerStatus {
+	return s.runtime.SkillsStatus(serverName)
+}
+
+// ListSkillRecords returns a server's skill records.
+func (s *Server) ListSkillRecords(serverName string) ([]*storage.SkillApprovalRecord, error) {
+	return s.runtime.ListSkillRecords(serverName)
+}
+
+// SkillFileText returns one stored text file of a skill.
+func (s *Server) SkillFileText(serverName, skillPath, relPath string, approvedCopy bool) ([]byte, storage.SkillFile, error) {
+	return s.runtime.SkillFileText(serverName, skillPath, relPath, approvedCopy)
+}
+
+// ListAvailableSkills returns the approved copies of a server's skills that
+// agents may have.
+//
+// This is the door of a scoped REST caller, so the upstream-written words pass
+// the output policy the agent tools apply.
+func (s *Server) ListAvailableSkills(serverName string) ([]*runtime.AvailableSkill, error) {
+	list, err := s.runtime.ListAvailableSkills(serverName)
+	if err != nil || s.mcpProxy == nil {
+		return list, err
+	}
+	out := list[:0]
+	for _, sk := range list {
+		if c := s.mcpProxy.CleanSkillForAgents(sk); c != nil {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+// EmitActivitySkillAccess records one skill access in the activity log.
+func (s *Server) EmitActivitySkillAccess(a runtime.SkillAccessActivity) {
+	s.runtime.EmitActivitySkillAccess(a)
+}
+
+// AvailableSkillFile returns one text file of the approved copy of an
+// available skill.
+//
+// The text is what the output policy lets out (runtime.ErrSkillOutputBlocked
+// when it lets nothing out), computed on the whole file as for the agent
+// tools: a scoped REST read and load_skill give the same text.
+func (s *Server) AvailableSkillFile(serverName, skillPath, relPath string) ([]byte, storage.SkillFile, *runtime.AvailableSkill, error) {
+	data, meta, sk, err := s.runtime.AvailableSkillFile(serverName, skillPath, relPath)
+	if err != nil || s.mcpProxy == nil {
+		return data, meta, sk, err
+	}
+	text, _, _, perr := s.mcpProxy.SkillTextForAgents(serverName, meta.Digest, data)
+	if perr != nil {
+		return nil, meta, sk, perr
+	}
+	if c := s.mcpProxy.CleanSkillForAgents(sk); c != nil {
+		sk = c
+	}
+	return text, meta, sk, nil
+}
+
+// SkillAvailable reports whether an agent may have the skill.
+func (s *Server) SkillAvailable(serverName string, rec *storage.SkillApprovalRecord) bool {
+	return s.runtime.SkillAvailable(serverName, rec)
+}
+
+// RefreshServerSkills reads one server's skills into the catalog.
+func (s *Server) RefreshServerSkills(ctx context.Context, serverName string) error {
+	return s.runtime.RefreshServerSkills(ctx, serverName)
+}
+
+// ApproveSkillsReviewedAt approves skills bound to the reviewed content hashes
+// and server incarnation (Spec 125 PR-2).
+func (s *Server) ApproveSkillsReviewedAt(ctx context.Context, serverName string, skillPaths []string, expected map[string]string, approvedBy string, expectedIncarnation int64) (int, error) {
+	return s.runtime.ApproveSkillsReviewedAt(ctx, serverName, skillPaths, expected, approvedBy, expectedIncarnation)
+}
+
+// SetSkillsBlockedAt sets or clears the blocked mark on skills (Spec 125 PR-2).
+func (s *Server) SetSkillsBlockedAt(ctx context.Context, serverName string, skillPaths []string, blocked bool, by string, expectedIncarnation int64) (int, error) {
+	return s.runtime.SetSkillsBlockedAt(ctx, serverName, skillPaths, blocked, by, expectedIncarnation)
 }
 
 // ListToolApprovals returns tool approval records for a server (Spec 032).
@@ -5549,4 +5855,58 @@ func (s *Server) ServerIncarnation(serverName string) (int64, bool) {
 		return 0, false
 	}
 	return s.runtime.ServerIncarnation(serverName)
+}
+
+// serveSingleServer serves /mcp/s/<server>. An unknown server, or one the
+// caller's credential may not use, gets the same 404, so the route cannot be
+// used to probe which servers exist.
+//
+// The endpoint (instance, transport, generation) is acquired as one value and
+// nothing about it is looked up again while the request runs, so a retirement
+// in the meantime (Spec 125 D14) cannot pair this request with a newer
+// instance. The handler chain is: session guard (this endpoint and
+// generation) -> native skills interceptor (when the instance has the native
+// surface) -> the instance's transport.
+func (s *Server) serveSingleServer(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/mcp/s/")
+	name = strings.TrimSuffix(name, "/")
+	if i := strings.Index(name, "/"); i >= 0 {
+		name = name[:i]
+	}
+	var (
+		ep *singleServerEndpoint
+		ok bool
+	)
+	if s.mcpProxy != nil && s.mcpProxy.singleServerAdmits(r.Context(), name) {
+		ep, ok = s.mcpProxy.acquireSingleServerEndpoint(name, func(srv *server.MCPServer, gen uint64) *server.StreamableHTTPServer {
+			return server.NewStreamableHTTPServer(srv, singleServerStreamableOptions(s.liveConfig, name, gen)...)
+		})
+	}
+	if !ok {
+		http.Error(w, `{"error":"Server not found"}`, http.StatusNotFound)
+		return
+	}
+	if hook := s.singleServerAcquired.Load(); hook != nil {
+		(*hook)(name)
+	}
+	ctx := withSingleServerEndpoint(r.Context(), ep)
+	if r.Method == http.MethodGet {
+		// A stream opened on an endpoint that is retired while it is open (or
+		// just before it registered) ends with the retirement.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			select {
+			case <-ep.retired:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
+	var next http.Handler = ep.transport
+	if ep.native {
+		next = s.mcpProxy.nativeSkillsInterceptor(ep, next)
+	}
+	singleServerSessionGuard(name, ep.gen, next).ServeHTTP(w, r.WithContext(ctx))
 }

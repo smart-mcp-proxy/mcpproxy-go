@@ -192,14 +192,14 @@ All import endpoints return a consistent response format:
     "skipped": [
       {
         "name": "existing-server",
-        "reason": "Server with this name already exists"
+        "reason": "already_exists"
       }
     ],
     "failed": [
       {
         "name": "invalid-server",
-        "reason": "Missing required field: command",
-        "original_config": {}
+        "error": "invalid_server",
+        "details": "command is required for stdio protocol"
       }
     ],
     "warnings": ["Server 'github' has no tools configured"]

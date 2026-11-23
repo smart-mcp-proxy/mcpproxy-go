@@ -79,12 +79,16 @@ func dockerConfig(name, docker string) *config.ServerConfig {
 // launcherConfig is a locally launched HTTP upstream whose command is the
 // marker shell: it never serves its URL, so an unretired connect fails at
 // wait-for-url after it launched.
-func launcherConfig(t *testing.T, name, dir string) *config.ServerConfig {
+//
+// wait is how long the launcher waits for the URL before it kills the command
+// again. The control passes its whole budget: a short wait kills a shell that
+// starts slowly before it has touched its marker.
+func launcherConfig(t *testing.T, name, dir string, wait time.Duration) *config.ServerConfig {
 	t.Helper()
 	cfg := markerCommand(t, name, dir)
 	cfg.Protocol = "http"
 	cfg.URL = "http://127.0.0.1:1/mcp" // nothing listens on port 1
-	cfg.LauncherWaitTimeout = config.Duration(500 * time.Millisecond)
+	cfg.LauncherWaitTimeout = config.Duration(wait)
 	return cfg
 }
 
@@ -134,18 +138,39 @@ func retireParkedLaunch(t *testing.T, cfg *config.ServerConfig) {
 	time.Sleep(300 * time.Millisecond) // a launched child would have touched its marker by now
 }
 
+// controlBudget is how long an unretired control may take to show its launch.
+// It is generous on purpose: on a loaded CI runner a shell needs seconds to
+// start, and a control that gives up first reads as a broken barrier test.
+// The controls return as soon as the launch is seen, so a healthy run does
+// not wait for it.
+const controlBudget = 60 * time.Second
+
+// connectUnretired starts a connect for cfg and returns at once; the connect
+// is cancelled and awaited when the test ends. Neither fixture is an MCP
+// server, so the connect never succeeds: the caller waits for the launch.
 func connectUnretired(t *testing.T, cfg *config.ServerConfig) *managed.Client {
 	t.Helper()
 	launches := observeLaunches(t, cfg.Name)
-	defer func() { assert.Positive(t, launches.Load(), "control: the launch section starts a process") }()
 	m := newGenTestManager(t)
 	m.AdvanceGenerations([]GenerationChange{present(cfg.Name, 1, cfg)})
 	require.NoError(t, m.AddServerConfigAt(cfg.Name, cfg, 1))
 	inst := registered(t, m, cfg.Name)
 	t.Cleanup(func() { _ = inst.Disconnect() })
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
-	_ = inst.Connect(ctx) // neither fixture is an MCP server
+	ctx, cancel := context.WithTimeout(context.Background(), controlBudget)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = inst.Connect(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Error("the control's connect did not return after its context was cancelled")
+		}
+		assert.Positive(t, launches.Load(), "control: the launch section starts a process")
+	})
 	return inst
 }
 
@@ -168,7 +193,7 @@ func TestRetire_DockerLaunchControl_RunsWhenNotRetired(t *testing.T) {
 	docker := mockDocker(t, dir)
 	connectUnretired(t, dockerConfig("docker-ctl", docker))
 	require.Eventually(t, func() bool { return dockerRuns(t, dir) > 0 && markers(t, dir) > 0 },
-		5*time.Second, 50*time.Millisecond, "control: an unretired Docker launch runs the mock `docker run`")
+		controlBudget, 50*time.Millisecond, "control: an unretired Docker launch runs the mock `docker run`")
 }
 
 func TestRetire_LauncherParked_RemovalLaunchesNothing(t *testing.T) {
@@ -176,7 +201,7 @@ func TestRetire_LauncherParked_RemovalLaunchesNothing(t *testing.T) {
 		t.Skip("spawns a shell")
 	}
 	dir := t.TempDir()
-	retireParkedLaunch(t, launcherConfig(t, "launcher-parked", dir))
+	retireParkedLaunch(t, launcherConfig(t, "launcher-parked", dir, 500*time.Millisecond))
 	assert.Zero(t, markers(t, dir), "the removed server's launcher must not run")
 }
 
@@ -185,7 +210,7 @@ func TestRetire_LauncherControl_LaunchesWhenNotRetired(t *testing.T) {
 		t.Skip("spawns a shell")
 	}
 	dir := t.TempDir()
-	connectUnretired(t, launcherConfig(t, "launcher-ctl", dir))
-	require.Eventually(t, func() bool { return markers(t, dir) > 0 }, 5*time.Second, 50*time.Millisecond,
+	connectUnretired(t, launcherConfig(t, "launcher-ctl", dir, controlBudget))
+	require.Eventually(t, func() bool { return markers(t, dir) > 0 }, controlBudget, 50*time.Millisecond,
 		"control: an unretired launcher runs its command")
 }

@@ -26,7 +26,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 // newStoredScriptProxy builds a code-execution-enabled proxy whose config-file
@@ -73,7 +72,7 @@ func newStoredScriptProxyCfg(t *testing.T, configure func(*config.Config), opts 
 		configure(cfg)
 	}
 
-	um := upstream.NewManager(logger, cfg, sm.GetBoltDB(), secret.NewTestWildcardResolver(), sm)
+	um := newTestUpstreamManager(t, logger, cfg, sm.GetBoltDB(), secret.NewTestWildcardResolver(), sm)
 
 	cm, err := cache.NewManager(sm.GetDB(), logger)
 	require.NoError(t, err)

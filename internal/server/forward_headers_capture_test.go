@@ -38,7 +38,7 @@ func captureProbe(t *testing.T, cfg *config.Config) *httptest.Server {
 	})
 	streamable := mcpserver.NewStreamableHTTPServer(srv, clientFacingStreamableOptions(func() *config.Config { return cfg })...)
 	hs := httptest.NewServer(streamable)
-	t.Cleanup(hs.Close)
+	t.Cleanup(func() { closeHTTPFixture(hs) })
 	return hs
 }
 
@@ -125,7 +125,7 @@ func TestAllStreamableMountsUseSharedCaptureOptions(t *testing.T) {
 		for _, a := range call.Args {
 			ast.Inspect(a, func(m ast.Node) bool {
 				if c, ok := m.(*ast.CallExpr); ok {
-					if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "clientFacingStreamableOptions" {
+					if id, ok := c.Fun.(*ast.Ident); ok && (id.Name == "clientFacingStreamableOptions" || id.Name == "singleServerStreamableOptions") {
 						found = true
 					}
 				}
@@ -135,7 +135,28 @@ func TestAllStreamableMountsUseSharedCaptureOptions(t *testing.T) {
 		assert.True(t, found, "NewStreamableHTTPServer at %s must use clientFacingStreamableOptions", fset.Position(call.Pos()))
 		return true
 	})
-	assert.Equal(t, 5, mounts, "/mcp, /mcp/all, /mcp/code, /mcp/call and /mcp/p/<slug>")
+	assert.Equal(t, 6, mounts, "/mcp, /mcp/all, /mcp/code, /mcp/call, /mcp/p/<slug> and /mcp/s/<server>")
+
+	// singleServerStreamableOptions (the /mcp/s/<server> mount) must itself be
+	// built on clientFacingStreamableOptions.
+	sf, err := parser.ParseFile(fset, "mcp_single_server.go", nil, 0)
+	require.NoError(t, err)
+	delegates := false
+	for _, d := range sf.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "singleServerStreamableOptions" {
+			continue
+		}
+		ast.Inspect(fn.Body, func(m ast.Node) bool {
+			if c, ok := m.(*ast.CallExpr); ok {
+				if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "clientFacingStreamableOptions" {
+					delegates = true
+				}
+			}
+			return true
+		})
+	}
+	assert.True(t, delegates, "singleServerStreamableOptions must build on clientFacingStreamableOptions")
 
 	src, err := os.ReadFile("server.go")
 	require.NoError(t, err)

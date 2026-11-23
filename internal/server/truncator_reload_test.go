@@ -12,7 +12,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -50,7 +49,7 @@ func TestTruncatorHotReloadOnServingPath(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { idx.Close() })
 
-	um := upstream.NewManager(logger, cfg, sm.GetBoltDB(), secret.NewTestWildcardResolver(), sm)
+	um := newTestUpstreamManager(t, logger, cfg, sm.GetBoltDB(), secret.NewTestWildcardResolver(), sm)
 
 	cm, err := cache.NewManager(sm.GetDB(), logger)
 	require.NoError(t, err)

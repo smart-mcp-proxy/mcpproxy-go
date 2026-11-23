@@ -15,7 +15,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
@@ -143,7 +142,7 @@ func TestCodeExecutionToolCaller_IsSubjectToAdmission(t *testing.T) {
 	}
 	cfg := &config.Config{Servers: []*config.ServerConfig{serverCfg}}
 
-	um := upstream.NewManager(zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
+	um := newTestUpstreamManager(t, zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
 	require.NoError(t, um.AddServerConfig("db", serverCfg))
 	client, ok := um.GetClient("db")
 	require.True(t, ok)
@@ -186,7 +185,7 @@ func TestCodeExecutionToolCaller_ShedIsAttributedInternally(t *testing.T) {
 	}
 	cfg := &config.Config{Servers: []*config.ServerConfig{serverCfg}}
 
-	um := upstream.NewManager(zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
+	um := newTestUpstreamManager(t, zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
 	require.NoError(t, um.AddServerConfig("db", serverCfg))
 	client, ok := um.GetClient("db")
 	require.True(t, ok)

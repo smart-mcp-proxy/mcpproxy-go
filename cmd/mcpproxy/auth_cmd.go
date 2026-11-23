@@ -12,6 +12,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/cli"
 
@@ -466,6 +467,13 @@ func displayAuthStatusPretty(servers []map[string]interface{}) error {
 				fmt.Printf("  Action: mcpproxy upstream logs %s\n", name)
 			}
 		}
+		// Spec 123: a stored token that cannot be decrypted is its own state,
+		// never "log in": a sign-in could not overwrite the row.
+		if srvOAuthTokenUndecryptable(srv) {
+			fmt.Printf("  Stored token: ❌ cannot be decrypted (%s)\n", diagnostics.OAuthTokenUndecryptable)
+			fmt.Printf("  Action: restore the encryption key and restart mcpproxy, or discard the token: mcpproxy auth logout --server=%s, then mcpproxy auth login --server=%s\n", name, name)
+			fmt.Printf("  Details: mcpproxy doctor\n")
+		}
 
 		// Display OAuth configuration details (if available)
 		// Check if this is an autodiscovery server (no explicit OAuth config, but has token)
@@ -583,6 +591,22 @@ func displayAuthStatusPretty(servers []map[string]interface{}) error {
 	return nil
 }
 
+// srvOAuthTokenUndecryptable reports whether a server entry of the daemon's
+// servers payload carries the MCPX_OAUTH_TOKEN_UNDECRYPTABLE diagnostic.
+func srvOAuthTokenUndecryptable(srv map[string]interface{}) bool {
+	code := string(diagnostics.OAuthTokenUndecryptable)
+	if c, _ := srv["error_code"].(string); c == code {
+		return true
+	}
+	if d, ok := srv["diagnostic"].(map[string]interface{}); ok {
+		if c, _ := d["code"].(string); c == code {
+			return true
+		}
+	}
+	lastError, _ := srv["last_error"].(string)
+	return strings.Contains(lastError, "stored OAuth token cannot be decrypted")
+}
+
 func loadAuthConfig() (*config.Config, error) {
 	cfgPath := resolveCLIConfigPath(authConfigPath)
 	if cfgPath == "" {
@@ -641,11 +665,20 @@ func runAuthLoginClientMode(ctx context.Context, client *cliclient.Client, serve
 		return runAuthLoginStandalone(ctx, serverName)
 	}
 
+	// Spec 123: an undecryptable stored row is explained here, before the
+	// daemon is asked to log in (which it would refuse anyway).
+	if err := preflightDaemonOAuthRow(ctx, client, serverName); err != nil {
+		return err
+	}
+
 	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode - coordinating OAuth with running server\n\n")
 
 	// Trigger OAuth via daemon
 	result, err := client.TriggerOAuthLoginWithResult(ctx, serverName)
 	if err != nil {
+		if refusal := oauthRefusalFromAPIError(err, serverName); refusal != nil {
+			return refusal
+		}
 		// Spec 020: Check for structured OAuth errors and display rich output
 		var oauthFlowErr *contracts.OAuthFlowError
 		if errors.As(err, &oauthFlowErr) {
@@ -711,6 +744,18 @@ func runAuthLoginStandalone(ctx context.Context, serverName string) error {
 	if !authServerExistsInConfig(serverName, globalConfig) {
 		return fmt.Errorf("server '%s' not found in configuration. Available servers: %v",
 			serverName, getAuthAvailableServerNames(globalConfig))
+	}
+
+	// Spec 123: read the stored row first. An undecryptable one is explained
+	// (reason, key ids, next commands) and stops here: no client, no
+	// discovery, no browser.
+	for _, srv := range globalConfig.Servers {
+		if srv != nil && srv.Name == serverName {
+			if err := preflightStandaloneOAuthRow(globalConfig, srv); err != nil {
+				return err
+			}
+			break
+		}
 	}
 
 	// Create CLI client for manual OAuth
@@ -914,7 +959,7 @@ func runAuthLogoutClientMode(ctx context.Context, client *cliclient.Client, serv
 }
 
 // runAuthLogoutStandalone clears OAuth token in standalone mode.
-func runAuthLogoutStandalone(ctx context.Context, serverName string, cfg *config.Config) error {
+func runAuthLogoutStandalone(_ context.Context, serverName string, cfg *config.Config) error {
 	fmt.Printf("🔐 OAuth Logout - Server: %s\n", serverName)
 	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
@@ -929,14 +974,16 @@ func runAuthLogoutStandalone(ctx context.Context, serverName string, cfg *config
 	fmt.Println("   Note: Running in standalone mode (no daemon detected)")
 	fmt.Println()
 
-	cliClient, err := cli.NewClient(serverName, cfg, authLogLevel)
+	// Spec 123: not cli.NewClient. It resolves the OAuth token
+	// key first, and an unresolvable key reference (the usual lost-key case)
+	// would refuse the very logout the docs prescribe for it. The clear is a
+	// key-only delete, so it needs no key.
+	logger, err := logs.SetupCommandLogger(false, authLogLevel, false, "")
 	if err != nil {
-		return fmt.Errorf("failed to create CLI client: %w", err)
+		return fmt.Errorf("failed to create logger: %w", err)
 	}
-	defer cliClient.Close()
-
-	// Clear OAuth token
-	if err := cliClient.ClearOAuthToken(ctx); err != nil {
+	defer func() { _ = logger.Sync() }()
+	if err := cli.ClearOAuthTokenStandalone(cfg, serverName, logger.Sugar()); err != nil {
 		return fmt.Errorf("failed to clear OAuth token: %w", err)
 	}
 

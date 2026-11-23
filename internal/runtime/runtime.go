@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,8 +13,10 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -47,6 +50,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tokenseal"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolsig"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
@@ -186,13 +190,26 @@ type Runtime struct {
 	// MCP serving path reads it via Truncator(). An atomic.Pointer makes the
 	// swap/read race-free (#861) and independent of r.mu, so the accessor stays
 	// lock-free on the hot path and composes with the config commit serialization.
-	truncator        atomic.Pointer[truncate.Truncator]
-	sigCache         *toolsig.Cache // Spec 085 FR-008: single process-wide signature cache (indexing warms, MCP reads)
-	secretResolver   *secret.Resolver
-	tokenizer        tokens.Tokenizer
-	refreshManager   *oauth.RefreshManager // Proactive OAuth token refresh
-	updateChecker    *updatecheck.Checker  // Background version checking
-	telemetryService *telemetry.Service    // Anonymous usage telemetry (Spec 036)
+	truncator      atomic.Pointer[truncate.Truncator]
+	sigCache       *toolsig.Cache // Spec 085 FR-008: single process-wide signature cache (indexing warms, MCP reads)
+	secretResolver *secret.Resolver
+	tokenizer      tokens.Tokenizer
+
+	// tokenSavingsCache holds the last tokenized savings estimate and
+	// tokenSavingsKey the inputs it was computed from (CalculateTokenSavings).
+	tokenSavingsMu    sync.Mutex
+	tokenSavingsCache *tokens.TokenSavingsMetrics
+	tokenSavingsKey   string
+	refreshManager    *oauth.RefreshManager // Proactive OAuth token refresh
+	updateChecker     *updatecheck.Checker  // Background version checking
+	telemetryService  *telemetry.Service    // Anonymous usage telemetry (Spec 036)
+	// starterClassifier decides starter-ness of a (server, incarnation) for the
+	// schema-17 completion counters (Spec 126 FR-037). nil: the default, which
+	// answers false. See upstream_outcome.go.
+	starterClassifier atomic.Pointer[starterClassifierHolder]
+	// successScopeReached caches the success_scope_ever ordinal this process
+	// has persisted, so RecordUpstreamOutcome skips the store once reached.
+	successScopeReached atomic.Uint32
 
 	// bundleRefresher is the TPA bundle refresh scheduler (Spec 087 / Spec 101
 	// US3 B19), registered by the server and started in
@@ -231,9 +248,16 @@ type Runtime struct {
 	// counter matters — is exactly when that happens.
 	rejectionMetric atomic.Pointer[RejectionMetricSink]
 
+	// requestSessionFacts resolves the work session, owning user and run name
+	// of a request from its context (Spec 124). Installed by the server, which
+	// owns the request-level resolution; used by rows the runtime writes
+	// itself.
+	requestSessionFacts atomic.Pointer[RequestSessionFacts]
+
 	// workSessions derives a unit of USER WORK from the churn of transport
 	// sessions underneath it (Spec 082).
-	workSessions *WorkSessionTracker
+	workSessions     *WorkSessionTracker
+	workSessionsOnce sync.Once
 
 	// Spec 047: coalesces servers.changed bursts and embeds the server list +
 	// stats payload so SSE subscribers can update without a follow-up
@@ -251,6 +275,9 @@ type Runtime struct {
 
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
 	supervisor *supervisor.Supervisor
+
+	// skills is the Spec 125 skills catalog state (skills_catalog.go).
+	skills skillsCatalogState
 
 	// Tool discovery deduplication: tracks servers with in-progress reactive discovery
 	// Key: serverName, Value: struct{} (presence indicates discovery in progress)
@@ -421,12 +448,22 @@ type Runtime struct {
 	// credentialsService is Spec 115's issuance/revocation facade over both
 	// credential kinds; it shares bindingWriteMu with clientsService.
 	credentialsService *CredentialsService
+	// oauthLoginService is Spec 132's browser-login service; it shares
+	// bindingWriteMu with the two services above.
+	oauthLoginService *OAuthLoginService
 	// profilesService is Spec 108-f's single profiles service; the evaluator
 	// and session hook are installed by the server.
 	profilesService    *ProfilesService
 	profileEvaluatorMu sync.RWMutex
 	profileEvaluator   ProfileEvaluator
 	profileSessionHook ProfileSessionHook
+
+	// oauthTokenKey is the key config.db's oauth_tokens values are sealed
+	// with (Spec 123), resolved once in New before storage is opened and kept
+	// for the life of the process (the field is restart-gated). nil = off.
+	// oauthKeySource is what doctor reports about it; it holds no path.
+	oauthTokenKey  *tokenseal.Key
+	oauthKeySource config.KeySource
 
 	appCtx    context.Context
 	appCancel context.CancelFunc
@@ -436,6 +473,19 @@ type Runtime struct {
 	// started after shutdown still observes the cancellation (Sol r5 P2).
 	lifetimeCtx context.Context
 }
+
+// runtimeNewStageHook is a test seam (nil in production) that runtime.New
+// calls with the open storage just before it constructs the component a
+// stage names (Spec 123 T040: the boot sweep runs before either).
+var runtimeNewStageHook func(stage string, sm *storage.Manager)
+
+const (
+	runtimeStageUpstreamManager = "upstream_manager"
+	runtimeStageRefreshManager  = "refresh_manager"
+	// runtimeStageOAuthBootSweep fires just before the Spec 123 boot sweep
+	// seals plaintext oauth_tokens rows.
+	runtimeStageOAuthBootSweep = "oauth_boot_sweep"
+)
 
 // New creates a runtime helper for the given config and prepares core managers.
 func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, error) {
@@ -450,7 +500,15 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		logger.Warn(w.Message, zap.String("key", w.Key), zap.String("value", w.Value))
 	}
 
-	storageManager, err := storage.NewManager(cfg.DataDir, logger.Sugar())
+	// Spec 123 FR-020/FR-022: resolve the OAuth token key once, before
+	// config.db is opened. An unresolvable or malformed key stops here with a
+	// *config.StartupError (exit 4) and no byte of the database written.
+	oauthTokenKey, oauthKeySource, err := config.ResolveOAuthTokenKey(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	storageManager, err := storage.NewManager(cfg.DataDir, logger.Sugar(), storage.WithOAuthTokenKey(oauthTokenKey))
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize storage manager: %w", err)
 	}
@@ -472,6 +530,44 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		}
 	}
 
+	// Spec 123 FR-016: the boot sweep. With a key configured, every plaintext
+	// oauth_tokens row is sealed in one transaction here, directly after the
+	// shutdown marker is armed (so a crash or hang in the sweep still reads
+	// as a crash next time) and before any component that reads or writes
+	// OAuth rows (the upstream manager, the refresh manager, background
+	// initialization) exists, so nothing is in flight. Sealed and undecryptable rows are left
+	// as they are, and so is a plaintext row that cannot be sealed for a
+	// per-row reason (logged). A transaction-level failure leaves every row as
+	// it was and refuses startup.
+	if oauthTokenKey != nil {
+		if hook := runtimeNewStageHook; hook != nil {
+			hook(runtimeStageOAuthBootSweep, storageManager)
+		}
+		sealed, sweepErr := storageManager.SealPlaintextOAuthTokens(context.Background())
+		if sweepErr != nil {
+			// Refuse to start: encryption is configured, so no OAuth consumer
+			// may run over rows that are still plaintext. The transaction
+			// rolled back, leaving every row as it was; fix the cause (disk
+			// space, permissions, a corrupt file) and start again.
+			logger.Error("OAuth token boot sweep failed; refusing to start",
+				zap.String("key_id", oauthTokenKey.ID()), zap.Error(sweepErr))
+			_ = storageManager.Close()
+			return nil, fmt.Errorf("failed to encrypt stored OAuth tokens at startup: %w", sweepErr)
+		}
+		logger.Info("OAuth token encryption enabled",
+			zap.String("key_id", oauthTokenKey.ID()), zap.Int("sealed_plaintext_rows", sealed))
+	}
+
+	// Spec 126 FR-033: record the install anchor right after the shutdown
+	// marker (Spec 080 FR-010 keeps that the first DB operation) and the
+	// Spec 123 OAuth boot sweep, and before every other startup write, before
+	// telemetry is wired (SetTelemetry reads the anchor once, for day_two and
+	// window_age) and before the HTTP server and MCP initialisation. Emptiness
+	// was decided when the store opened, so those earlier writes cannot change
+	// it; an early write only shrinks the window in which a crash would leave
+	// a new store without an anchor. Whatever the telemetry opt-out setting.
+	ensureInstallAnchor(storageManager, logger)
+
 	// Close any stale sessions from previous runs
 	if err := storageManager.CloseAllActiveSessions(); err != nil {
 		logger.Warn("Failed to close stale sessions on startup", zap.Error(err))
@@ -486,6 +582,9 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// Initialize secret resolver (upstream scope: server entries + guards).
 	secretResolver := config.BuildSecretResolver(cfg, cfgPath, secret.ScopeUpstream)
 
+	if hook := runtimeNewStageHook; hook != nil {
+		hook(runtimeStageUpstreamManager, storageManager)
+	}
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
 	// Spec 116 PR2b (review R6.1): no instance is built for a committed view
 	// the stored row has already moved past.
@@ -547,6 +646,9 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 
 	// Initialize OAuth refresh manager for proactive token refresh
 	// Uses storageManager as the token store and global coordinator for flow coordination
+	if hook := runtimeNewStageHook; hook != nil {
+		hook(runtimeStageRefreshManager, storageManager)
+	}
 	refreshManager := oauth.NewRefreshManager(
 		storageManager,
 		oauth.GetGlobalCoordinator(),
@@ -588,6 +690,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		// value (>= 0 is applied; -1 would mean "unchanged").
 		maxSizeBytes := int64(cfg.EffectiveActivityMaxSizeMB()) * 1024 * 1024
 		activityService.SetRetentionConfig(maxAge, cfg.EffectiveActivityMaxRecords(), checkInterval, maxSizeBytes)
+		activityService.SetSessionWindow(time.Duration(cfg.EffectiveSessionRetentionDays()) * 24 * time.Hour)
 		logger.Info("Activity retention config applied",
 			zap.Int("max_response_size", cfg.ActivityMaxResponseSize),
 			zap.Int("retention_days", cfg.EffectiveActivityRetentionDays()),
@@ -612,7 +715,9 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	}
 
 	rt := &Runtime{
-		cfg: cfg,
+		oauthTokenKey:  oauthTokenKey,
+		oauthKeySource: oauthKeySource,
+		cfg:            cfg,
 		// Boot: memory and disk agree by definition.
 		desiredCfg:         cfg,
 		cfgPath:            cfgPath,
@@ -681,6 +786,27 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		Logger:   logger,
 	})
 
+	// Spec 132: the browser-login service. Same mutex as the two services
+	// above (the one lock order is documented on OAuthLoginService); revoking
+	// or forgetting a client cancels that client's pending sign-in requests
+	// through it.
+	rt.oauthLoginService = NewOAuthLoginService(OAuthLoginDeps{
+		Store: storageManager,
+		HMACKey: func() ([]byte, error) {
+			return auth.GetOrCreateHMACKey(rt.Config().DataDir)
+		},
+		Config:           rt.Config,
+		Guard:            rt.BindingGuard,
+		Activity:         storageManager.SaveActivity,
+		Publish:          rt.publishEvent,
+		Mu:               &rt.bindingWriteMu,
+		Logger:           logger,
+		ConfigCommitLock: &rt.configCommitMu,
+	})
+	rt.clientsService.SetLoginCanceler(func(clientID string) { rt.oauthLoginService.CancelForClient(clientID) })
+	rt.credentialsService.SetOAuthLogin(rt.oauthLoginService)
+	rt.repairOAuthBindings()
+
 	rt.profilesService = newProfilesService(rt)
 
 	// Spec 047: drainer goroutine that publishes coalesced servers.changed
@@ -703,6 +829,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// in the MCP dispatch layer) so code_execution and activity replay are
 	// covered by construction.
 	rt.installRejectionObserver()
+	rt.installUpstreamEventObserver()
 
 	return rt, nil
 }
@@ -717,6 +844,48 @@ func (r *Runtime) Attention() []contracts.AttentionItem {
 		return nil
 	}
 	return r.attention.Items()
+}
+
+// OAuthTokenKeyID returns the id of the key oauth_tokens values are sealed
+// with, or "" when encryption is off (Spec 123). It never exposes the key.
+func (r *Runtime) OAuthTokenKeyID() string {
+	return r.oauthTokenKey.ID()
+}
+
+// OAuthTokenKeySource reports where the running key came from, as resolved
+// once at startup. It holds no path or key material.
+func (r *Runtime) OAuthTokenKeySource() config.KeySource {
+	return r.oauthKeySource
+}
+
+// OAuthTokenStorageState reads what the doctor section about the stored OAuth
+// rows needs (Spec 123 FR-030): the public key id and key-source metadata
+// resolved at startup, the classification of every oauth_tokens row, the
+// compaction-advised marker and whether a config.db.bak sits in the data
+// directory. It returns no key material and no path.
+func (r *Runtime) OAuthTokenStorageState() (management.OAuthTokenStorageState, error) {
+	st := management.OAuthTokenStorageState{
+		KeyID:     r.oauthTokenKey.ID(),
+		KeySource: r.oauthKeySource,
+	}
+	sm := r.StorageManager()
+	if sm == nil {
+		return st, fmt.Errorf("storage not initialized")
+	}
+	rows, err := sm.ListOAuthTokenRows()
+	if err != nil {
+		return st, err
+	}
+	st.Rows = rows
+	if st.CompactAdvised, err = sm.OAuthCompactAdvised(); err != nil {
+		return st, err
+	}
+	if snap := r.ConfigSnapshot(); snap != nil && snap.Config != nil && snap.Config.DataDir != "" {
+		if _, statErr := os.Stat(filepath.Join(snap.Config.DataDir, "config.db.bak")); statErr == nil {
+			st.BackupPresent = true
+		}
+	}
+	return st, nil
 }
 
 // Config returns the underlying configuration pointer.
@@ -1210,6 +1379,12 @@ func (r *Runtime) Close() error {
 	// evicting a replacement installed by someone else.
 	r.stopBundleRefresher()
 
+	// Spec 125: background skill refreshes write BBolt state (staged file
+	// rows, records) from their own goroutines, so they are joined here,
+	// before the storage manager starts to stop. appCancel above ended their
+	// context; no new one starts once this returns.
+	r.skills.close()
+
 	// The index closes AFTER the telemetry flush above, not before it. That
 	// flush builds one last heartbeat, and tool_count is read from this index
 	// (GetToolCount). Closing first made GetDocumentCount fail, which sent the
@@ -1376,25 +1551,21 @@ func (r *Runtime) NotifySecretsChanged(ctx context.Context, operation, secretNam
 		return fmt.Errorf("config not available")
 	}
 
-	// Find all servers that reference this secret in their env vars or args
+	// Find all servers that reference this secret, in any field that is
+	// resolved when the connection is created: env, args, working dir, and
+	// for remote servers the URL, headers and OAuth settings (release QA F9:
+	// a header reference was never restarted).
 	secretRef := fmt.Sprintf("${keyring:%s}", secretName)
 	var affectedServers []string
 
 	for _, server := range cfg.Servers {
-		// Check environment variables
-		for _, value := range server.Env {
-			if strings.Contains(value, secretRef) {
-				affectedServers = append(affectedServers, server.Name)
-				break
-			}
+		// A restart enables a disabled server (RestartServerCtx), and a
+		// secret change is no reason to undo the operator's disable.
+		if !server.Enabled {
+			continue
 		}
-
-		// Check arguments
-		for _, arg := range server.Args {
-			if strings.Contains(arg, secretRef) {
-				affectedServers = append(affectedServers, server.Name)
-				break
-			}
+		if serverReferencesSecret(server, secretRef) {
+			affectedServers = append(affectedServers, server.Name)
 		}
 	}
 
@@ -1675,6 +1846,25 @@ func (r *Runtime) GetServerToolCalls(serverName string, limit int) ([]*contracts
 // mid-queue releases the slot immediately instead of leaving a call queued for
 // a caller that is gone (FR-005).
 func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error) {
+	return r.ReplayToolCallWithOptions(ctx, id, arguments, ReplayOptions{})
+}
+
+// ReplayOptions tunes how ReplayToolCallWithOptions dispatches.
+type ReplayOptions struct {
+	// PinEpoch pins the dispatch to the connection generation Epoch, the one a
+	// caller's gate certified the tool identity against (Spec 105 FR-009): the
+	// managed client refuses, with zero transport calls, if the generation moved
+	// before the call reaches the transport. False dispatches unpinned.
+	PinEpoch bool
+	Epoch    int64
+}
+
+// ReplayToolCallWithOptions is ReplayToolCall with dispatch options. A
+// dispatch the managed client refused BEFORE the transport (a generation
+// change on a pinned call, a failed dispatch re-check) is returned as an error
+// and not recorded: nothing reached the upstream, so there is no call to
+// record.
+func (r *Runtime) ReplayToolCallWithOptions(ctx context.Context, id string, arguments map[string]interface{}, opts ReplayOptions) (*contracts.ToolCallRecord, error) {
 	// Spec 093 FR-008: snapshot the collaborators under the lock and release it
 	// before anything that can block. Replay dispatches through the same
 	// admission seam as every other origin, so holding r.mu across the call
@@ -1798,8 +1988,19 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 	ctx = reqcontext.WithRequestSource(ctx, reqcontext.SourceInternal)
 
 	startTime := time.Now()
-	result, callErr := client.CallTool(ctx, originalCall.ToolName, callArgs)
+	var (
+		result  interface{}
+		callErr error
+	)
+	if opts.PinEpoch {
+		result, callErr = client.CallToolOnEpoch(ctx, originalCall.ToolName, callArgs, opts.Epoch)
+	} else {
+		result, callErr = client.CallTool(ctx, originalCall.ToolName, callArgs)
+	}
 	duration := time.Since(startTime)
+	if callErr != nil && (errors.Is(callErr, managed.ErrConnectionGenerationChanged) || errors.Is(callErr, managed.ErrDispatchRecheckRefused)) {
+		return nil, callErr
+	}
 
 	// Create new tool call record
 	newCall := &storage.ToolCallRecord{
@@ -2373,66 +2574,41 @@ func (r *Runtime) CalculateTokenSavings() (*contracts.ServerTokenMetrics, error)
 		model = r.cfg.Tokenizer.DefaultModel
 	}
 
-	// Create savings calculator
-	savingsCalc := tokens.NewSavingsCalculator(r.tokenizer, r.logger.Sugar(), model)
-
-	// Get all connected servers and their tools
-	serverInfos := []tokens.ServerToolInfo{}
-
-	// Get all server names
-	serverNames := r.upstreamManager.GetAllServerNames()
-	for _, serverName := range serverNames {
-		client, exists := r.upstreamManager.GetClient(serverName)
-		if !exists {
-			continue
-		}
-
-		// Get tools for this server
-		toolsList, err := client.ListTools(r.appCtx)
-		if err != nil {
-			r.logger.Debug("Failed to list tools for server", zap.String("server", serverName), zap.Error(err))
-			continue
-		}
-
-		// Convert to ToolInfo format
-		toolInfos := make([]tokens.ToolInfo, 0, len(toolsList))
-		for _, tool := range toolsList {
-			// Parse input schema from ParamsJSON
-			var inputSchema map[string]interface{}
-			if tool.ParamsJSON != "" {
-				if err := json.Unmarshal([]byte(tool.ParamsJSON), &inputSchema); err != nil {
-					r.logger.Debug("Failed to parse tool params JSON",
-						zap.String("tool", tool.Name),
-						zap.Error(err))
-					inputSchema = make(map[string]interface{})
-				}
-			} else {
-				inputSchema = make(map[string]interface{})
-			}
-
-			toolInfos = append(toolInfos, tokens.ToolInfo{
-				Name:        tool.Name,
-				Description: tool.Description,
-				InputSchema: inputSchema,
-			})
-		}
-
-		serverInfos = append(serverInfos, tokens.ServerToolInfo{
-			ServerName: serverName,
-			ToolCount:  len(toolsList),
-			Tools:      toolInfos,
-		})
-	}
-
-	// Calculate savings
 	topK := r.cfg.ToolsLimit
 	if topK == 0 {
 		topK = 15 // Default
 	}
 
-	savingsMetrics, err := savingsCalc.CalculateProxySavings(serverInfos, topK)
-	if err != nil {
-		return nil, fmt.Errorf("failed to calculate savings: %w", err)
+	// The tool lists come from the supervisor's StateView, the copy discovery
+	// keeps current, not from a live tools/list on every upstream. The Web UI
+	// and the tray poll GET /api/v1/activity/usage every half minute, so the
+	// live calls cost one upstream round trip per server per poll (about a
+	// thousand an hour for a dozen servers), and on a busy machine the poll
+	// took seconds to minutes. Tokenizing every tool definition is the other
+	// expensive part, so its result is kept until a server's tool definitions,
+	// the model or topK change.
+	serverInfos, fingerprint := r.tokenSavingsInputs()
+	cacheKey := fmt.Sprintf("%s|%d|%s", model, topK, fingerprint)
+
+	r.tokenSavingsMu.Lock()
+	cached := r.tokenSavingsCache
+	cachedKey := r.tokenSavingsKey
+	r.tokenSavingsMu.Unlock()
+
+	var savingsMetrics *tokens.TokenSavingsMetrics
+	if cached != nil && cachedKey == cacheKey {
+		savingsMetrics = cached
+	} else {
+		savingsCalc := tokens.NewSavingsCalculator(r.tokenizer, r.logger.Sugar(), model)
+		computed, err := savingsCalc.CalculateProxySavings(serverInfos, topK)
+		if err != nil {
+			return nil, fmt.Errorf("failed to calculate savings: %w", err)
+		}
+		savingsMetrics = computed
+		r.tokenSavingsMu.Lock()
+		r.tokenSavingsCache = computed
+		r.tokenSavingsKey = cacheKey
+		r.tokenSavingsMu.Unlock()
 	}
 
 	// Convert to contracts type
@@ -2441,7 +2617,7 @@ func (r *Runtime) CalculateTokenSavings() (*contracts.ServerTokenMetrics, error)
 		AverageQueryResultSize:  savingsMetrics.AverageQueryResultSize,
 		SavedTokens:             savingsMetrics.SavedTokens,
 		SavedTokensPercentage:   savingsMetrics.SavedTokensPercentage,
-		PerServerToolListSizes:  savingsMetrics.PerServerToolListSizes,
+		PerServerToolListSizes:  copyIntMap(savingsMetrics.PerServerToolListSizes),
 	}
 
 	// Spec 109-k / audit finding F-Token: once a real retrieve_tools call has
@@ -2461,6 +2637,105 @@ func (r *Runtime) CalculateTokenSavings() (*contracts.ServerTokenMetrics, error)
 	}
 
 	return result, nil
+}
+
+// tokenSavingsInputs builds the per-server tool lists for the token savings
+// estimate from the StateView (connected servers whose discovery has
+// completed), plus a fingerprint that changes whenever one of those tool sets
+// does.
+//
+// The estimate therefore describes the tool set mcpproxy holds and serves,
+// the same one GET /servers/{id}/tools lists. Two consequences differ from a
+// live tools/list: a quarantined server contributes nothing (its tools are
+// not published to the view and no client can reach them), and a tool set
+// that discovery deliberately retained after a lenient empty result stays
+// counted until an authoritative refresh replaces it.
+//
+// The fingerprint is a digest of exactly what the estimate tokenizes (server
+// name, tool name, description, input schema). A discovery epoch plus a tool
+// count would not do: the epoch is the connection token, so a
+// tools/list_changed re-discovery on the same connection keeps it, and an
+// edited description or schema keeps the count too. Hashing the definitions
+// costs far less than tokenizing them.
+func (r *Runtime) tokenSavingsInputs() ([]tokens.ServerToolInfo, string) {
+	sup := r.Supervisor()
+	if sup == nil || sup.StateView() == nil {
+		return nil, ""
+	}
+	// The committed snapshot is read before the view, as GetServerTools does
+	// (Spec 116 PR2): the view lags a removal commit, so a row may belong to a
+	// server that no longer exists, or to the predecessor of a same-name
+	// replacement. Neither is counted.
+	committed := r.committedSnapshot()
+	snapshot := sup.StateView().Snapshot()
+	names := make([]string, 0, len(snapshot.Servers))
+	for name, status := range snapshot.Servers {
+		if status == nil || !status.Connected || !status.ToolsDiscovered {
+			continue
+		}
+		if committed.absent(name) {
+			continue
+		}
+		if inc, ok := r.ServerIncarnation(name); ok && status.Incarnation != inc {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	digest := sha256.New()
+	// Every field is length-prefixed so adjacent fields cannot run together.
+	writeField := func(b []byte) {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(b)))
+		digest.Write(size[:])
+		digest.Write(b)
+	}
+	infos := make([]tokens.ServerToolInfo, 0, len(names))
+	for _, name := range names {
+		status := snapshot.Servers[name]
+		writeField([]byte(name))
+		writeField([]byte(strconv.Itoa(len(status.Tools))))
+		toolInfos := make([]tokens.ToolInfo, 0, len(status.Tools))
+		for _, tool := range status.Tools {
+			inputSchema := tool.InputSchema
+			if inputSchema == nil {
+				inputSchema = map[string]interface{}{}
+			}
+			writeField([]byte(tool.Name))
+			writeField([]byte(tool.Description))
+			// encoding/json sorts map keys, so the same schema always yields
+			// the same bytes. A schema that cannot be encoded falls back to a
+			// marker; it cannot be tokenized as JSON either.
+			schemaJSON, err := json.Marshal(inputSchema)
+			if err != nil {
+				schemaJSON = []byte("unencodable")
+			}
+			writeField(schemaJSON)
+			toolInfos = append(toolInfos, tokens.ToolInfo{
+				Name:        tool.Name,
+				Description: tool.Description,
+				InputSchema: inputSchema,
+			})
+		}
+		infos = append(infos, tokens.ServerToolInfo{
+			ServerName: name,
+			ToolCount:  len(status.Tools),
+			Tools:      toolInfos,
+		})
+	}
+	return infos, hex.EncodeToString(digest.Sum(nil))
+}
+
+func copyIntMap(m map[string]int) map[string]int {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]int, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 // contains checks if a string slice contains a specific string
@@ -2762,6 +3037,10 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			continue
 		}
 		serverStatus = committed.pairStatus(serverStatus)
+		// Read once per server (after the nil guard above): concurrent tool
+		// calls set this flag, and the stored-row probe and the health input
+		// below must see the same value.
+		callTimeOAuthRequired := r.callTimeOAuthRequired(serverStatus.Name)
 		// Convert StateView ServerStatus to API response format
 		connected := serverStatus.Connected
 		connecting := strings.EqualFold(serverStatus.State, "connecting")
@@ -2789,6 +3068,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		var oauthStatus string // OAuth status: "authenticated", "expired", "error", "none"
 		var tokenExpiresAt time.Time
 		var hasRefreshToken bool
+		// oauthUndecryptable is the coded error for a stored OAuth row the
+		// configured key cannot decrypt (Spec 123 FR-031), nil otherwise.
+		var oauthUndecryptable error
 		if serverStatus.Config != nil {
 			created = serverStatus.Config.Created
 			url = serverStatus.Config.URL
@@ -2825,7 +3107,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			// IMPORTANT: This runs for ALL servers with a URL, including autodiscovery servers
 			// PersistentTokenStore uses serverKey (name + URL hash), not just server name
 			// We need to generate the same key format: "servername_hash16"
-			if url != "" && r.storageManager != nil && tokenInPlay {
+			if shouldProbeStoredOAuthRow(url, r.storageManager != nil, tokenInPlay, callTimeOAuthRequired) {
 				r.logger.Debug("Checking OAuth token in storage",
 					zap.String("server", serverStatus.Name),
 					// #1158: the configured upstream URL routinely carries a
@@ -2850,9 +3132,21 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 					zap.Bool("token_nil", token == nil),
 					zap.Error(err))
 
-				// DCR persists client credentials before the code exchange. Like
-				// PersistentTokenStore.GetToken, require an actual access token.
-				if err == nil && token != nil && token.AccessToken != "" {
+				// Spec 123 FR-031: a row the configured key cannot decrypt is
+				// present but unusable. It identifies an OAuth server, it is
+				// not authenticated, and its reason goes to the health detail
+				// and the diagnostics code instead of a "log in" status.
+				if oauth.IsTokenUndecryptable(err) {
+					oauthUndecryptable = oauth.TokenUndecryptableError(serverStatus.Name, err)
+					if oauthConfig == nil {
+						oauthConfig = map[string]interface{}{"autodiscovery": true}
+					}
+					oauthStatus = string(oauth.OAuthStatusError)
+				} else if !tokenInPlay {
+					// Probed only for the undecryptable outcome (a call-time
+					// sign-in need on a static-header server): a readable
+					// leftover row is still not evidence about this server.
+				} else if err == nil && token != nil && token.AccessToken != "" {
 					authenticated = true
 					tokenExpiresAt = token.ExpiresAt
 					hasRefreshToken = token.RefreshToken != ""
@@ -3008,6 +3302,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		if serverStatus.Config != nil && serverStatus.Config.ExposePrompts != nil {
 			serverMap["expose_prompts"] = *serverStatus.Config.ExposePrompts
 		}
+		if serverStatus.Config != nil && serverStatus.Config.ExposeSkills != nil {
+			serverMap["expose_skills"] = *serverStatus.Config.ExposeSkills
+		}
 
 		// Spec 112: surface the forward_headers allowlist (names only).
 		if serverStatus.Config != nil && len(serverStatus.Config.ForwardHeaders) > 0 {
@@ -3073,6 +3370,34 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			serverMap["error_code"] = string(d.Code)
 		}
 
+		// Spec 123 FR-031: an undecryptable stored OAuth row is the cause to
+		// report while the server is not connected, whatever the last dial
+		// error says (a parked "login required" is exactly what must not be
+		// shown for it).
+		setUndecryptableDiagnostic := func() {
+			code := diagnostics.OAuthTokenUndecryptable
+			cause := oauthUndecryptable.Error()
+			if len(cause) > 256 {
+				cause = stringutil.UTF8Prefix(cause, 256) + "..."
+			}
+			diagMap := map[string]interface{}{
+				"code":        code,
+				"cause":       cause,
+				"detected_at": time.Now(),
+			}
+			if entry, ok := diagnostics.Get(code); ok {
+				diagMap["severity"] = entry.Severity
+				diagMap["user_message"] = entry.UserMessage
+				diagMap["fix_steps"] = entry.FixSteps
+				diagMap["docs_url"] = entry.DocsURL
+			}
+			serverMap["diagnostic"] = diagMap
+			serverMap["error_code"] = string(code)
+		}
+		if oauthUndecryptable != nil && !connected {
+			setUndecryptableDiagnostic()
+		}
+
 		// Add OAuth status fields if available
 		if oauthStatus != "" {
 			serverMap["oauth_status"] = oauthStatus
@@ -3087,11 +3412,10 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		// MCP-2084: call-time OAuth requirement — set when an anonymously-connected
 		// server rejected a tools/call with "authorization required". Drives a
 		// proactive Sign-in CTA even though the server looks connected.
-		var callTimeOAuthRequired bool
+		// (callTimeOAuthRequired was read once at the top of this iteration.)
 		if r.upstreamManager != nil {
 			if client, exists := r.upstreamManager.GetClient(serverStatus.Name); exists && client != nil {
 				userLoggedOut = client.IsUserLoggedOut()
-				callTimeOAuthRequired = client.IsOAuthCallRequired()
 			}
 		}
 		serverMap["user_logged_out"] = userLoggedOut
@@ -3127,6 +3451,10 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			RetryStoppedReason: serverStatus.RetryStoppedReason,
 			RetryCount:         serverStatus.RetryCount,
 		}
+		healthInput.NetworkFailure, healthInput.NetworkGaveUp, healthInput.NextRetryAt = r.NetworkRetryState(serverStatus.Name)
+		if oauthUndecryptable != nil {
+			healthInput.OAuthTokenUndecryptable = oauth.TokenUndecryptableDetail(oauthUndecryptable)
+		}
 		// Spec 113-d: rolling tool-call failure rate (same source at all sites).
 		if r.upstreamManager != nil {
 			healthInput.CallsInWindow, healthInput.CallFailuresInWindow, healthInput.DominantCallFailureKind =
@@ -3146,6 +3474,12 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 
 		healthStatus := health.CalculateHealth(healthInput, healthConfig)
 		serverMap["health"] = healthStatus
+		// Spec 123 FR-031: a connected server whose sign-in need met the
+		// undecryptable row reports the same diagnostic a disconnected one does
+		// (health says configure; the diagnostic must not disagree).
+		if oauthUndecryptable != nil && connected && health.IsOAuthTokenUndecryptable(healthStatus) {
+			setUndecryptableDiagnostic()
+		}
 
 		// GH #1145: agents and the CLI read these directly rather than parsing
 		// the health summary. Emitted only when set, so the payload shape is
@@ -3315,6 +3649,9 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 		// path. Tri-state *bool — only emit when set.
 		if srv.ExposePrompts != nil {
 			serverInfo["expose_prompts"] = *srv.ExposePrompts
+		}
+		if srv.ExposeSkills != nil {
+			serverInfo["expose_skills"] = *srv.ExposeSkills
 		}
 
 		// Spec 112: forward_headers allowlist in parity with the StateView path.
@@ -3564,7 +3901,61 @@ func (r *Runtime) HealthRefreshState(name string, cfg *config.ServerConfig) *oau
 	if r.refreshManager == nil || !r.StoredOAuthTokenInPlay(name, cfg) {
 		return nil
 	}
-	return r.refreshManager.GetRefreshState(name)
+	info := r.refreshManager.GetRefreshState(name)
+	if info != nil && (info.State == oauth.RefreshStateRetrying || info.State == oauth.RefreshStateFailed) {
+		return info
+	}
+	// GH #1929: refreshes that failed transiently outside the proactive
+	// schedule (a tool call's reactive refresh while offline, a token that was
+	// already expired so nothing was scheduled) still mean "being retried",
+	// not "sign in again".
+	if cfg != nil && cfg.URL != "" {
+		var binding commitview.CredentialBinding
+		if r.upstreamManager != nil {
+			if client, ok := r.upstreamManager.GetClient(name); ok && client != nil {
+				binding = client.CredentialBinding()
+			}
+		}
+		if st, ok := oauth.DefaultRefreshCoordinator().TransientRefreshStatus(oauth.GenerateServerKey(name, cfg.URL), binding); ok {
+			out := &oauth.RefreshStateInfo{State: oauth.RefreshStateRetrying, RetryCount: st.Failures, LastError: st.LastError}
+			if info != nil {
+				out.ExpiresAt = info.ExpiresAt
+			}
+			if !st.RetryAt.IsZero() {
+				at := st.RetryAt
+				out.NextAttempt = &at
+			}
+			return out
+		}
+	}
+	return info
+}
+
+// NetworkRetryState reports whether the named server's current failure is a
+// network failure, whether its client gave up the regular retries, and when
+// its next automatic reconnect is due (GH #1929), so health can present an
+// outage as temporary. nextRetry is nil when unknown.
+func (r *Runtime) NetworkRetryState(name string) (networkFailure, gaveUp bool, nextRetry *time.Time) {
+	if r.upstreamManager == nil {
+		return false, false, nil
+	}
+	client, ok := r.upstreamManager.GetClient(name)
+	if !ok || client == nil {
+		return false, false, nil
+	}
+	info := client.GetConnectionInfo()
+	if info.State != upstreamtypes.StateError || !info.NetworkFailure {
+		return false, false, nil
+	}
+	if info.LastRetryTime.IsZero() {
+		return true, info.GaveUp, nil
+	}
+	wait := upstreamtypes.RetryBackoffDuration(info.RetryCount)
+	if info.GaveUp {
+		wait = upstreamtypes.GaveUpProbeInterval
+	}
+	at := info.LastRetryTime.Add(wait)
+	return true, info.GaveUp, &at
 }
 
 // serverConnectedWithOAuth reports whether the named server's live connection
@@ -3951,6 +4342,10 @@ func (r *Runtime) SetTelemetry(version, edition string) {
 			if err := funnelStore.RecordActivity(db, time.Now().UTC()); err != nil {
 				r.logger.Debug("Failed to record funnel activity at startup", zap.Error(err))
 			}
+
+			// Spec 126 (schema 17): install anchor provider for day_two and
+			// window_age, and the first counter window's coverage.
+			r.wireDayTwoTelemetry()
 		}
 	}
 
@@ -4085,19 +4480,112 @@ func (r *Runtime) SetWorkSessionResolver(resolver SessionWorkSessionResolver) {
 // ResolveWorkSession derives the work session for an identity, opening a new one
 // when it has been idle past the window. Called once per connection.
 func (r *Runtime) ResolveWorkSession(id WorkSessionIdentity) string {
-	if r.workSessions == nil {
-		r.workSessions = NewWorkSessionTracker(DefaultWorkSessionIdleWindow)
+	return r.workSessionTracker().Resolve(id)
+}
+
+// ResolveWorkSessionEffective is ResolveWorkSession that also returns the
+// identity the session was filed under (see WorkSessionTracker.ResolveEffective).
+func (r *Runtime) ResolveWorkSessionEffective(id WorkSessionIdentity) (string, WorkSessionIdentity) {
+	return r.workSessionTracker().ResolveEffective(id)
+}
+
+// EffectiveWorkSessionIdentity returns the identity a work session would be
+// filed under, without resolving it (see WorkSessionTracker.EffectiveIdentity).
+func (r *Runtime) EffectiveWorkSessionIdentity(id WorkSessionIdentity) WorkSessionIdentity {
+	return r.workSessionTracker().EffectiveIdentity(id)
+}
+
+// workSessionTracker returns the one tracker of this runtime. Spec 124: work
+// sessions are resolved per request, from any request goroutine, so the lazy
+// creation must be safe for concurrent first use.
+func (r *Runtime) workSessionTracker() *WorkSessionTracker {
+	r.workSessionsOnce.Do(func() {
+		if r.workSessions == nil {
+			r.workSessions = NewWorkSessionTracker(DefaultWorkSessionIdleWindow)
+		}
+	})
+	return r.workSessions
+}
+
+// ActivityRetentionState implements management.ActivityRetentionOperations
+// (Spec 124 FR-035).
+func (r *Runtime) ActivityRetentionState() (*storage.RetentionShortfall, time.Duration, error) {
+	if r.activityService == nil {
+		return nil, DefaultSessionWindow, nil
 	}
-	return r.workSessions.Resolve(id)
+	return r.activityService.RetentionShortfall()
+}
+
+// Work-session reads (Spec 124). Thin pass-throughs to storage.
+
+// ListWorkSessionSummaries returns every work-session summary.
+func (r *Runtime) ListWorkSessionSummaries() ([]*storage.WorkSessionSummary, error) {
+	return r.storageManager.ListWorkSessionSummaries()
+}
+
+// GetWorkSessionSummary returns one summary, or nil.
+func (r *Runtime) GetWorkSessionSummary(id string) (*storage.WorkSessionSummary, error) {
+	return r.storageManager.GetWorkSessionSummary(id)
+}
+
+// WorkSessionRowRefs returns a session's index entries in time order.
+func (r *Runtime) WorkSessionRowRefs(id string) ([]storage.WorkSessionRowRef, error) {
+	return r.storageManager.WorkSessionRowRefs(id)
+}
+
+// WalkWorkSessionTimeline visits a work session's index entries merged with
+// the upstream events of the given servers, in time order.
+func (r *Runtime) WalkWorkSessionTimeline(id string, servers []string, from, to time.Time, fn func(storage.WorkSessionRowRef) bool) error {
+	return r.storageManager.WalkWorkSessionTimeline(id, servers, from, to, fn)
+}
+
+// OpenUpstreamEventsBefore returns the latest unresolved upstream event of
+// each server before a time (release QA F2).
+func (r *Runtime) OpenUpstreamEventsBefore(kinds map[string][]string, before, until, notBefore time.Time, visible func(owner string) bool) ([]storage.WorkSessionRowRef, error) {
+	return r.storageManager.OpenUpstreamEventsBefore(kinds, before, until, notBefore, visible)
+}
+
+// GetActivitiesByKeys loads activity rows by key.
+func (r *Runtime) GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error) {
+	return r.storageManager.GetActivitiesByKeys(keys)
+}
+
+// RequestSessionFacts returns the attribution of the request in ctx: its
+// credential, client, profile, work session, owning user and run name. A row
+// the runtime writes itself must carry the same attribution as the rows the
+// dispatch writes for that request, or it would look like another caller's
+// row inside the session.
+type RequestSessionFacts func(ctx context.Context) ActivityAttribution
+
+// SetRequestSessionFacts installs the request-level session resolver.
+func (r *Runtime) SetRequestSessionFacts(f RequestSessionFacts) {
+	if f == nil {
+		r.requestSessionFacts.Store(nil)
+		return
+	}
+	r.requestSessionFacts.Store(&f)
+}
+
+// TouchWorkSession moves the idle clock of a work session that a connection
+// reuses without resolving it again (Spec 124 FR-019).
+func (r *Runtime) TouchWorkSession(workSessionID string, id WorkSessionIdentity) {
+	r.workSessionTracker().Touch(workSessionID, id)
+}
+
+// AdoptWorkSession files an identity under an existing work session.
+func (r *Runtime) AdoptWorkSession(workSessionID string, id WorkSessionIdentity) {
+	r.workSessionTracker().Adopt(workSessionID, id)
+}
+
+// TouchWorkSessionID refreshes the idle clock of a work session by its id.
+func (r *Runtime) TouchWorkSessionID(workSessionID string) {
+	r.workSessionTracker().TouchID(workSessionID)
 }
 
 // ReapWorkSessions drops work sessions idle past maxIdle, so a long-lived daemon
 // does not accumulate one map entry per identity forever.
 func (r *Runtime) ReapWorkSessions(maxIdle time.Duration) int {
-	if r.workSessions == nil {
-		return 0
-	}
-	return r.workSessions.Reap(maxIdle)
+	return r.workSessionTracker().Reap(maxIdle)
 }
 
 // RecordRealToolCallForActivation marks the first-ever real (upstream) tool
@@ -4650,4 +5138,61 @@ func knownClientAliases() map[string]bool {
 
 func isKnownClientAlias(rawNormalized string) bool {
 	return knownClientAliases()[rawNormalized]
+}
+
+// callTimeOAuthRequired reports whether the named server's client recorded a
+// call-time sign-in requirement (MCP-2084).
+func (r *Runtime) callTimeOAuthRequired(name string) bool {
+	if r.upstreamManager == nil {
+		return false
+	}
+	client, exists := r.upstreamManager.GetClient(name)
+	return exists && client != nil && client.IsOAuthCallRequired()
+}
+
+// shouldProbeStoredOAuthRow decides whether the server-list projection reads
+// the stored OAuth row. A token in play always does. A header-authenticated
+// server whose leftover row is not in play (GH #1172) is exempt, unless its
+// client recorded a call-time sign-in requirement: health will then offer
+// `login`, which must never be offered over an undecryptable row (Spec 123
+// FR-031), so the row is probed (for that outcome only).
+func shouldProbeStoredOAuthRow(url string, haveStorage, tokenInPlay, callTimeOAuthRequired bool) bool {
+	return url != "" && haveStorage && (tokenInPlay || callTimeOAuthRequired)
+}
+
+// serverReferencesSecret reports whether any field of server that is expanded
+// when its connection is created contains ref (e.g. "${keyring:name}").
+func serverReferencesSecret(server *config.ServerConfig, ref string) bool {
+	if server == nil {
+		return false
+	}
+	has := func(v string) bool { return strings.Contains(v, ref) }
+	anyOf := func(vs []string) bool {
+		for _, v := range vs {
+			if has(v) {
+				return true
+			}
+		}
+		return false
+	}
+	values := func(m map[string]string) bool {
+		for _, v := range m {
+			if has(v) {
+				return true
+			}
+		}
+		return false
+	}
+	if has(server.URL) || has(server.Command) || has(server.WorkingDir) ||
+		anyOf(server.Args) || values(server.Env) || values(server.Headers) {
+		return true
+	}
+	if o := server.OAuth; o != nil {
+		if has(o.ClientID) || has(o.ClientSecret) || has(o.RedirectURI) || has(o.CallbackBaseURL) ||
+			has(o.AuthorizationEndpoint) || has(o.TokenEndpoint) || has(o.RegistrationEndpoint) ||
+			has(o.AuthServerMetadataURL) || anyOf(o.Scopes) || values(o.ExtraParams) {
+			return true
+		}
+	}
+	return false
 }

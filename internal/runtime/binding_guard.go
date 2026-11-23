@@ -44,6 +44,11 @@ type GuardFix struct {
 type GuardState struct {
 	Config *config.Config
 	Tokens []auth.AgentToken
+	// OAuthBindings are the browser-login binding entries (Spec 132 R5), each
+	// with its liveness. Every producer of a current or candidate state fills
+	// it from storage; a storage read error refuses the change. The evaluators
+	// read the combined view through EffectiveTokens.
+	OAuthBindings []OAuthBinding
 }
 
 // BindingGuard evaluates FR-008a. Implementations must be safe for concurrent
@@ -155,15 +160,17 @@ func BindingRefOf(t *auth.AgentToken) BindingRef {
 func (ConservativeBindingGuard) BindingGuardDelta(current, candidate GuardState) []BindingRef {
 	now := time.Now()
 	already := make(map[string]bool)
-	for i := range current.Tokens {
-		t := &current.Tokens[i]
+	currentTokens := current.EffectiveTokens(now)
+	for i := range currentTokens {
+		t := &currentTokens[i]
 		if conservativeBypassable(current, t, now) {
 			already[t.Name] = true
 		}
 	}
 	var out []BindingRef
-	for i := range candidate.Tokens {
-		t := &candidate.Tokens[i]
+	candidateTokens := candidate.EffectiveTokens(now)
+	for i := range candidateTokens {
+		t := &candidateTokens[i]
 		if conservativeBypassable(candidate, t, now) && !already[t.Name] {
 			out = append(out, BindingRefOf(t))
 		}
@@ -197,15 +204,17 @@ type bindingIdentity struct{ name, pin, mode string }
 func (StrictOfflineBindingGuard) BindingGuardDelta(current, candidate GuardState) []BindingRef {
 	now := time.Now()
 	already := make(map[bindingIdentity]bool)
-	for i := range current.Tokens {
-		t := &current.Tokens[i]
+	currentTokens := current.EffectiveTokens(now)
+	for i := range currentTokens {
+		t := &currentTokens[i]
 		if conservativeBypassable(current, t, now) {
 			already[bindingIdentity{t.Name, t.ProfilePin, t.ProfileMode}] = true
 		}
 	}
 	var out []BindingRef
-	for i := range candidate.Tokens {
-		t := &candidate.Tokens[i]
+	candidateTokens := candidate.EffectiveTokens(now)
+	for i := range candidateTokens {
+		t := &candidateTokens[i]
 		if conservativeBypassable(candidate, t, now) && !already[bindingIdentity{t.Name, t.ProfilePin, t.ProfileMode}] {
 			out = append(out, BindingRefOf(t))
 		}

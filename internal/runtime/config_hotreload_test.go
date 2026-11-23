@@ -74,6 +74,37 @@ func TestDetectConfigChanges_AggregateUpstreamPrompts(t *testing.T) {
 	})
 }
 
+// TestDetectConfigChanges_EnableSkills (spec 125): enable_skills is hot-applied,
+// never restart-required, and a per-server expose_skills change is detected
+// through the mcpServers clause.
+func TestDetectConfigChanges_EnableSkills(t *testing.T) {
+	mk := func(on bool) *config.Config {
+		return &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			EnableSkills: on,
+		}
+	}
+	t.Run("toggle detected, hot-reloadable", func(t *testing.T) {
+		result := DetectConfigChanges(mk(false), mk(true))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "enable_skills")
+		assert.False(t, result.RequiresRestart, "enable_skills must not require a restart")
+	})
+	t.Run("no change reports nothing", func(t *testing.T) {
+		result := DetectConfigChanges(mk(true), mk(true))
+		assert.NotContains(t, result.ChangedFields, "enable_skills")
+	})
+	t.Run("per-server expose_skills change is detected, hot", func(t *testing.T) {
+		off := false
+		a, b := mk(true), mk(true)
+		a.Servers = []*config.ServerConfig{{Name: "s", Protocol: "stdio", Enabled: true}}
+		b.Servers = []*config.ServerConfig{{Name: "s", Protocol: "stdio", Enabled: true, ExposeSkills: &off}}
+		result := DetectConfigChanges(a, b)
+		assert.Contains(t, result.ChangedFields, "mcpServers")
+		assert.False(t, result.RequiresRestart)
+	})
+}
+
 // TestDetectConfigChanges_DiscoveryHealthIntervals (MCP-1189 / Codex finding #2):
 // a global health_check_interval / tool_discovery_interval edit must be detected
 // as a hot-reloadable change so ApplyConfig propagates the new cadence to the

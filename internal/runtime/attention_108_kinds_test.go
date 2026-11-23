@@ -26,7 +26,7 @@ func TestAttention108KindsEqualProfileWarningCodes(t *testing.T) {
 	for kind, code := range pairs {
 		assert.Equal(t, kind, string(code))
 	}
-	assert.Len(t, AttentionKinds(), 13)
+	assert.Len(t, AttentionKinds(), 14) // + Spec 125 skill_review
 }
 
 func TestAttention108FixVerbsEqualWarningActionKinds(t *testing.T) {

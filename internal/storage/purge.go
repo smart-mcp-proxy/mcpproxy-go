@@ -99,6 +99,19 @@ func purgeServerTx(tx *bbolt.Tx, name string) (PurgeReport, error) {
 		note(bucket, n)
 	}
 
+	// Spec 125: skill buckets are matched exactly, not by prefix alone (the
+	// approval key holds a URI with ':'; the file key ends in 64 hex).
+	n, err := deleteKeysTx(tx, SkillApprovalBucket, func(k, v []byte) bool { return skillRecordBelongsTo(k, v, name) })
+	if err != nil {
+		return rep, fmt.Errorf("%s: %w", SkillApprovalBucket, err)
+	}
+	note(SkillApprovalBucket, n)
+	n, err = deleteKeysTx(tx, SkillFileBucket, func(k, _ []byte) bool { _, ok := skillFileKeyDigest(k, name); return ok })
+	if err != nil {
+		return rep, fmt.Errorf("%s: %w", SkillFileBucket, err)
+	}
+	note(SkillFileBucket, n)
+
 	// Spec 117 PR-1: the durable tool baseline marker goes with the records
 	// it describes, so a re-added server starts as new.
 	if b := tx.Bucket([]byte(ToolBaselineDecisionsBucket)); b != nil && b.Get([]byte(name)) != nil {
@@ -116,7 +129,7 @@ func purgeServerTx(tx *bbolt.Tx, name string) (PurgeReport, error) {
 		note(OAuthTokenBucket, n)
 	}
 
-	n, err := deleteKeysTx(tx, OAuthCompletionBucket, func(_, v []byte) bool {
+	n, err = deleteKeysTx(tx, OAuthCompletionBucket, func(_, v []byte) bool {
 		var ev OAuthCompletionEvent
 		return json.Unmarshal(v, &ev) == nil && ev.ServerName == name
 	})
@@ -268,6 +281,8 @@ func (m *Manager) PurgeSetCounts(name string) (map[string]int, error) {
 		count(ToolApprovalBucket, hasPrefix)
 		count(PromptApprovalBucket, hasPrefix)
 		count(ToolHashBucket, hasPrefix)
+		count(SkillApprovalBucket, func(k, v []byte) bool { return skillRecordBelongsTo(k, v, name) })
+		count(SkillFileBucket, func(k, _ []byte) bool { _, ok := skillFileKeyDigest(k, name); return ok })
 		count(OAuthTokenBucket, func(k, _ []byte) bool { return oauthKeyBelongsTo(string(k), name) })
 		count(OAuthCompletionBucket, func(_, v []byte) bool {
 			var ev OAuthCompletionEvent

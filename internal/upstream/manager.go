@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os/exec"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -167,8 +168,12 @@ type Manager struct {
 	// Context for shutdown coordination
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
-	shuttingDown   bool           // Flag to prevent reconnections during shutdown
-	shutdownWg     sync.WaitGroup // Tracks all background goroutines for clean shutdown
+
+	// networkRecovery reconnects servers that failed on the network once it
+	// is back (GH #1929); nil when disabled by MCPPROXY_NETWORK_RECOVERY.
+	networkRecovery *networkRecovery
+	shuttingDown    bool           // Flag to prevent reconnections during shutdown
+	shutdownWg      sync.WaitGroup // Tracks all background goroutines for clean shutdown
 
 	// Docker recovery state
 	dockerRecoveryMu     sync.RWMutex
@@ -199,6 +204,13 @@ type Manager struct {
 
 	// Tool discovery callback for notifications/tools/list_changed handling
 	toolDiscoveryCallback func(ctx context.Context, serverName string) error
+
+	// transitionObserver receives every state change of every server's
+	// current instance, in the order it happened (Spec 124 D5).
+	transitionObserver ServerTransitionObserver
+	// transitionLoginClassifier says whether a change into the error state is
+	// a login requirement; handed to every state manager with the observer.
+	transitionLoginClassifier func(serverName, transport string, t types.Transition) bool
 
 	// Prompts-changed callback for notifications/prompts/list_changed handling (F13)
 	promptsChangedCallback func(serverName string)
@@ -322,7 +334,37 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *st
 		manager.logger.Info("Docker recovery monitor disabled (docker isolation off or recovery disabled in config)")
 	}
 
+	// Reconnect servers that failed on the network as soon as it is back,
+	// instead of on a backoff built while it was gone (GH #1929).
+	if networkRecoveryEnabled() {
+		manager.networkRecovery = newNetworkRecovery(defaultNetworkRecoveryConfig(), logger.Named("network_recovery"), dialProbe, networkFingerprint)
+		manager.shutdownWg.Add(1)
+		go func() {
+			defer manager.shutdownWg.Done()
+			manager.networkRecovery.run(shutdownCtx, manager.networkRecoveryTargets)
+		}()
+	} else {
+		manager.logger.Info("Network recovery watcher disabled", zap.String("env", networkRecoveryEnv))
+	}
+
 	return manager
+}
+
+// networkRecoveryTargets lists the registered clients for the connectivity
+// watcher; it decides itself which of them are waiting on the network.
+func (m *Manager) networkRecoveryTargets() []recoveryTarget {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.shuttingDown {
+		return nil
+	}
+	targets := make([]recoveryTarget, 0, len(m.clients))
+	for _, c := range m.clients {
+		if c != nil {
+			targets = append(targets, c)
+		}
+	}
+	return targets
 }
 
 // shouldEnableDockerRecovery returns true when Docker recovery should run based
@@ -497,6 +539,74 @@ func (m *Manager) SetToolDiscoveryCallback(callback func(ctx context.Context, se
 	}
 	m.logger.Debug("Tool discovery callback set on manager",
 		zap.Int("existing_clients", len(m.clients)))
+}
+
+// ServerTransitionObserver receives one state change of one upstream server.
+// Calls for the same server arrive one at a time, in the order the changes
+// happened; calls for different servers may be concurrent.
+//
+// transport is the server's configured transport ("stdio", "http", ...). For
+// a stdio server a lost connection is its process going away, which the error
+// text alone does not say once the connection was established.
+type ServerTransitionObserver func(serverName, transport string, t types.Transition)
+
+// SetTransitionObserver installs the observer on every existing client and on
+// every client created later. The runtime uses it to record connection loss
+// and recovery in the activity log with the time they actually happened.
+//
+// isLogin says whether a change into the error state means a login is
+// required; the state managers use it so that folding a full queue never
+// hides such a change uncounted. It may be nil.
+func (m *Manager) SetTransitionObserver(observer ServerTransitionObserver, isLogin func(serverName, transport string, t types.Transition) bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.transitionObserver = observer
+	m.transitionLoginClassifier = isLogin
+	for _, client := range m.clients {
+		if client != nil {
+			cfg := client.GetConfig()
+			m.wireTransitionObserverLocked(client, cfg.Name, serverTransport(cfg))
+		}
+	}
+}
+
+// wireTransitionObserverLocked connects one client's state manager to the
+// manager's observer. Caller holds m.mu.
+func (m *Manager) wireTransitionObserverLocked(client *managed.Client, serverName, transport string) {
+	observer := m.transitionObserver
+	if observer == nil {
+		client.StateManager.SetTransitionObserver(nil)
+		client.StateManager.SetTransitionLoginClassifier(nil)
+		return
+	}
+	if isLogin := m.transitionLoginClassifier; isLogin != nil {
+		client.StateManager.SetTransitionLoginClassifier(func(t types.Transition) bool {
+			return isLogin(serverName, transport, t)
+		})
+	}
+	client.StateManager.SetTransitionObserver(func(t types.Transition) {
+		// A superseded instance's transitions (the Disconnect of an instance
+		// a commit replaced) are not events of the server that now runs
+		// under the same name.
+		if client.Unregistered() {
+			return
+		}
+		observer(serverName, transport, t)
+	})
+}
+
+// serverTransport names a server's transport for the transition observer.
+func serverTransport(cfg *config.ServerConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	if cfg.Protocol != "" && cfg.Protocol != "auto" {
+		return cfg.Protocol
+	}
+	if cfg.Command != "" {
+		return "stdio"
+	}
+	return "http"
 }
 
 // SetPromptsChangedCallback sets the callback for triggering aggregated-prompt
@@ -1217,6 +1327,42 @@ func (m *Manager) DiscoverToolsReport(ctx context.Context, dueOnly bool) ([]*con
 // under one ticket for the whole sweep.
 func (m *Manager) DiscoverToolsReportCaptured(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, map[string]managed.InventoryCapture, error) {
 	return m.discoverTools(ctx, dueOnly)
+}
+
+// DiscoverToolsWithFailures is DiscoverTools plus the names of the servers
+// that are connected, enabled and not quarantined but whose tools/list did not
+// succeed in this sweep (a transient failure — e.g. its OAuth token refresh is
+// failing while the connection stays up). Their tools are missing from the
+// result. The direct-mode rebuild uses it to retry until they list again,
+// since such a server can recover without any servers.changed event (GH #1929
+// release QA). A server that connected after the sweep started can appear
+// here too; that only costs one extra retry.
+func (m *Manager) DiscoverToolsWithFailures(ctx context.Context) ([]*config.ToolMetadata, []string, error) {
+	tools, listed, _, err := m.discoverTools(ctx, false)
+	if err != nil {
+		return tools, nil, err
+	}
+	ok := make(map[string]struct{}, len(listed))
+	for _, name := range listed {
+		ok[name] = struct{}{}
+	}
+	var failed []string
+	m.mu.RLock()
+	for _, client := range m.clients {
+		if client == nil || !client.IsConnected() {
+			continue
+		}
+		cfg := client.GetConfig()
+		if cfg == nil || cfg.Name == "" || !cfg.Enabled || cfg.Quarantined {
+			continue
+		}
+		if _, listedOK := ok[cfg.Name]; !listedOK {
+			failed = append(failed, cfg.Name)
+		}
+	}
+	m.mu.RUnlock()
+	sort.Strings(failed)
+	return tools, failed, nil
 }
 
 // DiscoverToolsDue is the periodic-sweep variant of DiscoverTools: it lists only
@@ -2829,8 +2975,8 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 	// Preflight: if server does not appear to require OAuth, avoid starting
 	// OAuth flow and return an informative error (tray will show it).
 	// Attempt a short no-auth initialize to confirm.
-	if !oauth.ShouldUseOAuth(cfg) && !force {
-		m.logger.Info("OAuth not applicable based on config (no headers, protocol)", zap.String("server", cfg.Name))
+	if !oauth.ManualLoginApplicable(cfg) && !force {
+		m.logger.Info("OAuth not applicable based on config", zap.String("server", cfg.Name))
 		return fmt.Errorf("OAuth is not supported or not required for server '%s'", cfg.Name)
 	}
 
@@ -2846,6 +2992,12 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 	}
 	if err != nil {
 		return fmt.Errorf("failed to create core client for OAuth: %w", err)
+	}
+
+	// Spec 123: an undecryptable stored row is reported to the caller here,
+	// not logged inside the goroutine.
+	if guardErr := coreClient.CheckManualLoginAllowed(); guardErr != nil {
+		return guardErr
 	}
 
 	go func() {
@@ -2919,7 +3071,7 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 		zap.String("server", cfg.Name))
 
 	// Preflight: if server does not appear to require OAuth, return error
-	if !oauth.ShouldUseOAuth(cfg) {
+	if !oauth.ManualLoginApplicable(cfg) {
 		m.logger.Info("OAuth not applicable based on config", zap.String("server", cfg.Name))
 		return nil, fmt.Errorf("OAuth is not supported or not required for server '%s'", cfg.Name)
 	}
@@ -3007,6 +3159,14 @@ func (m *Manager) storedAccessToken(cfg *config.ServerConfig, b commitview.Crede
 		return ""
 	}
 	record, err := m.storage.GetOAuthTokenBound(oauth.GenerateServerKey(cfg.Name, cfg.URL), b)
+	if oauth.IsTokenUndecryptable(err) {
+		// Spec 123 FR-031: the header injector sends no token; the
+		// connection path reports the undecryptable row, nothing here
+		// starts a login.
+		m.logger.Debug("Stored OAuth token cannot be decrypted; no access token to inject",
+			zap.String("server", cfg.Name), zap.Error(err))
+		return ""
+	}
 	if err != nil || record == nil {
 		return ""
 	}
@@ -3030,8 +3190,8 @@ func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core
 		zap.Bool("force", force))
 
 	// Preflight: if server does not appear to require OAuth, avoid starting
-	if !oauth.ShouldUseOAuth(cfg) && !force {
-		m.logger.Info("OAuth not applicable based on config (no headers, protocol)", zap.String("server", cfg.Name))
+	if !oauth.ManualLoginApplicable(cfg) && !force {
+		m.logger.Info("OAuth not applicable based on config", zap.String("server", cfg.Name))
 		return nil, fmt.Errorf("OAuth is not supported or not required for server '%s'", cfg.Name)
 	}
 
@@ -3554,6 +3714,12 @@ func (m *Manager) RefreshOAuthToken(serverName string) error {
 		// Tokens are stored with key = SHA256(serverName|serverURL)[:16], not just serverName.
 		serverKey := oauth.GenerateServerKey(serverName, serverConfig.URL)
 		token, err := m.storage.GetOAuthTokenBound(serverKey, client.CredentialBinding())
+		if oauth.IsTokenUndecryptable(err) {
+			// Spec 123 FR-031: the row is present but unusable. Report it with
+			// its code; no refresh and no reconnect fallback, which would
+			// only end in a login that cannot overwrite the row.
+			return fmt.Errorf("OAuth refresh for %s not attempted: %w", serverName, oauth.TokenUndecryptableError(serverName, err))
+		}
 		if err == nil && token != nil && token.RefreshToken != "" {
 			hasStoredTokens = true
 			m.logger.Debug("Found OAuth token in database for dynamic OAuth server",

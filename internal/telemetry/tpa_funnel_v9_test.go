@@ -260,7 +260,7 @@ func TestPayloadV9_TrustModeDistributionAndFunnelCounters(t *testing.T) {
 	}
 	js := string(data)
 	for _, required := range []string{
-		`"schema_version":16`,
+		`"schema_version":17`,
 		`"trust_mode_distribution":`,
 		`"tool_change_gate_scans":2`,
 		`"prompt_scans":1`,

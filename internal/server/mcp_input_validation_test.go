@@ -70,7 +70,7 @@ func startCountingStubUpstream(t *testing.T, proxy *MCPProxyServer, tools map[st
 	addr := fmt.Sprintf("http://%s", ln.Addr().String())
 	httpSrv := &http.Server{Handler: mcpserver.NewStreamableHTTPServer(mcpSrv), ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = httpSrv.Serve(ln) }()
-	t.Cleanup(func() { _ = httpSrv.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = httpSrv.Close() })
 
 	serverCfg := &config.ServerConfig{
 		Name: "stub", URL: addr, Protocol: "streamable-http", Enabled: true,

@@ -15,7 +15,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 func TestUpstreamServersHandlerPerformance(t *testing.T) {
@@ -47,7 +46,7 @@ func TestUpstreamServersHandlerPerformance(t *testing.T) {
 	defer indexManager.Close()
 
 	// Create upstream manager
-	upstreamManager := upstream.NewManager(zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
+	upstreamManager := newTestUpstreamManager(t, zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
 
 	// Create cache manager
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), zap.NewNop())
@@ -143,7 +142,7 @@ func TestUpstreamServersListOperation(t *testing.T) {
 	defer indexManager.Close()
 
 	// Create upstream manager
-	upstreamManager := upstream.NewManager(zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
+	upstreamManager := newTestUpstreamManager(t, zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
 
 	// Create cache manager
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), zap.NewNop())

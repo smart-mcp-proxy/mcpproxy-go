@@ -21,6 +21,11 @@ on:
         description: 'Failed Release workflow run ID (from Actions URL)'
         required: true
         type: string
+      linux_repos_only:
+        description: Republish Linux package repositories for the current stable release using the selected workflow revision
+        required: false
+        type: boolean
+        default: false
       post_release_only:
         description: >-
           Skip signing/assembly/release/homebrew/linux-repos and run only the
@@ -44,7 +49,7 @@ env:
 
 jobs:
   sign-windows:
-    if: ${{ !inputs.post_release_only }}
+    if: ${{ !inputs.post_release_only && !inputs.linux_repos_only }}
     runs-on: ubuntu-latest
     environment: production
     strategy:
@@ -73,7 +78,7 @@ jobs:
           path: unsigned/*.exe
 
       - name: Submit to SignPath for signing
-        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092  # v3.0
+        uses: signpath/github-action-submit-signing-request@4a84eb4ad763290f059275786f2deed97c2c672b  # v3.1
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           organization-id: '84efd51b-c11c-4a85-82e6-7c3b1157d7ca'
@@ -116,7 +121,7 @@ jobs:
 
   release:
     needs: sign-windows
-    if: ${{ !inputs.post_release_only }}
+    if: ${{ !inputs.post_release_only && !inputs.linux_repos_only }}
     runs-on: ubuntu-latest
     environment: production
     outputs:
@@ -368,7 +373,7 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Create release with binaries
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3  # v3.0.4
         with:
           tag_name: ${{ inputs.tag }}
           files: release-files/*
@@ -402,7 +407,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
 
       # Keyless cosign signature — OIDC identity from the GitHub Actions JWT.
       # id-token: write is granted at the workflow level.
@@ -438,7 +443,7 @@ jobs:
   # this workflow is triggered by workflow_dispatch on a branch, not a tag push).
   provenance:
     needs: [release]
-    if: ${{ !inputs.post_release_only }}
+    if: ${{ !inputs.post_release_only && !inputs.linux_repos_only }}
     permissions:
       actions: read
       id-token: write
@@ -639,7 +644,7 @@ jobs:
   # Publish signed apt/yum repositories to Cloudflare R2 (mirrors release.yml)
   publish-linux-repos:
     needs: [release]
-    if: ${{ !inputs.post_release_only && github.repository == 'smart-mcp-proxy/mcpproxy-go' && !contains(inputs.tag, '-') }}
+    if: ${{ !cancelled() && (needs.release.result == 'success' || inputs.linux_repos_only) && !inputs.post_release_only && github.repository == 'smart-mcp-proxy/mcpproxy-go' && !contains(inputs.tag, '-') }}
     runs-on: ubuntu-latest
     environment: production
 
@@ -661,7 +666,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.linux_repos_only && github.sha || inputs.tag }}
 
       - name: Install repo tooling
         run: |
@@ -673,7 +678,36 @@ jobs:
       # not this run's artifacts, so we use gh run download instead of
       # actions/download-artifact.  Flatten subdirs to match the flat layout
       # that publish.sh expects (same as actions/download-artifact merge-multiple: true).
+      - name: Install cosign for release checksum verification
+        if: inputs.linux_repos_only
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      - name: Download packages from the published stable release
+        if: inputs.linux_repos_only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$(gh release view --json tagName --jq .tagName)" == "$TAG" ]]
+          version=${TAG#v}
+          mkdir release-artifacts
+          cd release-artifacts
+          gh release download "$TAG" --pattern 'checksums.txt*'
+          cosign verify-blob --bundle checksums.txt.cosign.bundle \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+          for asset in "mcpproxy_${version}_amd64.deb" "mcpproxy_${version}_arm64.deb" \
+                       "mcpproxy-${version}-1.x86_64.rpm" "mcpproxy-${version}-1.aarch64.rpm"; do
+            gh release download "$TAG" --pattern "$asset"
+            expected=$(awk -v file="$asset" '$2 == file {print $1}' checksums.txt)
+            [[ "$expected" =~ ^[[:xdigit:]]{64}$ ]]
+            printf '%s  %s\n' "$expected" "$asset" | sha256sum --check
+          done
+
       - name: Download Linux package artifacts from original run
+        if: ${{ !inputs.linux_repos_only }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

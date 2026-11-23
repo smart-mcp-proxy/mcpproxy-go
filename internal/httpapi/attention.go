@@ -20,7 +20,7 @@ type attentionResponse struct {
 
 // handleGetAttention godoc
 // @Summary Get the needs-attention list
-// @Description One list, one count, every surface (Web UI, macOS tray/Home, CLI) reads from it. Filtered per caller: an administrator sees every item; a scoped caller (agent token, or a non-admin server-edition OAuth user session) sees only server items whose server it may enumerate (for a profile-pinned token: servers within its pin); every other subject type (client, setting) is administrator-only.
+// @Description One list, one count, every surface (Web UI, macOS tray/Home, CLI) reads from it. Filtered per caller: an administrator sees every item; a scoped caller (agent token, or a non-admin server-edition OAuth user session) sees only server items whose server it may enumerate (for a profile-pinned token: servers within its pin); every other subject type (client, setting) and the skill_review kind (Spec 125 held skills) are administrator-only.
 // @Tags attention
 // @Produce json
 // @Security ApiKeyAuth
@@ -64,12 +64,27 @@ func renderAttentionChangedForCaller(ctx context.Context, payload map[string]int
 	}
 	ids := make([]string, 0, len(items))
 	for _, it := range items {
-		if !scopedCallerMaySeeAttention(ctx, it.SubjectType, it.SubjectID) {
+		if !attentionKindVisibleTo(ctx, it.Kind) || !scopedCallerMaySeeAttention(ctx, it.SubjectType, it.SubjectID) {
 			continue
 		}
 		ids = append(ids, it.ID)
 	}
 	return map[string]interface{}{"count": len(ids), "ids": ids}
+}
+
+// attentionEventIDsFor narrows a runtime attention event's items to the ids
+// ctx's caller may see, by the same rule as renderAttentionChangedForCaller.
+func attentionEventIDsFor(ctx context.Context, items []internalRuntime.AttentionEventItem) []string {
+	ids, _ := renderAttentionChangedForCaller(ctx, map[string]interface{}{"items": items})["ids"].([]string)
+	return ids
+}
+
+func attentionIDSet(ids []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		out[id] = struct{}{}
+	}
+	return out
 }
 
 // attentionIDSetsEqual reports whether two rendered attention.changed id sets
@@ -96,7 +111,7 @@ func filterAttentionItems(ctx context.Context, items []contracts.AttentionItem) 
 	}
 	out := make([]contracts.AttentionItem, 0, len(items))
 	for _, it := range items {
-		if scopedCallerMaySeeAttention(ctx, it.Subject.Type, it.Subject.ID) {
+		if attentionKindVisibleTo(ctx, it.Kind) && scopedCallerMaySeeAttention(ctx, it.Subject.Type, it.Subject.ID) {
 			out = append(out, it)
 		}
 	}

@@ -24,7 +24,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 // Spec 105 FR-001 / FR-002 / FR-013 mandatory fixtures (task T027, gap
@@ -65,7 +64,7 @@ func newRestartableProxy(t *testing.T, dir string) (*MCPProxyServer, func()) {
 	cfg := config.DefaultConfig()
 	cfg.DataDir = dir
 	cfg.ToolsLimit = 20
-	um := upstream.NewManager(logger, cfg, nil, secret.NewTestWildcardResolver(), nil)
+	um := newTestUpstreamManager(t, logger, cfg, nil, secret.NewTestWildcardResolver(), nil)
 	cm, err := cache.NewManager(sm.GetDB(), logger)
 	require.NoError(t, err)
 	tr := truncate.NewTruncator(0)

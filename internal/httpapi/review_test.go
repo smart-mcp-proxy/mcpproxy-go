@@ -71,8 +71,10 @@ func TestSSE_ReviewChangedOutOfScopeAndEmptyServerAreDroppedForScopedSubscriber(
 
 	adminBody, adminClose := sseSubscribe(t, ts.URL, scopeAdminAPIKey)
 	defer adminClose()
+	readSSEUntil(t, adminBody, "attention.changed", time.Now().Add(5*time.Second))
 	agentBody, agentClose := sseSubscribe(t, ts.URL, token)
 	defer agentClose()
+	readSSEUntil(t, agentBody, "attention.changed", time.Now().Add(5*time.Second))
 
 	require.Eventually(t, func() bool { return ctrl.subscriberCount() == 2 }, 5*time.Second, 20*time.Millisecond,
 		"precondition: both SSE connections must be subscribed to the event bus")
@@ -110,4 +112,46 @@ func TestSSE_ReviewChangedOutOfScopeAndEmptyServerAreDroppedForScopedSubscriber(
 	agentFirst := sseReadRuntimeEvent(t, agentBody)
 	require.Equal(t, string(runtime.EventTypeOAuthTokenRefreshed), agentFirst.event,
 		"scoped subscriber must skip both out-of-scope and empty-server review frames")
+}
+
+func TestSSE_ReviewChangedBatchKeepsOnlyVisibleServers(t *testing.T) {
+	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: scopeFixtureServers(), withManagement: true}
+	srv, token := scopedAgentServer(t, ctrl, []string{"alpha"})
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	adminBody, adminClose := sseSubscribe(t, ts.URL, scopeAdminAPIKey)
+	defer adminClose()
+	readSSEUntil(t, adminBody, "attention.changed", time.Now().Add(5*time.Second))
+	agentBody, agentClose := sseSubscribe(t, ts.URL, token)
+	defer agentClose()
+	readSSEUntil(t, agentBody, "attention.changed", time.Now().Add(5*time.Second))
+
+	publish := func(payload map[string]any) {
+		ctrl.publishToAll(runtime.Event{
+			Type:      runtime.EventTypeReviewChanged,
+			Payload:   payload,
+			Timestamp: time.Now(),
+		})
+	}
+	publish(map[string]any{"servers": []string{"beta"}})
+	publish(map[string]any{"servers": []string{""}})
+	publish(map[string]any{"servers": []string{"alpha", "beta"}, runtime.ReviewChangedSkillsKey: true})
+	publish(map[string]any{"servers": []string{"alpha", "beta"}})
+
+	readBatch := func(frame sseRuntimeFrame) map[string]any {
+		require.Equal(t, string(runtime.EventTypeReviewChanged), frame.event)
+		var envelope struct {
+			Payload map[string]any `json:"payload"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(frame.data), &envelope))
+		return envelope.Payload
+	}
+	// The mixed ordinary batch is the first event the agent may receive.
+	require.Equal(t, map[string]any{"servers": []any{"alpha"}}, readBatch(sseReadRuntimeEvent(t, agentBody)))
+	require.Equal(t, map[string]any{"servers": []any{"beta"}}, readBatch(sseReadRuntimeEvent(t, adminBody)))
+	require.Equal(t, map[string]any{"servers": []any{""}}, readBatch(sseReadRuntimeEvent(t, adminBody)))
+	require.Equal(t, map[string]any{"servers": []any{"alpha", "beta"}, runtime.ReviewChangedSkillsKey: true},
+		readBatch(sseReadRuntimeEvent(t, adminBody)))
+	require.Equal(t, map[string]any{"servers": []any{"alpha", "beta"}}, readBatch(sseReadRuntimeEvent(t, adminBody)))
 }

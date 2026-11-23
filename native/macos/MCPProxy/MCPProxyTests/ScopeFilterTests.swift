@@ -38,7 +38,9 @@ final class ScopeFilterTests: XCTestCase {
         XCTAssertEqual(Set(types), Set([
             "policy_decision", "quarantine_change", "server_change", "system_start",
             "system_stop", "config_change", "tool_quarantine_change", "security_scan",
-            "credential_broker", "preflight", "prompt_get", "profile_change",
+            "credential_broker", "preflight", "prompt_get", "profile_change", "upstream_event",
+            // Spec 125: administrator-only skill rows (the app is an administrator).
+            "skill_quarantine_change", "skill_access",
         ]))
         XCTAssertFalse(types.contains("tool_call"))
         XCTAssertFalse(types.contains("internal_tool_call"))

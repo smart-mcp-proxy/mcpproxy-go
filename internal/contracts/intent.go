@@ -113,7 +113,7 @@ func (i *IntentDeclaration) Validate() *IntentValidationError {
 	if i.DataSensitivity != "" && !isValidDataSensitivity(i.DataSensitivity) {
 		return NewIntentValidationError(
 			IntentErrorCodeInvalidSensitivity,
-			fmt.Sprintf("Invalid intent.data_sensitivity '%s': must be public, internal, private, or unknown", i.DataSensitivity),
+			"Invalid intent.data_sensitivity: must be public, internal, private, or unknown",
 			map[string]interface{}{
 				"provided":     i.DataSensitivity,
 				"valid_values": ValidDataSensitivities,

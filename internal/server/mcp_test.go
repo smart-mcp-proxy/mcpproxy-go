@@ -15,7 +15,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 func TestSecurityConfigValidation(t *testing.T) {
@@ -699,7 +698,7 @@ func TestHandleCallToolErrorRecovery(t *testing.T) {
 	// This test verifies the core issue mentioned in the error logs
 
 	mockProxy := &MCPProxyServer{
-		upstreamManager: upstream.NewManager(zap.NewNop(), config.DefaultConfig(), nil, secret.NewTestWildcardResolver(), nil),
+		upstreamManager: newTestUpstreamManager(t, zap.NewNop(), config.DefaultConfig(), nil, secret.NewTestWildcardResolver(), nil),
 		logger:          zap.NewNop(),
 	}
 
@@ -741,7 +740,7 @@ func TestHandleCallToolCompleteErrorHandling(t *testing.T) {
 	// Test comprehensive error handling scenarios including self-referential calls
 
 	mockProxy := &MCPProxyServer{
-		upstreamManager: upstream.NewManager(zap.NewNop(), config.DefaultConfig(), nil, secret.NewTestWildcardResolver(), nil),
+		upstreamManager: newTestUpstreamManager(t, zap.NewNop(), config.DefaultConfig(), nil, secret.NewTestWildcardResolver(), nil),
 		logger:          zap.NewNop(),
 		config:          &config.Config{}, // Add minimal config for testing
 	}

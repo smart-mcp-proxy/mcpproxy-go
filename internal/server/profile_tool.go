@@ -65,6 +65,8 @@ func buildSetProfileTool() mcp.Tool {
 // the pre-105 payload byte-for-byte — the selected profile's servers, or every
 // configured server on clear — because SC-005 names no FR-003 exception for
 // them (an administrator is never pinned, so only the URL tier could differ).
+// The anonymous caller is administrator-shaped only while anonymous_profile is
+// unset: once confined it is reported the anonymous base's servers on a clear.
 // setProfileRefusal is the refusal for a slug the caller may not select. A
 // Spec 108 client credential gets text chosen by its own profile mode alone
 // (locked: "this client's profile is locked"; switchable: "not a profile this
@@ -179,6 +181,28 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 			zap.String("session_id", sessionID),
 			zap.String("profile", slug),
 		)
+	}
+
+	// A caller confined by anonymous_profile carries the administrator-shaped
+	// anonymous context, but discovery and dispatch resolve it through
+	// ResolveProfileV3: an admitted URL profile, else the admitted selection,
+	// else the anonymous base. Report that same set — on a clear the base
+	// profile's servers (nothing when it no longer exists), never every
+	// configured server. slug is used directly, never re-read from the session
+	// store (see resolveEffectiveProfileForJustSetSlug).
+	if anonymousProfileConfined {
+		base := cfg.AnonymousProfile
+		if profiles.position(base) < 0 {
+			// Dangling base: deny-all, no URL or selection is admitted.
+			return setProfileResult(slug, nil)
+		}
+		effective := base
+		if urlScope := profile.ProfileScopeFromContext(ctx); urlScope != nil && admittedBySwitchableTo(profiles.PolicyFor(base), base, urlScope.Name) {
+			effective = urlScope.Name
+		} else if slug != "" {
+			effective = slug
+		}
+		return setProfileResult(slug, profiles.EffectiveServersFor(effective, []string{"*"}))
 	}
 
 	// SC-005: administrators report the stored selection's own servers.

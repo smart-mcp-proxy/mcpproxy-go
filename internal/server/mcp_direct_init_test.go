@@ -69,7 +69,7 @@ func TestBuildDirectModeTools_KeepsDescribeToolOnTheDiscoverToolsErrorPath(t *te
 
 	// No upstream manager wired: DiscoverTools cannot succeed, which is the
 	// shape of the error path.
-	tools, cat := p.buildDirectModeTools()
+	tools, cat, _ := p.buildDirectModeTools()
 
 	require.NotNil(t, cat, "the error path must still yield a non-nil catalog (D13 rule 2)")
 

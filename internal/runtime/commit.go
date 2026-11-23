@@ -982,6 +982,18 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 		h(reason)
 	}
 
+	// Spec 132 R15: a commit in which browser login goes from on to off cancels
+	// every pending and approved sign-in request BEFORE the new configuration
+	// becomes visible, on the API update path and the file-reload path alike
+	// (both end here). It does not depend on config.reloaded, which is
+	// asynchronous and may be dropped. The lifecycle lock taken here is held until
+	// the function returns, that is, past the publish below and the r.cfg swap, so
+	// a BeginAuthorization either created its request before this ran or sees the
+	// switch off. See the lock-order note on OAuthLoginService.
+	if base.Config != nil && base.Config.MCPOAuthEnabled && !tx.next.MCPOAuthEnabled && r.oauthLoginService != nil {
+		defer r.oauthLoginService.beginDisable("feature_disabled")()
+	}
+
 	// Step 8: publish.
 	snap, perr := r.configSvc.Publish(prepared)
 	if perr != nil {
@@ -1285,6 +1297,14 @@ func (r *Runtime) afterCommitFunc(tx *CommitTx, res *CommitResult, snap *configs
 		}
 		r.afterServerPurge(res.Purged, res.exemptionsDropped)
 		if res.Published {
+			// Spec 125 D6: enable_skills, or a server's expose_skills, turning
+			// on. Here, and not at the callers, so every way of changing the
+			// configuration (file reload, whole-config apply, a REST or MCP
+			// change to one server) triggers the same refresh. It only starts
+			// goroutines; the commit lock is already released.
+			if tx.base != nil {
+				r.onSkillsConfigChanged(tx.base.Config, tx.next)
+			}
 			r.runCommitWorkers(tx, res, snap)
 			r.notifyTelemetryInOrder(res.Generation, tx.next)
 			if len(res.Changes) > 0 {
@@ -1299,21 +1319,41 @@ func (r *Runtime) afterCommitFunc(tx *CommitTx, res *CommitResult, snap *configs
 				}
 				extra["servers"], extra["generation"] = names, res.Generation
 				r.emitServersChanged(tx.reason, extra)
-			}
-			for name, ch := range res.Changes {
-				prev, next := baseEntry(tx.base.Config, name), tx.entry(name)
-				quarantineMoved := ch.QuarantineRaised || (prev != nil && next != nil && prev.Quarantined != next.Quarantined)
-				if quarantineMoved || ch.Kind == configsvc.ChangeRemoved || ch.Kind == configsvc.ChangeReplaced {
-					r.emitReviewChanged(name)
+
+				var reviewNames []string
+				for _, name := range names {
+					ch := res.Changes[name]
+					prev, next := baseEntry(tx.base.Config, name), tx.entry(name)
+					quarantineMoved := ch.QuarantineRaised || (prev != nil && next != nil && prev.Quarantined != next.Quarantined)
+					if quarantineMoved || ch.Kind == configsvc.ChangeRemoved || ch.Kind == configsvc.ChangeReplaced {
+						reviewNames = append(reviewNames, name)
+					}
+				}
+				// A bulk commit can affect more servers than fit in an event buffer.
+				// Keep one invalidation so config.saved and Skills events can follow.
+				switch len(reviewNames) {
+				case 0:
+				case 1:
+					r.emitReviewChanged(reviewNames[0])
+				default:
+					r.publishEvent(newEvent(EventTypeReviewChanged, map[string]any{"servers": reviewNames}))
 				}
 			}
 		}
 		if res.DiskWritten {
 			r.emitConfigSaved(r.configSvc.Current().Path)
 		}
+		// Spec 125: the skills announcements of an exposure change go out
+		// after the commit's own events: the skills-marked review.changed
+		// here, the one skills.changed list after tx.after.
+		var skillsTabs []string
+		if res.Published && tx.base != nil {
+			skillsTabs = r.announceSkillsExposureChanges(tx.base.Config, tx.next)
+		}
 		for _, fn := range tx.after {
 			fn(res)
 		}
+		r.publishSkillsExposureChanged(skillsTabs)
 	}
 }
 
