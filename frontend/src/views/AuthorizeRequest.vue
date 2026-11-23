@@ -132,7 +132,7 @@
 //  - Approve needs a complete preview, with access, for the CURRENT choice, and
 //    sends exactly the body that preview answered;
 //  - one decision per page: after success the buttons stay disabled.
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import api, { ApiError } from '@/services/api'
 import { navigateTo } from '@/utils/navigate'
@@ -282,7 +282,8 @@ function resetPage(keepNote = false) {
 }
 
 function resetChoice(v: OAuthAuthorization) {
-  profileSel.value = UNSET
+  // With no profiles configured the select has no placeholder: All servers.
+  profileSel.value = v.profiles.length === 0 ? ALL : UNSET
   lock.value = true
   replace.value = !!v.previous_login
   // The new-client draft is always ready, whatever is selected first.
@@ -293,6 +294,10 @@ function resetChoice(v: OAuthAuthorization) {
 }
 
 async function load(keepNote = false) {
+  // A review-again reload keeps what the user chose, when it still exists.
+  const kept = keepNote
+    ? { selected: selected.value, newId: newId.value, newName: newName.value, profileSel: profileSel.value, lock: lock.value, replace: replace.value }
+    : null
   resetPage(keepNote)
   const id = requestId.value
   if (!id) {
@@ -307,6 +312,14 @@ async function load(keepNote = false) {
     view.value = v
     loadedId.value = id
     resetChoice(v)
+    if (kept && v.address_kind === 'generic' && (kept.selected === NEW || v.existing_clients?.some((c) => c.id === kept.selected))) {
+      selected.value = kept.selected
+      newId.value = kept.newId
+      newName.value = kept.newName
+      profileSel.value = kept.profileSel
+      lock.value = kept.lock
+      replace.value = kept.replace
+    }
     phase.value = 'ready'
   } catch (e) {
     if (gen !== loadGen) return
@@ -332,6 +345,11 @@ async function runPreview(id: string, key: string) {
     accepted.value = null
     if (e instanceof ApiError && e.status === 404 && e.code !== 'profile_not_found') {
       phase.value = 'gone'
+      return
+    }
+    if (e instanceof ApiError && e.code === 'binding_changed') {
+      await load(true)
+      changedNote.value = true
       return
     }
     previewFailed.value = true
@@ -361,11 +379,16 @@ async function decide(call: (id: string) => Promise<OAuthDecision>) {
   if (busy.value || !loadedId.value) return
   submitting.value = true
   errorText.value = ''
+  // An answer for a request that was left (new id, unmount) is obsolete: it
+  // must not navigate, hide, disable or release anything on the page now shown.
+  const gen = loadGen
   try {
     const res = await call(loadedId.value)
+    if (gen !== loadGen) return
     decided.value = true // terminal: stays disabled while the browser leaves
     navigateTo(res.redirect_url)
   } catch (e) {
+    if (gen !== loadGen) return
     submitting.value = false
     await handleDecisionError(e)
   }
@@ -403,6 +426,11 @@ function submitKey() {
   pastedKey.value = ''
   void load()
 }
+
+onBeforeUnmount(() => {
+  loadGen++
+  previewSeq++
+})
 
 onMounted(() => {
   if (!api.hasAPIKey()) {
