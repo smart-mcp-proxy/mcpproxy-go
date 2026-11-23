@@ -2,6 +2,7 @@ package configimport
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -80,6 +81,18 @@ func MapToServerConfig(parsed *ParsedServer, now time.Time) (*config.ServerConfi
 			server.OAuth = oauth
 			warnings = append(warnings, "OAuth credentials imported; you may need to reconfigure")
 		}
+	case FormatClaudeCode:
+		if oauth := mapClaudeCodeOAuth(parsed.Fields); oauth != nil {
+			if raw, ok := parsed.Fields["oauth"].(*ClaudeCodeOAuthConfig); ok && raw.CallbackPort != 0 {
+				// mcpproxy has no port-only callback pin; oauth.redirect_uri
+				// is the full URL, so half a pin would fail validation. Claude
+				// Code also just allocates the port for its own callback, so
+				// leaving it unset matches the source behavior.
+				warnings = append(warnings, fmt.Sprintf("oauth.callbackPort %d has no mcpproxy equivalent and was dropped; set oauth.redirect_uri in config or the web UI if you need a fixed callback", raw.CallbackPort))
+			}
+			server.OAuth = oauth
+			warnings = append(warnings, "OAuth credentials imported; you may need to reconfigure")
+		}
 	}
 
 	// Track skipped fields
@@ -123,6 +136,29 @@ func mapGeminiOAuth(fields map[string]interface{}) *config.OAuthConfig {
 		Scopes:       oauth.Scopes,
 		RedirectURI:  oauth.RedirectURI,
 	}
+}
+
+// mapClaudeCodeOAuth extracts OAuth config from Claude Code's oauth field.
+// Claude Code's dialect: scopes is a space-separated string and the auth
+// server is named by authServerMetadataUrl. An empty client_id stays empty:
+// mcpproxy falls back to DCR or public-client PKCE, which is what a server
+// without a static client needs anyway.
+func mapClaudeCodeOAuth(fields map[string]interface{}) *config.OAuthConfig {
+	oauth, ok := fields["oauth"].(*ClaudeCodeOAuthConfig)
+	if !ok || oauth == nil {
+		return nil
+	}
+
+	if oauth.ClientID != "" || oauth.ClientSecret != "" || oauth.Scopes != "" || oauth.AuthServerMetadataURL != "" {
+		return &config.OAuthConfig{
+			ClientID:              oauth.ClientID,
+			ClientSecret:          oauth.ClientSecret,
+			Scopes:                strings.Fields(oauth.Scopes),
+			AuthServerMetadataURL: oauth.AuthServerMetadataURL,
+		}
+	}
+
+	return nil
 }
 
 // getSkippedFields returns a list of fields that couldn't be mapped.

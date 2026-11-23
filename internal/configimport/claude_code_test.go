@@ -2,6 +2,7 @@ package configimport
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -73,6 +74,94 @@ func TestClaudeCodeParser_Parse(t *testing.T) {
 		}
 		if protocols["with-command"] != "stdio" {
 			t.Errorf("with-command should auto-detect as stdio, got %s", protocols["with-command"])
+		}
+	})
+
+	t.Run("oauth_block", func(t *testing.T) {
+		content := []byte(`{
+			"mcpServers": {
+				"remote": {
+					"type": "http",
+					"url": "https://example.com/mcp",
+					"oauth": {
+						"clientId": "example-client",
+						"clientSecret": "example-secret",
+						"scopes": "read write",
+						"callbackPort": 8080,
+						"authServerMetadataUrl": "https://auth.example.com/.well-known/oauth-authorization-server"
+					}
+				}
+			}
+		}`)
+
+		servers, err := parser.Parse(content)
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		if len(servers) != 1 {
+			t.Fatalf("Parse() returned %d servers, want 1", len(servers))
+		}
+
+		oauth, ok := servers[0].Fields["oauth"].(*ClaudeCodeOAuthConfig)
+		if !ok || oauth == nil {
+			t.Fatal("oauth field should be *ClaudeCodeOAuthConfig")
+		}
+		if oauth.ClientID != "example-client" {
+			t.Errorf("clientId = %s, want example-client", oauth.ClientID)
+		}
+		if oauth.ClientSecret != "example-secret" {
+			t.Errorf("clientSecret = %s, want example-secret", oauth.ClientSecret)
+		}
+		if oauth.Scopes != "read write" {
+			t.Errorf("scopes = %s, want 'read write'", oauth.Scopes)
+		}
+		if oauth.CallbackPort != 8080 {
+			t.Errorf("callbackPort = %d, want 8080", oauth.CallbackPort)
+		}
+		if oauth.AuthServerMetadataURL != "https://auth.example.com/.well-known/oauth-authorization-server" {
+			t.Errorf("authServerMetadataUrl = %s", oauth.AuthServerMetadataURL)
+		}
+		if len(oauth.UnknownKeys) != 0 {
+			t.Errorf("UnknownKeys = %v, want none", oauth.UnknownKeys)
+		}
+		if len(servers[0].Warnings) != 0 {
+			t.Errorf("warnings = %v, want none", servers[0].Warnings)
+		}
+	})
+
+	t.Run("oauth_unknown_keys_warned", func(t *testing.T) {
+		content := []byte(`{
+			"mcpServers": {
+				"remote": {
+					"type": "http",
+					"url": "https://example.com/mcp",
+					"oauth": {
+						"clientId": "example-client",
+						"futureField": true
+					}
+				}
+			}
+		}`)
+
+		servers, err := parser.Parse(content)
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		oauth, _ := servers[0].Fields["oauth"].(*ClaudeCodeOAuthConfig)
+		if oauth == nil {
+			t.Fatal("oauth field should be set")
+		}
+		if len(oauth.UnknownKeys) != 1 || oauth.UnknownKeys[0] != "futureField" {
+			t.Errorf("UnknownKeys = %v, want [futureField]", oauth.UnknownKeys)
+		}
+		found := false
+		for _, w := range servers[0].Warnings {
+			if strings.Contains(w, "futureField") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no warning mentions futureField: %v", servers[0].Warnings)
 		}
 	})
 

@@ -199,6 +199,77 @@ func TestMapToServerConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("claude_code_oauth", func(t *testing.T) {
+		parsed := &ParsedServer{
+			Name:         "oauth-server",
+			SourceFormat: FormatClaudeCode,
+			Fields: map[string]interface{}{
+				"url":      "https://example.com/mcp",
+				"protocol": "http",
+				"oauth": &ClaudeCodeOAuthConfig{
+					ClientID:              "claude-client",
+					ClientSecret:          "claude-secret",
+					Scopes:                "read write",
+					CallbackPort:          8080,
+					AuthServerMetadataURL: "https://auth.example.com/.well-known/oauth-authorization-server",
+				},
+			},
+		}
+
+		server, _, warnings := MapToServerConfig(parsed, now)
+
+		if server.OAuth == nil {
+			t.Fatal("OAuth should be set")
+		}
+		if server.OAuth.ClientID != "claude-client" {
+			t.Errorf("OAuth.ClientID = %s, want claude-client", server.OAuth.ClientID)
+		}
+		if server.OAuth.ClientSecret != "claude-secret" {
+			t.Errorf("OAuth.ClientSecret = %s, want claude-secret", server.OAuth.ClientSecret)
+		}
+		// Claude Code writes scopes as a space-separated string; mcpproxy wants []string.
+		if len(server.OAuth.Scopes) != 2 || server.OAuth.Scopes[0] != "read" || server.OAuth.Scopes[1] != "write" {
+			t.Errorf("OAuth.Scopes = %v, want [read write]", server.OAuth.Scopes)
+		}
+		if server.OAuth.AuthServerMetadataURL != "https://auth.example.com/.well-known/oauth-authorization-server" {
+			t.Errorf("OAuth.AuthServerMetadataURL = %s", server.OAuth.AuthServerMetadataURL)
+		}
+		// callbackPort has no mcpproxy equivalent: mcpproxy pins redirects with
+		// redirect_uri (full URL), and half a pin would fail validation.
+		var portWarned bool
+		for _, w := range warnings {
+			if strings.Contains(w, "callbackPort") && strings.Contains(w, "dropped") {
+				portWarned = true
+			}
+		}
+		if !portWarned {
+			t.Errorf("dropping callbackPort must be warned about, got %v", warnings)
+		}
+	})
+
+	t.Run("claude_code_oauth_without_client_id", func(t *testing.T) {
+		parsed := &ParsedServer{
+			Name:         "oauth-server",
+			SourceFormat: FormatClaudeCode,
+			Fields: map[string]interface{}{
+				"url":      "https://example.com/mcp",
+				"protocol": "http",
+				"oauth": &ClaudeCodeOAuthConfig{
+					AuthServerMetadataURL: "https://auth.example.com/.well-known/oauth-authorization-server",
+				},
+			},
+		}
+
+		server, _, _ := MapToServerConfig(parsed, now)
+
+		if server.OAuth == nil {
+			t.Fatal("OAuth should be set even without a client_id; mcpproxy falls back to DCR or public-client PKCE")
+		}
+		if server.OAuth.ClientID != "" {
+			t.Errorf("OAuth.ClientID = %s, want empty", server.OAuth.ClientID)
+		}
+	})
+
 	t.Run("gemini_oauth_usable_redirect_uri_preserved", func(t *testing.T) {
 		parsed := &ParsedServer{
 			Name:         "oauth-server",
