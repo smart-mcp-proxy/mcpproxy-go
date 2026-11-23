@@ -86,6 +86,10 @@ func writeUndoRecord(cfgPath, backupPath, clientID, serverName string, written [
 	}
 	path := undoRecordPath(cfgPath, backupPath)
 	if backupPath == "" {
+		// The file did not exist, so any earlier created-file record of this entry
+		// describes a file that is gone: stale by definition, and never to be
+		// matched against the file this connect is about to create.
+		removeCreatedFileRecords(cfgPath, clientID, serverName)
 		var rnd [8]byte
 		if _, err := rand.Read(rnd[:]); err != nil {
 			return "", fmt.Errorf("undo record name: %w", err)
@@ -193,6 +197,22 @@ func checkUndoRecordFile(path, backupPath, clientID, serverName string, current 
 func removeUndoRecord(path string) {
 	if path != "" {
 		_ = os.Remove(path)
+	}
+}
+
+// removeCreatedFileRecords deletes every created-file record (see undoNewPrefix)
+// of clientID's entry serverName beside cfgPath.
+func removeCreatedFileRecords(cfgPath, clientID, serverName string) {
+	matches, _ := filepath.Glob(cfgPath + undoNewPrefix + "*")
+	for _, m := range matches {
+		raw, err := os.ReadFile(m)
+		if err != nil {
+			continue
+		}
+		var rec undoRecord
+		if json.Unmarshal(raw, &rec) == nil && rec.Client == clientID && rec.Server == serverName {
+			_ = os.Remove(m)
+		}
 	}
 }
 
