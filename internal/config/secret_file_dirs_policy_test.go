@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -51,6 +52,33 @@ func TestSecretFileDirsManagementEditRefused(t *testing.T) {
 
 	same := &Config{DataDir: dir, Listen: ":8080", SecretFileDirs: &w, ToolsLimit: 2}
 	assert.False(t, SecretFileDirsManagementEditRefused(path, same))
+}
+
+// Review #6 (PR #1884): an on-disk config that cannot be decoded must not
+// let a management edit through; there is nothing to compare it with.
+func TestSecretFileDirsManagementEditRefused_UndecodableFileFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ConfigFileName)
+	require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o600))
+
+	wild := SecretFileDirs{"*"}
+	incoming := &Config{DataDir: dir, Listen: ":8080", SecretFileDirs: &wild}
+	assert.True(t, SecretFileDirsManagementEditRefused(path, incoming))
+
+	// Even an incoming config that leaves the key unset is refused: the file's
+	// setting is unknown, so no edit can be shown not to change it.
+	assert.True(t, SecretFileDirsManagementEditRefused(path, &Config{DataDir: dir, Listen: ":8080"}))
+}
+
+// A config file that does not exist yet holds no secret_file_dirs: an edit
+// that sets one is refused, an edit that leaves it unset is not.
+func TestSecretFileDirsManagementEditRefused_MissingFileComparesWithUnset(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ConfigFileName)
+
+	wild := SecretFileDirs{"*"}
+	assert.True(t, SecretFileDirsManagementEditRefused(path, &Config{DataDir: dir, SecretFileDirs: &wild}))
+	assert.False(t, SecretFileDirsManagementEditRefused(path, &Config{DataDir: dir}))
 }
 
 func TestApplyPatchMap_RejectsSecretFileDirs(t *testing.T) {

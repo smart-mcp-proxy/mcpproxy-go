@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -58,14 +59,20 @@ func RestoreSecretFileDirsFromFile(dst, onDisk *Config) {
 }
 
 // SecretFileDirsManagementEditRefused reports whether incoming changes
-// secret_file_dirs relative to the file at configPath.
+// secret_file_dirs relative to the file at configPath. It fails closed: a file
+// that exists but cannot be read or decoded refuses the edit, since nothing
+// shows the edit leaves the operator's setting alone. A file that does not
+// exist holds no setting, so only an edit that sets one is refused.
 func SecretFileDirsManagementEditRefused(configPath string, incoming *Config) bool {
 	if incoming == nil || configPath == "" {
 		return false
 	}
+	if _, statErr := os.Stat(configPath); errors.Is(statErr, fs.ErrNotExist) {
+		return incoming.SecretFileDirs != nil
+	}
 	onDisk, err := DecodeConfigFile(configPath)
 	if err != nil {
-		return false
+		return true
 	}
 	return SecretFileDirsChanged(onDisk, incoming)
 }
