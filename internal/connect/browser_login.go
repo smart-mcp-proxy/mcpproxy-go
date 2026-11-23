@@ -178,6 +178,10 @@ func (s *Service) urlPointsHere(u, baseURL, clientID string) bool {
 // query, fragment, userinfo or extra path. Host and port are the current ones,
 // as for the key path.
 func (s *Service) canonicalOAuthURLs(clientID string) []string {
+	// A client without a recorded real-client check never gets (or owns) one.
+	if c := FindClient(clientID); c == nil || !c.SupportsBrowserLogin {
+		return nil
+	}
 	bases := []string{stripScheme(s.baseURL())}
 	if base, err := s.oauthEndpoint(); err == nil && stripScheme(base) != bases[0] {
 		bases = append(bases, stripScheme(base))
