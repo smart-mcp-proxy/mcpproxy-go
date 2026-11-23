@@ -235,6 +235,16 @@ actor APIClient {
         return try await fetchWrapped(path: "/api/v1/attention")
     }
 
+    /// Pending browser sign-in requests (Spec 132). `nil` while the feature is
+    /// off (the core answers 404 `feature_disabled`), so the tray shows nothing.
+    func signInRequests() async throws -> [SignInWire.Summary]? {
+        do {
+            return try await fetchWrapped(path: "/api/v1/oauth/authorizations")
+        } catch APIClientError.httpError(let status, _) where status == 404 {
+            return nil
+        }
+    }
+
     func reviewQueue() async throws -> ReviewQueueResponse { try await fetchWrapped(path: "/api/v1/review") }
     func serverReview(_ name: String) async throws -> ServerReviewResponse { try await fetchWrapped(path: "/api/v1/servers/\(Self.escapePathComponent(name))/review") }
     func startSecurityScan(_ id: String) async throws { try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/scan") }

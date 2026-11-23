@@ -268,3 +268,113 @@ test('h. the consent page is never framed (any case)', async ({ request }) => {
     expect(res.headers()['x-frame-options'], path).toBe('DENY')
   }
 })
+
+// ---------------------------------------------------------------------------
+// Spec 132 T061 (web part): /ui/clients credential list and revoke, and the
+// browser-login switch on /ui/settings. The core is expected to hold
+// `mcp_oauth_enabled` in its config (not only through MCPPROXY_MCP_OAUTH_ENABLED,
+// which locks the Settings switch).
+// ---------------------------------------------------------------------------
+
+// A client with an API key (POST /clients) that signed in once through the page.
+async function clientWithLogin(page: Page, suffix: string): Promise<string> {
+  await catchCallback(page)
+  const id = `e2e-hub-${suffix}-${randomBytes(3).toString('hex')}`
+  const created = await admin('/clients', { method: 'POST', body: JSON.stringify({ id, display_name: `Hub ${suffix}` }) })
+  expect(created.status, await created.clone().text()).toBeLessThan(300)
+  const p = await startSignIn(`Hub ${suffix} app`, `/mcp/oauth/${id}`, `state-${suffix}`)
+  await page.goto(p.requestUrl)
+  await t(page, 'authorize-approve').click()
+  await page.waitForURL(/127\.0\.0\.1:54321\/callback/)
+  await exchange(p, new URL(page.url()).searchParams.get('code') || '')
+  expect(await loginCount(id)).toBe(1)
+  return id
+}
+
+async function credentials(client: string): Promise<any[]> {
+  const res = await admin(`/clients/${client}`)
+  expect(res.status).toBe(200)
+  return (await res.json()).data?.credentials || []
+}
+
+async function openClient(page: Page, id: string) {
+  await page.goto(`${BASE}/ui/clients`)
+  await t(page, `client-expand-${id}`).click()
+  await expect(t(page, `client-credentials-${id}`)).toBeVisible()
+}
+
+test('i. /ui/clients lists the API key and the login; revoking the API key alone leaves the login', async ({ page }) => {
+  await withKey(page)
+  const id = await clientWithLogin(page, 'key')
+  await openClient(page, id)
+  await expect(t(page, 'credential-api_key')).toBeVisible()
+  const loginRow = page.locator('[data-test^="credential-login-"]')
+  await expect(loginRow).toHaveCount(1)
+  await expect(t(page, 'credential-reported-name')).toContainText(/hub key app/i) // the core normalises the reported name
+  await shot(page, 'i-clients-credentials')
+
+  await t(page, 'revoke-api-key').click()
+  await shot(page, 'i-revoke-api-key-dialog')
+  await t(page, 'revoke-credential-confirm').click()
+  await expect(t(page, 'revoke-api-key')).toHaveCount(0)
+  await expect(t(page, 'credential-state-api_key')).toContainText('revoked')
+
+  const creds = await credentials(id)
+  expect(creds.find((c) => c.kind === 'api_key')?.state).toBe('revoked')
+  expect(creds.filter((c) => c.kind === 'browser_login' && c.state === 'active')).toHaveLength(1)
+  await expect(loginRow.locator('[data-test^="revoke-login-"]')).toBeVisible()
+})
+
+test('j. /ui/clients revokes one login through the dialog; Cancel changes nothing', async ({ page }) => {
+  await withKey(page)
+  const id = await clientWithLogin(page, 'login')
+  await openClient(page, id)
+  const revoke = page.locator('[data-test^="revoke-login-"]')
+  await expect(revoke).toHaveCount(1)
+  await revoke.click()
+  await t(page, 'revoke-credential-cancel').click()
+  expect(await loginCount(id)).toBe(1)
+
+  await revoke.click()
+  await shot(page, 'j-revoke-login-dialog')
+  await t(page, 'revoke-credential-confirm').click()
+  await expect(revoke).toHaveCount(0)
+  expect(await loginCount(id)).toBe(0)
+  // the API key is untouched
+  expect((await credentials(id)).find((c) => c.kind === 'api_key')?.state).toBe('active')
+  await expect(t(page, 'credential-api_key')).toBeVisible()
+  await shot(page, 'j-after-revoke')
+})
+
+test('k. /ui/settings shows the browser-login switch with its badge; toggling it changes mcp_oauth_enabled', async ({ page }) => {
+  await withKey(page)
+  const enabled = async () => ((await (await admin('/config')).json()).data?.config?.mcp_oauth_enabled ?? false) as boolean
+  expect(await enabled(), 'start the scratch core with "mcp_oauth_enabled": true in its config').toBe(true)
+
+  await page.goto(`${BASE}/ui/settings?tab=security`)
+  const row = t(page, 'setting-row-mcp_oauth_enabled')
+  await expect(row).toBeVisible()
+  await expect(t(page, 'setting-badge-mcp_oauth_enabled')).toHaveText('Experimental')
+  await expect(row).toContainText('Browser login for MCP clients')
+  const toggle = t(page, 'setting-toggle-mcp_oauth_enabled')
+  await expect(toggle).toBeChecked()
+  await shot(page, 'k-settings-on')
+
+  const save = async () => {
+    await page.getByRole('button', { name: 'Save changes' }).first().click()
+    await sleep(1500)
+  }
+  await toggle.uncheck()
+  await save()
+  expect(await enabled()).toBe(false)
+  // off needs no restart and hides the OAuth paths again
+  expect((await fetch(`${BASE}/.well-known/oauth-authorization-server`)).status).toBe(404)
+  await shot(page, 'k-settings-off')
+
+  await page.reload()
+  await expect(t(page, 'setting-toggle-mcp_oauth_enabled')).not.toBeChecked()
+  await t(page, 'setting-toggle-mcp_oauth_enabled').check()
+  await save()
+  expect(await enabled()).toBe(true)
+  expect((await fetch(`${BASE}/.well-known/oauth-authorization-server`)).status).toBe(200)
+})

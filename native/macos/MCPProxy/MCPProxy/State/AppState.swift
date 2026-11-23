@@ -96,6 +96,57 @@ final class AppState: ObservableObject {
     /// attention count, which can contain multiple reasons for one server.
     @Published var reviewQueueCount: Int = 0
 
+    /// Browser sign-in requests waiting for the administrator (Spec 132). Fed by
+    /// SSE `oauth.authorization_pending` / `_decided` and by a reload of
+    /// `GET /api/v1/oauth/authorizations`; empty while the feature is off.
+    @Published private(set) var signInRequests = SignInRequestStore()
+
+    /// Returns true when the request is new (the caller sends the notification).
+    @MainActor @discardableResult
+    func addSignInRequest(id: String, rawLabel: String, now: Date = Date()) -> Bool {
+        var store = signInRequests
+        let added = store.add(
+            SignInRequest(id: id, clientLabel: SignInPresentation.sanitizedLabel(rawLabel),
+                          expiresAt: now.addingTimeInterval(SignInPresentation.defaultLifetime)),
+            now: now)
+        if store != signInRequests { signInRequests = store }
+        return added
+    }
+
+    @MainActor
+    func removeSignInRequest(id: String) {
+        var store = signInRequests
+        store.remove(id: id)
+        if store != signInRequests { signInRequests = store }
+    }
+
+    /// Replace the list with the core's (reconnect, periodic refresh).
+    @MainActor
+    func replaceSignInRequests(_ summaries: [SignInWire.Summary], now: Date = Date()) {
+        let fresh = summaries.map { s in
+            SignInRequest(
+                id: s.id,
+                clientLabel: SignInPresentation.sanitizedLabel(s.clientLabel ?? ""),
+                expiresAt: SignInPresentation.parseDate(s.expiresAt)
+                    ?? now.addingTimeInterval(SignInPresentation.defaultLifetime))
+        }
+        var store = signInRequests
+        store.replaceAll(with: fresh, now: now)
+        if store != signInRequests { signInRequests = store }
+    }
+
+    @MainActor
+    func expireSignInRequests(now: Date = Date()) {
+        var store = signInRequests
+        store.expire(now: now)
+        if store != signInRequests { signInRequests = store }
+    }
+
+    @MainActor
+    func clearSignInRequests() {
+        if !signInRequests.isEmpty { signInRequests = SignInRequestStore() }
+    }
+
     /// The `reload_hint` fix (`client_never_seen`, "How to restart") has no
     /// native client screen yet (109-h adds `/clients?focus=<id>`). Setting
     /// this instead of no-op'ing lets Home surface the item's own restart

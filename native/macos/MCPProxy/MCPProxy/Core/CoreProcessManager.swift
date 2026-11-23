@@ -1782,6 +1782,22 @@ actor CoreProcessManager {
             // Spec 108-f: a client's binding, credential or lock changed.
             scheduleClientsRefresh()
 
+        case "oauth.authorization_pending":
+            // Spec 132: an MCP client asked to sign in. The tray lists it and
+            // notifies once; approval happens on the Web UI page.
+            guard let pending = SignInWire.decodePending(event.data) else { break }
+            let label = SignInPresentation.sanitizedLabel(pending.clientLabel)
+            let isNew = await MainActor.run {
+                appState.addSignInRequest(id: pending.requestID, rawLabel: pending.clientLabel)
+            }
+            if isNew {
+                await notificationService.sendSignInRequest(requestId: pending.requestID, clientLabel: label)
+            }
+
+        case "oauth.authorization_decided":
+            guard let decided = SignInWire.decodeDecided(event.data) else { break }
+            await MainActor.run { appState.removeSignInRequest(id: decided.requestID) }
+
         case "ping":
             // Keepalive; no action needed
             break
@@ -1961,6 +1977,7 @@ actor CoreProcessManager {
         await refreshClients()
         await refreshAttention()
         await refreshReviewQueue()
+        await refreshSignInRequests()
         // Bump activityVersion so ActivityView reloads. Still needed after the
         // glance's SSE work: the bus emits `activity.tool_call.completed` and
         // `activity.internal_tool_call.completed` (internal/runtime/events.go),
@@ -2041,6 +2058,24 @@ actor CoreProcessManager {
             }
         } catch {
             // Non-fatal; we'll retry on the next refresh or SSE event.
+        }
+    }
+
+    /// Reload the pending browser sign-in requests (Spec 132): on connect and
+    /// reconnect, so a request made while the tray was not listening still
+    /// shows, and on the periodic tick, which also drops expired ones. A core
+    /// with the feature off (404) leaves nothing listed.
+    func refreshSignInRequests() async {
+        guard let apiClient else { return }
+        do {
+            if let summaries = try await apiClient.signInRequests() {
+                await MainActor.run { appState.replaceSignInRequests(summaries) }
+            } else {
+                await MainActor.run { appState.clearSignInRequests() }
+            }
+        } catch {
+            // Non-fatal; keep what is listed but drop what has expired.
+            await MainActor.run { appState.expireSignInRequests() }
         }
     }
 
