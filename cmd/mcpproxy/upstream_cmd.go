@@ -2465,6 +2465,7 @@ func applyImportedServersDaemonMode(ctx context.Context, client *cliclient.Clien
 			Headers:    s.Server.Headers,
 			WorkingDir: s.Server.WorkingDir,
 			Protocol:   s.Server.Protocol,
+			OAuth:      s.Server.OAuth,
 		}
 
 		// Use the quarantine state from the import result (controlled by --no-quarantine flag)
