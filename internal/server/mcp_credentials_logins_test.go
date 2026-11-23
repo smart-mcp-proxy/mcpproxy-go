@@ -126,6 +126,20 @@ func TestCredentialsTool_RevokeLoginRefusals(t *testing.T) {
 	assert.Equal(t, "active", rows[0]["state"])
 }
 
+// An empty or blank grant is a refusal, never the client-wide revoke that
+// omitting grant means.
+func TestCredentialsTool_BlankGrantIsRefusedNotClientWide(t *testing.T) {
+	f := loginsFixture(t)
+	for _, blank := range []string{"", " ", "\t", "  \n"} {
+		out := f.crefused(map[string]any{"operation": "revoke", "client": "cursor", "grant": blank})
+		assert.Equal(t, "invalid_argument", out["code"], "%q", blank)
+		assert.Equal(t, "grant", out["field"], "%q", blank)
+	}
+	rows := loginRows(f.cok(map[string]any{"operation": "list", "kind": "browser_login"}))
+	require.Len(t, rows, 1)
+	assert.Equal(t, "active", rows[0]["state"], "nothing was revoked")
+}
+
 func TestCredentialsTool_NoOperationCreatesALogin(t *testing.T) {
 	for _, op := range credentialsOperations {
 		assert.NotContains(t, op, "login")

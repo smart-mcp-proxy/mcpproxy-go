@@ -375,7 +375,11 @@ func (p *MCPProxyServer) runCredentialsOperation(ctx context.Context, args map[s
 		if client != "" && !clientsSupported {
 			return recorded, nil, nil, unsupported
 		}
-		grant, _ := str("grant")
+		grant, hasGrant := str("grant")
+		if hasGrant && strings.TrimSpace(grant) == "" {
+			// A supplied blank grant is never the client-wide revoke that omitting it means.
+			return recorded, nil, nil, &credentialsToolError{profile.CredentialErrorCodeInvalidArgument, `invalid argument "grant": must not be empty`, "grant"}
+		}
 		if grant != "" && client == "" {
 			return recorded, nil, nil, &credentialsToolError{profile.CredentialErrorCodeInvalidArgument, "revoke: grant requires client", "grant"}
 		}

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -96,6 +97,10 @@ Examples:
   mcpproxy client revoke-login cursor 3f9a1c2e7b44`,
 		Args: argsOrHelpJSON(cobra.ExactArgs(2)),
 		RunE: func(_ *cobra.Command, args []string) error {
+			// A blank id would build a path ending in a slash: refuse it here.
+			if strings.TrimSpace(args[0]) == "" || strings.TrimSpace(args[1]) == "" {
+				return flagValidationError{fmt.Errorf("both the client id and the grant id are required")}
+			}
 			sess, err := newRESTSession("client")
 			if err != nil {
 				return err

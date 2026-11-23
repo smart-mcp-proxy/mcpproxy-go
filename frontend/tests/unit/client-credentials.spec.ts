@@ -120,6 +120,47 @@ describe('ClientCredentials (Spec 132 T056)', () => {
     expect(w.emitted('changed')).toBeUndefined()
   })
 
+  it('cannot be cancelled, closed or confirmed twice while a revoke is in flight', async () => {
+    let settle!: (v: unknown) => void
+    ;(api.revokeClientLogin as any).mockReturnValue(new Promise(resolve => { settle = resolve }))
+    const w = mountIt(client([login(), login({ grant_id: 'grantBBBB' })], false))
+    await w.get('[data-test="revoke-login-grantAAAA"]').trigger('click')
+    await w.get('[data-test="revoke-credential-confirm"]').trigger('click')
+    await flushPromises()
+
+    expect(w.get('[data-test="revoke-credential-cancel"]').attributes('disabled')).toBeDefined()
+    await w.get('[data-test="revoke-credential-cancel"]').trigger('click')
+    await w.findComponent({ name: 'BaseDialog' }).vm.$emit('close') // Escape / backdrop
+    await w.get('[data-test="revoke-credential-confirm"]').trigger('click')
+    await w.get('[data-test="revoke-login-grantBBBB"]').trigger('click') // cannot swap the target
+    expect(w.get('[data-test="revoke-credential-dialog"]').text()).toContain('Revoke')
+    expect(api.revokeClientLogin).toHaveBeenCalledTimes(1)
+
+    settle({ changed: true })
+    await flushPromises()
+    expect(w.emitted('changed')).toHaveLength(1)
+    expect(api.revokeClientLogin).toHaveBeenCalledTimes(1)
+    expect(w.get('[data-test="revoke-credential-dialog"]').text()).not.toContain('Revoke')
+  })
+
+  it('a stale completion changes nothing in a newer dialog', async () => {
+    const settles: Array<(v: unknown, fail?: boolean) => void> = []
+    ;(api.revokeClientLogin as any).mockImplementation(() => new Promise((resolve, reject) => { settles.push((v, fail) => (fail ? reject(v) : resolve(v))) }))
+    const w = mountIt(client([login(), login({ grant_id: 'grantBBBB' })], false))
+    await w.get('[data-test="revoke-login-grantAAAA"]').trigger('click')
+    await w.get('[data-test="revoke-credential-confirm"]').trigger('click')
+    // Force the stale case the UI guards against: drop the dialog state under the call.
+    ;(w.vm as any).$.setupState.pending = null
+    ;(w.vm as any).$.setupState.busy = false
+    await flushPromises()
+    await w.get('[data-test="revoke-login-grantBBBB"]').trigger('click')
+    settles[0](new Error('late failure'), true)
+    await flushPromises()
+    expect(w.find('[data-test="revoke-credential-error"]').exists()).toBe(false)
+    expect(w.emitted('changed')).toBeUndefined()
+    expect(w.get('[data-test="revoke-credential-dialog"]').text()).toContain('Revoke')
+  })
+
   it('renders nothing while browser login is off and was never used (no new fields in the payload)', () => {
     const w = mountIt(client(undefined, undefined))
     expect(w.html()).toBe('<!--v-if-->')

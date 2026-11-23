@@ -39,7 +39,7 @@
         <div v-if="error" role="alert" class="alert alert-error text-sm" data-test="revoke-credential-error">{{ error }}</div>
       </template>
       <template #actions>
-        <button type="button" class="btn btn-ghost btn-sm" data-test="revoke-credential-cancel" @click="cancel">Cancel</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-test="revoke-credential-cancel" :disabled="busy" @click="cancel">Cancel</button>
         <button type="button" class="btn btn-error btn-sm" :disabled="busy" data-test="revoke-credential-confirm" @click="confirm">
           <span v-if="busy" class="loading loading-spinner loading-xs" />
           Revoke
@@ -84,22 +84,39 @@ function stateClass(state: string) {
   return 'badge-ghost'
 }
 
-function ask(next: Pending) { error.value = ''; busy.value = false; pending.value = next }
-function cancel() { pending.value = null; error.value = '' }
+// Every dialog opening and every revoke gets an identity. A completion that is
+// no longer the current one changes nothing in the UI.
+let opSeq = 0
+let current = 0
+
+function ask(next: Pending) {
+  if (busy.value) return // a revoke is in flight: the target cannot change under it
+  current = ++opSeq
+  error.value = ''
+  pending.value = next
+}
+function cancel() {
+  if (busy.value) return // Cancel, Escape and the backdrop wait for the revoke to settle
+  current = ++opSeq
+  pending.value = null
+  error.value = ''
+}
 async function confirm() {
   const target = pending.value
   if (!target || busy.value) return
+  const op = current
   busy.value = true
   error.value = ''
   try {
     if (target.kind === 'api_key') await api.revokeClientAPIKey(props.client.id)
     else await api.revokeClientLogin(props.client.id, target.cred.grant_id ?? '')
-    pending.value = null
+    // The revoke happened whatever the dialog shows now: tell the page.
     emit('changed')
+    if (op === current) pending.value = null
   } catch (err) {
-    error.value = describeError(err)
+    if (op === current) error.value = describeError(err)
   } finally {
-    busy.value = false
+    if (op === current) busy.value = false
   }
 }
 </script>
