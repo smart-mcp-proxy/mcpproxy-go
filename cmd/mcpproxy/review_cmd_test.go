@@ -243,6 +243,28 @@ func TestFormatReviewResponseTableQueueColumns(t *testing.T) {
 	}
 }
 
+// Spec 125 T031: held skills show in their own column; a skill-only row
+// (kind skill_review) says how many are pending and changed.
+func TestFormatReviewResponseTableQueueShowsHeldSkills(t *testing.T) {
+	raw := []byte(`{"data":{"servers":[` +
+		`{"server":"both","kind":"tool_review","enabled":true,"pending":1,"skills_changed":1},` +
+		`{"server":"hf","kind":"skill_review","enabled":true,"skills_pending":3,"skills_changed":2},` +
+		`{"server":"plain","kind":"tool_review","enabled":true,"changed":1}]}}`)
+	output := captureReviewOutput(t, func() error { return formatReviewResponse("table", raw, false) })
+	require.Contains(t, output, "SKILLS")
+	for _, line := range strings.Split(output, "\n") {
+		switch {
+		case strings.HasPrefix(line, "hf"):
+			require.Contains(t, line, "skill_review")
+			require.Contains(t, line, "3 pending, 2 changed")
+		case strings.HasPrefix(line, "both"):
+			require.Contains(t, line, "0 pending, 1 changed")
+		case strings.HasPrefix(line, "plain"):
+			require.NotContains(t, line, "pending,")
+		}
+	}
+}
+
 func TestFormatReviewResponseTableQueueShowsEnabledState(t *testing.T) {
 	raw := []byte(`{"data":{"servers":[{"server":"live","kind":"server_review","quarantined":true,"enabled":true},{"server":"parked","kind":"server_review","quarantined":true,"enabled":false},{"server":"legacy","kind":"server_review","quarantined":true}]}}`)
 	output := captureReviewOutput(t, func() error { return formatReviewResponse("table", raw, false) })

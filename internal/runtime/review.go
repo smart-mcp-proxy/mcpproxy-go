@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
@@ -55,8 +57,14 @@ type ReviewQueueRow struct {
 	TierCounts    map[contracts.Tier]int `json:"tier_counts,omitempty"`
 	Pending       int                    `json:"pending,omitempty"`
 	Changed       int                    `json:"changed,omitempty"`
-	Scan          *ReviewScan            `json:"scan,omitempty"`
-	Since         *time.Time             `json:"since,omitempty"`
+	// SkillsPending and SkillsChanged count the server's held skills (Spec
+	// 125): pending or changed, not blocked, listed, on a server whose skills
+	// are read. Administrator-only: the REST layer removes them, and drops a
+	// skill_review row, for every scoped caller.
+	SkillsPending int         `json:"skills_pending,omitempty"`
+	SkillsChanged int         `json:"skills_changed,omitempty"`
+	Scan          *ReviewScan `json:"scan,omitempty"`
+	Since         *time.Time  `json:"since,omitempty"`
 }
 
 // Review scan coverage values (ReviewScan.Coverage). They say whether the
@@ -176,9 +184,20 @@ type ReviewToolDiff struct {
 	Annotations  string `json:"annotations"`
 }
 
-// GetReviewQueue composes one row for each quarantined server and each
-// trusted server with pending or changed tool definitions.
+// GetReviewQueue composes one row for each quarantined server, each trusted
+// server with pending or changed tool definitions, and (Spec 125) each server
+// with held skills. A server with held tools keeps its kind and also carries
+// its skill counts; a server whose only owed review is held skills gets a
+// skill_review row.
 func (r *Runtime) GetReviewQueue(ctx context.Context) (*ReviewQueue, error) {
+	return r.GetReviewQueueWithSkills(ctx, true)
+}
+
+// GetReviewQueueWithSkills composes the queue with or without held skills.
+// Without them (a caller that may not see held skills, FR-019a) no skill
+// approval is read at all, so the cost of a scoped caller's request does not
+// depend on how many skills are held.
+func (r *Runtime) GetReviewQueueWithSkills(ctx context.Context, includeSkills bool) (*ReviewQueue, error) {
 	cfg, err := r.GetConfig()
 	if err != nil {
 		return nil, err
@@ -213,14 +232,39 @@ func (r *Runtime) GetReviewQueue(ctx context.Context) (*ReviewQueue, error) {
 				row.Since = &since
 			}
 		}
-		if !server.Quarantined && row.Pending+row.Changed == 0 {
+		var skillsPending, skillsChanged int
+		var skillsSince time.Time
+		if includeSkills {
+			skillsPending, skillsChanged, skillsSince, err = r.heldSkills(cfg, server)
+		}
+		if err != nil {
+			// A failed skills read must not fail the whole queue: that would
+			// be a 500 for every caller, which a scoped caller could observe
+			// (FR-019a). Count no skills for this server, as the attention
+			// subscriber does; the next read tries again.
+			if r.logger != nil {
+				r.logger.Warn("Review queue: cannot read skill records; counting none",
+					zap.String("server", server.Name), zap.Error(err))
+			}
+			skillsPending, skillsChanged, skillsSince = 0, 0, time.Time{}
+		}
+		row.SkillsPending, row.SkillsChanged = skillsPending, skillsChanged
+		heldTools := row.Pending+row.Changed > 0
+		if !server.Quarantined && !heldTools && skillsPending+skillsChanged == 0 {
 			continue
 		}
-		if server.Quarantined {
+		switch {
+		case server.Quarantined:
 			row.Kind = "server_review"
-		} else {
+		case heldTools:
 			row.Kind = "tool_review"
 			row.TierCounts = nil
+		default:
+			row.Kind = ReviewKindSkillReview
+			row.TierCounts = nil
+			if !skillsSince.IsZero() {
+				row.Since = &skillsSince
+			}
 		}
 		if server.Quarantined {
 			row.Scan, _, _ = r.reviewScanFor(ctx, server.Name, true, records)

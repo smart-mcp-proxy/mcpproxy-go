@@ -372,7 +372,13 @@ struct AttentionResponse: Codable, Equatable {
 // MARK: - Review queue (Spec 109-g)
 struct ReviewQueueRow: Codable, Equatable, Identifiable {
     let server: String; let kind: String; let quarantined: Bool; let pending: Int?; let changed: Int?; let toolsCaptured: Int?
-    enum CodingKeys: String, CodingKey { case server, kind, quarantined, pending, changed; case toolsCaptured = "tools_captured" }
+    /// Held skills (Spec 125); administrator-only, absent on an older core.
+    /// A row of kind `skill_review` owes nothing but these.
+    var skillsPending: Int? = nil; var skillsChanged: Int? = nil
+    enum CodingKeys: String, CodingKey {
+        case server, kind, quarantined, pending, changed; case toolsCaptured = "tools_captured"
+        case skillsPending = "skills_pending"; case skillsChanged = "skills_changed"
+    }
     var id: String { server }
 }
 struct ReviewQueueResponse: Codable, Equatable { let count: Int; let servers: [ReviewQueueRow] }

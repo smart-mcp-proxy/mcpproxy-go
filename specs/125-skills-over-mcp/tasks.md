@@ -77,7 +77,7 @@ description: "Task list for Skills over MCP (spec 125)"
 - [x] T028 [P] [US2] Tests for `ApproveSkillsReviewedAt`, `BlockSkill`, `UnblockSkill`: stale review writes nothing (409 `review_out_of_date`), replaced server (409 `server_replaced`), unusable refused, approved copy retained when current changes later
 - [x] T029 [US2] Implement them with the approval lock and incarnation check (plan D10); activity type `skill_quarantine_change` with a `…Ctx` emitter (constants, `ValidActivityTypes`, label parity test)
 - [x] T030 [US2] REST `approve`, `block`, `unblock` (administrator only) + CLI `skills approve|block|unblock`, `skills show --diff`
-- [ ] T031 [US2] Held and changed skills in the review queue and attention list as administrator-only entries; `skillVisibleTo` helper; test that walks every REST and SSE read door with a scoped credential and a held skill and finds it nowhere (FR-019a) — **partly done in PR-2**: administrator-only activity rows and SSE events for skills, and the walk over every REST read door with a scoped credential and a held skill (`internal/httpapi/skills_held_walk_test.go`). The review-queue and attention-list entries and `skillVisibleTo` move to their own PR (they change the Web and macOS parity contract).
+- [x] T031 [US2] Held and changed skills in the review queue and attention list as administrator-only entries; `skillVisibleTo` helper; test that walks every REST and SSE read door with a scoped credential and a held skill and finds it nowhere (FR-019a) — **partly done in PR-2**: administrator-only activity rows and SSE events for skills, and the walk over every REST read door with a scoped credential and a held skill (`internal/httpapi/skills_held_walk_test.go`). The review-queue and attention-list entries and `skillVisibleTo` move to their own PR (they change the Web and macOS parity contract). **Rest done in PR-4b**: `skill_review` queue rows and `skills_pending`/`skills_changed` counts (`internal/runtime/skills_review.go`, `review.go`), `skill_review` attention items (ranks 62/63), `skillVisibleTo` (`internal/httpapi/skills_visibility.go`) on `/review`, `/attention`, `attention.changed` and the skills-caused `review.changed`; the walk now also covers the queue and attention with the administrator counterpart.
 - [x] T032 [US2] Fixture scenario test for the story's independent test: approve, change one byte upstream, refresh → held with diff, approve → new content
 - [x] T033 [US2] Scan the public server's 25 skills manually and record verdicts in the PR description (plan Risks: false positives); docs section "Reviewing skills" in `docs/features/skills.md` and `docs/features/security-quarantine.md`
 
@@ -103,20 +103,20 @@ description: "Task list for Skills over MCP (spec 125)"
 
 ## PR-4: Web UI (US1, US2 on the Web)
 
-- [ ] T043 [P] Vitest specs under `frontend/tests/unit/` for the Skills tab: list with state chips, file list, text viewer with paging, diff, findings, approve bound to the shown hash, block, 409 handling
-- [ ] T044 Implement the Skills tab in `frontend/src/views/ServerDetail.vue` and its components; API client methods; `skills.changed` SSE handling
-- [ ] T045 Review queue and Home attention rows for skills; terminology values in `internal/contracts/terminology.go` and fixtures
-- [ ] T046 Playwright sweep and HTML report per `docs/development/web-ui-verification.md`; `docs/web-ui/` page
+- [x] T043 [P] Vitest specs under `frontend/tests/unit/` for the Skills tab: list with state chips, file list, text viewer with paging, diff, findings, approve bound to the shown hash, block, 409 handling
+- [x] T044 Implement the Skills tab in `frontend/src/views/ServerDetail.vue` and its components; API client methods; `skills.changed` SSE handling
+- [x] T045 Review queue and Home attention rows for skills; terminology values in `internal/contracts/terminology.go` and fixtures — PR-4b: attention kind `skill_review` in the terminology golden and the attention parity fixture, Web review-queue rows (`utils/reviewQueue.ts`, `ReviewQueueList.vue`), macOS review-queue wording, Home icon and the two skills activity labels.
+- [x] T046 Playwright sweep and HTML report per `docs/development/web-ui-verification.md`; `docs/web-ui/` page
 
 ---
 
 ## PR-5: Native surface on the single-server endpoint (US5)
 
-- [ ] T047 [P] [US5] Tests with a raw client against `/mcp/s/<server>`: extension announced only when the feature is on and the server not excluded; listing and single entry contain exactly the available skills with upstream addresses; file read byte-exact against the listed digest; held skill absent and not found; aggregated endpoints never announce; activity rows for list, get and read including not-found
-- [ ] T048 [P] [US5] Parity tests: each extension method with a missing session id, a foreign one and an unsupported protocol version gets the refusal `tools/call` gets
-- [ ] T049 [US5] Extract the transport's method, protocol-version and session checks for reuse; implement the interceptor inside `serveSingleServer` and the resource template in `internal/server/skills_native.go` (plan D14)
-- [ ] T050 [US5] Endpoint lifecycle: per-endpoint lock, combined acquisition of instance, transport and generation, retirement, generation in session ids, upstream name bound to the instance; tests for off → on → off (old session refused, old stream closed, transports do not accumulate), the acquisition-versus-retirement race and the paused `initialize`
-- [ ] T051 [US5] Manual check with a client that consumes the extension; docs section "Native skills on single-server endpoints"
+- [x] T047 [P] [US5] Tests with a raw client against `/mcp/s/<server>`: extension announced only when the feature is on and the server not excluded; listing and single entry contain exactly the available skills with upstream addresses; file read byte-exact against the listed digest; held skill absent and not found; aggregated endpoints never announce; activity rows for list, get and read including not-found
+- [x] T048 [P] [US5] Parity tests: each extension method with a missing session id, a foreign one and an unsupported protocol version gets the refusal `tools/call` gets
+- [x] T049 [US5] Extract the transport's method, protocol-version and session checks for reuse; implement the interceptor inside `serveSingleServer` and the resource template in `internal/server/skills_native.go` (plan D14)
+- [x] T050 [US5] Endpoint lifecycle: per-endpoint lock, combined acquisition of instance, transport and generation, retirement, generation in session ids, upstream name bound to the instance; tests for off → on → off (old session refused, old stream closed, transports do not accumulate), the acquisition-versus-retirement race and the paused `initialize`
+- [x] T051 [US5] Manual check with a client that consumes the extension; docs section "Native skills on single-server endpoints"
 
 ---
 

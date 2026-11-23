@@ -327,7 +327,7 @@ func (p *MCPProxyServer) instructionsForCaller(ctx context.Context, srv *mcpserv
 	// A single-server surface (/mcp/s/<server>) stands in for the upstream
 	// server itself, so it answers with that server's own instructions and
 	// nothing of mcpproxy's.
-	if name, ok := p.singleServerNameFor(srv); ok {
+	if name, ok := p.singleServerNameFor(ctx, srv); ok {
 		if !p.singleServerAdmits(ctx, name) {
 			return ""
 		}

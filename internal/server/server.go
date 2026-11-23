@@ -110,9 +110,9 @@ func (s *Server) setSecurityScanner(svc securityScannerService) {
 type Server struct {
 	logger  *zap.Logger
 	runtime *runtime.Runtime
-	// singleServerHTTP maps each /mcp/s/<server> MCP server to its Streamable
-	// HTTP transport, created on first use (serveSingleServer).
-	singleServerHTTP sync.Map // *server.MCPServer -> *server.StreamableHTTPServer
+	// singleServerAcquired, when set (tests only), runs after a /mcp/s/<server>
+	// request has acquired its endpoint and before it is served.
+	singleServerAcquired atomic.Pointer[func(name string)]
 	// bundleDegradedLogged is the last degraded-coverage reason already logged
 	// by bundleAdmissionSuspended (Spec 101 FR-007), so the suspension is
 	// logged once per reason rather than once per settle event.
@@ -860,6 +860,15 @@ func (s *Server) GetReviewQueue(ctx context.Context) (*runtime.ReviewQueue, erro
 		return nil, fmt.Errorf("runtime unavailable")
 	}
 	return s.runtime.GetReviewQueue(ctx)
+}
+
+// GetReviewQueueWithSkills forwards the caller-aware queue read (Spec 125
+// FR-019a: a caller that may not see held skills reads no skill approvals).
+func (s *Server) GetReviewQueueWithSkills(ctx context.Context, includeSkills bool) (*runtime.ReviewQueue, error) {
+	if s.runtime == nil {
+		return nil, fmt.Errorf("runtime unavailable")
+	}
+	return s.runtime.GetReviewQueueWithSkills(ctx, includeSkills)
 }
 
 // GetServerReview forwards the scoped REST review read to the runtime.
@@ -5845,24 +5854,53 @@ func (s *Server) ServerIncarnation(serverName string) (int64, bool) {
 // serveSingleServer serves /mcp/s/<server>. An unknown server, or one the
 // caller's credential may not use, gets the same 404, so the route cannot be
 // used to probe which servers exist.
+//
+// The endpoint (instance, transport, generation) is acquired as one value and
+// nothing about it is looked up again while the request runs, so a retirement
+// in the meantime (Spec 125 D14) cannot pair this request with a newer
+// instance. The handler chain is: session guard (this endpoint and
+// generation) -> native skills interceptor (when the instance has the native
+// surface) -> the instance's transport.
 func (s *Server) serveSingleServer(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/mcp/s/")
 	name = strings.TrimSuffix(name, "/")
 	if i := strings.Index(name, "/"); i >= 0 {
 		name = name[:i]
 	}
-	var srv *server.MCPServer
+	var (
+		ep *singleServerEndpoint
+		ok bool
+	)
 	if s.mcpProxy != nil && s.mcpProxy.singleServerAdmits(r.Context(), name) {
-		srv = s.mcpProxy.SingleServerMCP(name)
+		ep, ok = s.mcpProxy.acquireSingleServerEndpoint(name, func(srv *server.MCPServer, gen uint64) *server.StreamableHTTPServer {
+			return server.NewStreamableHTTPServer(srv, singleServerStreamableOptions(s.liveConfig, name, gen)...)
+		})
 	}
-	if srv == nil {
+	if !ok {
 		http.Error(w, `{"error":"Server not found"}`, http.StatusNotFound)
 		return
 	}
-	transport, ok := s.singleServerHTTP.Load(srv)
-	if !ok {
-		transport, _ = s.singleServerHTTP.LoadOrStore(srv,
-			server.NewStreamableHTTPServer(srv, singleServerStreamableOptions(s.liveConfig, name)...))
+	if hook := s.singleServerAcquired.Load(); hook != nil {
+		(*hook)(name)
 	}
-	singleServerSessionGuard(name, transport.(*server.StreamableHTTPServer)).ServeHTTP(w, r)
+	ctx := withSingleServerEndpoint(r.Context(), ep)
+	if r.Method == http.MethodGet {
+		// A stream opened on an endpoint that is retired while it is open (or
+		// just before it registered) ends with the retirement.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			select {
+			case <-ep.retired:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
+	var next http.Handler = ep.transport
+	if ep.native {
+		next = s.mcpProxy.nativeSkillsInterceptor(ep, next)
+	}
+	singleServerSessionGuard(name, ep.gen, next).ServeHTTP(w, r.WithContext(ctx))
 }

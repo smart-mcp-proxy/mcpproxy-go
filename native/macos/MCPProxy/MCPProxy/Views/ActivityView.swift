@@ -1147,47 +1147,12 @@ struct ActivityTableRow: View {
         return parts.isEmpty ? "No attribution recorded" : parts.joined(separator: ", ")
     }
 
-    private var typeIcon: String {
-        switch entry.type {
-        case "tool_call": return "wrench.fill"
-        case "internal_tool_call": return "gearshape.fill"
-        case "tool_quarantine_change": return "shield.fill"
-        case "system_start": return "play.circle.fill"
-        case "system_stop": return "stop.circle.fill"
-        case "config_change": return "slider.horizontal.3"
-        case "policy_decision": return "hand.raised.fill"
-        case "server_change": return "arrow.triangle.2.circlepath"
-        default: return "circle.fill"
-        }
-    }
+    // Every core activity type has an explicit case (ActivityTypePresentation).
+    private var typeIcon: String { ActivityTypePresentation.icon(entry.type) }
 
-    private var typeIconColor: Color {
-        switch entry.type {
-        case "tool_call": return .blue
-        case "internal_tool_call": return .indigo
-        case "tool_quarantine_change": return .orange
-        case "system_start": return .green
-        case "system_stop": return .red
-        case "config_change": return .purple
-        case "policy_decision": return .orange
-        case "server_change": return .teal
-        default: return .gray
-        }
-    }
+    private var typeIconColor: Color { ActivityTypePresentation.color(entry.type) }
 
-    private var displayType: String {
-        switch entry.type {
-        case "tool_call": return "Tool Call"
-        case "internal_tool_call": return "Internal Tool"
-        case "tool_quarantine_change": return "Quarantine"
-        case "system_start": return "System Start"
-        case "system_stop": return "System Stop"
-        case "config_change": return "Config Change"
-        case "policy_decision": return "Policy"
-        case "server_change": return "Server Change"
-        default: return entry.type
-        }
-    }
+    private var displayType: String { ActivityTypePresentation.label(entry.type) }
 
     private func relativeTime(_ timestamp: String) -> String {
         let formatter = ISO8601DateFormatter()

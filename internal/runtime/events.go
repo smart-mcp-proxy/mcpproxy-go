@@ -91,6 +91,10 @@ const (
 	// EventTypeSkillsChanged is emitted when a skills refresh (or a damaged
 	// stored copy) changes a server's skill records. Payload:
 	// {server, counts{available, pending, changed, unusable, blocked}} (Spec 125).
+	// A commit that changes whether skills are read (enable_skills, a server's
+	// enabled, quarantine or expose_skills) sends ONE event for all affected
+	// servers instead: {servers: [sorted names]}, no server key.
+	// Administrator-only on SSE.
 	EventTypeSkillsChanged EventType = "skills.changed"
 
 	// Spec 026: Sensitive data detection event

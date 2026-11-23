@@ -141,6 +141,46 @@ Every approval (by you, by the scan, or by `auto` mode), every hold of a changed
 mcpproxy activity list --type skill_quarantine_change
 ```
 
+### In the Web UI {#web-ui}
+
+The **Skills** tab of a server's page (`/ui/servers/<name>?tab=skills`) does the
+same review as the commands above: the list with one state chip per skill, the
+file list, a text viewer that pages through large files, a comparison of the
+approved copy with the current one (file by file, and line by line for one
+changed text file), the scan result with its findings, and the Approve, Block and
+Unblock buttons. Approve is bound to the hash and the server incarnation of the
+version you opened: a new version that arrives while you review is shown as a
+stale review with Approve off until you open it, and a skill that changed on the
+server before the page knew is refused with a notice and the list reloads. See [Server Detail page](../web-ui/server-detail.md#skills-tab).
+
+The tab has **All skills** and **Needs review** filters. Opening the tab directly
+shows all skills. A Skills action from the global Review queue opens
+`?tab=skills&state=needs-review`, which shows only currently listed, unblocked
+skills in Pending or Changed state. The displayed count follows that filtered
+list. You can switch to All skills to inspect approved, blocked, or unusable
+records. On desktop, selecting a skill shows its card beside the list. On a
+compact screen, the card takes the list's place and **Back to skills** returns
+to the selected row. Keyboard focus follows the card on open and the row on
+return. A refresh retains the open card and the approval version check; if an
+action removes that skill from Needs review, the card stays visible until you
+go back or choose another skill.
+
+The card shows scan evidence and any coverage warnings above **Approve** and
+**Approve changes**. **Read SKILL.md** opens the current text directly. Expand
+**File hashes** for full digests or **Unchanged files** for matching paths.
+Added, removed, and changed files stay visible in the comparison.
+
+### Where held skills show up {#held-skills-in-review}
+
+A skill that is pending or changed (not blocked, still listed, on an enabled server that is not quarantined and not excluded) is owed a review, and it shows up next to the tool reviews:
+
+- **Review queue** (`GET /api/v1/review`, the Web UI Review queue, `mcpproxy review list`, the macOS Review Queue). A server with held tools keeps its row and gains `skills_pending` / `skills_changed`; a server with only held skills gets a row of kind `skill_review`, and `count` (the sidebar badge) includes it. In the Web UI that row's **Review** opens the server's Skills tab with Needs review active; a tool row with held skills also offers **Skills**, which opens the same filter. The tool row's **Review** still opens tool review. The macOS app has no Skills tab, so its row says "Review in the Web UI" and opens that page in the browser.
+- **Needs attention** (Home, the header pill, `mcpproxy attention`): one `skill_review` item per state, ranked right after the tool reviews (62 changed, 63 pending), fixed on the server's Skills tab.
+
+A quarantined server is only a server review: its skills are not read until it is approved.
+
+These entries are for **administrators only**. A scoped caller (an agent token, pinned or not, or a non-admin user session) gets no skill counts, no `skill_review` row or attention item, a queue `count` without them, and no `review.changed` frame caused by a skills change, even for a server it may see.
+
 ### Reasons a skill is unusable
 
 | Reason | Meaning |
@@ -222,7 +262,7 @@ Call the tool again with that `offset` and `version`. The header is repeated on 
 
 ### Where the tools are offered
 
-On every MCP endpoint that offers `retrieve_tools`, and on the direct endpoint (`/mcp/all`) next to `describe_tool`. They are not offered on single-server endpoints (`/mcp/s/<server>`), and a `code_execution` script cannot call them. Turning `enable_skills` on or off adds or removes the tools at once and tells connected clients that the tool list changed. With the switch off, the tool list is the same as in a build without this feature.
+On every MCP endpoint that offers `retrieve_tools`, and on the direct endpoint (`/mcp/all`) next to `describe_tool`. They are not offered on single-server endpoints (`/mcp/s/<server>`), which serve skills natively instead (see [Native skills on single-server endpoints](#native-skills)), and a `code_execution` script cannot call them. Turning `enable_skills` on or off adds or removes the tools at once and tells connected clients that the tool list changed. With the switch off, the tool list is the same as in a build without this feature.
 
 ### Activity
 
@@ -233,6 +273,33 @@ mcpproxy activity list --type skill_access
 ```
 
 While the tools are offered, the instructions MCPProxy sends to every client name them, and `mcpproxy agent-instructions` adds a skills line to its snippet; see [Agent Instructions](agent-instructions.md).
+
+## Native skills on single-server endpoints {#native-skills}
+
+A client that implements the skills extension itself (for example the MCP Inspector, `--method skills/list --verify`) can connect to the single-server endpoint of one upstream, `http://127.0.0.1:8080/mcp/s/<server>`, and use its own skills interface and consent prompts. With `enable_skills` on and the server not excluded (`expose_skills: false`), that endpoint:
+
+- announces the extension (`capabilities.extensions["io.modelcontextprotocol/skills"]`) and the `resources` capability it requires;
+- answers `skills/list` with exactly the skills of that server that are available to agents, under the addresses the upstream uses (`skill://…`), with the frontmatter, digest and size of the approved copy. Only text files are listed: binary files are not served in this version. The whole listing is one page;
+- answers `skills/get` for one of those addresses, and `resources/read` for one of their files.
+
+What a client reads is the approved copy, byte for byte. The client checks the digests itself, so MCPProxy adds no header and rewrites nothing: when the output sanitisation policy would block or change a file, the read is refused (`skill output blocked by the output sanitisation policy`), and a skill whose address, file addresses or frontmatter the policy would change is left out of the listing. Sensitive-data detection still runs on every file read and records its findings without changing the bytes.
+
+A held, changed, blocked or unusable skill is not listed, and asking for it by address answers `skill not found: <uri>` (`skills/get`) or `resource not found: <uri>` (`resources/read`), error code `-32002`, the same answer as for an address that does not exist.
+
+The aggregated endpoints (`/mcp`, `/mcp/all`, `/mcp/code`, `/mcp/call`, `/mcp/p/<profile>`) never announce the extension. They offer the [skill tools](#agent-tools) instead.
+
+**Same door as the tools.** A caller whose credential or profile does not reach the server gets the endpoint's `404`, exactly as for its tools. Each of the three requests is answered only after the endpoint's transport has accepted it the way it accepts a `tools/call`: a request without a session id, with a session id another endpoint issued, or with a protocol version the endpoint does not serve gets the same refusal a `tools/call` gets. The single-server endpoint currently serves protocol revisions for which the transport ignores the `Mcp-Method` and `Mcp-Name` headers.
+
+**Ordinary resources stay ordinary.** Only `resources/read` of a skill address (`skill://…`, or a file address a skill of that server lists) is answered by the skills surface. Any other `resources/read` on the same endpoint goes to the endpoint's transport unchanged, gets the answer it gets without native skills, and is not recorded as a `skill_access`.
+
+**Following the switch.** Turning `enable_skills` on or off, or changing a server's `expose_skills`, retires that server's single-server endpoint: its open streams are closed and the session ids it issued are refused (`404`), so the client initializes again and sees the new capabilities. Nothing has to be restarted.
+
+**Activity.** Every native listing, entry and file read is a `skill_access` row with the method in the tool column (`skills/list`, `skills/get`, `resources/read`), the action (`list`, `load`, `read`), the outcome (`not_found` included) and the caller's session.
+
+```bash
+npx @modelcontextprotocol/inspector --cli http://127.0.0.1:8080/mcp/s/hf --transport http \
+  --method skills/list --verify --require-digests
+```
 
 ## Command line
 
@@ -316,7 +383,9 @@ Approve, block, unblock and refresh require administrator credentials (the API k
 
 **An agent gets `skill not found` for a skill I can see.** The skill is not available to that agent. Check, in this order: `mcpproxy skills list --server <name>` shows it `approved`, not blocked and `listed`; the server is enabled, not quarantined and has no `expose_skills: false`; the agent's token or profile includes the server. `mcpproxy activity list --type skill_access` shows the call and its outcome.
 
-**An agent does not see the skill tools.** `enable_skills` is off, or the client is connected to a single-server endpoint (`/mcp/s/<server>`), where they are not offered.
+**An agent does not see the skill tools.** `enable_skills` is off, or the client is connected to a single-server endpoint (`/mcp/s/<server>`), where they are not offered: a client that speaks the skills extension gets the server's skills natively there.
+
+**A native client says the server does not declare the skills extension.** It is connected to an aggregated endpoint, `enable_skills` is off, or the server has `expose_skills: false`. Connect it to `/mcp/s/<server>`. After changing either switch, the client must initialize again (its old session id answers `404`).
 
 **A skill I approved shows `changed`.** The server changed its content. Compare with `mcpproxy skills show <server>:<skill> --diff` and approve again if the change is fine. Agents keep being refused until then.
 
