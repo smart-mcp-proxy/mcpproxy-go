@@ -62,3 +62,7 @@ internal/security/bundlesig/testdata/* -text
 # leave a \r on the shebang and every command line, so pin the CI shell
 # scripts to LF.
 scripts/*.sh text eol=lf
+
+# Spec 132 OAuth metadata goldens are byte-compared against LF-only
+# MarshalIndent output; pin LF so a Windows checkout does not yield CRLF.
+internal/mcplogin/testdata/*.json text eol=lf
