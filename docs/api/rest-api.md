@@ -1471,9 +1471,12 @@ Safety semantics:
   digest still equals it, and the sidecar is removed when the undo succeeds or
   the entry is disconnected) — it never clobbers later edits. A record that is
   malformed, unreadable or bound to another client, entry or backup is also a
-  conflict. Any connect that writes the config, an API-key one included, first
-  retires the records of that entry that describe a file it is replacing (a
-  directory read only when there is none). A connect that cannot list the config's directory (a browser-login connect refuses before writing
+  conflict. A connect stages its record, writes the config, publishes the record and only
+  then retires the older records of that entry, an API-key connect included (a
+  directory read only when there is none), so a connect that fails changes no
+  record. Records carry their creation time and only the newest created-file
+  record of an entry can authorise an Undo; a problem publishing or retiring
+  after a successful write is reported as `cleanup_error`. A connect that cannot list the config's directory (a browser-login connect refuses before writing
   anything; an API-key connect proceeds as before) or an Undo that cannot (it answers conflict)
   fails closed; a disconnect reports `cleanup_error` and still succeeds. A backup name that
   already has another entry's or client's record is skipped, like a name that exists.

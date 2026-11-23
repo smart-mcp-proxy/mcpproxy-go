@@ -1187,27 +1187,25 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	// gap open, per round 5. The permission bits also come from currentPerm's
 	// fresh re-stat rather than the mode captured all the way back in
 	// parseOrCreateJSON, for the same reason (see currentPerm's doc comment).
-	// Stale records of this entry go first, for every connect (see
-	// retireStaleUndoRecords). Only a browser-login connect then records its own
-	// write (see undo_record.go): a key connect writes exactly the files it
-	// always wrote.
-	if err := retireStaleUndoRecords(cfgPath, backupPath, client.ID, serverName, cred.oauth); err != nil {
-		return nil, err
-	}
-	recPath := ""
+	// Only a browser-login connect records its write (see undo_record.go): a key
+	// connect writes exactly the files it always wrote. The record is staged now
+	// and published, with the retirement of the older ones, only after the config
+	// write succeeded, so a connect that fails changes no record.
+	var staged *stagedRecord
 	if cred.oauth {
 		var recErr error
-		if recPath, recErr = writeUndoRecord(cfgPath, backupPath, client.ID, serverName, encoded, currentPerm(cfgPath, perm)); recErr != nil {
+		if staged, recErr = stageUndoRecord(cfgPath, backupPath, client.ID, serverName, encoded, currentPerm(cfgPath, perm)); recErr != nil {
 			return nil, recErr
 		}
 	}
 	if err := atomicWriteFile(cfgPath, encoded, currentPerm(cfgPath, perm), func() error {
 		return s.refuseIfServersSectionRaced(client, cfgPath)
 	}); err != nil {
-		removeUndoRecord(recPath)
+		staged.discard()
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 	cred.markWritten()
+	recordNote := finishUndoRecords(staged, cfgPath, backupPath, client.ID, serverName, cred.oauth)
 
 	// Verify by re-reading
 	if err := s.verifyJSONEntry(client, cfgPath, serverName); err != nil {
@@ -1222,6 +1220,9 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 		ServerName: serverName,
 		Action:     action,
 		Message:    fmt.Sprintf("MCPProxy registered in %s as %q", client.Name, serverName),
+		// A problem publishing or retiring undo records after the write (the
+		// connect itself succeeded): reported, never failing the connect.
+		CleanupError: recordNote,
 	}, nil
 }
 
@@ -1395,27 +1396,25 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 	// than a call from here, and why the permission bits come from
 	// currentPerm's fresh re-stat rather than the mode parseOrCreateTOML
 	// captured earlier.
-	// Stale records of this entry go first, for every connect (see
-	// retireStaleUndoRecords). Only a browser-login connect then records its own
-	// write (see undo_record.go): a key connect writes exactly the files it
-	// always wrote.
-	if err := retireStaleUndoRecords(cfgPath, backupPath, client.ID, serverName, cred.oauth); err != nil {
-		return nil, err
-	}
-	recPath := ""
+	// Only a browser-login connect records its write (see undo_record.go): a key
+	// connect writes exactly the files it always wrote. The record is staged now
+	// and published, with the retirement of the older ones, only after the config
+	// write succeeded, so a connect that fails changes no record.
+	var staged *stagedRecord
 	if cred.oauth {
 		var recErr error
-		if recPath, recErr = writeUndoRecord(cfgPath, backupPath, client.ID, serverName, buf.Bytes(), currentPerm(cfgPath, perm)); recErr != nil {
+		if staged, recErr = stageUndoRecord(cfgPath, backupPath, client.ID, serverName, buf.Bytes(), currentPerm(cfgPath, perm)); recErr != nil {
 			return nil, recErr
 		}
 	}
 	if err := atomicWriteFile(cfgPath, buf.Bytes(), currentPerm(cfgPath, perm), func() error {
 		return s.refuseIfServersSectionRaced(client, cfgPath)
 	}); err != nil {
-		removeUndoRecord(recPath)
+		staged.discard()
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 	cred.markWritten()
+	recordNote := finishUndoRecords(staged, cfgPath, backupPath, client.ID, serverName, cred.oauth)
 
 	return &ConnectResult{
 		Success:    true,
@@ -1425,6 +1424,9 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 		ServerName: serverName,
 		Action:     action,
 		Message:    fmt.Sprintf("MCPProxy registered in %s as %q", client.Name, serverName),
+		// A problem publishing or retiring undo records after the write (the
+		// connect itself succeeded): reported, never failing the connect.
+		CleanupError: recordNote,
 	}, nil
 }
 

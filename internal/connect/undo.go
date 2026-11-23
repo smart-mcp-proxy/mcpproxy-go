@@ -210,7 +210,7 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 			return nil, fmt.Errorf("remove created config: %w", err)
 		}
 		removeUndoRecord(recPath)
-		_ = removeCreatedFileRecords(cfgPath, client.ID, serverName)
+		_ = removeCreatedFileRecords(cfgPath, client.ID, serverName, "")
 		res := &ConnectResult{
 			Success:    true,
 			Client:     client.ID,
@@ -234,7 +234,7 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 		return nil, fmt.Errorf("restore from backup: %w", err)
 	}
 	removeUndoRecord(recPath)
-	_ = removeCreatedFileRecords(cfgPath, client.ID, serverName)
+	_ = removeCreatedFileRecords(cfgPath, client.ID, serverName, "")
 
 	res := &ConnectResult{
 		Success:    true,
