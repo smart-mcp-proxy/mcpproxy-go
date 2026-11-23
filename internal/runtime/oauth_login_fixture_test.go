@@ -118,7 +118,7 @@ func (fx *oauthFx) actor() Actor {
 // mintClient creates an API-key client with a binding.
 func (fx *oauthFx) mintClient(id, pin, mode string) {
 	fx.t.Helper()
-	_, err := fx.sm.MintClientCredential(id, "mcp_cli_"+id+"_oauth_test_secret_000000", oauthTestKey, mode, pin, fx.clock.Now().Add(24*time.Hour))
+	_, err := fx.sm.MintClientCredential(id, "mcp_cli_"+id+"_oauth_test_secret_000000", oauthTestKey, mode, pin, time.Now().Add(300*24*time.Hour)) // storage validates against the real clock
 	require.NoError(fx.t, err)
 }
 

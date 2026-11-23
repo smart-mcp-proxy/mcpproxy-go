@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 )
@@ -41,7 +42,8 @@ func TestGetOrCreateHMACKey_ConcurrentFirstCallersAgree(t *testing.T) {
 		}
 	}
 	info, _ := os.Stat(filepath.Join(dir, hmacKeyFile))
-	if info.Mode().Perm() != 0o600 {
+	// Windows reports 0666 for any writable file; the mode bits mean nothing there.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("permissions %v", info.Mode().Perm())
 	}
 	entries, _ := os.ReadDir(dir)
