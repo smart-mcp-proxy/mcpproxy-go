@@ -89,6 +89,14 @@ enum SignInPresentation {
         return GlanceFormatting.tailTruncated(collapsed, limit: labelLimit)
     }
 
+    /// The menu rows for `store` at `now`: expired requests never appear, the
+    /// first `maxMenuRows` are shown and the rest fold into a submenu.
+    static func menuRows(_ store: SignInRequestStore, now: Date = Date())
+        -> (shown: [SignInRequest], overflow: [SignInRequest]) {
+        let live = store.live(now: now)
+        return (Array(live.prefix(maxMenuRows)), Array(live.dropFirst(maxMenuRows)))
+    }
+
     static func menuTitle(for request: SignInRequest) -> String {
         // A truncated label already ends in an ellipsis; do not stack two.
         request.clientLabel.hasSuffix("\u{2026}")
@@ -120,8 +128,16 @@ enum SignInPresentation {
 /// by event and by list reload.
 struct SignInRequestStore: Equatable, Sendable {
     private(set) var requests: [SignInRequest] = []
+    /// Increases on every change of content, so a list reload can tell that an
+    /// event landed while its GET was in flight.
+    private(set) var revision = 0
 
     var isEmpty: Bool { requests.isEmpty }
+
+    /// Requests whose deadline has not passed.
+    func live(now: Date = Date()) -> [SignInRequest] {
+        requests.filter { $0.expiresAt > now }
+    }
 
     /// Adds a request. Returns true when it was not already listed (so the
     /// caller notifies once). An already-expired request is ignored.
@@ -129,19 +145,24 @@ struct SignInRequestStore: Equatable, Sendable {
     mutating func add(_ request: SignInRequest, now: Date = Date()) -> Bool {
         guard request.expiresAt > now else { return false }
         if let index = requests.firstIndex(where: { $0.id == request.id }) {
-            requests[index] = request
+            if requests[index] != request { requests[index] = request; revision += 1 }
             return false
         }
         requests.insert(request, at: 0)
+        revision += 1
         return true
     }
 
     mutating func remove(id: String) {
+        let before = requests.count
         requests.removeAll { $0.id == id }
+        if requests.count != before { revision += 1 }
     }
 
     mutating func expire(now: Date = Date()) {
+        let before = requests.count
         requests.removeAll { $0.expiresAt <= now }
+        if requests.count != before { revision += 1 }
     }
 
     /// The core's list is authoritative: what it no longer names is gone
@@ -149,8 +170,11 @@ struct SignInRequestStore: Equatable, Sendable {
     /// list is newest first, so its order is kept.
     mutating func replaceAll(with fresh: [SignInRequest], now: Date = Date()) {
         var seen = Set<String>()
-        requests = fresh.filter { $0.expiresAt > now && seen.insert($0.id).inserted }
+        let next = fresh.filter { $0.expiresAt > now && seen.insert($0.id).inserted }
+        if next != requests { requests = next; revision += 1 }
     }
 
-    mutating func clear() { requests = [] }
+    mutating func clear() {
+        if !requests.isEmpty { requests = []; revision += 1 }
+    }
 }

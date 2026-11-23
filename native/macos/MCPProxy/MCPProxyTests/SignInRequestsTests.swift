@@ -1,6 +1,12 @@
 import XCTest
 @testable import MCPProxy
 
+private final class CallCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var value = 0
+    func next() -> Int { lock.lock(); defer { lock.unlock() }; value += 1; return value }
+}
+
 /// Spec 132 (T054): the tray lists browser sign-in requests and opens the
 /// consent page; it never decides one.
 @MainActor
@@ -151,7 +157,7 @@ final class SignInRequestsTests: XCTestCase {
     // MARK: SSE routing and list reload
 
     func testSSEEventsAddAndRemoveARequest() async {
-        let state = AppState()
+        let state = connectedState()
         let manager = CoreProcessManager(
             appState: state,
             notificationService: NotificationService(deliveryEnabled: false),
@@ -167,6 +173,146 @@ final class SignInRequestsTests: XCTestCase {
                      data: #"{"payload":{"request_id":"r1","status":"approved"}}"#, retry: nil, id: nil),
             generation: state.connectionGeneration)
         XCTAssertTrue(state.signInRequests.isEmpty)
+    }
+
+    // MARK: Review round 1 (P2 x3)
+
+    private func summary(_ id: String, _ label: String = "App", ttl: TimeInterval = 600) -> SignInWire.Summary {
+        let iso = ISO8601DateFormatter().string(from: Date().addingTimeInterval(ttl))
+        return SignInWire.Summary(id: id, clientLabel: label, expiresAt: iso)
+    }
+
+    private func connectedState() -> AppState {
+        let state = AppState()
+        state.coreState = .connected
+        return state
+    }
+
+    /// P2-1: a reload that was fetched before an SSE decision must not bring
+    /// the decided request back.
+    func testReloadFetchedBeforeADecisionDoesNotResurrectIt() {
+        let state = connectedState()
+        state.addSignInRequest(id: "r1", rawLabel: "Cursor")
+        let ticket = state.signInReloadTicket()          // fetch starts, sees r1
+        state.removeSignInRequest(id: "r1")               // SSE: decided
+        XCTAssertEqual(state.applySignInReload([summary("r1")], ticket: ticket), .stale)
+        XCTAssertTrue(state.signInRequests.isEmpty)
+    }
+
+    /// P2-1: ... and must not drop a request that arrived while it was in flight.
+    func testReloadFetchedBeforeANewRequestDoesNotDropIt() {
+        let state = connectedState()
+        let ticket = state.signInReloadTicket()          // fetch starts, sees nothing
+        state.addSignInRequest(id: "new", rawLabel: "Fresh") // SSE: pending
+        XCTAssertEqual(state.applySignInReload([], ticket: ticket), .stale)
+        XCTAssertEqual(state.signInRequests.requests.map(\.id), ["new"])
+    }
+
+    func testReloadWithNoInterveningEventApplies() {
+        let state = connectedState()
+        let ticket = state.signInReloadTicket()
+        XCTAssertEqual(state.applySignInReload([summary("a")], ticket: ticket), .applied)
+        XCTAssertEqual(state.signInRequests.requests.map(\.id), ["a"])
+    }
+
+    func testFeatureOffAnswerClearsWhenNothingIntervened() {
+        let state = connectedState()
+        state.addSignInRequest(id: "r1", rawLabel: "Cursor")
+        let ticket = state.signInReloadTicket()
+        XCTAssertEqual(state.applySignInReload(nil, ticket: ticket), .applied)
+        XCTAssertTrue(state.signInRequests.isEmpty)
+    }
+
+    func testStaleFeatureOffAnswerDoesNotClearANewerRequest() {
+        let state = connectedState()
+        let ticket = state.signInReloadTicket()
+        state.addSignInRequest(id: "new", rawLabel: "Fresh")
+        XCTAssertEqual(state.applySignInReload(nil, ticket: ticket), .stale)
+        XCTAssertEqual(state.signInRequests.requests.map(\.id), ["new"])
+    }
+
+    /// The manager retries a stale reload and ends with the core's list.
+    func testManagerRefetchesAfterAStaleReload() async {
+        let state = connectedState()
+        let manager = CoreProcessManager(
+            appState: state, notificationService: NotificationService(deliveryEnabled: false),
+            socketPath: NSTemporaryDirectory() + "signin-\(UUID().uuidString).sock")
+        let counter = CallCounter()
+        let fresh = summary("sse", "Via SSE")
+        await manager.setSignInRequestsFetcher {
+            let n = counter.next()
+            if n == 1 {
+                // an SSE event lands while the first response is in flight
+                await MainActor.run { _ = state.addSignInRequest(id: "sse", rawLabel: "Via SSE") }
+                return []
+            }
+            return [fresh]
+        }
+        await manager.refreshSignInRequests()
+        XCTAssertEqual(counter.value, 2)
+        XCTAssertEqual(state.signInRequests.requests.map(\.id), ["sse"])
+    }
+
+    /// P2-2: leaving .connected forgets the old core's requests.
+    func testLeavingConnectedClearsRequests() {
+        let state = connectedState()
+        state.addSignInRequest(id: "r1", rawLabel: "Cursor")
+        state.coreState = .reconnecting(attempt: 1)
+        XCTAssertTrue(state.signInRequests.isEmpty)
+        state.coreState = .connected
+        XCTAssertTrue(state.signInRequests.isEmpty, "a restarted core must not inherit the old requests")
+    }
+
+    /// P2-2: a response issued to the previous connection is dropped.
+    func testDelayedOldGenerationReloadIsDropped() {
+        let state = connectedState()
+        let ticket = state.signInReloadTicket()
+        state.coreState = .reconnecting(attempt: 1)
+        state.coreState = .connected                      // a new core
+        XCTAssertEqual(state.applySignInReload([summary("old")], ticket: ticket), .stale)
+        XCTAssertTrue(state.signInRequests.isEmpty)
+    }
+
+    /// P2-2: an SSE event of an old stream is ignored.
+    func testSSEEventFromAnOldGenerationIsIgnored() async {
+        let state = connectedState()
+        let oldGeneration = state.connectionGeneration
+        state.coreState = .reconnecting(attempt: 1)
+        state.coreState = .connected
+        let manager = CoreProcessManager(
+            appState: state, notificationService: NotificationService(deliveryEnabled: false),
+            socketPath: NSTemporaryDirectory() + "signin-\(UUID().uuidString).sock")
+        await manager.handleSSEEvent(
+            SSEEvent(event: "oauth.authorization_pending",
+                     data: #"{"payload":{"request_id":"old","client_label":"Old"}}"#, retry: nil, id: nil),
+            generation: oldGeneration)
+        XCTAssertTrue(state.signInRequests.isEmpty)
+    }
+
+    /// P2-3: the menu never lists a request past its deadline, and selecting
+    /// one that expired since the menu was built opens nothing.
+    func testMenuRowsSkipExpiredRequestsAndSelectionRechecks() {
+        let state = connectedState()
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        state.addSignInRequest(id: "soon", rawLabel: "Soon", now: t0.addingTimeInterval(-590)) // expires t0+10
+        state.addSignInRequest(id: "later", rawLabel: "Later", now: t0)                          // expires t0+600
+        let rows = SignInPresentation.menuRows(state.signInRequests, now: t0.addingTimeInterval(20))
+        XCTAssertEqual(rows.shown.map(\.id), ["later"])
+        XCTAssertEqual(rows.overflow.count, 0)
+        XCTAssertNil(state.signInPath(forRequest: "soon", now: t0.addingTimeInterval(20)))
+        XCTAssertEqual(state.signInPath(forRequest: "later", now: t0.addingTimeInterval(20)),
+                       "/authorize?request=later")
+    }
+
+    func testMenuRowsFoldPastTheLimit() {
+        var store = SignInRequestStore()
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        for i in 0..<7 {
+            store.add(SignInRequest(id: "r\(i)", clientLabel: "A\(i)", expiresAt: t0.addingTimeInterval(600)), now: t0)
+        }
+        let rows = SignInPresentation.menuRows(store, now: t0)
+        XCTAssertEqual(rows.shown.count, SignInPresentation.maxMenuRows)
+        XCTAssertEqual(rows.overflow.count, 2)
     }
 
     func testListRequestReturnsNilWhenTheFeatureIsOff() async throws {

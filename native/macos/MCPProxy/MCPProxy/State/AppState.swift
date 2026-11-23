@@ -41,7 +41,13 @@ final class AppState: ObservableObject {
     @Published var coreState: CoreState = .idle {
         didSet {
             if coreState != oldValue { connectionGeneration &+= 1 }
-            if coreState != .connected { clearGlanceState() }
+            if coreState != .connected {
+                clearGlanceState()
+                // Requests belong to the core that announced them (Spec 132).
+                var store = signInRequests
+                store.clear()
+                if store != signInRequests { signInRequests = store }
+            }
         }
     }
 
@@ -144,7 +150,44 @@ final class AppState: ObservableObject {
 
     @MainActor
     func clearSignInRequests() {
-        if !signInRequests.isEmpty { signInRequests = SignInRequestStore() }
+        var store = signInRequests
+        store.clear()
+        if store != signInRequests { signInRequests = store }
+    }
+
+    /// What a list reload remembers from the moment its fetch started.
+    struct SignInReloadTicket: Equatable, Sendable {
+        let revision: Int
+        let generation: Int
+    }
+
+    enum SignInReloadResult: Equatable, Sendable { case applied, stale }
+
+    /// Take before the GET /oauth/authorizations fetch.
+    @MainActor
+    func signInReloadTicket() -> SignInReloadTicket {
+        SignInReloadTicket(revision: signInRequests.revision, generation: connectionGeneration)
+    }
+
+    /// Apply a reload (`nil` = feature off). It is stale, and changes nothing,
+    /// when the tray reconnected or an SSE event changed the list since the
+    /// ticket was taken; the caller refetches.
+    @MainActor
+    @discardableResult
+    func applySignInReload(_ summaries: [SignInWire.Summary]?, ticket: SignInReloadTicket,
+                           now: Date = Date()) -> SignInReloadResult {
+        guard isCurrentConnection(ticket.generation), ticket.revision == signInRequests.revision else {
+            return .stale
+        }
+        if let summaries { replaceSignInRequests(summaries, now: now) } else { clearSignInRequests() }
+        return .applied
+    }
+
+    /// The Web UI path a menu selection opens, or nil when the request is gone
+    /// or past its deadline (the menu may have been built a while ago).
+    func signInPath(forRequest id: String, now: Date = Date()) -> String? {
+        guard signInRequests.live(now: now).contains(where: { $0.id == id }) else { return nil }
+        return SignInPresentation.webUIPath(requestID: id)
     }
 
     /// The `reload_hint` fix (`client_never_seen`, "How to restart") has no

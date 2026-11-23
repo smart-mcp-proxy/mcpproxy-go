@@ -1788,7 +1788,9 @@ actor CoreProcessManager {
             guard let pending = SignInWire.decodePending(event.data) else { break }
             let label = SignInPresentation.sanitizedLabel(pending.clientLabel)
             let isNew = await MainActor.run {
-                appState.addSignInRequest(id: pending.requestID, rawLabel: pending.clientLabel)
+                // An event of an earlier stream belongs to a core we left.
+                appState.isCurrentConnection(generation)
+                    && appState.addSignInRequest(id: pending.requestID, rawLabel: pending.clientLabel)
             }
             if isNew {
                 await notificationService.sendSignInRequest(requestId: pending.requestID, clientLabel: label)
@@ -1796,7 +1798,9 @@ actor CoreProcessManager {
 
         case "oauth.authorization_decided":
             guard let decided = SignInWire.decodeDecided(event.data) else { break }
-            await MainActor.run { appState.removeSignInRequest(id: decided.requestID) }
+            await MainActor.run {
+                if appState.isCurrentConnection(generation) { appState.removeSignInRequest(id: decided.requestID) }
+            }
 
         case "ping":
             // Keepalive; no action needed
@@ -2065,17 +2069,34 @@ actor CoreProcessManager {
     /// reconnect, so a request made while the tray was not listening still
     /// shows, and on the periodic tick, which also drops expired ones. A core
     /// with the feature off (404) leaves nothing listed.
+    /// Test seam: replaces the GET (nil = use `apiClient`).
+    private var signInRequestsFetcher: (@Sendable () async throws -> [SignInWire.Summary]?)?
+
+    func setSignInRequestsFetcher(_ fetcher: (@Sendable () async throws -> [SignInWire.Summary]?)?) {
+        signInRequestsFetcher = fetcher
+    }
+
     func refreshSignInRequests() async {
-        guard let apiClient else { return }
-        do {
-            if let summaries = try await apiClient.signInRequests() {
-                await MainActor.run { appState.replaceSignInRequests(summaries) }
-            } else {
-                await MainActor.run { appState.clearSignInRequests() }
+        // An SSE event that lands while the GET is in flight, or a reconnect,
+        // makes the answer stale (see `AppState.applySignInReload`): fetch again.
+        for _ in 0..<3 {
+            let ticket = await MainActor.run { appState.signInReloadTicket() }
+            let fetched: [SignInWire.Summary]?
+            do {
+                if let fetcher = signInRequestsFetcher {
+                    fetched = try await fetcher()
+                } else if let apiClient {
+                    fetched = try await apiClient.signInRequests()
+                } else {
+                    return
+                }
+            } catch {
+                // Non-fatal; keep what is listed but drop what has expired.
+                await MainActor.run { appState.expireSignInRequests() }
+                return
             }
-        } catch {
-            // Non-fatal; keep what is listed but drop what has expired.
-            await MainActor.run { appState.expireSignInRequests() }
+            let result = await MainActor.run { appState.applySignInReload(fetched, ticket: ticket) }
+            if result == .applied { return }
         }
     }
 
