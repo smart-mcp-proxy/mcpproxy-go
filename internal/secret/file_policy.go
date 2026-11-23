@@ -133,7 +133,6 @@ func (p *FilePolicy) deniedByPath(resolvedPath string) bool {
 	return false
 }
 
-
 // ReadFileWithPolicy reads a secret file according to policy.
 func ReadFileWithPolicy(path string, policy *FilePolicy) (string, error) {
 	if path == "" {

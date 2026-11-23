@@ -92,7 +92,6 @@ func TestReadFileWithPolicy_ErrorTextDoesNotLeakPath(t *testing.T) {
 	assert.Equal(t, err.Error(), ErrSecretFileDenied.Error())
 }
 
-
 func TestPathContainedInRoot_PrefixTrap(t *testing.T) {
 	root := t.TempDir()
 	allowed := filepath.Join(root, "secrets")

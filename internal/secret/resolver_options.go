@@ -30,9 +30,9 @@ type FilePolicy struct {
 	// Disabled refuses every ${file:} reference (explicit secret_file_dirs: []).
 	Disabled bool
 	// AllowedRoots are absolute, symlink-resolved directory roots.
-	AllowedRoots   []string
-	Scope          ResolveScope
-	Deny DenyPaths
+	AllowedRoots []string
+	Scope        ResolveScope
+	Deny         DenyPaths
 }
 
 // ResolverOptions configures a production resolver.

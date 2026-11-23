@@ -18,10 +18,10 @@ import (
 
 type policyImportController struct {
 	mockImportController
-	cfg   *config.Config
+	cfg     *config.Config
 	cfgPath string
-	mu    sync.Mutex
-	added []string
+	mu      sync.Mutex
+	added   []string
 }
 
 func (m *policyImportController) GetCurrentConfig() *config.Config { return m.cfg }
