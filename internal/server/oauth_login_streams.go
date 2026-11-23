@@ -69,6 +69,7 @@ type oauthStreamRegistry struct {
 // dropped, and tracking is accepted again. Allocation stays lazy.
 func (s *Server) resetOAuthStreams() {
 	s.oauthStreamsMu.Lock()
+	s.oauthStreamsRun++ // requests of the previous run can no longer register
 	s.oauthStreamsStopping = false
 	s.oauthStreams.Store(nil)
 	s.oauthStreamsMu.Unlock()
@@ -85,18 +86,28 @@ func (s *Server) wakeOAuthStreams() {
 	}
 }
 
+// oauthRunGen is the server-run generation a request captures BEFORE it
+// authenticates; trackOAuthRequest refuses a request of another generation, so
+// a request of a stopped run that was still paused in authentication cannot
+// register in the next run.
+func (s *Server) oauthRunGen() uint64 {
+	s.oauthStreamsMu.Lock()
+	defer s.oauthStreamsMu.Unlock()
+	return s.oauthStreamsRun
+}
+
 // trackOAuthRequest registers an authenticated request of grantID, authenticated
-// at switch-off epoch. interrupt ends it (context cancelled, transport I/O
+// at switch-off epoch in server run run. interrupt ends it (context cancelled, transport I/O
 // interrupted). The returned release must be called when the request ends. ok is
-// false when the server is stopping: nothing is tracked and no watcher starts,
+// false when the server is stopping or the request belongs to another run: nothing is tracked and no watcher starts,
 // and the caller must not serve the request.
-func (s *Server) trackOAuthRequest(grantID string, expiresAt time.Time, epoch uint64, interrupt func()) (release func(), ok bool) {
+func (s *Server) trackOAuthRequest(grantID string, expiresAt time.Time, epoch, run uint64, interrupt func()) (release func(), ok bool) {
 	st := &oauthStream{grantID: grantID, expiresAt: expiresAt, epoch: epoch, interrupt: interrupt}
 	// The stopping flag, the registry's creation and the entry's insertion are
 	// one critical section: a track after stopOAuthStreams has marked the run
 	// stopped is refused, whether or not a registry ever existed.
 	s.oauthStreamsMu.Lock()
-	if s.oauthStreamsStopping {
+	if s.oauthStreamsStopping || run != s.oauthStreamsRun {
 		s.oauthStreamsMu.Unlock()
 		return func() {}, false
 	}
@@ -218,11 +229,11 @@ func (s *Server) stopOAuthStreams() {
 // serveTracked serves next for an authenticated browser-login request and ends
 // the request when its login stops being valid. grantID and expiresAt come from
 // the authentication, epoch from BEFORE it (so a switch-off in between counts).
-func (s *Server) serveTracked(w http.ResponseWriter, r *http.Request, next http.Handler, grantID string, expiresAt time.Time, epoch uint64) {
+func (s *Server) serveTracked(w http.ResponseWriter, r *http.Request, next http.Handler, grantID string, expiresAt time.Time, epoch, run uint64) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	rc := http.NewResponseController(w)
-	release, ok := s.trackOAuthRequest(grantID, expiresAt, epoch, func() {
+	release, ok := s.trackOAuthRequest(grantID, expiresAt, epoch, run, func() {
 		cancel()
 		// Interrupt blocked transport I/O too; errors (a writer that cannot
 		// take deadlines) are ignored, the context cancel still applies.

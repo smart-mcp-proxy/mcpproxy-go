@@ -237,7 +237,7 @@ func TestOAuthLogin_OpenStreamsEndWithTheLogin(t *testing.T) {
 func TestOAuthLoginHardening_RegistryExpiryAndRelease(t *testing.T) {
 	srv := newOAuthLoginTestServer(t, func(c *config.Config) { c.MCPOAuthEnabled = true })
 	ctx, cancel := context.WithCancel(context.Background())
-	release, ok := srv.trackOAuthRequest("g1", time.Now().Add(150*time.Millisecond), 0, cancel)
+	release, ok := srv.trackOAuthRequest("g1", time.Now().Add(150*time.Millisecond), 0, srv.oauthRunGen(), cancel)
 	require.True(t, ok)
 	require.Equal(t, 1, srv.oauthTrackedRequests())
 	select {
@@ -249,7 +249,7 @@ func TestOAuthLoginHardening_RegistryExpiryAndRelease(t *testing.T) {
 	assert.Zero(t, srv.oauthTrackedRequests())
 
 	// A request that ends normally leaves nothing behind.
-	release2, ok := srv.trackOAuthRequest("g2", time.Now().Add(time.Hour), 0, func() {})
+	release2, ok := srv.trackOAuthRequest("g2", time.Now().Add(time.Hour), 0, srv.oauthRunGen(), func() {})
 	require.True(t, ok)
 	release2()
 	assert.Zero(t, srv.oauthTrackedRequests())

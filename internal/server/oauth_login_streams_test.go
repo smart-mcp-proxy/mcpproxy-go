@@ -47,7 +47,7 @@ func TestOAuthStreams_BlockedWriteIsInterrupted(t *testing.T) {
 					f.Flush()
 				}
 			}
-		}), "g1", time.Now().Add(time.Hour), srv.oauthLoginSvc().DisableEpoch())
+		}), "g1", time.Now().Add(time.Hour), srv.oauthLoginSvc().DisableEpoch(), srv.oauthRunGen())
 	}))
 	defer ts.Close()
 
@@ -73,7 +73,7 @@ func TestOAuthStreams_StalledUploadIsInterrupted(t *testing.T) {
 		defer close(done)
 		srv.serveTracked(w, r, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 			_, _ = io.Copy(io.Discard, r.Body)
-		}), "g1", time.Now().Add(time.Hour), srv.oauthLoginSvc().DisableEpoch())
+		}), "g1", time.Now().Add(time.Hour), srv.oauthLoginSvc().DisableEpoch(), srv.oauthRunGen())
 	}))
 	defer ts.Close()
 	conn, err := net.Dial("tcp", strings.TrimPrefix(ts.URL, "http://"))
@@ -94,7 +94,7 @@ func TestOAuthStreams_ShutdownJoinsWatcher(t *testing.T) {
 	srv := newOAuthLoginTestServer(t, func(c *config.Config) { c.MCPOAuthEnabled = true })
 	interrupted := make(chan struct{})
 	var once sync.Once
-	release, ok := srv.trackOAuthRequest("g1", time.Now().Add(time.Hour), srv.oauthLoginSvc().DisableEpoch(), func() { once.Do(func() { close(interrupted) }) })
+	release, ok := srv.trackOAuthRequest("g1", time.Now().Add(time.Hour), srv.oauthLoginSvc().DisableEpoch(), srv.oauthRunGen(), func() { once.Do(func() { close(interrupted) }) })
 	require.True(t, ok)
 	defer release()
 	reg := srv.oauthStreams.Load()
@@ -117,7 +117,7 @@ func TestOAuthStreams_ShutdownJoinsWatcher(t *testing.T) {
 	reg.mu.Unlock()
 
 	// Tracking after the stop is refused: nothing is registered, no watcher starts.
-	_, ok = srv.trackOAuthRequest("g2", time.Now().Add(time.Hour), 0, func() {})
+	_, ok = srv.trackOAuthRequest("g2", time.Now().Add(time.Hour), 0, srv.oauthRunGen(), func() {})
 	assert.False(t, ok, "a request tracked after shutdown is refused")
 	reg.mu.Lock()
 	assert.False(t, reg.running)
@@ -326,14 +326,14 @@ func TestOAuthStreams_StopWithoutRegistryRefusesLateTracking(t *testing.T) {
 	srv.stopOAuthStreams()
 	require.Nil(t, srv.oauthStreams.Load(), "stopping allocates nothing")
 
-	_, ok := srv.trackOAuthRequest("g", time.Now().Add(time.Hour), 0, func() {})
+	_, ok := srv.trackOAuthRequest("g", time.Now().Add(time.Hour), 0, srv.oauthRunGen(), func() {})
 	assert.False(t, ok)
 	assert.Nil(t, srv.oauthStreams.Load(), "no registry, hence no watcher")
 
 	called := false
 	rec := httptest.NewRecorder()
 	srv.serveTracked(rec, httptest.NewRequest(http.MethodGet, "/mcp/oauth/cursor", http.NoBody),
-		http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }), "g", time.Now().Add(time.Hour), 0)
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }), "g", time.Now().Add(time.Hour), 0, srv.oauthRunGen())
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	assert.False(t, called, "the MCP handler is not invoked while stopping")
 }
@@ -400,4 +400,74 @@ func TestOAuthStreams_RequestPausedAcrossQuickOffOnIsEnded(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("a request authenticated before the switch-off survived the off -> on")
 	}
+}
+
+// A request of a stopped run, still paused in authentication when the next run
+// starts, is refused with 503 and not registered in the new run; a request of
+// the new run works.
+func TestOAuthStreams_LateRequestOfPreviousRunIsRefused(t *testing.T) {
+	f := newOAuthFlow(t, nil)
+	srv := f.srv
+	called := make(chan struct{}, 1)
+	ts := httptest.NewServer(srv.oauthResourceAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	})))
+	defer ts.Close()
+	f.host = strings.TrimPrefix(ts.URL, "http://")
+	_, tok := f.login("cursor")
+
+	paused, resume := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	srv.testHookAfterEpochCapture = func() { once.Do(func() { close(paused); <-resume }) }
+	status := make(chan int, 1)
+	go func() {
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/mcp/oauth/cursor", http.NoBody)
+		req.Header.Set("Authorization", "Bearer "+tok.access)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			status <- -1
+			return
+		}
+		resp.Body.Close()
+		status <- resp.StatusCode
+	}()
+	<-paused
+	srv.stopOAuthStreams()
+	srv.resetOAuthStreams() // the next run starts while the old request is paused
+	close(resume)
+	select {
+	case code := <-status:
+		assert.Equal(t, http.StatusServiceUnavailable, code)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the old request never answered")
+	}
+	select {
+	case <-called:
+		t.Fatal("the MCP handler ran for a request of the previous run")
+	default:
+	}
+	assert.Zero(t, srv.oauthTrackedRequests(), "nothing of the old run registered in the new one")
+
+	// a request of the new run works
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/mcp/oauth/cursor", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+tok.access)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// The generation itself: a captured generation is refused after stop and start.
+func TestOAuthStreams_GenerationIsComparedAtRegistration(t *testing.T) {
+	srv := newOAuthLoginTestServer(t, func(c *config.Config) { c.MCPOAuthEnabled = true })
+	old := srv.oauthRunGen()
+	srv.stopOAuthStreams()
+	srv.resetOAuthStreams()
+	_, ok := srv.trackOAuthRequest("g", time.Now().Add(time.Hour), 0, old, func() {})
+	assert.False(t, ok)
+	assert.Nil(t, srv.oauthStreams.Load(), "refused without allocating a registry or watcher")
+	release, ok := srv.trackOAuthRequest("g", time.Now().Add(time.Hour), 0, srv.oauthRunGen(), func() {})
+	assert.True(t, ok)
+	release()
 }

@@ -964,8 +964,12 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 	// the function returns, that is, past the publish below and the r.cfg swap, so
 	// a BeginAuthorization either created its request before this ran or sees the
 	// switch off. See the lock-order note on OAuthLoginService.
+	disablePublished := func() {}
 	if base.Config != nil && base.Config.MCPOAuthEnabled && !tx.next.MCPOAuthEnabled && r.oauthLoginService != nil {
 		defer r.oauthLoginService.beginDisable("feature_disabled")()
+		// The disable epoch counts the switch-off only after a successful
+		// publish (below); the lock above is released either way.
+		disablePublished = r.oauthLoginService.disablePublished
 	}
 
 	// Step 8: publish.
@@ -990,6 +994,7 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 		fn(oldCfg, tx.next)
 	}
 	r.mu.Unlock()
+	disablePublished()
 	if r.upstreamManager != nil {
 		r.upstreamManager.SetGlobalConfig(tx.next)
 	}

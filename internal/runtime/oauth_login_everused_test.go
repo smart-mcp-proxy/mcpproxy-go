@@ -23,16 +23,15 @@ func TestEverUsed_ReadErrorFailsClosed(t *testing.T) {
 	assert.False(t, healthy.EverUsed(), "a successful read of an unused install is false")
 }
 
-// Every switch-off boundary bumps the epoch, so a request authenticated before
-// an off -> on can be told apart from one authenticated after it.
-func TestDisableEpoch_CountsSwitchOffs(t *testing.T) {
+// The epoch counts a switch-off only when the commit reports a successful
+// publish; the lifecycle lock is released either way.
+func TestDisableEpoch_CountsOnlyPublishedSwitchOffs(t *testing.T) {
 	fx := newOAuthFx(t)
 	svc := NewOAuthLoginService(OAuthLoginDeps{Store: fx.sm})
 	assert.Zero(t, svc.DisableEpoch())
 	release := svc.beginDisable("test")
 	assert.Zero(t, svc.DisableEpoch(), "not counted before the disabled config is published")
+	svc.disablePublished()
 	release()
 	assert.Equal(t, uint64(1), svc.DisableEpoch())
-	svc.beginDisable("test")()
-	assert.Equal(t, uint64(2), svc.DisableEpoch())
 }

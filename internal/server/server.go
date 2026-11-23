@@ -133,6 +133,7 @@ type Server struct {
 	// until the first one.
 	oauthStreams         atomic.Pointer[oauthStreamRegistry]
 	oauthStreamsMu       sync.Mutex // guards oauthStreamsStopping and the registry's creation
+	oauthStreamsRun      uint64     // server-run generation, bumped by resetOAuthStreams
 	oauthStreamsStopping bool       // set by stopOAuthStreams, cleared by a new run
 	// testHookAfterEpochCapture pauses oauthResourceAuth between the switch-off
 	// epoch capture and the authentication (tests only; nil in production).

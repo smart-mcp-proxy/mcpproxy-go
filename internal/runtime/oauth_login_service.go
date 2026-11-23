@@ -272,18 +272,20 @@ func (s *OAuthLoginService) CancelAll(reason string) int {
 // (and it is cancelled here) or waits and then sees the switch off.
 func (s *OAuthLoginService) beginDisable(reason string) (release func()) {
 	s.lifecycleMu.Lock()
+	// Pending and approved sign-in requests are cancelled here, before the new
+	// configuration is published. If the publish then FAILS the feature stays on
+	// and those requests stay cancelled: acceptable, the client starts again.
 	s.cancelAllLocked(reason)
-	return func() {
-		// The epoch counts the switch-off only once the disabled configuration
-		// is visible (the caller runs release after publishing it, inside the
-		// serialized config commit). A request that authenticated under the
-		// previous, enabled configuration therefore captured an epoch lower
-		// than the one read after this point, even across a quick off -> on.
-		// An atomic, read without any lock.
-		s.disableEpoch.Add(1)
-		s.lifecycleMu.Unlock()
-	}
+	return s.lifecycleMu.Unlock
 }
+
+// disablePublished counts a switch-off once the disabled configuration is
+// visible. The commit calls it after a SUCCESSFUL publish only (a failed one
+// leaves the feature on and must not end live streams). A request that
+// authenticated under the previous, enabled configuration therefore captured an
+// epoch lower than the one read after this point, even across a quick off -> on.
+// An atomic, read without any lock.
+func (s *OAuthLoginService) disablePublished() { s.disableEpoch.Add(1) }
 
 // cancelAllLocked snapshots the pending ids and cancels everything in one
 // request-store critical section (s.lifecycleMu held).

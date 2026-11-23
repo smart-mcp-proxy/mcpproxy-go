@@ -377,6 +377,7 @@ func (s *Server) oauthResourceAuth(next http.Handler) http.Handler {
 		}
 		// The switch-off epoch is read BEFORE authenticating, so a switch-off
 		// that lands in between makes this request older than the epoch.
+		run := s.oauthRunGen()
 		epoch := svc.DisableEpoch()
 		if h := s.testHookAfterEpochCapture; h != nil {
 			h()
@@ -390,6 +391,6 @@ func (s *Server) oauthResourceAuth(next http.Handler) http.Handler {
 		// The request (an SSE stream can live for hours) ends when the login is
 		// revoked, its client forgotten, the feature switched off, its tokens
 		// rotated or its access token expires.
-		s.serveTracked(w, r.WithContext(auth.WithAuthContext(r.Context(), ac)), mcpRequestMiddlewares(next), grant.GrantID, grant.AccessExpiresAt, epoch)
+		s.serveTracked(w, r.WithContext(auth.WithAuthContext(r.Context(), ac)), mcpRequestMiddlewares(next), grant.GrantID, grant.AccessExpiresAt, epoch, run)
 	})
 }
