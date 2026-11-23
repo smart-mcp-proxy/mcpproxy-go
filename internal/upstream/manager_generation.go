@@ -372,7 +372,7 @@ func (m *Manager) installLocked(name string, client *managed.Client) {
 // the manager's callbacks and admission control into it before it becomes
 // reachable. Caller holds mu.
 func (m *Manager) newWiredClientLocked(id string, cfg *config.ServerConfig, gen int64) (*managed.Client, error) {
-	client, err := managed.NewClientAt(id, cfg, gen, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, m.secretResolver)
+	client, err := managed.NewClientAt(id, cfg, gen, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, m.currentSecretResolver())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client for server %s: %w", cfg.Name, err)
 	}

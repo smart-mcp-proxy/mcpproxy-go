@@ -191,8 +191,8 @@ type Runtime struct {
 	// swap/read race-free (#861) and independent of r.mu, so the accessor stays
 	// lock-free on the hot path and composes with the config commit serialization.
 	truncator      atomic.Pointer[truncate.Truncator]
-	sigCache       *toolsig.Cache // Spec 085 FR-008: single process-wide signature cache (indexing warms, MCP reads)
-	secretResolver *secret.Resolver
+	sigCache       *toolsig.Cache                  // Spec 085 FR-008: single process-wide signature cache (indexing warms, MCP reads)
+	secretResolver atomic.Pointer[secret.Resolver] // swapped on secret_file_dirs hot reload
 	tokenizer      tokens.Tokenizer
 
 	// tokenSavingsCache holds the last tokenized savings estimate and
@@ -730,7 +730,6 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		cacheManager:       cacheManager,
 		popularityProvider: popularityProvider,
 		sigCache:           toolsig.NewCache(),
-		secretResolver:     secretResolver,
 		tokenizer:          tokenizer,
 		refreshManager:     refreshManager,
 		activityService:    activityService,
@@ -752,6 +751,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		lastGoodTools:     make(map[string][]*config.ToolMetadata),
 		profileMembership: make(map[string][]string),
 	}
+	rt.secretResolver.Store(secretResolver)
 	rt.truncator.Store(truncator)
 
 	// Spec 108 FR-026: the one clients service behind every client-credential
@@ -1533,7 +1533,7 @@ func extractToolCount(stats map[string]interface{}) int {
 
 // GetSecretResolver returns the secret resolver instance
 func (r *Runtime) GetSecretResolver() *secret.Resolver {
-	return r.secretResolver
+	return r.secretResolver.Load()
 }
 
 // NotifySecretsChanged notifies the runtime that secrets have changed and restarts affected servers.
@@ -4191,9 +4191,10 @@ func (r *Runtime) applyComponentConfigLocked(oldCfg, newCfg *config.Config) {
 	}
 
 	if oldCfg.DataDir != newCfg.DataDir || !config.SecretFileDirsEqual(oldCfg.SecretFileDirs, newCfg.SecretFileDirs) {
-		r.secretResolver = config.BuildSecretResolver(newCfg, r.cfgPath, secret.ScopeUpstream)
+		resolver := config.BuildSecretResolver(newCfg, r.cfgPath, secret.ScopeUpstream)
+		r.secretResolver.Store(resolver)
 		if r.upstreamManager != nil {
-			r.upstreamManager.SetSecretResolver(r.secretResolver)
+			r.upstreamManager.SetSecretResolver(resolver)
 		}
 	}
 }
