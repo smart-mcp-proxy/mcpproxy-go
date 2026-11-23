@@ -174,14 +174,39 @@ func (s *Service) urlPointsHere(u, baseURL string) bool {
 
 // isOAuthURL reports whether u is a browser login address of this instance:
 // under the key-path endpoint, or under the dialable oauth endpoint.
+//
+// The scheme is not compared: like the key path, recognition does not depend on
+// tls.enabled, so an entry written before TLS was switched on or off is still
+// this instance's. Host and port are compared, as the key path does.
 func (s *Service) isOAuthURL(u string) bool {
-	if isOAuthAddress(u, s.baseURL()) {
+	u = stripScheme(u)
+	if isOAuthAddress(u, stripScheme(s.baseURL())) {
 		return true
 	}
 	if base, err := s.oauthEndpoint(); err == nil {
-		return isOAuthAddress(u, base)
+		return isOAuthAddress(u, stripScheme(base))
 	}
 	return false
+}
+
+func stripScheme(u string) string {
+	for _, p := range []string{"https://", "http://"} {
+		if strings.HasPrefix(u, p) {
+			return u[len(p):]
+		}
+	}
+	return u
+}
+
+// entryOAuthURL is the browser login address a parsed client entry holds, or ""
+// when it holds none.
+func (s *Service) entryOAuthURL(entry map[string]interface{}) string {
+	for _, field := range []string{"url", "serverUrl", "httpUrl"} {
+		if u, ok := entry[field].(string); ok && s.isOAuthURL(u) {
+			return u
+		}
+	}
+	return ""
 }
 
 // isOAuthAddress reports whether u is a browser login address of the instance

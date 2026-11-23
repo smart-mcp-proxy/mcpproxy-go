@@ -68,7 +68,7 @@ func TestFeatureOffPayloadsAreUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != string(want) {
+	if strings.TrimRight(string(got), "\n") != strings.TrimRight(string(want), "\n") { // the end-of-file hook adds a final newline
 		t.Fatalf("feature-off payloads changed.\n--- want\n%s\n--- got\n%s", want, got)
 	}
 }

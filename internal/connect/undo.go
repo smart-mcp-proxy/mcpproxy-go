@@ -173,10 +173,13 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 	credentialOK := currentSecret == "" ||
 		(s.minter != nil && s.minter.HeldByRecord(client.ID, currentSecret))
 	// A browser login connect holds the sign-in address and no credential.
-	oauthEntry := s.rawEntryIsOAuth(client, currentRaw, serverName)
+	// The replay uses the address actually written (the live scheme or listener
+	// may have changed since); the whole-file drift check below is unchanged.
+	oauthURL := s.rawEntryOAuthURL(client, currentRaw, serverName)
+	oauthEntry := oauthURL != ""
 	var expected []byte
 	if credentialOK {
-		expected, err = s.replayConnectWriteAs(client, serverName, backupRaw, currentSecret, oauthEntry)
+		expected, err = s.replayConnectWriteAs(client, serverName, backupRaw, currentSecret, oauthURL)
 		if err != nil {
 			return nil, err
 		}
@@ -288,12 +291,16 @@ func entryCredentialFromRaw(client *ClientDef, raw []byte, serverName string) (s
 // current file that has not been touched since is byte-identical to this
 // reconstruction.
 func (s *Service) replayConnectWrite(client *ClientDef, serverName string, backupRaw []byte, credential string) ([]byte, error) {
-	return s.replayConnectWriteAs(client, serverName, backupRaw, credential, false)
+	return s.replayConnectWriteAs(client, serverName, backupRaw, credential, "")
 }
 
 // replayConnectWriteAs is replayConnectWrite for an entry that is either an
 // API-key entry or the browser login address (oauth, no credential).
-func (s *Service) replayConnectWriteAs(client *ClientDef, serverName string, backupRaw []byte, credential string, oauth bool) ([]byte, error) {
+func (s *Service) replayConnectWriteAs(client *ClientDef, serverName string, backupRaw []byte, credential string, oauthURL string) ([]byte, error) {
+	params := s.entryParams(credential)
+	if oauthURL != "" {
+		params = serverEntryParams{baseURL: oauthURL}
+	}
 	data := make(map[string]interface{})
 	if client.Format == "toml" {
 		if len(backupRaw) > 0 {
@@ -305,7 +312,7 @@ func (s *Service) replayConnectWriteAs(client *ClientDef, serverName string, bac
 		if serversMap == nil {
 			serversMap = make(map[string]interface{})
 		}
-		serversMap[serverName] = buildServerEntry(client.ID, s.entryParamsFor(client.ID, oauth, credential))
+		serversMap[serverName] = buildServerEntry(client.ID, params)
 		data["mcp_servers"] = serversMap
 		var buf bytes.Buffer
 		if err := toml.NewEncoder(&buf).Encode(data); err != nil {
@@ -335,23 +342,26 @@ func (s *Service) replayConnectWriteAs(client *ClientDef, serverName string, bac
 			delete(serversMap, adoptedName)
 		}
 	}
-	serversMap[serverName] = buildServerEntry(client.ID, s.entryParamsFor(client.ID, oauth, credential))
+	serversMap[serverName] = buildServerEntry(client.ID, params)
 	setServersMap(client, data, serversMap)
 	return marshalJSONIndent(data)
 }
 
 // rawEntryIsOAuth reports whether serverName's entry in a raw client config
 // holds a browser login address of this instance.
-func (s *Service) rawEntryIsOAuth(client *ClientDef, raw []byte, serverName string) bool {
+func (s *Service) rawEntryOAuthURL(client *ClientDef, raw []byte, serverName string) string {
 	data := make(map[string]interface{})
 	if client.Format == "toml" {
 		if _, err := toml.Decode(string(raw), &data); err != nil {
-			return false
+			return ""
 		}
 	} else if err := unmarshalLenientJSON(raw, &data); err != nil {
-		return false
+		return ""
 	}
 	serversMap, _ := getServersMap(client, data)
 	entry, ok := serversMap[serverName].(map[string]interface{})
-	return ok && s.entryIsOAuth(entry)
+	if !ok {
+		return ""
+	}
+	return s.entryOAuthURL(entry)
 }
