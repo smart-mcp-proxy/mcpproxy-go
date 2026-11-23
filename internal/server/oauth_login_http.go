@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"html"
@@ -376,6 +375,9 @@ func (s *Server) oauthResourceAuth(next http.Handler) http.Handler {
 			unauthorized()
 			return
 		}
+		// The switch-off epoch is read BEFORE authenticating, so a switch-off
+		// that lands in between makes this request older than the epoch.
+		epoch := svc.DisableEpoch()
 		ac, grant, err := svc.Authenticate(token, origin, r.URL.Path, time.Now())
 		if err != nil {
 			unauthorized()
@@ -385,9 +387,6 @@ func (s *Server) oauthResourceAuth(next http.Handler) http.Handler {
 		// The request (an SSE stream can live for hours) ends when the login is
 		// revoked, its client forgotten, the feature switched off, its tokens
 		// rotated or its access token expires.
-		ctx, cancel := context.WithCancel(auth.WithAuthContext(r.Context(), ac))
-		release := s.trackOAuthRequest(grant.GrantID, grant.AccessExpiresAt, cancel)
-		defer release()
-		mcpRequestMiddlewares(next).ServeHTTP(w, r.WithContext(ctx))
+		s.serveTracked(w, r.WithContext(auth.WithAuthContext(r.Context(), ac)), mcpRequestMiddlewares(next), grant.GrantID, grant.AccessExpiresAt, epoch)
 	})
 }

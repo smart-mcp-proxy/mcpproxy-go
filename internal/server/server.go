@@ -1604,6 +1604,10 @@ func (s *Server) Shutdown() error {
 
 	s.logger.Info("Shutting down MCP proxy server...")
 
+	// Spec 132: end every tracked browser-login request and join the watcher
+	// first, or the HTTP shutdown below would wait for open streams.
+	s.stopOAuthStreams()
+
 	// Gracefully shutdown HTTP server first to stop accepting new connections
 	if httpServer != nil {
 		s.logger.Info("Gracefully shutting down HTTP server...")
@@ -2802,6 +2806,10 @@ func (s *Server) StopServer() error {
 	_ = s.logger.Sync()
 
 	s.updateStatus(runtime.PhaseStopping, "Server is stopping...")
+
+	// Spec 132: end tracked browser-login requests (open SSE streams) and join
+	// their watcher, or the graceful shutdown below waits for them.
+	s.stopOAuthStreams()
 
 	// STEP 1: Gracefully shutdown HTTP server FIRST to stop accepting new connections
 	// This must happen before we disconnect upstream servers to prevent new requests

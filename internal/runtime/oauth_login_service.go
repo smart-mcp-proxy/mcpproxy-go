@@ -3,6 +3,7 @@ package runtime
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -105,6 +106,9 @@ type OAuthLoginService struct {
 	testHookBeforeRotateLock  func()
 	testHookInRotate          func()
 
+	// disableEpoch counts switch-offs (beginDisable); see DisableEpoch.
+	disableEpoch atomic.Uint64
+
 	everUsed  bool // positive results only
 	everMu    sync.Mutex
 	touchMu   sync.Mutex
@@ -192,6 +196,11 @@ func (r *Runtime) OAuthLoginService() *OAuthLoginService { return r.oauthLoginSe
 // SetNotifier installs the live-session notifier (the server).
 func (s *OAuthLoginService) SetNotifier(n BindingNotifier) { s.notifier = n }
 
+// DisableEpoch is the number of times the feature was switched off since the
+// process started. A request authenticated at an older epoch predates a
+// switch-off, even when the feature is on again. A lock-free read.
+func (s *OAuthLoginService) DisableEpoch() uint64 { return s.disableEpoch.Load() }
+
 // Enabled reports whether the feature is on in the live configuration.
 func (s *OAuthLoginService) Enabled() bool {
 	c := s.cfg()
@@ -263,6 +272,9 @@ func (s *OAuthLoginService) CancelAll(reason string) int {
 // (and it is cancelled here) or waits and then sees the switch off.
 func (s *OAuthLoginService) beginDisable(reason string) (release func()) {
 	s.lifecycleMu.Lock()
+	// A quick off -> on must still end what was open before the switch-off, so
+	// the boundary counts itself (an atomic, read without any lock).
+	s.disableEpoch.Add(1)
 	s.cancelAllLocked(reason)
 	return s.lifecycleMu.Unlock
 }

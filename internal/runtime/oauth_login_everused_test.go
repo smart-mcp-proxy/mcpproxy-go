@@ -22,3 +22,14 @@ func TestEverUsed_ReadErrorFailsClosed(t *testing.T) {
 	healthy := NewOAuthLoginService(OAuthLoginDeps{Store: fx.sm})
 	assert.False(t, healthy.EverUsed(), "a successful read of an unused install is false")
 }
+
+// Every switch-off boundary bumps the epoch, so a request authenticated before
+// an off -> on can be told apart from one authenticated after it.
+func TestDisableEpoch_CountsSwitchOffs(t *testing.T) {
+	fx := newOAuthFx(t)
+	svc := NewOAuthLoginService(OAuthLoginDeps{Store: fx.sm})
+	assert.Zero(t, svc.DisableEpoch())
+	svc.beginDisable("test")()
+	svc.beginDisable("test")()
+	assert.Equal(t, uint64(2), svc.DisableEpoch())
+}
