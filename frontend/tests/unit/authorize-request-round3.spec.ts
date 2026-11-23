@@ -111,27 +111,21 @@ describe('review-again reload validates what it keeps', () => {
     expect(t(w, 'authorize-approve').attributes('disabled')).toBeDefined()
   })
 
-  it('a kept replace flag does not survive a previous login that is gone', async () => {
+  it('re-checks replace for a previous login that changed (g1 -> g2) and sends the new grant', async () => {
     const prev = { grant_id: 'g1', client_id: 'cursor', approved_at: '2026-11-03T10:00:00Z' }
     const { w } = await mountAt({ r1: generic('r1', { previous_login: prev, suggested_client: { id: 'cursor', matched: 'id' } }) })
-    await t(w, 'authorize-replace').setValue(false)
+    // Unchecking changes the choice; its preview is refused and the reload finds a newer login.
     A.previewOAuthAuthorization.mockImplementationOnce(async () => { throw changed() })
-    A.getOAuthAuthorization.mockImplementation(async () => generic('r1', { previous_login: { ...prev, grant_id: 'g2' } }))
-    await t(w, 'authorize-client-select').setValue('cursor')
-    await t(w, 'authorize-client-select').trigger('change')
-    // Force a preview on the same client by switching away and back.
-    await t(w, 'authorize-client-select').setValue('codex')
-    await flushPromises()
-    await t(w, 'authorize-client-select').setValue('cursor')
+    A.getOAuthAuthorization.mockImplementation(async () => generic('r1', { previous_login: { ...prev, grant_id: 'g2' }, suggested_client: { id: 'cursor', matched: 'id' } }))
+    await t(w, 'authorize-replace').setValue(false)
     await flushPromises()
     const box = t(w, 'authorize-replace')
-    if (box.exists()) {
-      A.approveOAuthAuthorization.mockResolvedValue({ redirect_url: 'http://127.0.0.1:1/cb?code=c' })
-      await t(w, 'authorize-approve').trigger('click')
-      await flushPromises()
-      const sent = A.approveOAuthAuthorization.mock.calls.at(-1)![1]
-      expect(sent.replace_grant === undefined).toBe(!(box.element as HTMLInputElement).checked)
-    }
+    expect(box.exists()).toBe(true)
+    expect((box.element as HTMLInputElement).checked).toBe(true)
+    A.approveOAuthAuthorization.mockResolvedValue({ redirect_url: 'http://127.0.0.1:1/cb?code=c' })
+    await t(w, 'authorize-approve').trigger('click')
+    await flushPromises()
+    expect(A.approveOAuthAuthorization.mock.calls.at(-1)![1].replace_grant).toBe('g2')
   })
 })
 

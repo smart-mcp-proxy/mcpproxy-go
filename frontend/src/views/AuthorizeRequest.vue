@@ -32,7 +32,8 @@
     </div>
 
     <div v-else-if="phase === 'error'" class="alert alert-error" role="alert" data-test="authorize-load-error">
-      {{ errorText }}
+      <span>{{ errorText }}</span>
+      <button type="button" class="btn btn-sm" data-test="authorize-load-retry" @click="load()">Try again</button>
     </div>
 
     <div v-else-if="view" class="card bg-base-100 shadow">
@@ -112,7 +113,7 @@
           The client's access changed while this page was open. It was reloaded: review it and approve again.
         </div>
         <div v-if="errorText" class="alert alert-error text-sm" role="alert" data-test="authorize-error">{{ errorText }}</div>
-        <button v-if="previewFailed && !busy" type="button" class="btn btn-sm btn-outline self-start" data-test="authorize-retry" @click="retryPreview">Check again</button>
+        <button v-if="previewFailed && !busy" type="button" class="btn btn-sm btn-outline self-start" data-test="authorize-retry" @click="checkAgain">Check again</button>
 
         <div class="card-actions justify-end">
           <button type="button" class="btn" :disabled="busy" data-test="authorize-deny" @click="deny">Deny</button>
@@ -170,6 +171,10 @@ const submitting = ref(false)
 const decided = ref(false)
 let previewSeq = 0
 let loadGen = 0
+// A preview answering binding_changed reloads the request once on its own; a
+// user-initiated change (or a new request) earns one more.
+let reloadsLeft = 1
+let applyingReload = false
 
 const busy = computed(() => submitting.value || decided.value)
 const fixed = computed(() => (view.value?.address_kind === 'client' ? view.value.client ?? null : null))
@@ -305,6 +310,7 @@ async function load(keepNote = false): Promise<boolean> {
       }
     : null
   resetPage(keepNote)
+  if (!keepNote) reloadsLeft = 1
   const id = requestId.value
   if (!id) {
     phase.value = 'gone'
@@ -315,6 +321,7 @@ async function load(keepNote = false): Promise<boolean> {
   try {
     const v = await api.getOAuthAuthorization(id)
     if (gen !== loadGen) return false
+    applyingReload = keepNote // the watcher must not treat the reload's own changes as user edits
     view.value = v
     loadedId.value = id
     resetChoice(v)
@@ -331,8 +338,10 @@ async function load(keepNote = false): Promise<boolean> {
       replace.value = v.previous_login ? (v.previous_login.grant_id === kept.grant ? kept.replace : true) : false
     }
     phase.value = 'ready'
+    applyingReload = false
     return true
   } catch (e) {
+    applyingReload = false
     if (gen !== loadGen) return false
     if (e instanceof ApiError && e.status === 404) phase.value = 'gone'
     else {
@@ -360,7 +369,15 @@ async function runPreview(id: string, key: string) {
       return
     }
     if (e instanceof ApiError && e.code === 'binding_changed') {
-      if (await load(true)) changedNote.value = true
+      if (reloadsLeft > 0) {
+        reloadsLeft--
+        if (await load(true)) changedNote.value = true
+        return
+      }
+      // Reloaded once already: stop here. Deny stays available; Check again is the user's call.
+      previewFailed.value = true
+      changedNote.value = true
+      errorText.value = "The client's access keeps changing. Check again when it is stable."
       return
     }
     previewFailed.value = true
@@ -372,6 +389,7 @@ async function runPreview(id: string, key: string) {
 watch(
   previewKey,
   (key) => {
+    if (key !== null && !applyingReload) reloadsLeft = 1
     previewSeq++
     accepted.value = null
     guardOverride.value = null
@@ -406,6 +424,11 @@ async function decide(call: (id: string) => Promise<OAuthDecision>) {
     // The preview that was cut off when the decision started is run again.
     if (gen === loadGen && phase.value === 'ready' && !current.value) retryPreview()
   }
+}
+
+function checkAgain() {
+  reloadsLeft = 1
+  retryPreview()
 }
 
 // Runs the preview again for the current request and choice (also the
