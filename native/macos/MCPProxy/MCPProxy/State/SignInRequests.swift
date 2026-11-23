@@ -145,7 +145,8 @@ struct SignInRequestStore: Equatable, Sendable {
     mutating func add(_ request: SignInRequest, now: Date = Date()) -> Bool {
         guard request.expiresAt > now else { return false }
         if let index = requests.firstIndex(where: { $0.id == request.id }) {
-            if requests[index] != request { requests[index] = request; revision += 1 }
+            requests[index] = request
+            revision += 1 // an accepted event, even if it changes nothing visible
             return false
         }
         requests.insert(request, at: 0)
@@ -154,9 +155,11 @@ struct SignInRequestStore: Equatable, Sendable {
     }
 
     mutating func remove(id: String) {
-        let before = requests.count
         requests.removeAll { $0.id == id }
-        if requests.count != before { revision += 1 }
+        // An accepted decision advances the revision even when the id is
+        // absent (the pending event may have been missed): a reload snapshot
+        // taken before it must not be applied afterwards.
+        revision += 1
     }
 
     mutating func expire(now: Date = Date()) {

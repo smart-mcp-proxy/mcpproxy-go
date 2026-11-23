@@ -200,6 +200,24 @@ final class SignInRequestsTests: XCTestCase {
     }
 
     /// P2-1: ... and must not drop a request that arrived while it was in flight.
+    /// Round 2: the pending event was missed, so the decision removes nothing
+    /// locally; it must still invalidate a snapshot taken before it.
+    func testDecisionForAnAbsentIdStillInvalidatesAnInFlightSnapshot() {
+        let state = connectedState()
+        let ticket = state.signInReloadTicket()          // GET snapshots X; store has no X
+        state.removeSignInRequest(id: "x")                // SSE: decided X (absent locally)
+        XCTAssertEqual(state.applySignInReload([summary("x")], ticket: ticket), .stale)
+        XCTAssertTrue(state.signInRequests.isEmpty)
+    }
+
+    func testRepeatedPendingEventStillInvalidatesAnInFlightSnapshot() {
+        let state = connectedState()
+        state.addSignInRequest(id: "x", rawLabel: "X")
+        let ticket = state.signInReloadTicket()
+        state.addSignInRequest(id: "x", rawLabel: "X")    // accepted event, no-op on the array
+        XCTAssertEqual(state.applySignInReload([], ticket: ticket), .stale)
+    }
+
     func testReloadFetchedBeforeANewRequestDoesNotDropIt() {
         let state = connectedState()
         let ticket = state.signInReloadTicket()          // fetch starts, sees nothing
