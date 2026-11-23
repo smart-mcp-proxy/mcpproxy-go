@@ -182,15 +182,15 @@ func (s *Service) canonicalOAuthURLs(clientID string) []string {
 	if c := FindClient(clientID); c == nil || !c.SupportsBrowserLogin {
 		return nil
 	}
-	bases := []string{stripScheme(s.baseURL())}
-	if base, err := s.oauthEndpoint(); err == nil && stripScheme(base) != bases[0] {
-		bases = append(bases, stripScheme(base))
+	// Only the normalised endpoint: never the raw listener (a wildcard host is not
+	// an address Connect writes), and none when the listener cannot serve it.
+	base, err := s.oauthEndpoint()
+	if err != nil {
+		return nil
 	}
 	var out []string
 	for _, scheme := range []string{"http", "https"} {
-		for _, b := range bases {
-			out = append(out, scheme+"://"+b+oauthPathSegment+"/"+clientID)
-		}
+		out = append(out, scheme+"://"+stripScheme(base)+oauthPathSegment+"/"+clientID)
 	}
 	return out
 }
