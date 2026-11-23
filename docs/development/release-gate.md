@@ -138,6 +138,11 @@ page disagree):
   900 px: the header status pill names servers awaiting review, a secret-like
   Manual-add value is masked with a Show toggle, and profile Try it is readable
   and labels unsaved edits.
+- `client-oauth-consent.spec.ts` (spec 132): the browser-login consent page.
+  The sweep core runs with `MCPPROXY_MCP_OAUTH_ENABLED=true`; a scripted public
+  client registers and authorizes, then the page is approved on the per-client
+  and generic addresses (name suggestion, new client), denied, opened without
+  an API key, shown a markup-shaped client name, and checked for frame headers.
 - `skills-tab.spec.ts` (spec 125): the Skills tab of Server Detail, run by its
   own launcher [`scripts/run-skills-tab-sweep.sh`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/scripts/run-skills-tab-sweep.sh)
   as a second step of the same job (it needs `enable_skills` and a
