@@ -55,6 +55,7 @@
           <select
             id="authorize-client-select"
             v-model="selected"
+            :disabled="busy"
             class="select select-bordered w-full"
             data-test="authorize-client-select"
           >
@@ -65,11 +66,11 @@
           <div v-if="selected === '__new__'" class="grid gap-2 sm:grid-cols-2">
             <label class="form-control">
               <span class="label-text text-sm">Client id</span>
-              <input v-model.lazy="newId" class="input input-bordered" maxlength="56" data-test="authorize-new-id" />
+              <input v-model.lazy="newId" :disabled="busy" class="input input-bordered" maxlength="56" data-test="authorize-new-id" />
             </label>
             <label class="form-control">
               <span class="label-text text-sm">Display name</span>
-              <input v-model.lazy="newName" class="input input-bordered" maxlength="64" data-test="authorize-new-name" />
+              <input v-model.lazy="newName" :disabled="busy" class="input input-bordered" maxlength="64" data-test="authorize-new-name" />
             </label>
           </div>
         </div>
@@ -84,6 +85,7 @@
           <select
             id="authorize-profile-select"
             v-model="profileSel"
+            :disabled="busy"
             class="select select-bordered w-full"
             data-test="authorize-profile-select"
           >
@@ -92,7 +94,7 @@
             <option :value="ALL">All servers</option>
           </select>
           <label v-if="profileSel !== UNSET && profileSel !== ALL" class="flex items-center gap-2 text-sm">
-            <input v-model="lock" type="checkbox" class="checkbox checkbox-sm" data-test="authorize-lock" />
+            <input v-model="lock" :disabled="busy" type="checkbox" class="checkbox checkbox-sm" data-test="authorize-lock" />
             Lock this client to the profile
           </label>
         </div>
@@ -100,7 +102,7 @@
         <p v-if="current?.access" class="text-sm" data-test="authorize-access">{{ accessSentence }}</p>
 
         <label v-if="showReplace" class="flex items-center gap-2 text-sm">
-          <input v-model="replace" type="checkbox" class="checkbox checkbox-sm" data-test="authorize-replace" />
+          <input v-model="replace" :disabled="busy" type="checkbox" class="checkbox checkbox-sm" data-test="authorize-replace" />
           Replace the previous browser login (approved {{ approvedOn }})
         </label>
 
@@ -293,41 +295,50 @@ function resetChoice(v: OAuthAuthorization) {
   else selected.value = ''
 }
 
-async function load(keepNote = false) {
+async function load(keepNote = false): Promise<boolean> {
   // A review-again reload keeps what the user chose, when it still exists.
   const kept = keepNote
-    ? { selected: selected.value, newId: newId.value, newName: newName.value, profileSel: profileSel.value, lock: lock.value, replace: replace.value }
+    ? {
+        selected: selected.value, newId: newId.value, newName: newName.value, profileSel: profileSel.value,
+        lock: lock.value, replace: replace.value, grant: view.value?.previous_login?.grant_id ?? '',
+      }
     : null
   resetPage(keepNote)
   const id = requestId.value
   if (!id) {
     phase.value = 'gone'
-    return
+    return false
   }
   phase.value = 'loading'
   const gen = loadGen
   try {
     const v = await api.getOAuthAuthorization(id)
-    if (gen !== loadGen) return
+    if (gen !== loadGen) return false
     view.value = v
     loadedId.value = id
     resetChoice(v)
     if (kept && v.address_kind === 'generic' && (kept.selected === NEW || v.existing_clients?.some((c) => c.id === kept.selected))) {
+      // Every kept value is checked against the reloaded data.
       selected.value = kept.selected
       newId.value = kept.newId
       newName.value = kept.newName
-      profileSel.value = kept.profileSel
+      const names = v.profiles.map((p) => p.name)
+      if (names.length === 0) profileSel.value = ALL
+      else if (kept.profileSel === ALL || names.includes(kept.profileSel)) profileSel.value = kept.profileSel
+      else profileSel.value = UNSET
       lock.value = kept.lock
-      replace.value = kept.replace
+      replace.value = v.previous_login ? (v.previous_login.grant_id === kept.grant ? kept.replace : true) : false
     }
     phase.value = 'ready'
+    return true
   } catch (e) {
-    if (gen !== loadGen) return
+    if (gen !== loadGen) return false
     if (e instanceof ApiError && e.status === 404) phase.value = 'gone'
     else {
       errorText.value = e instanceof Error ? e.message : 'Could not load the request.'
       phase.value = 'error'
     }
+    return false
   }
 }
 
@@ -348,8 +359,7 @@ async function runPreview(id: string, key: string) {
       return
     }
     if (e instanceof ApiError && e.code === 'binding_changed') {
-      await load(true)
-      changedNote.value = true
+      if (await load(true)) changedNote.value = true
       return
     }
     previewFailed.value = true
@@ -411,8 +421,7 @@ async function handleDecisionError(e: unknown) {
   }
   if (e.code === 'already_decided') phase.value = 'decided'
   else if (e.code === 'binding_changed') {
-    await load(true)
-    changedNote.value = true
+    if (await load(true)) changedNote.value = true
   } else if (e.code === 'binding_bypassable_without_auth') {
     guardOverride.value = { code: e.code, bindings: e.bindings ?? [], fixes: e.fixes ?? [] }
   } else if (e.status === 404 && e.code !== 'profile_not_found') phase.value = 'gone'
