@@ -1462,8 +1462,13 @@ component and cannot escape the config dir (defense against path injection).
 Safety semantics:
 
 - Undo **refuses with `409 Conflict`** when the config changed since the
-  connect (it verifies the current file is byte-identical to what that connect
-  wrote) — it never clobbers later edits. Fall back to
+  connect (every connect records the SHA-256 of the file it wrote in a small
+  sidecar `<config>.undo.<timestamp>`, or `<config>.undo.new` when it created
+  the file, beside the backup; the file counts as untouched only if its digest
+  still equals it) — it never clobbers later edits. A record that is malformed,
+  unreadable or bound to another client, entry or backup is also a conflict. A
+  backup from before records existed is checked by replaying the key-path write,
+  as before. Fall back to
   `DELETE /connect/{client}` for a surgical entry removal.
 - A vanished backup returns `404`; a `backup_name` that is a path (contains a
   directory separator) or does not match `<config>.bak.*` for that client

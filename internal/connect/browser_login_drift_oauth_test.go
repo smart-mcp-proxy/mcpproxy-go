@@ -4,11 +4,11 @@ package connect
 
 import "testing"
 
-// After a connect, a change of listen address or tls.enabled behaves for a
-// browser-login entry exactly as it does for an API-key entry today: not
-// recognised under a custom name, name-only ("other") under the default one,
-// and Undo reports a conflict rather than touching the file. Pinned, not a
-// feature: the key path is the reference.
+// Undo compares the file with the digest recorded at write time, so a later
+// change of listener or tls never strands it, on either path. What differs by
+// listener is Status recognition, and there a browser-login entry behaves for a
+// port change exactly as an API-key entry does (not recognised under a custom
+// name, name-only under the default one). Pinned: the key path is the reference.
 func TestOAuthPath_ListenerChangeMatchesTheKeyPath(t *testing.T) {
 	type outcome struct {
 		connected bool

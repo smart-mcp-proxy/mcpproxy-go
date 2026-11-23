@@ -172,39 +172,20 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 	currentSecret, _ := entryCredentialFromRaw(client, currentRaw, serverName)
 	credentialOK := currentSecret == "" ||
 		(s.minter != nil && s.minter.HeldByRecord(client.ID, currentSecret))
-	// Replay the connect from the backup and accept the file only if it is
-	// byte-equal to the result. An API-key connect has one possible result per
-	// credential. A browser-login connect has the canonical addresses of this
-	// client (one per scheme, since tls.enabled may have been toggled since); the
-	// address is never taken from the file, so an edited one is a conflict.
-	var expectations [][]byte
-	oauthMatch := false
-	if credentialOK {
+	// Write provenance first: a connect records the digest of the file it wrote,
+	// and the file is untouched iff it still has that digest (no replay, so the
+	// auth mode of the connect cannot be confused). A backup from before records
+	// existed can only be a key connect and keeps the original key-path replay.
+	verdict, recAuth := checkUndoRecord(cfgPath, backupPath, client.ID, serverName, currentRaw)
+	oauthEntry := verdict == undoUntouched && recAuth == AuthOAuth
+	matched := verdict == undoUntouched
+	if verdict == undoLegacy && credentialOK {
 		expected, err := s.replayConnectWrite(client, serverName, backupRaw, currentSecret)
 		if err != nil {
 			return nil, err
 		}
-		expectations = append(expectations, expected)
+		matched = bytes.Equal(currentRaw, expected)
 	}
-	matched := false
-	for _, e := range expectations {
-		if bytes.Equal(currentRaw, e) {
-			matched = true
-		}
-	}
-	if !matched && credentialOK && currentSecret == "" {
-		for _, u := range s.canonicalOAuthURLs(client.ID) {
-			e, err := s.replayConnectWriteAs(client, serverName, backupRaw, "", u)
-			if err != nil {
-				return nil, err
-			}
-			if bytes.Equal(currentRaw, e) {
-				matched, oauthMatch = true, true
-				break
-			}
-		}
-	}
-	oauthEntry := oauthMatch
 	if !credentialOK || !matched {
 		return &ConnectResult{
 			Success:    false,
@@ -312,16 +293,7 @@ func entryCredentialFromRaw(client *ClientDef, raw []byte, serverName string) (s
 // current file that has not been touched since is byte-identical to this
 // reconstruction.
 func (s *Service) replayConnectWrite(client *ClientDef, serverName string, backupRaw []byte, credential string) ([]byte, error) {
-	return s.replayConnectWriteAs(client, serverName, backupRaw, credential, "")
-}
-
-// replayConnectWriteAs is replayConnectWrite for an entry that is either an
-// API-key entry or the browser login address (oauth, no credential).
-func (s *Service) replayConnectWriteAs(client *ClientDef, serverName string, backupRaw []byte, credential string, oauthURL string) ([]byte, error) {
 	params := s.entryParams(credential)
-	if oauthURL != "" {
-		params = serverEntryParams{baseURL: oauthURL}
-	}
 	data := make(map[string]interface{})
 	if client.Format == "toml" {
 		if len(backupRaw) > 0 {

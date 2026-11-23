@@ -1170,9 +1170,14 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	// gap open, per round 5. The permission bits also come from currentPerm's
 	// fresh re-stat rather than the mode captured all the way back in
 	// parseOrCreateJSON, for the same reason (see currentPerm's doc comment).
+	recPath, err := writeUndoRecord(cfgPath, backupPath, client.ID, serverName, encoded, cred.oauth, currentPerm(cfgPath, perm))
+	if err != nil {
+		return nil, err
+	}
 	if err := atomicWriteFile(cfgPath, encoded, currentPerm(cfgPath, perm), func() error {
 		return s.refuseIfServersSectionRaced(client, cfgPath)
 	}); err != nil {
+		_ = os.Remove(recPath)
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 	cred.markWritten()
@@ -1358,9 +1363,14 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 	// than a call from here, and why the permission bits come from
 	// currentPerm's fresh re-stat rather than the mode parseOrCreateTOML
 	// captured earlier.
+	recPath, err := writeUndoRecord(cfgPath, backupPath, client.ID, serverName, buf.Bytes(), cred.oauth, currentPerm(cfgPath, perm))
+	if err != nil {
+		return nil, err
+	}
 	if err := atomicWriteFile(cfgPath, buf.Bytes(), currentPerm(cfgPath, perm), func() error {
 		return s.refuseIfServersSectionRaced(client, cfgPath)
 	}); err != nil {
+		_ = os.Remove(recPath)
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 	cred.markWritten()
