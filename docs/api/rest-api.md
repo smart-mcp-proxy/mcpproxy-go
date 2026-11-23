@@ -1706,7 +1706,11 @@ reference: the Spec 132 contracts.
   without a `client` answers `200 {"complete": false}` (no `access`, no `guard`) and
   approve without one answers `422 client_required`. `previous_login` is
   `{grant_id, client_id, approved_at}`: `client_id` is the client that owns that
-  login. Preview and approve refuse (`422`, field `replace_grant`) a `replace_grant`
+  login (the newest live login of this registration overall). `previous_logins` lists
+  the newest live login of this registration under each client, so the page can offer
+  replacement for whichever client is selected on the generic address. Names a client
+  reports are stripped of Unicode format characters (bidi controls, zero-width
+  characters) at registration and in a new client's display name. Preview and approve refuse (`422`, field `replace_grant`) a `replace_grant`
   that is a live login of this registration owned by another client than the one
   chosen; the page offers replacement only for the owning client.
 - `POST /api/v1/oauth/authorizations/{id}/preview`: read-only verdict for a

@@ -39,8 +39,8 @@
     <div v-else-if="view" class="card bg-base-100 shadow">
       <div class="card-body space-y-4">
         <div class="space-y-1">
-          <p data-test="authorize-reported">The app calls itself "{{ view.reported_name }}". MCPProxy cannot verify that.</p>
-          <p class="text-sm opacity-70" data-test="authorize-returns-to">Returns to: {{ view.redirect_uri }}</p>
+          <p data-test="authorize-reported">The app calls itself "<bdi class="font-mono bg-base-200 px-1 rounded">{{ view.reported_name }}</bdi>". MCPProxy cannot verify that.</p>
+          <p class="text-sm opacity-70" data-test="authorize-returns-to">Returns to: <bdi class="font-mono bg-base-200 px-1 rounded">{{ view.redirect_uri }}</bdi></p>
         </div>
 
         <!-- Per-client address: the client is fixed. -->
@@ -60,10 +60,10 @@
             class="select select-bordered w-full"
             data-test="authorize-client-select"
           >
-            <option v-for="c in existingClients" :key="c.id" :value="c.id">{{ c.display_name }}</option>
+            <option v-for="c in existingClients" :key="c.id" :value="c.id">{{ c.display_name }} ({{ c.id }})</option>
             <option value="__new__">New client</option>
           </select>
-          <p v-if="showSuggestion" class="text-sm" data-test="authorize-suggestion-note">Suggested because the app calls itself "{{ view.reported_name }}". MCPProxy cannot verify that.</p>
+          <p v-if="showSuggestion" class="text-sm" data-test="authorize-suggestion-note">Suggested because the app calls itself "<bdi class="font-mono bg-base-200 px-1 rounded">{{ view.reported_name }}</bdi>". MCPProxy cannot verify that.</p>
           <div v-if="selected === '__new__'" class="grid gap-2 sm:grid-cols-2">
             <label class="form-control">
               <span class="label-text text-sm">Client id</span>
@@ -100,7 +100,7 @@
           </label>
         </div>
 
-        <p v-if="current?.access" class="text-sm" data-test="authorize-access">{{ accessSentence }}</p>
+        <p v-if="current?.access" class="text-sm" data-test="authorize-access"><template v-if="current.access.same_access_as_existing_client">Approving gives this app the same access as <bdi class="font-mono bg-base-200 px-1 rounded">{{ clientDisplayName }}</bdi>.</template><template v-else>Approving gives this app access to <bdi class="font-mono bg-base-200 px-1 rounded">{{ current.access.profile || 'All servers' }}</bdi> as <bdi class="font-mono bg-base-200 px-1 rounded">{{ clientDisplayName }}</bdi>.</template></p>
 
         <label v-if="showReplace" class="flex items-center gap-2 text-sm">
           <input v-model="replace" :disabled="busy" type="checkbox" class="checkbox checkbox-sm" data-test="authorize-replace" />
@@ -192,12 +192,13 @@ const showSuggestion = computed(
 )
 
 // A previous login is replaced only by signing in the client that owns it.
-const showReplace = computed(() => {
-  const prev = view.value?.previous_login
-  if (!prev) return false
+const previousForSelection = computed(() => {
   const owner = fixed.value?.id ?? selectedExisting.value?.id
-  return !!owner && owner === prev.client_id
+  if (!owner || !view.value) return null
+  const list = view.value.previous_logins ?? []
+  return list.find((p) => p.client_id === owner) ?? (view.value.previous_login?.client_id === owner ? view.value.previous_login : null)
 })
+const showReplace = computed(() => !!previousForSelection.value)
 
 const title = computed(() => {
   const name = fixed.value?.display_name
@@ -237,7 +238,7 @@ function buildBody(): OAuthApprovalBody {
     body.profile = profileValue.value
     if (profileValue.value !== '') body.mode = lock.value ? 'locked' : 'switchable'
   }
-  if (view.value?.previous_login && showReplace.value && replace.value) body.replace_grant = view.value.previous_login.grant_id
+  if (previousForSelection.value && replace.value) body.replace_grant = previousForSelection.value.grant_id
   return body
 }
 
@@ -261,15 +262,8 @@ const approveReady = computed(
 )
 const approveDisabled = computed(() => !approveReady.value || busy.value)
 
-const accessSentence = computed(() => {
-  const a = current.value?.access
-  if (!a) return ''
-  if (a.same_access_as_existing_client) return `Approving gives this app the same access as ${clientDisplayName.value}.`
-  return `Approving gives this app access to ${a.profile || 'All servers'} as ${clientDisplayName.value}.`
-})
-
 const approvedOn = computed(() => {
-  const at = view.value?.previous_login?.approved_at
+  const at = previousForSelection.value?.approved_at
   if (!at) return ''
   const d = new Date(at)
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
@@ -293,7 +287,7 @@ function resetChoice(v: OAuthAuthorization) {
   // With no profiles configured the select has no placeholder: All servers.
   profileSel.value = v.profiles.length === 0 ? ALL : UNSET
   lock.value = true
-  replace.value = !!v.previous_login
+  replace.value = !!(v.previous_login || v.previous_logins?.length)
   // The new-client draft is always ready, whatever is selected first.
   newId.value = v.suggested_new_client?.id ?? ''
   newName.value = v.suggested_new_client?.display_name ?? ''
@@ -306,7 +300,7 @@ async function load(keepNote = false): Promise<boolean> {
   const kept = keepNote
     ? {
         selected: selected.value, newId: newId.value, newName: newName.value, profileSel: profileSel.value,
-        lock: lock.value, replace: replace.value, grant: view.value?.previous_login?.grant_id ?? '',
+        lock: lock.value, replace: replace.value, grant: previousForSelection.value?.grant_id ?? '',
       }
     : null
   resetPage(keepNote)
@@ -335,7 +329,9 @@ async function load(keepNote = false): Promise<boolean> {
       else if (kept.profileSel === ALL || names.includes(kept.profileSel)) profileSel.value = kept.profileSel
       else profileSel.value = UNSET
       lock.value = kept.lock
-      replace.value = v.previous_login ? (v.previous_login.grant_id === kept.grant ? kept.replace : true) : false
+      const prev = (v.previous_logins ?? []).find((p) => p.client_id === kept.selected)
+        ?? (v.previous_login?.client_id === kept.selected ? v.previous_login : undefined)
+      replace.value = prev ? (prev.grant_id === kept.grant ? kept.replace : true) : false
     }
     phase.value = 'ready'
     applyingReload = false
@@ -352,6 +348,11 @@ async function load(keepNote = false): Promise<boolean> {
   }
 }
 
+// A 404 that names the choice (not the request) is shown on the choice.
+function isChoiceError(e: ApiError): boolean {
+  return e.code === 'profile_not_found' || e.code === 'client_not_found'
+}
+
 async function runPreview(id: string, key: string) {
   const seq = ++previewSeq
   errorText.value = ''
@@ -364,7 +365,7 @@ async function runPreview(id: string, key: string) {
   } catch (e) {
     if (seq !== previewSeq || busy.value) return
     accepted.value = null
-    if (e instanceof ApiError && e.status === 404 && e.code !== 'profile_not_found') {
+    if (e instanceof ApiError && e.status === 404 && !isChoiceError(e)) {
       phase.value = 'gone'
       return
     }
@@ -458,7 +459,7 @@ async function handleDecisionError(e: unknown) {
     if (await load(true)) changedNote.value = true
   } else if (e.code === 'binding_bypassable_without_auth') {
     guardOverride.value = { code: e.code, bindings: e.bindings ?? [], fixes: e.fixes ?? [] }
-  } else if (e.status === 404 && e.code !== 'profile_not_found') phase.value = 'gone'
+  } else if (e.status === 404 && !isChoiceError(e)) phase.value = 'gone'
   else errorText.value = e.message
 }
 

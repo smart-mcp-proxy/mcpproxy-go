@@ -1,7 +1,9 @@
 package mcplogin
 
 import (
+	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientidentity"
@@ -67,8 +69,22 @@ func truncateUTF8(s string, max int) string {
 	return s
 }
 
+// StripFormat drops every Unicode format character (category Cf: bidi
+// overrides and isolates, zero-width characters, the byte order mark). A name a
+// client reports is shown between the consent page's own words; with these
+// controls it could reorder or hide them. Kept here, not in the shared
+// clientidentity.SanitizeDisplay, so other callers keep their stored names.
+func StripFormat(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 func sanitize(s string, max int) string {
-	return truncateUTF8(clientidentity.SanitizeDisplay(s), max)
+	return truncateUTF8(clientidentity.SanitizeDisplay(StripFormat(s)), max)
 }
 
 // ValidateRegistration checks a request and returns the registration with the

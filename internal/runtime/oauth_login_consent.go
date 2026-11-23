@@ -265,7 +265,10 @@ type AuthorizationView struct {
 	Profiles           []ProfileChoice          `json:"profiles"`
 	ProfileRequired    bool                     `json:"profile_required"`
 	PreviousLogin      *PreviousLogin           `json:"previous_login,omitempty"`
-	Guard              *GuardVerdict            `json:"guard"`
+	// PreviousLogins is the newest live login of THIS registration under each
+	// client (generic address: the page picks the one for the selected client).
+	PreviousLogins []PreviousLogin `json:"previous_logins,omitempty"`
+	Guard          *GuardVerdict   `json:"guard"`
 }
 
 // PreviewAccess is the access sentence of a proposed choice.
@@ -344,16 +347,28 @@ func (s *OAuthLoginService) Describe(ctx context.Context, requestID string) (*Au
 		RedirectURI: req.RedirectURI, Resource: req.Resource, Profiles: profileChoices(cfg),
 	}
 	liveByClient := map[string]int{}
+	newestByClient := map[string]PreviousLogin{}
 	for i := range grants {
 		g := &grants[i]
 		if !g.Revoked && g.RefreshExpiresAt.After(now) {
 			liveByClient[g.Client]++
+			if g.RegistrationID == reg.ClientID && (req.PathClient == "" || g.Client == req.PathClient) {
+				if cur, ok := newestByClient[g.Client]; !ok || g.ApprovedAt.After(cur.ApprovedAt) {
+					newestByClient[g.Client] = PreviousLogin{GrantID: g.GrantID, ClientID: g.Client, ApprovedAt: g.ApprovedAt}
+				}
+			}
 			if g.RegistrationID == reg.ClientID && (req.PathClient == "" || g.Client == req.PathClient) &&
 				(v.PreviousLogin == nil || g.ApprovedAt.After(v.PreviousLogin.ApprovedAt)) {
 				v.PreviousLogin = &PreviousLogin{GrantID: g.GrantID, ClientID: g.Client, ApprovedAt: g.ApprovedAt}
 			}
 		}
 	}
+	defer func() {
+		for _, pl := range newestByClient {
+			v.PreviousLogins = append(v.PreviousLogins, pl)
+		}
+		sort.Slice(v.PreviousLogins, func(i, j int) bool { return v.PreviousLogins[i].ClientID < v.PreviousLogins[j].ClientID })
+	}()
 	bindingOf := func(id string) (*BindingView, bool) {
 		pin, mode, found, err := s.store.CurrentClientBinding(id)
 		if err != nil || !found {
@@ -688,7 +703,8 @@ func (s *OAuthLoginService) resolveChoice(req mcplogin.Request, c ApprovalChoice
 		if c.Client.ID != "" {
 			return nil, &ValidationError{Field: "client", Message: "choose an existing client or a new one, not both"}
 		}
-		n := c.Client.New
+		n := *c.Client.New
+		n.DisplayName = mcplogin.StripFormat(n.DisplayName)
 		if !auth.ValidClientID(n.ID) {
 			return nil, &ValidationError{Field: "client_new_id", Message: fmt.Sprintf(
 				"invalid client id %q: must be lower-case letters, digits, '-' or '_', start with a letter or digit, and be at most 56 characters", n.ID)}

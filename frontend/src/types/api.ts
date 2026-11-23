@@ -1604,6 +1604,8 @@ export interface OAuthAuthorization {
   profiles: Array<{ name: string }>
   profile_required: boolean
   previous_login?: { grant_id: string; client_id: string; approved_at: string }
+  /** The newest live login of this registration under each client. */
+  previous_logins?: Array<{ grant_id: string; client_id: string; approved_at: string }>
   guard: OAuthGuardVerdict | null
 }
 
