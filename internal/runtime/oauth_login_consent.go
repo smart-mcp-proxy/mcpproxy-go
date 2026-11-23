@@ -230,6 +230,7 @@ type ProfileChoice struct {
 // PreviousLogin is a live login of THIS registration.
 type PreviousLogin struct {
 	GrantID    string    `json:"grant_id"`
+	ClientID   string    `json:"client_id"` // the client that owns the login
 	ApprovedAt time.Time `json:"approved_at"`
 }
 
@@ -349,7 +350,7 @@ func (s *OAuthLoginService) Describe(ctx context.Context, requestID string) (*Au
 			liveByClient[g.Client]++
 			if g.RegistrationID == reg.ClientID && (req.PathClient == "" || g.Client == req.PathClient) &&
 				(v.PreviousLogin == nil || g.ApprovedAt.After(v.PreviousLogin.ApprovedAt)) {
-				v.PreviousLogin = &PreviousLogin{GrantID: g.GrantID, ApprovedAt: g.ApprovedAt}
+				v.PreviousLogin = &PreviousLogin{GrantID: g.GrantID, ClientID: g.Client, ApprovedAt: g.ApprovedAt}
 			}
 		}
 	}
@@ -757,10 +758,15 @@ func (s *OAuthLoginService) resolveChoice(req mcplogin.Request, c ApprovalChoice
 	}
 
 	// 3. Replace the previous login: only a live login of THIS registration
-	// and of this client; anything else is ignored, never revoked.
+	// and of this client; anything else is ignored, never revoked. A live login
+	// of this registration that belongs to ANOTHER client is refused: the page
+	// asked to replace a login of a client it is not signing in.
 	if c.ReplaceGrant != "" {
-		if g, err := s.store.GetOAuthGrant(c.ReplaceGrant); err == nil && g != nil && g.Client == rc.clientID &&
+		if g, err := s.store.GetOAuthGrant(c.ReplaceGrant); err == nil && g != nil &&
 			!g.Revoked && g.RefreshExpiresAt.After(s.now()) && g.RegistrationID == req.RegistrationID {
+			if g.Client != rc.clientID {
+				return nil, &ValidationError{Field: "replace_grant", Message: "that login belongs to another client"}
+			}
 			rc.replace = g.GrantID
 		}
 	}

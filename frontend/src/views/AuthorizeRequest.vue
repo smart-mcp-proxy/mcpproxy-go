@@ -97,9 +97,9 @@
           </label>
         </div>
 
-        <p v-if="preview?.access" class="text-sm" data-test="authorize-access">{{ accessSentence }}</p>
+        <p v-if="current?.access" class="text-sm" data-test="authorize-access">{{ accessSentence }}</p>
 
-        <label v-if="view.previous_login" class="flex items-center gap-2 text-sm">
+        <label v-if="showReplace" class="flex items-center gap-2 text-sm">
           <input v-model="replace" type="checkbox" class="checkbox checkbox-sm" data-test="authorize-replace" />
           Replace the previous browser login (approved {{ approvedOn }})
         </label>
@@ -112,7 +112,7 @@
         <div v-if="errorText" class="alert alert-error text-sm" role="alert" data-test="authorize-error">{{ errorText }}</div>
 
         <div class="card-actions justify-end">
-          <button type="button" class="btn" :disabled="submitting" data-test="authorize-deny" @click="deny">Deny</button>
+          <button type="button" class="btn" :disabled="busy" data-test="authorize-deny" @click="deny">Deny</button>
           <button type="button" class="btn btn-primary" :disabled="approveDisabled" data-test="authorize-approve" @click="approve">Approve</button>
         </div>
       </div>
@@ -125,12 +125,19 @@
 // reports (name, redirect URI) is untrusted and is rendered as text only. The
 // reported name never decides anything: the page sends the client the user
 // sees selected, and the server never applies a suggestion.
+//
+// Three rules keep a decision tied to what is on screen:
+//  - the decision goes to the request that was LOADED and is displayed; a new
+//    `?request=` id clears the page at once and loads again;
+//  - Approve needs a complete preview, with access, for the CURRENT choice, and
+//    sends exactly the body that preview answered;
+//  - one decision per page: after success the buttons stay disabled.
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import api, { ApiError } from '@/services/api'
 import { navigateTo } from '@/utils/navigate'
 import GuardRefusal from '@/components/GuardRefusal.vue'
-import type { OAuthApprovalBody, OAuthAuthorization, OAuthGuardVerdict, OAuthPreview } from '@/types/api'
+import type { OAuthApprovalBody, OAuthAuthorization, OAuthDecision, OAuthGuardVerdict, OAuthPreview } from '@/types/api'
 
 const UNSET = '__unset__'
 const ALL = '__all__'
@@ -143,6 +150,7 @@ const requestId = computed(() => (typeof route.query.request === 'string' ? rout
 
 const phase = ref<Phase>('loading')
 const view = ref<OAuthAuthorization | null>(null)
+const loadedId = ref('')
 const pastedKey = ref('')
 const selected = ref('')
 const newId = ref('')
@@ -150,14 +158,17 @@ const newName = ref('')
 const profileSel = ref<string>(UNSET)
 const lock = ref(true)
 const replace = ref(false)
-const preview = ref<OAuthPreview | null>(null)
-const previewing = ref(false)
+const accepted = ref<{ key: string; preview: OAuthPreview } | null>(null)
+const previewFailed = ref(false)
 const guardOverride = ref<OAuthGuardVerdict | null>(null)
 const errorText = ref('')
 const changedNote = ref(false)
 const submitting = ref(false)
+const decided = ref(false)
 let previewSeq = 0
+let loadGen = 0
 
+const busy = computed(() => submitting.value || decided.value)
 const fixed = computed(() => (view.value?.address_kind === 'client' ? view.value.client ?? null : null))
 const existingClients = computed(() => view.value?.existing_clients ?? [])
 const selectedExisting = computed(() =>
@@ -171,6 +182,14 @@ const clientChosen = computed(() => !!fixed.value || !!selected.value)
 const showSuggestion = computed(
   () => !!view.value?.suggested_client && selected.value === view.value.suggested_client.id,
 )
+
+// A previous login is replaced only by signing in the client that owns it.
+const showReplace = computed(() => {
+  const prev = view.value?.previous_login
+  if (!prev) return false
+  const owner = fixed.value?.id ?? selectedExisting.value?.id
+  return !!owner && owner === prev.client_id
+})
 
 const title = computed(() => {
   const name = fixed.value?.display_name
@@ -210,15 +229,18 @@ function buildBody(): OAuthApprovalBody {
     body.profile = profileValue.value
     if (profileValue.value !== '') body.mode = lock.value ? 'locked' : 'switchable'
   }
-  if (view.value?.previous_login && replace.value && !isNewGeneric.value) body.replace_grant = view.value.previous_login.grant_id
+  if (view.value?.previous_login && showReplace.value && replace.value) body.replace_grant = view.value.previous_login.grant_id
   return body
 }
 
 const previewKey = computed(() => (phase.value === 'ready' && complete.value ? JSON.stringify(buildBody()) : null))
 
+// The accepted preview is current only for the exact body it answered.
+const current = computed(() => (accepted.value && accepted.value.key === previewKey.value ? accepted.value.preview : null))
+
 const guard = computed(() => {
   if (guardOverride.value) return refusalOf(guardOverride.value)
-  if (preview.value) return preview.value.guard ? refusalOf(preview.value.guard) : null
+  if (current.value) return current.value.guard ? refusalOf(current.value.guard) : null
   return view.value?.guard ? refusalOf(view.value.guard) : null
 })
 
@@ -226,13 +248,13 @@ function refusalOf(g: OAuthGuardVerdict) {
   return { bindings: g.bindings, fixes: g.fixes }
 }
 
-const approveDisabled = computed(
-  () => !complete.value || previewing.value || submitting.value || !!guard.value || !!previewFailed.value,
+const approveReady = computed(
+  () => !!current.value && current.value.complete === true && !!current.value.access && !guard.value && !previewFailed.value,
 )
-const previewFailed = ref(false)
+const approveDisabled = computed(() => !approveReady.value || busy.value)
 
 const accessSentence = computed(() => {
-  const a = preview.value?.access
+  const a = current.value?.access
   if (!a) return ''
   if (a.same_access_as_existing_client) return `Approving gives this app the same access as ${clientDisplayName.value}.`
   return `Approving gives this app access to ${a.profile || 'All servers'} as ${clientDisplayName.value}.`
@@ -245,39 +267,49 @@ const approvedOn = computed(() => {
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
 })
 
-function resetChoice(v: OAuthAuthorization) {
-  guardOverride.value = null
-  preview.value = null
+function resetPage(keepNote = false) {
+  loadGen++
+  previewSeq++
+  view.value = null
+  loadedId.value = ''
+  accepted.value = null
   previewFailed.value = false
+  guardOverride.value = null
+  errorText.value = ''
+  submitting.value = false
+  decided.value = false
+  if (!keepNote) changedNote.value = false
+}
+
+function resetChoice(v: OAuthAuthorization) {
   profileSel.value = UNSET
+  lock.value = true
   replace.value = !!v.previous_login
-  if (v.address_kind === 'generic') {
-    if (v.suggested_client) {
-      selected.value = v.suggested_client.id
-    } else {
-      selected.value = NEW
-      newId.value = v.suggested_new_client?.id ?? ''
-      newName.value = v.suggested_new_client?.display_name ?? ''
-    }
-  } else {
-    selected.value = ''
-  }
+  // The new-client draft is always ready, whatever is selected first.
+  newId.value = v.suggested_new_client?.id ?? ''
+  newName.value = v.suggested_new_client?.display_name ?? ''
+  if (v.address_kind === 'generic') selected.value = v.suggested_client ? v.suggested_client.id : NEW
+  else selected.value = ''
 }
 
 async function load(keepNote = false) {
-  if (!requestId.value) {
+  resetPage(keepNote)
+  const id = requestId.value
+  if (!id) {
     phase.value = 'gone'
     return
   }
   phase.value = 'loading'
-  errorText.value = ''
-  if (!keepNote) changedNote.value = false
+  const gen = loadGen
   try {
-    const v = await api.getOAuthAuthorization(requestId.value)
+    const v = await api.getOAuthAuthorization(id)
+    if (gen !== loadGen) return
     view.value = v
+    loadedId.value = id
     resetChoice(v)
     phase.value = 'ready'
   } catch (e) {
+    if (gen !== loadGen) return
     if (e instanceof ApiError && e.status === 404) phase.value = 'gone'
     else {
       errorText.value = e instanceof Error ? e.message : 'Could not load the request.'
@@ -286,53 +318,67 @@ async function load(keepNote = false) {
   }
 }
 
-async function runPreview(key: string) {
+async function runPreview(id: string, key: string) {
   const seq = ++previewSeq
-  previewing.value = true
   errorText.value = ''
   try {
-    const p = await api.previewOAuthAuthorization(requestId.value, JSON.parse(key))
+    const p = await api.previewOAuthAuthorization(id, JSON.parse(key))
     if (seq !== previewSeq) return
-    preview.value = p
+    accepted.value = { key, preview: p }
     previewFailed.value = false
     guardOverride.value = null
   } catch (e) {
     if (seq !== previewSeq) return
-    preview.value = null
+    accepted.value = null
     if (e instanceof ApiError && e.status === 404 && e.code !== 'profile_not_found') {
       phase.value = 'gone'
       return
     }
     previewFailed.value = true
     errorText.value = e instanceof Error ? e.message : 'Could not check this choice.'
-  } finally {
-    if (seq === previewSeq) previewing.value = false
   }
 }
 
-watch(previewKey, (key) => {
-  if (key === null) {
+// Sync: the accepted preview is dropped in the same tick the choice changes.
+watch(
+  previewKey,
+  (key) => {
     previewSeq++
-    previewing.value = false
-    preview.value = null
+    accepted.value = null
+    guardOverride.value = null
     previewFailed.value = false
-    return
-  }
-  void runPreview(key)
+    if (key !== null && loadedId.value) void runPreview(loadedId.value, key)
+  },
+  { flush: 'sync' },
+)
+
+watch(requestId, () => {
+  if (phase.value === 'nokey') return
+  void load()
 })
 
-async function approve() {
-  if (approveDisabled.value) return
+async function decide(call: (id: string) => Promise<OAuthDecision>) {
+  if (busy.value || !loadedId.value) return
   submitting.value = true
   errorText.value = ''
   try {
-    const res = await api.approveOAuthAuthorization(requestId.value, buildBody())
+    const res = await call(loadedId.value)
+    decided.value = true // terminal: stays disabled while the browser leaves
     navigateTo(res.redirect_url)
   } catch (e) {
-    await handleDecisionError(e)
-  } finally {
     submitting.value = false
+    await handleDecisionError(e)
   }
+}
+
+function approve() {
+  const a = accepted.value
+  if (!approveReady.value || !a) return
+  void decide((id) => api.approveOAuthAuthorization(id, JSON.parse(a.key)))
+}
+
+function deny() {
+  void decide((id) => api.denyOAuthAuthorization(id))
 }
 
 async function handleDecisionError(e: unknown) {
@@ -348,19 +394,6 @@ async function handleDecisionError(e: unknown) {
     guardOverride.value = { code: e.code, bindings: e.bindings ?? [], fixes: e.fixes ?? [] }
   } else if (e.status === 404 && e.code !== 'profile_not_found') phase.value = 'gone'
   else errorText.value = e.message
-}
-
-async function deny() {
-  submitting.value = true
-  errorText.value = ''
-  try {
-    const res = await api.denyOAuthAuthorization(requestId.value)
-    navigateTo(res.redirect_url)
-  } catch (e) {
-    await handleDecisionError(e)
-  } finally {
-    submitting.value = false
-  }
 }
 
 function submitKey() {

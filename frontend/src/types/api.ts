@@ -1603,7 +1603,7 @@ export interface OAuthAuthorization {
   suggested_client?: { id: string; matched: 'id' | 'display_name' | 'known_name' }
   profiles: Array<{ name: string }>
   profile_required: boolean
-  previous_login?: { grant_id: string; approved_at: string }
+  previous_login?: { grant_id: string; client_id: string; approved_at: string }
   guard: OAuthGuardVerdict | null
 }
 

@@ -1704,7 +1704,11 @@ reference: the Spec 132 contracts.
   client's id, display name or known client name, absent otherwise and never on a
   per-client address. It is advice for the page, computed on read and never stored: preview
   without a `client` answers `200 {"complete": false}` (no `access`, no `guard`) and
-  approve without one answers `422 client_required`.
+  approve without one answers `422 client_required`. `previous_login` is
+  `{grant_id, client_id, approved_at}`: `client_id` is the client that owns that
+  login. Preview and approve refuse (`422`, field `replace_grant`) a `replace_grant`
+  that is a live login of this registration owned by another client than the one
+  chosen; the page offers replacement only for the owning client.
 - `POST /api/v1/oauth/authorizations/{id}/preview`: read-only verdict for a
   proposed client, profile and mode. `POST .../approve` and `POST .../deny` answer
   `{redirect_url}`; approve refuses with `409 already_decided`, `409 binding_changed`,

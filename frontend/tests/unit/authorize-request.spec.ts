@@ -119,7 +119,8 @@ describe('AuthorizeRequest: per-client address', () => {
     const without = await mountPage(base())
     expect(t(without, 'authorize-replace').exists()).toBe(false)
 
-    const w = await mountPage(base({ previous_login: { grant_id: 'g1', approved_at: '2026-11-03T10:00:00Z' } }))
+    const prev = { grant_id: 'g1', client_id: 'cursor', approved_at: '2026-11-03T10:00:00Z' }
+    const w = await mountPage(base({ previous_login: prev }))
     const box = t(w, 'authorize-replace')
     expect(box.exists()).toBe(true)
     expect((box.element as HTMLInputElement).checked).toBe(true)
@@ -131,8 +132,12 @@ describe('AuthorizeRequest: per-client address', () => {
     }))
     expect(navigateTo).toHaveBeenCalledWith('http://127.0.0.1:54321/callback?code=c&state=s')
 
-    await box.setValue(false)
-    await t(w, 'authorize-approve').trigger('click')
+    // A fresh page with the box unchecked sends no replace_grant.
+    const w2 = await mountPage(base({ previous_login: prev }))
+    await t(w2, 'authorize-replace').setValue(false)
+    await flushPromises()
+    A.approveOAuthAuthorization.mockClear()
+    await t(w2, 'authorize-approve').trigger('click')
     await flushPromises()
     expect(A.approveOAuthAuthorization.mock.calls.at(-1)![1].replace_grant).toBeUndefined()
   })
