@@ -176,7 +176,7 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 	// and the file is untouched iff it still has that digest (no replay, so the
 	// auth mode of the connect cannot be confused). A backup from before records
 	// existed can only be a key connect and keeps the original key-path replay.
-	verdict, recAuth := checkUndoRecord(cfgPath, backupPath, client.ID, serverName, currentRaw)
+	verdict, recAuth, recPath := checkUndoRecord(cfgPath, backupPath, client.ID, serverName, currentRaw)
 	oauthEntry := verdict == undoUntouched && recAuth == AuthOAuth
 	matched := verdict == undoUntouched
 	if verdict == undoLegacy && credentialOK {
@@ -209,7 +209,7 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 		if err := os.Remove(cfgPath); err != nil {
 			return nil, fmt.Errorf("remove created config: %w", err)
 		}
-		removeUndoRecord(undoRecordPath(cfgPath, backupPath))
+		removeUndoRecord(recPath)
 		res := &ConnectResult{
 			Success:    true,
 			Client:     client.ID,
@@ -232,7 +232,7 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 	if err := atomicWriteFile(cfgPath, backupRaw, perm, nil); err != nil {
 		return nil, fmt.Errorf("restore from backup: %w", err)
 	}
-	removeUndoRecord(undoRecordPath(cfgPath, backupPath))
+	removeUndoRecord(recPath)
 
 	res := &ConnectResult{
 		Success:    true,

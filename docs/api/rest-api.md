@@ -1463,8 +1463,11 @@ Safety semantics:
 
 - Undo **refuses with `409 Conflict`** when the config changed since the
   connect (a browser-login connect records the SHA-256 of the file it wrote in a
-  small sidecar `<config>.undo.<timestamp>`, or `<config>.undo.new` when it
-  created the file, beside the backup; the file counts as untouched only if its
+  small sidecar `<config>.undo.<timestamp>`, or `<config>.undo.new.<random>` when
+  it created the file, beside the backup. Two browser-login connects that race
+  to create the same file each keep their own record and the file is untouched
+  if it matches either, never otherwise: connect takes no lock across read,
+  backup and write, so a racing pair is resolved fail-closed, not serialised; the file counts as untouched only if its
   digest still equals it, and the sidecar is removed when the undo succeeds or
   the entry is disconnected) — it never clobbers later edits. A record that is
   malformed, unreadable or bound to another client, entry or backup is also a

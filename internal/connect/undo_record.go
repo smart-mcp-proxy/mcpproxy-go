@@ -1,6 +1,7 @@
 package connect
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -29,6 +31,18 @@ import (
 
 const undoRecordVersion = 1
 
+// undoNewPrefix starts the name of a record of a connect that created the file:
+// `<config>.undo.new.<random>`. Connect holds no lock around read, backup and
+// write for a browser-login connect (nor does the key path across its initial
+// read; the key path's only guard is the minter's per-client claim, which a
+// browser-login connect does not take because it mints nothing), so two
+// concurrent first-time connects can both find no file. Each keeps its own
+// record, so neither overwrites the other's; whichever wrote the file last is
+// the one whose digest matches, and a file that matches none of them is a
+// conflict. The fail-closed outcome is the limit: Undo never restores over a
+// file it cannot account for.
+const undoNewPrefix = ".undo.new."
+
 type undoRecord struct {
 	Version int    `json:"version"`
 	Client  string `json:"client"`
@@ -41,9 +55,11 @@ type undoRecord struct {
 }
 
 // undoRecordPath is where the record of the write that took backupPath lives.
+// A connect that created the file has no backup, so its record name carries a
+// random suffix instead (see undoNewPrefix); the caller supplies it.
 func undoRecordPath(cfgPath, backupPath string) string {
 	if backupPath == "" {
-		return cfgPath + ".undo.new"
+		return cfgPath + undoNewPrefix
 	}
 	base := filepath.Base(backupPath)
 	if i := strings.LastIndex(base, ".bak."); i >= 0 {
@@ -69,11 +85,43 @@ func writeUndoRecord(cfgPath, backupPath, clientID, serverName string, written [
 		return "", err
 	}
 	path := undoRecordPath(cfgPath, backupPath)
-	if err := os.MkdirAll(filepath.Dir(path), newDirPerm); err != nil {
+	if backupPath == "" {
+		var rnd [8]byte
+		if _, err := rand.Read(rnd[:]); err != nil {
+			return "", fmt.Errorf("undo record name: %w", err)
+		}
+		path = cfgPath + undoNewPrefix + hex.EncodeToString(rnd[:])
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, newDirPerm); err != nil {
 		return "", fmt.Errorf("create directory for undo record: %w", err)
 	}
-	if err := os.WriteFile(path, raw, perm.Perm()); err != nil {
+	// Stage the whole record in an exclusively created temp file beside it and
+	// publish it with a rename, so a failed write or close leaves neither a
+	// partial record nor the temp file.
+	tmp, err := os.CreateTemp(dir, filepath.Base(cfgPath)+".undo-tmp-*")
+	if err != nil {
+		return "", fmt.Errorf("stage undo record: %w", err)
+	}
+	tmpName := tmp.Name()
+	fail := func(err error) (string, error) {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
 		return "", fmt.Errorf("write undo record: %w", err)
+	}
+	if err := recordWrite(tmp, raw); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Chmod(perm.Perm()); err != nil && runtime.GOOS != "windows" {
+		return fail(err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return "", fmt.Errorf("write undo record: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return "", fmt.Errorf("publish undo record: %w", err)
 	}
 	return path, nil
 }
@@ -90,8 +138,34 @@ const (
 // checkUndoRecord compares the current file with the record of the connect
 // that took backupPath. A record that is unreadable, malformed or bound to
 // another client, entry or backup fails closed.
-func checkUndoRecord(cfgPath, backupPath, clientID, serverName string, current []byte) (undoVerdict, string) {
-	raw, err := os.ReadFile(undoRecordPath(cfgPath, backupPath))
+//
+// The verdict also names the record it matched, for cleanup. A connect that
+// created the file may own any of several records (see undoNewPrefix): the file
+// is untouched if it matches one of them.
+func checkUndoRecord(cfgPath, backupPath, clientID, serverName string, current []byte) (undoVerdict, string, string) {
+	paths := []string{undoRecordPath(cfgPath, backupPath)}
+	if backupPath == "" {
+		paths, _ = filepath.Glob(cfgPath + undoNewPrefix + "*")
+		if len(paths) == 0 {
+			return undoLegacy, "", ""
+		}
+	}
+	verdict, auth, matched := undoLegacy, "", ""
+	for _, p := range paths {
+		v, a := checkUndoRecordFile(p, backupPath, clientID, serverName, current)
+		switch v {
+		case undoUntouched:
+			return v, a, p
+		case undoConflict:
+			verdict = undoConflict
+		case undoLegacy:
+		}
+	}
+	return verdict, auth, matched
+}
+
+func checkUndoRecordFile(path, backupPath, clientID, serverName string, current []byte) (undoVerdict, string) {
+	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return undoLegacy, ""
 	}
@@ -137,4 +211,13 @@ func removeUndoRecords(cfgPath, clientID, serverName string) {
 			_ = os.Remove(m)
 		}
 	}
+}
+
+// recordWrite writes a record's bytes into its staging file. A seam, as the
+// HMAC key code has, so a test can make the write fail half way.
+var recordWrite = defaultRecordWrite
+
+func defaultRecordWrite(f *os.File, b []byte) error {
+	_, err := f.Write(b)
+	return err
 }
