@@ -341,7 +341,9 @@ logs one warning naming every such server
 To migrate, either add the file's directory to `secret_file_dirs` in the config
 file (for example `"secret_file_dirs": ["/Users/me/.config/tokens"]`; the
 platform defaults are then replaced by your list, so add `<data-dir>/secrets`
-too if you use it), or move the file under `<data-dir>/secrets`.
+too if you use it), or move the file under `<data-dir>/secrets`. A secret file
+with more than one hard link is refused (see below), so copy a hardlinked secret
+rather than linking it.
 
 #### Reserved proxy namespace
 
@@ -364,10 +366,17 @@ upstream-scoped read refuses:
 Checks use the opened file’s identity (device and inode), so hardlinks, aliases,
 and a config file replaced by rename are refused — not only a literal path match.
 Secret files have no reason to be hard-linked: the link-count rule refuses a
-hardlink to any live proxy file, wherever it is under `<data-dir>`. Earlier
-config versions are remembered for the life of the process only; a hardlink to
-a version replaced by an earlier run is not recognised, so keep allowed
-directories writable only by the account that runs mcpproxy.
+hardlink to any live proxy file, wherever it is under `<data-dir>`.
+
+Hardlink protection is best-effort against a local user who can already create
+links in an allowed directory. The list of replaced config versions lives in
+memory, holds the last 4096 saves, and is filled only by saves this process
+makes: a restart, a save by a separate process (a `mcpproxy` CLI command
+editing the config while the daemon runs) or 4096 later saves forget an older
+version, and a link to it then reads as an ordinary file with one link. The
+same is true of a hardlink to a log file that has since been rotated or
+deleted: once the original name is gone, the link is the file's only link.
+Keep allowed directories writable only by the account that runs mcpproxy.
 
 `["*"]` resolves the path and then opens it by path, so it does not protect
 against a concurrent filesystem writer that swaps a symlink in between; the
