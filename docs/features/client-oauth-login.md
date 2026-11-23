@@ -121,5 +121,6 @@ logins simply stop being usable.
 
 The issuer is `http://127.0.0.1:<port>`, not HTTPS. The specifications ask for HTTPS for
 non-loopback issuers; loopback HTTP is the common local-tool case. Client behaviour is
-checked in `specs/132-client-oauth-login/verification/real-clients.md`; only the MCP
-TypeScript SDK client flow is verified so far.
+checked in `specs/132-client-oauth-login/verification/real-clients.md`; the MCP
+TypeScript SDK client flow and the Claude Code CLI login flow are verified so far (Cursor, VS
+Code and MCP Inspector are not).

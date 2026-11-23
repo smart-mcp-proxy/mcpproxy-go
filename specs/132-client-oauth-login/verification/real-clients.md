@@ -10,11 +10,25 @@ Date: 2026-11-23. Build: `feat/client-oauth-login-e2e` (slices 1a-1e), scratch c
 |---|---|---|
 | MCP TypeScript SDK 1.32.2 (`@modelcontextprotocol/sdk`, the OAuth client code that MCP clients build on), driven by `sdk-client.mjs` | **VERIFIED** over plain HTTP | below |
 | MCP Inspector CLI 2.13.0 | **NOT verified** | it needs a TTY and a browser for OAuth (`auth_required: Interactive OAuth requires a TTY ... or MCP_AUTO_OPEN_ENABLED=true`); a pty wrapper produced no request to the core within 20 s; not pursued further |
-| Claude Code | **NOT verified** | needs `claude mcp add` / config edits and an interactive browser step |
+| Claude Code CLI 2.1.318 | **VERIFIED** for the login flow over plain HTTP loopback (see "Claude Code observations"); refresh, metadata order, browser callback path and in-session tool calls NOT verified | below |
 | Cursor | **NOT verified** | needs its real config and a GUI |
 | VS Code | **NOT verified** | needs its real settings and a GUI |
 
-`SupportsBrowserLogin` (PR-3) must stay unset for Claude Code, Cursor and VS Code until the manual checklist below is done for each. Note: the SDK result shows the server side works over plain HTTP for a standards-following client; it does not prove that any of the products above accepts an `http://127.0.0.1` issuer.
+`SupportsBrowserLogin` (PR-3) may be set for `claude-code` only; it must stay unset for Cursor and VS Code (and Inspector) until the manual checklist below is done for each. The SDK result alone does not prove that a product accepts an `http://127.0.0.1` issuer; the Claude Code result below does for Claude Code.
+
+**R13 go/no-go:** the condition "at least one of the four completes the flow over plain HTTP loopback" is MET by Claude Code. Cursor, VS Code and MCP Inspector remain unverified; keep their checklist items.
+
+## Claude Code observations
+
+Run by the main session on 2026-11-23, Claude Code CLI 2.1.318, macOS, against an isolated scratch core built from 44ac406a7 (explicit `--config`, scratch HOME, `--data-dir`, `--listen 127.0.0.1:18431`, `MCPPROXY_*` cleared, `require_mcp_auth` true, web UI off, `mcp_oauth_enabled` via env).
+
+- Added with `claude mcp add --scope local --transport http mcpproxy-oauth-check http://127.0.0.1:18431/mcp/oauth/claude-code` from a scratch project dir; removed afterwards (`claude mcp logout`, `claude mcp remove -s local`).
+- `claude mcp login --no-browser <name>` needs a TTY (without one it prints the authorize URL then exits 1: "stdin isn't a terminal"). It was run under a pseudo-terminal and the redirect URL was pasted back at its "Or paste the redirect URL here:" prompt. The browser/loopback-callback path (login without `--no-browser`) was NOT exercised.
+- Observed: Claude Code accepted the plain-HTTP `http://127.0.0.1` issuer; it registered dynamically (same `client_id` reused across three login attempts). The authorize request carried `response_type=code`, `code_challenge_method=S256`, `state`, `resource=http://127.0.0.1:18431/mcp/oauth/claude-code` (exactly the per-client address), `redirect_uri` `http://localhost:<port>/callback` (host `localhost`, fixed port across attempts in this run: 65306), and no `scope`.
+- Server side: authorize -> 302 `/ui/authorize?request=<id>`; the request showed `address_kind` "client", client id `claude-code`, `reported_name` "claude code (mcpproxy-oauth-check)" (i.e. "Claude Code (<server name>)" lower-cased); approved through the admin REST with profile "" / mode switchable; the client printed 'Authenticated with "mcpproxy-oauth-check". Its tools are now available in Claude Code.' and exited 0.
+- After login `claude mcp get` showed "Status: Connected"; the client row had one `browser_login` credential, state active, `redirect_host` "localhost", `observed_name` "claude-code", `name_mismatch` false, `last_used_at` set; the server log shows POST and GET (stream) requests on `/mcp/oauth/claude-code`.
+- NOT verified for Claude Code: token refresh (no expiry was waited for or forced), the order of metadata requests (those endpoints are not in the request log), the real browser + loopback callback path, behaviour inside an interactive Claude Code session (tool calls), the generic `/mcp/oauth` address, Windows/Linux.
+- Note printed by the client, recorded verbatim without interpretation: "[mcp-sdk] SEP-2352: stored OAuth credential has no 'issuer' stamp (pre-upgrade storage or provider not round-tripping the value). SEP-2352 isolation is inactive for this read; ensure your provider round-trips the issuer field."
 
 ## SDK client observations (`node sdk-client.mjs <address> <redirect_uri> <name>`)
 
@@ -41,7 +55,7 @@ Findings that matter for the design:
 
 ## Manual checklist (needs a human, not done)
 
-For each of Claude Code, Cursor, VS Code, MCP Inspector (web UI), with an isolated scratch core (below) and the client configured with `http://127.0.0.1:18080/mcp/oauth/<client-id>` (back up the client config first):
+For each of Cursor, VS Code, MCP Inspector (web UI) (and, for the items marked NOT verified above, Claude Code), with an isolated scratch core (below) and the client configured with `http://127.0.0.1:18080/mcp/oauth/<client-id>` (back up the client config first):
 
 1. Start the client; does it show a sign-in step instead of failing on the 401?
 2. In the core log or with `GET /api/v1/oauth/authorizations`, note: name it registered (`reported_name`), redirect URI shape, whether `resource` was sent, and the metadata URLs it fetched in order.
