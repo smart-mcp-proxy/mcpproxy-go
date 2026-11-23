@@ -143,6 +143,9 @@ func TestGracefulShutdownNoPanic(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping E2E test in short mode")
 	}
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGINT process signaling is not supported on Windows")
+	}
 
 	// Build the binary first
 	binaryPath, cleanup := buildTestBinary(t)

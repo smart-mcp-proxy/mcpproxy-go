@@ -277,33 +277,55 @@ func TestMaskTextHandlesAPayloadFullOfSecrets(t *testing.T) {
 // reintroducing the O(n^2) behavior TestMaskTextStaysCheapOnAPayloadFullOfSecrets
 // used to catch (removed because an absolute wall-clock ceiling was flaky under
 // CI load — see BenchmarkMaskTextPayloadFullOfSecrets below for the profiling
-// counterpart). Instead of a fixed threshold, it compares masking a payload
-// against one 4x the size: linear work predicts ~4x the time, so a generous
-// growth ceiling still catches real quadratic blowups (~16x) while absorbing
-// routine scheduler/GC noise from the comparison running in the same process.
+// counterpart).
+//
+// A single small-vs-4x wall-clock ratio flaked on a Windows runner (a ~6ms
+// baseline against one ~90ms run: a scheduler or GC stall, not an algorithm).
+// So each size is timed several times and only its fastest run is kept: noise
+// only ever adds time, so the minimum approximates the real cost. The size step
+// is 8x, so linear work predicts ~8x while a quadratic regression predicts ~64x;
+// the ceiling of 3x the linear prediction sits well clear of both.
 func TestMaskTextScalesLinearlyOnAPayloadFullOfSecrets(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing-sensitive; skipped under -short")
 	}
 
-	measure := func(targetLen int) time.Duration {
-		d := NewDetector(nil)
-		text := secretsPayload(targetLen)
-		start := time.Now()
+	const (
+		smallLen = 32 * 1024
+		largeLen = 8 * smallLen
+		runs     = 5
+		// Linear growth is largeLen/smallLen = 8x; fail beyond 3x that.
+		maxGrowth = 24
+	)
+
+	d := NewDetector(nil)
+	smallText := secretsPayload(smallLen)
+	largeText := secretsPayload(largeLen)
+
+	// best returns the fastest of several runs, after one untimed warm-up
+	// (allocator and CPU-cache warmup is not algorithmic cost).
+	best := func(text string) time.Duration {
 		d.MaskText(text)
-		return time.Since(start)
+		fastest := time.Duration(1<<63 - 1)
+		for range runs {
+			start := time.Now()
+			d.MaskText(text)
+			if elapsed := time.Since(start); elapsed < fastest {
+				fastest = elapsed
+			}
+		}
+		return fastest
 	}
 
-	// Warm up (first run pays for allocator/CPU-cache warmup, not algorithmic cost).
-	measure(16 * 1024)
+	small := best(smallText)
+	large := best(largeText)
 
-	small := measure(16 * 1024)
-	large := measure(64 * 1024) // 4x the payload
-
-	// The absolute floor keeps this from firing on noise when both runs are
-	// too fast for the ratio to mean anything.
-	if large > 10*small && large > 50*time.Millisecond {
-		t.Fatalf("masking a payload 4x the size took %s vs %s for the baseline — looks like a complexity regression, not scheduler noise", large, small)
+	if small <= 0 {
+		small = time.Nanosecond // coarse timer granularity; keeps the ratio finite
+	}
+	if growth := float64(large) / float64(small); growth > maxGrowth {
+		t.Fatalf("masking a payload %dx the size took %s vs %s for the baseline (%.1fx, linear predicts ~%dx) — looks like a complexity regression, not scheduler noise",
+			largeLen/smallLen, large, small, growth, largeLen/smallLen)
 	}
 }
 
