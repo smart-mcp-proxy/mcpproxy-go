@@ -1281,21 +1281,41 @@ func (r *Runtime) afterCommitFunc(tx *CommitTx, res *CommitResult, snap *configs
 				}
 				extra["servers"], extra["generation"] = names, res.Generation
 				r.emitServersChanged(tx.reason, extra)
-			}
-			for name, ch := range res.Changes {
-				prev, next := baseEntry(tx.base.Config, name), tx.entry(name)
-				quarantineMoved := ch.QuarantineRaised || (prev != nil && next != nil && prev.Quarantined != next.Quarantined)
-				if quarantineMoved || ch.Kind == configsvc.ChangeRemoved || ch.Kind == configsvc.ChangeReplaced {
-					r.emitReviewChanged(name)
+
+				var reviewNames []string
+				for _, name := range names {
+					ch := res.Changes[name]
+					prev, next := baseEntry(tx.base.Config, name), tx.entry(name)
+					quarantineMoved := ch.QuarantineRaised || (prev != nil && next != nil && prev.Quarantined != next.Quarantined)
+					if quarantineMoved || ch.Kind == configsvc.ChangeRemoved || ch.Kind == configsvc.ChangeReplaced {
+						reviewNames = append(reviewNames, name)
+					}
+				}
+				// A bulk commit can affect more servers than fit in an event buffer.
+				// Keep one invalidation so config.saved and Skills events can follow.
+				switch len(reviewNames) {
+				case 0:
+				case 1:
+					r.emitReviewChanged(reviewNames[0])
+				default:
+					r.publishEvent(newEvent(EventTypeReviewChanged, map[string]any{"servers": reviewNames}))
 				}
 			}
 		}
 		if res.DiskWritten {
 			r.emitConfigSaved(r.configSvc.Current().Path)
 		}
+		// Spec 125: the skills announcements of an exposure change go out
+		// after the commit's own events: the skills-marked review.changed
+		// here, the one skills.changed list after tx.after.
+		var skillsTabs []string
+		if res.Published && tx.base != nil {
+			skillsTabs = r.announceSkillsExposureChanges(tx.base.Config, tx.next)
+		}
 		for _, fn := range tx.after {
 			fn(res)
 		}
+		r.publishSkillsExposureChanged(skillsTabs)
 	}
 }
 

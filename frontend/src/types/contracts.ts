@@ -117,6 +117,7 @@ export const AttentionKindConfigError = 'config_error' as const;
 export const AttentionKindServerError = 'server_error' as const;
 export const AttentionKindServerReview = 'server_review' as const;
 export const AttentionKindToolReview = 'tool_review' as const;
+export const AttentionKindSkillReview = 'skill_review' as const;
 export const AttentionKindClientNeverSeen = 'client_never_seen' as const;
 
 export type AttentionKind =
@@ -132,6 +133,7 @@ export type AttentionKind =
   | typeof AttentionKindServerError
   | typeof AttentionKindServerReview
   | typeof AttentionKindToolReview
+  | typeof AttentionKindSkillReview
   | typeof AttentionKindClientNeverSeen;
 
 export interface AttentionSubject {

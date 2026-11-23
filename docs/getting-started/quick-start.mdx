@@ -361,8 +361,10 @@ Approved server context7: 2 tools approved, 0 blocked, 0 still pending, 0 change
 
 `mcpproxy security approve context7` is an alias.
 
-The header flips to `Connected (2 tools)`, **Admin state** to **Enabled**, and
-the tab to `Tools (2)`. The Review tab confirms *"context7 is approved"*.
+The Review tab confirms *"context7 is approved"*. The upstream can take a moment
+to connect after approval or a daemon restart. Before making the first tool call,
+run the command below. If Context7 shows `Connecting` or lists zero tools, run it again.
+Continue once its status is `Online` and the tool count is greater than zero.
 
 ```bash
 mcpproxy upstream list

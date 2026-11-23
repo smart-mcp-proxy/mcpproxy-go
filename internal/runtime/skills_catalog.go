@@ -210,13 +210,15 @@ func (s *skillsCatalogState) close() {
 	s.closeIndex()
 }
 
-func (s *skillsCatalogState) setStatus(serverName string, mut func(*SkillsServerStatus)) {
+func (s *skillsCatalogState) setStatus(serverName string, mut func(*SkillsServerStatus)) (supportChanged bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.init()
 	st := s.status[serverName]
+	wasSupported := st.Supported
 	mut(&st)
 	s.status[serverName] = st
+	return st.Supported != wasSupported
 }
 
 // SkillsStatus returns the in-memory status of the server's last refresh.
@@ -374,7 +376,9 @@ func (r *Runtime) refreshServerSkills(ctx context.Context, serverName string) er
 		return nil
 	}
 	if !um.ServerSupportsSkills(serverName) {
-		r.skills.setStatus(serverName, func(s *SkillsServerStatus) { s.Supported = false })
+		if r.skills.setStatus(serverName, func(s *SkillsServerStatus) { s.Supported = false }) {
+			r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": serverName}))
+		}
 		return nil
 	}
 
@@ -394,11 +398,13 @@ func (r *Runtime) refreshServerSkills(ctx context.Context, serverName string) er
 	}
 	if err != nil && !errors.Is(err, errSkillsCaptureStale) && !errors.Is(err, errSkillsSwitchedOff) &&
 		!errors.Is(err, commitview.ErrServerReplaced) && !errors.Is(err, ErrServerNotFound) {
-		r.skills.setStatus(serverName, func(s *SkillsServerStatus) {
+		if r.skills.setStatus(serverName, func(s *SkillsServerStatus) {
 			s.Supported = true
 			s.LastRefresh = time.Now()
 			s.Error = err.Error()
-		})
+		}) {
+			r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": serverName}))
+		}
 	}
 	return err
 }
@@ -641,7 +647,7 @@ func (r *Runtime) runSkillsRefresh(ctx, scanCtx context.Context, serverName stri
 		return err
 	}
 
-	r.skills.setStatus(serverName, func(s *SkillsServerStatus) {
+	supportChanged := r.skills.setStatus(serverName, func(s *SkillsServerStatus) {
 		s.Supported = true
 		s.LastRefresh = time.Now()
 		s.Error = ""
@@ -666,6 +672,8 @@ func (r *Runtime) runSkillsRefresh(ctx, scanCtx context.Context, serverName stri
 	}
 	if changed {
 		r.publishSkillsChanged(serverName, counts)
+	} else if supportChanged {
+		r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"server": serverName, "counts": counts}))
 	}
 	return nil
 }
@@ -1260,6 +1268,67 @@ func (r *Runtime) triggerSkillsRefreshAll() {
 	for _, name := range r.upstreamManager.GetAllServerNames() {
 		r.triggerSkillsRefresh(name)
 	}
+}
+
+// announceSkillsExposureChanges tells the review queue, once per commit, when
+// held skills appear or disappear because exposure changed (a skills-marked
+// review.changed), and returns the servers whose Skills tab must refresh: a
+// server that has skill records or supports skills (any other has no Skills
+// tab content and no held skill). The commit publishes those as one
+// skills.changed list (publishSkillsExposureChanged) after its own events, so
+// a large fleet cannot fill a subscriber's buffer ahead of them.
+func (r *Runtime) announceSkillsExposureChanges(oldCfg, newCfg *config.Config) []string {
+	if oldCfg == nil || newCfg == nil || r.storageManager == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var tabs []string
+	var reviewNames []string
+	for _, cfg := range []*config.Config{oldCfg, newCfg} {
+		for _, sc := range cfg.Servers {
+			if sc == nil || seen[sc.Name] {
+				continue
+			}
+			seen[sc.Name] = true
+			oldSc, newSc := skillsServerConfig(oldCfg, sc.Name), skillsServerConfig(newCfg, sc.Name)
+			wasRead, isRead := skillsServerExposed(oldCfg, oldSc), skillsServerExposed(newCfg, newSc)
+			// The admin tab can display retained records even on an ineligible server.
+			oldIncluded := oldSc != nil && (oldSc.ExposeSkills == nil || *oldSc.ExposeSkills)
+			newIncluded := newSc != nil && (newSc.ExposeSkills == nil || *newSc.ExposeSkills)
+			if wasRead == isRead && oldCfg.EnableSkills == newCfg.EnableSkills && oldIncluded == newIncluded && (oldSc == nil) == (newSc == nil) {
+				continue
+			}
+			recs, err := r.ListSkillRecords(sc.Name)
+			if err != nil || (len(recs) == 0 && !r.SkillsStatus(sc.Name).Supported) {
+				continue
+			}
+			tabs = append(tabs, sc.Name)
+			if wasRead != isRead && heldSkillCount(recs) > 0 {
+				reviewNames = append(reviewNames, sc.Name)
+			}
+		}
+	}
+	if len(tabs) == 0 {
+		return nil
+	}
+	r.skills.bumpIndexGeneration()
+	if len(reviewNames) > 0 {
+		sort.Strings(reviewNames)
+		r.publishEvent(newEvent(EventTypeReviewChanged, map[string]any{"servers": reviewNames, ReviewChangedSkillsKey: true}))
+	}
+	sort.Strings(tabs)
+	return tabs
+}
+
+// publishSkillsExposureChanged sends the ONE skills.changed of a commit's
+// exposure change: `{"servers": [sorted names]}`, no "server" key (per-server
+// refresh and approval events keep `{server, counts}`). One event, not one per
+// server, so a fleet larger than a subscriber's buffer cannot overflow it.
+func (r *Runtime) publishSkillsExposureChanged(names []string) {
+	if len(names) == 0 {
+		return
+	}
+	r.publishEvent(newEvent(EventTypeSkillsChanged, map[string]any{"servers": names}))
 }
 
 // onSkillsConfigChanged refreshes after a config change. A server is refreshed

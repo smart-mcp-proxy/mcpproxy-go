@@ -19,6 +19,7 @@ export {
 
 // Import HealthStatus/Tier for use in this file
 import type {
+  APIResponse,
   CredentialState, HealthStatus, Tier, ProfileSource, ProfileBlockReason,
   ProfileView, ProfileList, ProfileWriteResult, ProfileUsedBy, ProfileToolCounts, ProfileToolRules,
   EffectiveTool, EffectiveToolsResult, AccessExplanation, ClientWarning, ClientView,
@@ -1462,7 +1463,8 @@ export interface ReviewScan {
 
 export interface ReviewQueueRow {
   server: string
-  kind: 'server_review' | 'tool_review' | string
+  /** skill_review (Spec 125): the server's only owed review is held skills. */
+  kind: 'server_review' | 'tool_review' | 'skill_review' | string
   quarantined: boolean
   /** Configured enabled state; absent on an older core (treat as enabled). */
   enabled?: boolean
@@ -1470,6 +1472,9 @@ export interface ReviewQueueRow {
   tier_counts?: Record<string, number>
   pending?: number
   changed?: number
+  /** Held skills (Spec 125). Administrator-only: absent for a scoped caller. */
+  skills_pending?: number
+  skills_changed?: number
   scan?: ReviewScan
   since?: string
 }
@@ -1615,3 +1620,78 @@ export interface ExplainSubjectQuery {
   profile?: string
   anonymous?: boolean
 }
+
+// Spec 125 (skills over MCP, PR-4a): hand-written mirrors of
+// internal/contracts/skills.go. The routes are administrator-only. Every text
+// field below was written by an upstream server and is shown as inert text.
+export interface SkillFileInfo {
+  path: string
+  size: number
+  digest: string
+  text: boolean
+}
+
+export interface SkillScanFinding {
+  file: string
+  offset: number
+  rule: string
+  severity: string
+  evidence: string
+}
+
+export interface SkillScanInfo {
+  verdict: string
+  complete: boolean
+  incomplete: string
+  scanned_at?: string
+  findings_truncated: boolean
+  findings: SkillScanFinding[]
+}
+
+export type SkillStatus = 'pending' | 'approved' | 'changed' | 'unusable'
+
+export interface SkillEntry {
+  id: string
+  uri: string
+  path: string
+  name: string
+  description: string
+  status: SkillStatus | string
+  blocked: boolean
+  listed: boolean
+  available: boolean
+  unusable_reason: string
+  current_hash: string
+  approved_hash: string
+  approved_at?: string
+  approved_by: string
+  approved_files?: SkillFileInfo[]
+  files: SkillFileInfo[]
+  total_size: number
+  scan: SkillScanInfo
+}
+
+export interface SkillsListResponse {
+  enabled: boolean
+  incarnation: number
+  server?: string
+  supported: boolean
+  expose_skills: boolean | null
+  last_refresh: string | null
+  error: string
+  truncated: boolean
+  skills: SkillEntry[]
+}
+
+export interface SkillContentResponse {
+  text: string
+  offset: number
+  next_offset?: number
+  size: number
+  digest: string
+}
+
+export type SkillCopy = 'current' | 'approved'
+
+/** A response of the skills routes: a failure also carries the body's stable error_code. */
+export type SkillsResponse<T> = APIResponse<T> & { errorCode?: string }

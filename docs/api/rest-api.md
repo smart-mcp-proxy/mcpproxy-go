@@ -1022,7 +1022,7 @@ listings above.
 
 The one needs-attention list every surface renders (the Web UI Home page, header pill and sidebar badge, the macOS tray and Home section, `mcpproxy attention`, the first line of `mcpproxy status` and the first section of `mcpproxy doctor`). Both editions. See [Needs Attention](../features/needs-attention.md) for the kinds, ranks and fixes.
 
-Administrators see every item. A scoped caller (an agent token, or a non-admin user session) sees only the items whose server it may enumerate, never a client or setting item, with `count` recomputed from the narrowed list.
+Administrators see every item. A scoped caller (an agent token, or a non-admin user session) sees only the items whose server it may enumerate, never a client or setting item and never a `skill_review` item (held skills, Spec 125), with `count` recomputed from the narrowed list.
 
 ```json
 {
@@ -1055,13 +1055,13 @@ Administrators see every item. A scoped caller (an agent token, or a non-admin u
 }
 ```
 
-Items are sorted by `rank` ascending, then by `subject.name`; `id` (`kind:type:subject[:state]`) is stable, so a client can diff successive lists. `fix.target` is a Web UI route, and a fix never approves anything by itself. The SSE event `attention.changed` (`{count, ids}`) is emitted when the set of ids changes; see [Real-time Updates](#real-time-updates).
+Items are sorted by `rank` ascending, then by `subject.name`; `id` (`kind:type:subject[:state]`) is stable, so a client can diff successive lists. `fix.target` is a Web UI route, and a fix never approves anything by itself. The SSE event `attention.changed` (`{count, ids}`) sends the current visible ids at connection time and when that set changes. Administrators also receive an update when item details change with the same ids, for example when a held-skill count decreases; see [Real-time Updates](#real-time-updates).
 
 ### Review
 
 #### GET /api/v1/review
 
-The review queue: one row per server awaiting review, either a quarantined server (`kind: server_review`) or a trusted server with new or changed tools (`kind: tool_review`, with `pending` and `changed` counts). `count` is the number of rows, the number the Review queue badge shows. For a scoped caller (an agent token or a non-admin user session) the queue lists only the servers that caller may see.
+The review queue: one row per server awaiting review, either a quarantined server (`kind: server_review`), a trusted server with new or changed tools (`kind: tool_review`, with `pending` and `changed` counts), or, with [Skills over MCP](../features/skills.md#held-skills-in-review) on, a server whose only owed review is held skills (`kind: skill_review`). Any row except a quarantined server's may carry `skills_pending` and `skills_changed` (omitted when zero). `count` is the number of rows, the number the Review queue badge shows. For a scoped caller (an agent token or a non-admin user session) the queue lists only the servers that caller may see, and held skills are administrator-only: the skill counts are removed, `skill_review` rows are dropped and `count` excludes them.
 
 ```json
 {
@@ -1073,7 +1073,9 @@ The review queue: one row per server awaiting review, either a quarantined serve
        "tier_counts": {"read": 9, "write": 3, "destructive": 2, "unannotated": 0, "unknown": 0},
        "scan": {"verdict": "clean", "risk_score": 0}, "since": "2026-09-25T06:01:40Z"},
       {"server": "github", "kind": "tool_review", "quarantined": false, "pending": 0, "changed": 1,
-       "since": "2026-09-25T06:10:00Z"}
+       "since": "2026-09-25T06:10:00Z"},
+      {"server": "hf", "kind": "skill_review", "quarantined": false, "skills_pending": 3, "skills_changed": 1,
+       "since": "2026-11-16T19:20:00Z"}
     ]
   }
 }

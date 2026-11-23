@@ -22,7 +22,7 @@ import (
 // (and the client identity attributed to it) cannot be carried across
 // single-server surfaces.
 func TestSingleServerSessionIDs_BoundToTheirServer(t *testing.T) {
-	a, b := newSingleServerSessionIDs("alpha"), newSingleServerSessionIDs("beta")
+	a, b := newSingleServerSessionIDs("alpha", 0), newSingleServerSessionIDs("beta", 0)
 	id := a.Generate()
 	_, err := a.Validate(id)
 	require.NoError(t, err)
@@ -41,7 +41,7 @@ func TestSingleServerStreamable_RefusesAnotherServersSession(t *testing.T) {
 		srv.AddTool(mcp.NewTool("echo"), func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return mcp.NewToolResultText("ok"), nil
 		})
-		return httptest.NewServer(mcpserver.NewStreamableHTTPServer(srv, singleServerStreamableOptions(nil, name)...))
+		return httptest.NewServer(mcpserver.NewStreamableHTTPServer(srv, singleServerStreamableOptions(nil, name, 0)...))
 	}
 	alpha, beta := newSurface("alpha"), newSurface("beta")
 	defer alpha.Close()
@@ -113,7 +113,7 @@ func TestStripServerPrefixInJSON_DidYouMeanKeepsOnlyThisServer(t *testing.T) {
 // another endpoint's session record cannot be registered or closed here.
 func TestSingleServerSessionGuard_RefusesForeignIDOnEveryMethod(t *testing.T) {
 	var reached int
-	guarded := httptest.NewServer(singleServerSessionGuard("beta", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	guarded := httptest.NewServer(singleServerSessionGuard("beta", 0, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		reached++
 		w.WriteHeader(http.StatusNoContent)
 	})))
@@ -129,14 +129,14 @@ func TestSingleServerSessionGuard_RefusesForeignIDOnEveryMethod(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode
 	}
-	foreign := newSingleServerSessionIDs("alpha").Generate()
+	foreign := newSingleServerSessionIDs("alpha", 0).Generate()
 	for _, m := range []string{http.MethodGet, http.MethodDelete, http.MethodPost} {
 		assert.Equal(t, http.StatusNotFound, do(m, foreign), "%s with alpha's session on beta", m)
 		assert.Equal(t, http.StatusNotFound, do(m, "mcp-session-980d2b73-e933-46a0-8d2f-0b9090f6bb79"), "%s with an untagged id", m)
 	}
 	assert.Zero(t, reached, "a refused request never reaches the transport")
 
-	own := newSingleServerSessionIDs("beta").Generate()
+	own := newSingleServerSessionIDs("beta", 0).Generate()
 	assert.Equal(t, http.StatusNoContent, do(http.MethodGet, own))
 	assert.Equal(t, http.StatusNoContent, do(http.MethodDelete, own))
 	assert.Equal(t, http.StatusNoContent, do(http.MethodPost, ""), "initialize carries no session id")

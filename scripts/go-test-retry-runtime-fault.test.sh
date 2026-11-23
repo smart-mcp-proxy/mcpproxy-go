@@ -231,6 +231,30 @@ printf '%s\n' "$OK_OUT" > "$d/run2.out"; echo 0 > "$d/run2.exit"
 check "crlf: exit 0" [ "$st" -eq 0 ]
 check "crlf: two go invocations" [ "$(count)" = 2 ]
 
+# 7b. GC zombie crash (#1986): `fatal error: found pointer to free object`
+#     is retried like the other runtime faults.
+new_case free_object
+printf '%s\n' '=== RUN   TestSolR2' 'runtime: marked free object in span 0xc000, elemsize=48 freeindex=0' 'fatal error: found pointer to free object' $'FAIL\tgithub.com/x/y/internal/security/scanner\t1171.109s' 'FAIL' > "$d/run1.out"; echo 2 > "$d/run1.exit"
+printf '%s\n' "$OK_OUT" > "$d/run2.out"; echo 0 > "$d/run2.exit"
+"$SUT" -v -- ./... >/dev/null 2>&1; st=$?
+check "free object: exit 0" [ "$st" -eq 0 ]
+check "free object: two go invocations" [ "$(count)" = 2 ]
+
+# 7b-crlf. The same signature through a CRLF-converted log (windows runner).
+new_case free_object_crlf
+printf '%s\r\n' '=== RUN   TestSolR2' 'fatal error: found pointer to free object' $'FAIL\tgithub.com/x/y/internal/security/scanner\t1171.109s' 'FAIL' > "$d/run1.out"; echo 2 > "$d/run1.exit"
+printf '%s\n' "$OK_OUT" > "$d/run2.out"; echo 0 > "$d/run2.exit"
+"$SUT" -v -- ./... >/dev/null 2>&1; st=$?
+check "free object crlf: exit 0" [ "$st" -eq 0 ]
+check "free object crlf: two go invocations" [ "$(count)" = 2 ]
+
+# 7c. ...but not when a genuine failure sits in the same block.
+new_case free_object_plus_assert
+printf '%s\n' '=== RUN   TestA' '--- FAIL: TestA (0.00s)' 'fatal error: found pointer to free object' $'FAIL\tgithub.com/x/y/internal/mixed\t3.000s' 'FAIL' > "$d/run1.out"; echo 2 > "$d/run1.exit"
+"$SUT" -v -- ./... >/dev/null 2>&1; st=$?
+check "free object + assertion: exit 2 unchanged" [ "$st" -eq 2 ]
+check "free object + assertion: one go invocation" [ "$(count)" = 1 ]
+
 # 8. Usage: no `--` separator is a usage error, go never runs.
 new_case usage
 "$SUT" -v ./... >/dev/null 2>&1; st=$?

@@ -117,7 +117,7 @@ func TestE2E_UpstreamIsErrorRecordedAsActivityError(t *testing.T) {
 
 	servers, err := rt.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfg := rt.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	require.NoError(t, rt.CommitConfig(cfg))
 

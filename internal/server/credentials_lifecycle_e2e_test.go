@@ -603,15 +603,19 @@ func TestE2E_CredentialsLifecycle_WriteGates(t *testing.T) {
 	e := newCredE2E(t, nil)
 	e.createResearchProfiles()
 	e.adminOK("credentials", map[string]any{"operation": "create_token", "name": "pre", "profile": "daily-research", "expires_in": "1h"})
-	live := e.env.proxyServer.runtime.Config()
 	for _, gate := range []struct {
-		set  func(bool)
+		set  func(*config.Config, bool)
 		code string
 	}{
-		{func(v bool) { live.ReadOnlyMode = v }, "read_only_mode"},
-		{func(v bool) { live.DisableManagement = v }, "management_disabled"},
+		{func(cfg *config.Config, v bool) { cfg.ReadOnlyMode = v }, "read_only_mode"},
+		{func(cfg *config.Config, v bool) { cfg.DisableManagement = v }, "management_disabled"},
 	} {
-		gate.set(true)
+		setGate := func(enabled bool) {
+			cfg := copyLiveConfig(t, e.env)
+			gate.set(cfg, enabled)
+			require.NoError(t, e.env.proxyServer.runtime.CommitConfig(cfg))
+		}
+		setGate(true)
 		for _, args := range []map[string]any{
 			{"operation": "create_client", "client": "g", "profile": "daily-research", "expires_in": "1h"},
 			{"operation": "create_token", "name": "g", "profile": "daily-research", "expires_in": "1h"},
@@ -623,7 +627,7 @@ func TestE2E_CredentialsLifecycle_WriteGates(t *testing.T) {
 		}
 		e.adminOK("credentials", map[string]any{"operation": "list"})
 		e.adminOK("credentials", map[string]any{"operation": "get", "token": "pre"})
-		gate.set(false)
+		setGate(false)
 	}
 	got := e.adminOK("credentials", map[string]any{"operation": "get", "token": "pre"})
 	assert.Equal(t, "active", got["credential"].(map[string]any)["state"])
@@ -733,27 +737,49 @@ type sseCapture struct {
 func (e *credE2E) captureSSE() *sseCapture {
 	e.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
+	e.t.Cleanup(cancel)
 	c := &sseCapture{stop: cancel, done: make(chan struct{})}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.base+"/events", http.NoBody)
 	require.NoError(e.t, err)
 	req.Header.Set("X-API-Key", credE2EAPIKey)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(e.t, err)
+	ready := make(chan struct{})
 	go func() {
 		defer close(c.done)
 		defer resp.Body.Close()
 		sc := bufio.NewScanner(resp.Body)
 		sc.Buffer(make([]byte, 1<<20), 1<<22)
+		var markReady sync.Once
 		for sc.Scan() {
+			line := sc.Text()
 			c.mu.Lock()
-			c.buf.WriteString(sc.Text())
+			c.buf.WriteString(line)
 			c.buf.WriteByte('\n')
 			c.mu.Unlock()
+			if line == "event: status" {
+				markReady.Do(func() { close(ready) })
+			}
 		}
 		c.mu.Lock()
 		c.err = sc.Err()
 		c.mu.Unlock()
 	}()
+	e.t.Cleanup(func() {
+		c.stop()
+		<-c.done
+	})
+	require.Equal(e.t, http.StatusOK, resp.StatusCode)
+	// The server flushes its greeting before subscribing to runtime events.
+	// The initial status is sent after subscribing, so credential calls can
+	// start as soon as the capture sees it.
+	select {
+	case <-ready:
+	case <-c.done:
+		e.t.Fatalf("SSE stream ended before the initial status: %v", c.err)
+	case <-time.After(10 * time.Second):
+		e.t.Fatal("SSE stream did not send the initial status")
+	}
 	return c
 }
 
@@ -877,11 +903,22 @@ func TestE2E_CredentialsLifecycle_SecretSinks(t *testing.T) {
 		body := e.restGet("/api/v1/activity/export?format=json&include_bodies=true&type=internal_tool_call&limit=50000")
 		return strings.Count(body, `"tool_name":"credentials"`) >= wantCalls
 	}, 20*time.Second, 200*time.Millisecond, "every credentials call must be recorded before the sinks are read")
-	require.Eventually(t, func() bool {
+	sseDeadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(sseDeadline) {
 		snap := sse.snapshot()
-		return strings.Count(snap, "credentials.changed") >= wantChanged &&
-			strings.Count(snap, `"internal_tool_name":"credentials"`) >= wantCalls
-	}, 20*time.Second, 100*time.Millisecond, "the SSE capture must contain every credentials call frame and both issues and revokes")
+		if strings.Count(snap, "credentials.changed") >= wantChanged &&
+			strings.Count(snap, `"internal_tool_name":"credentials"`) >= wantCalls {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	snap := sse.snapshot()
+	gotChanged := strings.Count(snap, "credentials.changed")
+	gotCalls := strings.Count(snap, `"internal_tool_name":"credentials"`)
+	require.GreaterOrEqual(t, gotChanged, wantChanged,
+		"credentials.changed frames: got %d want %d; snapshot bytes=%d", gotChanged, wantChanged, len(snap))
+	require.GreaterOrEqual(t, gotCalls, wantCalls,
+		"credentials call frames: got %d want %d; snapshot bytes=%d", gotCalls, wantCalls, len(snap))
 
 	sinks := map[string]string{
 		"errors":          strings.Join(errorsSeen, "\n"),

@@ -13,9 +13,69 @@ The Server Detail page (URL: `/ui/servers/<name>`) is where you inspect and
 edit a single upstream server. It opens from the Servers list or via the
 macOS tray's per-server submenu.
 
-The page has four tabs: **Tools**, **Logs**, **Configuration**, and
-**Security**. This page covers the Configuration tab — for the others,
+The page has these tabs: **Tools**, **Review**, **Skills** (only when
+[skills over MCP](../features/skills.md) is on and the server supports it),
+**Logs**, **Configuration**, and **Security**. The active tab is kept in
+`?tab=` (for example `?tab=skills`), so a reload or a shared link lands on the
+same tab. This page covers the Skills and Configuration tabs — for the others,
 see the [Dashboard](dashboard.md) and [Activity Log](activity-log.md) pages.
+
+## Skills tab
+
+The Skills tab is the Web UI for [reviewing skills](../features/skills.md#reviewing-skills)
+that an upstream server offers. It appears when `enable_skills` is on and the
+server announces the skills extension (or already has skill records). It is
+never shown to a non-administrator user of the server edition, which gets no
+skills endpoint at all. A `?tab=skills` link to a server where the tab is not
+offered opens the Tools tab instead (and the URL says `?tab=tools`).
+
+- **List.** Every skill of the server with one state chip (Blocked, Unusable,
+  Changed, Awaiting review or Approved), whether it is offered to agents, its
+  file count and its scan verdict. **Refresh** reads the server's skills again;
+  the list also reloads by itself when a `skills.changed` event arrives for
+  this server. **All skills** is the default for a direct tab visit. **Needs
+  review** shows only Pending or Changed skills that are currently listed and
+  unblocked, with a count matching the visible rows. Review queue Skills links
+  open `?tab=skills&state=needs-review`.
+- **Selection.** On a desktop screen the selected skill's card opens beside the
+  list, immediately in view. On a compact screen the card replaces the list;
+  **Back to skills** returns to the list and restores focus to the selected
+  row. Focus enters the detail when a skill is opened. If an action removes an
+  open skill from Needs review, its card stays visible until Back or another
+  selection. A normal refresh also keeps the card open.
+- **Scan.** The verdict and findings appear before **Approve** or **Approve
+  changes**, including incomplete coverage and truncated findings. Each
+  finding shows its file, position, rule, severity, and excerpt.
+- **Files and viewer.** **Read SKILL.md** opens the current instructions in one
+  action when that file is text. Supporting text files open from the file list.
+  The viewer receives focus on open and returns it to the original action on
+  close. File sizes stay in the list and **File hashes** reveals the full
+  digests. The viewer reads text in 64 KiB parts (**Load more**), and
+  once a skill has an approved copy you can switch the viewer between the
+  current and the approved copy. A binary file is listed but never shown. Every
+  part must be the version the list on screen names (same digest, same
+  offset); if a part of another version comes back, the text is dropped, the
+  viewer says "This file changed; reload to review the new version", and the
+  list reloads.
+- **Changes.** For a skill with an approved copy, the files are compared by
+  path and digest. Added, removed, and changed paths stay visible. Expand
+  **Unchanged files** to see the matching paths. **Show line diff** compares
+  one changed text file line by line; a file over 256 KiB on either side is not
+  compared in the browser. A file whose approved copy is text has **View
+  approved**, which opens that copy; this covers a removed file and a text file
+  replaced by a binary file at the same path, which has no line diff.
+- **Approve, Block, Unblock.** Approve names the content hash and the server
+  incarnation of the version you opened. If a reload (Refresh, or a
+  `skills.changed` event) brings a new version of the open skill, or the server
+  was removed and added again, the page says "This skill changed while you were
+  reviewing it" and Approve stays off until you choose **Open the new
+  version**, which starts the review over (viewer and comparison reset). If
+  the skill changed on the server before the list showed it, nothing is
+  approved: the list reloads and a notice says so.
+
+Everything the upstream server wrote (names, descriptions, file names, file
+text, finding excerpts) is shown as plain text and is never interpreted as
+markup.
 
 ## Configuration tab
 

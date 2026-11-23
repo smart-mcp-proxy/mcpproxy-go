@@ -399,7 +399,17 @@ async function reloadAfterStaleReview(server: string, visit: number, message: st
   if (isCurrent(server, visit)) notice.value = message
 }
 async function blockTool(name: string) { const server = props.serverName; const visit = visitGeneration; toolNotice.value = ''; const res = await api.blockTools(server, [name], ...incarnationArgs(review.value?.server.incarnation)); if (!isCurrent(server, visit)) return; await load(); if (!res.success && isCurrent(server, visit)) toolNotice.value = res.error || 'Block failed' }
-function refreshAfterReviewChange() { scanning.value = false; rescanning.value = false; void load() }
+// Spec 125: only a review change about this server's tools reloads the open
+// review. A frame for another server, or one a skills change caused (marked
+// `skills`), leaves the review and its scanning state alone. A frame with no
+// detail (an older core, a local dispatch) still reloads.
+function refreshAfterReviewChange(event: Event) {
+  const payload = (event as CustomEvent<{ payload?: { server?: string; servers?: string[]; skills?: boolean } }>).detail?.payload
+  if (payload?.skills) return
+  if (payload?.servers && !payload.servers.includes(props.serverName)) return
+  if (payload?.server && payload.server !== props.serverName) return
+  scanning.value = false; rescanning.value = false; void load()
+}
 function refreshAfterServersChange() {
   if (readinessEventTimer) clearTimeout(readinessEventTimer)
   readinessEventTimer = setTimeout(() => {

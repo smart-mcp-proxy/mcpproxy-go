@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -98,8 +99,18 @@ func TestLoginCompletion_TokenAndClientStoredAsOnePair(t *testing.T) {
 	// completion time may hold a replacement listener on another port.
 	replacement, err := oauth.GetGlobalCallbackManager().StartCallbackServer(f.name, 0)
 	require.NoError(t, err)
-	cbA := &oauth.CallbackServer{Port: 41001, RedirectURI: "http://127.0.0.1:41001" + oauth.DefaultRedirectPath}
-	cbB := &oauth.CallbackServer{Port: 41002, RedirectURI: "http://127.0.0.1:41002" + oauth.DefaultRedirectPath}
+	// The OS can assign either synthetic port to the replacement listener.
+	portA, portB := 41001, 41002
+	if replacement.Port == portA || replacement.Port == portB {
+		portA, portB = 41003, 41004
+	}
+	newCallback := func(port int) *oauth.CallbackServer {
+		return &oauth.CallbackServer{
+			Port:        port,
+			RedirectURI: fmt.Sprintf("http://127.0.0.1:%d%s", port, oauth.DefaultRedirectPath),
+		}
+	}
+	cbA, cbB := newCallback(portA), newCallback(portB)
 	ctx := context.Background()
 
 	doneA := make(chan error, 1)
