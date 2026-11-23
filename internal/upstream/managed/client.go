@@ -207,6 +207,12 @@ type Client struct {
 	// (Spec 105 FR-009, codex review round 8).
 	connectionEpoch atomic.Int64
 
+	// connectSuccesses counts connects that reached Ready. The connectivity
+	// watcher compares it across ticks, so a reconnect that succeeded and
+	// failed again between two ticks still counts as having connected
+	// (GH #1929).
+	connectSuccesses atomic.Uint64
+
 	// epochMu serializes the probe goroutine's final epoch-check-and-SetError
 	// with Connect's epoch bump. Without it a reconnect could complete between
 	// the probe's staleness check and its SetError, letting a stale verdict
@@ -392,15 +398,24 @@ type toolCaller interface {
 }
 
 // ambiguousProbeTimeout bounds the liveness probe fired after an ambiguous
-// tools/call cancellation. Matches the background health-check probe budget.
+// tools/call cancellation.
 const ambiguousProbeTimeout = 5 * time.Second
 
 // healthCheckFailureThreshold is the number of consecutive transient
-// health-check failures we tolerate before marking the server Error.
-// With a 30-second tick this is ~90s of unreachability — long enough that a
-// real outage still surfaces promptly, short enough that one slow upstream
-// request doesn't paint the UI red and clear the tools list.
-const healthCheckFailureThreshold = 3
+// health-check failures (timeouts) we tolerate before marking the server
+// Error. The loop is serial (the 30-second timer restarts after each probe
+// returns), so a server that times out every probe takes about 2.5 minutes
+// plus up to healthCheckProbeTimeout per probe (roughly 3.75 minutes). Hard failures (connection refused, DNS gone) still mark Error at
+// once. Three misses (90s) was too few on a heavily loaded machine: when a
+// few dozen agent sessions start at once, the whole host is CPU-starved for
+// minutes, every upstream's ping misses its window together, and each server
+// was torn down and reconnected while the clients were mid-request.
+const healthCheckFailureThreshold = 5
+
+// healthCheckProbeTimeout bounds one health-check ping. A ping is tiny, but
+// on a CPU-starved host the TLS handshake and scheduling alone can take
+// several seconds, so 5s produced timeouts for upstreams that were fine.
+const healthCheckProbeTimeout = 15 * time.Second
 
 // NewClient creates a new managed client with state management. The instance
 // holds no commit generation (0); the daemon builds instances with
@@ -725,6 +740,11 @@ func (mc *Client) connectUnlessStopped(ctx context.Context, stop <-chan struct{}
 				zap.String("code", string(code)),
 				zap.Error(connectErr))
 			mc.StateManager.SetTerminalError(connectErr, string(code))
+		} else if isNetworkErr {
+			// No upstream answered (GH #1929): same backoff, but marked so the
+			// connectivity watcher reconnects it as soon as the network is back
+			// instead of leaving it on a ladder built while the network was gone.
+			mc.StateManager.SetNetworkError(connectErr)
 		} else {
 			mc.StateManager.SetError(connectErr)
 		}
@@ -750,6 +770,7 @@ func (mc *Client) connectUnlessStopped(ctx context.Context, stop <-chan struct{}
 	mc.connectionEpoch.Store(nextConnectionEpoch())
 	mc.resetHealthCheckFailures()
 	mc.epochMu.Unlock()
+	mc.connectSuccesses.Add(1)
 
 	// Spec 113-e FR-080: remember the session id this connect obtained, so a
 	// transport that loses it before the first managed request can recover.
@@ -983,7 +1004,8 @@ func (mc *Client) SetConfigAt(cfg *config.ServerConfig, gen int64) bool {
 // SetConfig atomically swaps the server configuration. Lock-free; callers must
 // not hold mc.mu (they don't need to — the swap is atomic).
 //
-// Also pushes ExposePrompts down to the coreClient (PR #973 review, P2):
+// Also pushes ExposePrompts and ExposeSkills down to the coreClient (PR #973
+// review, P2; Spec 125):
 // coreClient.config is set once at connect time and never reassigned, so
 // without this a hot-reloaded expose_prompts value would stay frozen at
 // whatever was in effect when the connection was created, until the next
@@ -1010,6 +1032,7 @@ func (mc *Client) SetConfig(config *config.ServerConfig) {
 func (mc *Client) applyConfigSideEffects(config *config.ServerConfig) {
 	if mc.coreClient != nil && config != nil {
 		mc.coreClient.SetExposePrompts(config.ExposePrompts)
+		mc.coreClient.SetExposeSkills(config.ExposeSkills)
 	}
 	mc.warnForwardHeaders()
 }
@@ -1449,6 +1472,12 @@ func (mc *Client) runListToolsAsLeader(listCtx context.Context, release func() b
 	return tools, nil
 }
 
+// ErrClientNotConnected is returned by a call on a client that is not
+// connected. Callers that have no not-connected check of their own (the
+// code_execution sub-call) recognise it to record the call by the server's
+// state rather than as a proxy failure (release QA F1).
+var ErrClientNotConnected = errors.New("client not connected")
+
 // ErrConnectionGenerationChanged is CallToolOnEpoch's refusal: the client's
 // connection generation is no longer the one the caller certified the tool
 // identity against, so the call was NOT sent. It is returned verbatim (never
@@ -1505,7 +1534,7 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 		return nil, ErrInstanceRetired
 	}
 	if !mc.IsConnected() {
-		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
+		return nil, fmt.Errorf("%w (state: %s)", ErrClientNotConnected, mc.StateManager.GetState().String())
 	}
 	// #1317 round 2: counted from HERE, before admission control, not just
 	// around the transport call below — a call already queued in
@@ -1535,7 +1564,7 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 			return nil, ErrConnectionGenerationChanged
 		}
 	} else if !mc.IsConnected() {
-		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
+		return nil, fmt.Errorf("%w (state: %s)", ErrClientNotConnected, mc.StateManager.GetState().String())
 	}
 
 	// Spec 093 FR-003/FR-005: admission control sits here, above
@@ -1699,8 +1728,42 @@ func (mc *Client) setErrorIfCurrentConnection(err error, epoch int64) bool {
 	if mc.retired.Load() || !mc.IsConnected() || mc.connectionEpoch.Load() != epoch {
 		return false
 	}
-	mc.StateManager.SetError(err)
+	if mc.isRemoteNetworkFailure(err) {
+		// GH #1929 (review r4): a live connection that failed on the network
+		// (ping, call, list) is a network failure like a failed connect, so
+		// the connectivity watcher keeps watching it instead of dropping the
+		// outage it had observed.
+		mc.StateManager.SetNetworkError(err)
+	} else {
+		mc.StateManager.SetError(err)
+	}
 	return true
+}
+
+// isRemoteNetworkFailure reports whether err, seen on a remote (HTTP/SSE)
+// server, is a network failure: a typed one (core.IsNetworkError), or the
+// text of a hard network fault that reached us flattened into a string (for
+// example inside an OAuth token error the transport wrapped). Stdio servers
+// have no network path, so their failures never qualify.
+func (mc *Client) isRemoteNetworkFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	cfg := mc.GetConfig()
+	if cfg == nil || cfg.URL == "" || cfg.Command != "" {
+		return false
+	}
+	if core.IsNetworkError(err) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, p := range []string{"connection refused", "no such host", "network is unreachable", "no route to host", "connection reset", "econnrefused",
+		"actively refused", "forcibly closed by the remote host", "aborted by the software in your host machine"} {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // recordCallToolOAuthSignal inspects a failed tools/call error and, when it is an
@@ -2201,8 +2264,7 @@ func (mc *Client) performHealthCheckFor(stop <-chan struct{}) {
 		return
 	}
 
-	// Create a short timeout for health check
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), healthCheckProbeTimeout)
 	defer cancel()
 
 	// Probe liveness with the MCP-standard lightweight `ping` rather than
@@ -2319,7 +2381,7 @@ func (mc *Client) performHealthCheckFor(stop <-chan struct{}) {
 // Transient errors (timeout, deadline exceeded, context canceled) need
 // healthCheckFailureThreshold consecutive misses before they're considered a
 // real outage — slow upstreams (e.g. hf.co/mcp under load) routinely miss a
-// single 5-second health-check window without actually being down. Hard
+// single 15-second health-check window without actually being down. Hard
 // failures (connection refused, host unreachable, DNS gone) trigger Error
 // immediately because waiting buys nothing — the server is genuinely
 // unreachable and the user should see that.
@@ -2395,6 +2457,12 @@ func isTransientHealthCheckError(err error) bool {
 	if isDeadTransportError(err) {
 		return false
 	}
+	// A typed socket error decides by type (review r6 on GH #1929): a timeout
+	// is a soft miss, anything else (refused, reset, unreachable network or
+	// host, in any OS's words) is hard.
+	if opErr, ok := socketOpError(err); ok {
+		return opErr.Timeout()
+	}
 	msg := strings.ToLower(err.Error())
 	// Hard failures: short-circuit to "not transient" so the caller flips
 	// Error on the first miss. Order matters — check these BEFORE the
@@ -2406,7 +2474,11 @@ func isTransientHealthCheckError(err error) bool {
 		strings.Contains(msg, "no route to host"),
 		strings.Contains(msg, "connection reset"),
 		strings.Contains(msg, "broken pipe"),
-		strings.Contains(msg, "econnrefused"):
+		strings.Contains(msg, "econnrefused"),
+		// Windows wordings of the same hard failures (GH #1929 CI).
+		strings.Contains(msg, "actively refused"),
+		strings.Contains(msg, "forcibly closed by the remote host"),
+		strings.Contains(msg, "aborted by the software in your host machine"):
 		return false
 	}
 	// Soft failures: short-window misses we want to tolerate.
@@ -2513,6 +2585,13 @@ func (mc *Client) tryReconnect() {
 // Disconnect closed stop, the reconnect tears nothing down and does not
 // Connect, so it cannot bring back a server that was just disconnected.
 func (mc *Client) tryReconnectFor(stop <-chan struct{}) {
+	mc.tryReconnectWithin(context.Background(), stop)
+}
+
+// tryReconnectWithin is tryReconnectFor bounded by parent as well: the
+// connectivity watcher passes the manager's shutdown context, so a reconnect
+// it started is abandoned when the manager shuts down (GH #1929).
+func (mc *Client) tryReconnectWithin(parent context.Context, stop <-chan struct{}) {
 	if mc.IsUserLoggedOut() {
 		mc.logger.Info("Skipping reconnection attempt - user explicitly logged out",
 			zap.String("server", mc.GetConfig().Name))
@@ -2538,7 +2617,7 @@ func (mc *Client) tryReconnectFor(stop <-chan struct{}) {
 	}()
 
 	// Create a timeout context for the reconnection attempt - increased for OAuth flows
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Minute)
 	defer cancel()
 
 	mc.logger.Info("Starting reconnection attempt",
@@ -2807,6 +2886,12 @@ func (mc *Client) isConnectionError(err error) bool {
 	if isDeadTransportError(err) {
 		return true
 	}
+	// A socket-level failure is a connection error whatever the OS calls it
+	// (review r6 on GH #1929: Windows words unreachable networks and timeouts
+	// in ways no phrase list keeps up with).
+	if _, ok := socketOpError(err); ok {
+		return true
+	}
 
 	errStr := err.Error()
 	connectionErrors := []string{
@@ -2828,6 +2913,11 @@ func (mc *Client) isConnectionError(err error) bool {
 		"Failed to reconnect SSE stream",
 		"Maximum reconnection attempts",
 		"connect ECONNREFUSED",
+		// Windows socket wordings (GH #1929 CI): a refused dial, and a
+		// connection the peer or the local stack dropped.
+		"actively refused",
+		"forcibly closed by the remote host",
+		"aborted by the software in your host machine",
 	}
 
 	for _, connErr := range connectionErrors {
@@ -2951,34 +3041,9 @@ func (mc *Client) isNormalReconnectionError(err error) bool {
 // isDeprecatedEndpointError checks if error indicates a deprecated/removed endpoint (HTTP 410 Gone)
 // This helps detect when an MCP server has migrated to a new endpoint URL
 func (mc *Client) isDeprecatedEndpointError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	// Check for transport.ErrEndpointDeprecated type first
-	if transport.IsEndpointDeprecatedError(err) {
-		return true
-	}
-
-	errStr := strings.ToLower(err.Error())
-	deprecationIndicators := []string{
-		"410",                            // HTTP 410 Gone
-		"gone",                           // Status text
-		"deprecated",                     // Common migration message
-		"removed",                        // Endpoint removed
-		"no longer supported",            // Common deprecation message
-		"use the http transport",         // Sentry-specific migration hint
-		"sse transport has been removed", // Sentry-specific error
-		"endpoint deprecated",            // Our custom error message
-	}
-
-	for _, indicator := range deprecationIndicators {
-		if strings.Contains(errStr, indicator) {
-			return true
-		}
-	}
-
-	return false
+	// GH #1929: one classifier for both layers; a socket failure naming an
+	// address that contains "410" is not a 410 Gone.
+	return transport.LooksLikeDeprecatedEndpoint(err)
 }
 
 // GetCachedToolCount returns the cached tool count or fetches fresh count if cache is expired
@@ -3160,3 +3225,16 @@ var connectionEpochCounter atomic.Int64
 
 // nextConnectionEpoch returns a fresh, strictly increasing epoch.
 func nextConnectionEpoch() int64 { return connectionEpochCounter.Add(1) }
+
+// socketOpError returns the socket-level *net.OpError in err's chain. A TLS
+// alert the peer sent ("remote error: tls: certificate required", "bad
+// certificate") is also reported as an OpError, but it is the server rejecting
+// our credentials, not a network failure (review r7 on GH #1929), so it is not
+// returned and the caller falls back to its text rules.
+func socketOpError(err error) (*net.OpError, bool) {
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) || opErr.Op == "remote error" {
+		return nil, false
+	}
+	return opErr, true
+}

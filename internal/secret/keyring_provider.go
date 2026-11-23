@@ -52,6 +52,25 @@ var ErrKeyringTimeout = errors.New("keyring operation timed out (backend unrespo
 // secret store.
 var ErrKeyringUnavailable = errors.New("keyring unavailable (backend not usable on this system — refusing to write to avoid OS modal prompts)")
 
+// ErrKeyringWriteOptIn is returned by Store on macOS when the only thing
+// standing in the way is the write opt-in (MCPPROXY_KEYRING_WRITE /
+// SetWritesEnabled): the Keychain was not consulted, so nothing is known to
+// be wrong with it (GH #1924). It matches ErrKeyringUnavailable under
+// errors.Is, so callers that fall back on that sentinel behave as before,
+// while its text names the opt-in instead of describing a broken backend.
+var ErrKeyringWriteOptIn error = keyringWriteOptInError{}
+
+type keyringWriteOptInError struct{}
+
+func (keyringWriteOptInError) Error() string {
+	return "OS keychain writes are not enabled: on macOS, outside the tray app, storing a secret requires opting in with MCPPROXY_KEYRING_WRITE=1 (the keychain itself was not checked)"
+}
+
+// Is makes the opt-in refusal a kind of ErrKeyringUnavailable.
+func (keyringWriteOptInError) Is(target error) bool {
+	return target == ErrKeyringUnavailable
+}
+
 // Package-level function variables allow tests to inject a fake/hanging
 // keyring without reaching into the real OS keychain.
 var (
@@ -162,7 +181,8 @@ func (p *KeyringProvider) Resolve(_ context.Context, ref Ref) (string, error) {
 // Store saves a secret to the OS keyring and updates the registry.
 //
 // By default on macOS this method does NOT actually call keyring.Set —
-// it returns ErrKeyringUnavailable immediately. Rationale: on macOS
+// it returns ErrKeyringWriteOptIn (a kind of ErrKeyringUnavailable)
+// immediately. Rationale: on macOS
 // keyring.Set wraps Security.framework under the hood; if the user's
 // default keychain is missing/locked/in an unusual state, Security.framework
 // pops a system modal ("Keychain Not Found" with a destructive default
@@ -197,7 +217,7 @@ func (p *KeyringProvider) Store(_ context.Context, ref Ref, value string) error 
 	// per-provider via SetWritesEnabled(true).
 	if runtime.GOOS == "darwin" && !p.writesEnabled() {
 		p.markUnavailable()
-		return ErrKeyringUnavailable
+		return ErrKeyringWriteOptIn
 	}
 
 	// Layer 1: if we already know the keyring is broken, bail out without
@@ -245,6 +265,16 @@ func (p *KeyringProvider) writesEnabled() bool {
 	}
 	v := strings.ToLower(os.Getenv("MCPPROXY_KEYRING_WRITE"))
 	return v == "1" || v == "true" || v == "yes"
+}
+
+// WriteOptInRequired reports whether a Store would be refused for the single
+// reason that the macOS write opt-in is absent — the condition a user can
+// lift themselves by setting MCPPROXY_KEYRING_WRITE=1 (GH #1924). It is false
+// in a headless environment, where there is no keychain to opt in to and
+// IsAvailableWithReason reports that reason instead, and it never touches the
+// keychain.
+func (p *KeyringProvider) WriteOptInRequired() bool {
+	return runtime.GOOS == "darwin" && !isHeadlessEnvironment() && !p.writesEnabled()
 }
 
 // SetWritesEnabled is a test-only helper that forces the opt-in state

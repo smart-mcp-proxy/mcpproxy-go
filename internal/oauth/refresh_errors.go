@@ -89,6 +89,31 @@ var (
 	ErrNoClientCredentials = errors.New("oauth: no client credentials available for token refresh; sign in again")
 )
 
+// refreshNotSentError marks a refresh that failed before any token request
+// was sent (the token endpoint could not be found, for example). It changes
+// neither the text nor the chain of the error it wraps.
+type refreshNotSentError struct{ err error }
+
+func (e *refreshNotSentError) Error() string { return e.err.Error() }
+func (e *refreshNotSentError) Unwrap() error { return e.err }
+
+// MarkRefreshNotSent marks err as the failure of a refresh that sent no token
+// request. A nil error stays nil.
+func MarkRefreshNotSent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &refreshNotSentError{err: err}
+}
+
+// RefreshWasNotSent reports whether err is the failure of a refresh that sent
+// no token request: one marked with MarkRefreshNotSent, or the refusal to
+// refresh without a client id.
+func RefreshWasNotSent(err error) bool {
+	var notSent *refreshNotSentError
+	return errors.As(err, &notSent) || errors.Is(err, ErrNoClientCredentials)
+}
+
 // RefreshHTTPError is the typed error of mcpproxy's own refresh request (the
 // stored-DCR-credentials path). Detail is already scrubbed and capped by the
 // producer; the raw body is never kept.

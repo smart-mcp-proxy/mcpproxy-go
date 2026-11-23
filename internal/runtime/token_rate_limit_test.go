@@ -110,7 +110,9 @@ func startEchoUpstream(t *testing.T) (addr string, reached *atomic.Int64) {
 	require.NoError(t, err)
 	httpSrv := &http.Server{Handler: mcpserver.NewStreamableHTTPServer(srv), ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = httpSrv.Serve(ln) }()
-	t.Cleanup(func() { _ = httpSrv.Shutdown(context.Background()) })
+	// Close, not Shutdown: the runtime may hold a standalone GET stream to this
+	// upstream (GH #1910), which never goes idle, so Shutdown would wait forever.
+	t.Cleanup(func() { _ = httpSrv.Close() })
 	return fmt.Sprintf("http://%s", ln.Addr().String()), reached
 }
 

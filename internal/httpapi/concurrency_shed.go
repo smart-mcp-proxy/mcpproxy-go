@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
 
 // toolCallRequestSource classifies who made a REST tool call, so the activity
@@ -20,6 +21,19 @@ func toolCallRequestSource(r *http.Request) reqcontext.RequestSource {
 		return reqcontext.SourceCLI
 	}
 	return reqcontext.SourceRESTAPI
+}
+
+// restClientSurface names the first-party surface behind a REST request, from
+// the X-MCPProxy-Client header the CLI, the Web UI and the tray already send,
+// or "rest" for any other caller (a script, curl). Spec 124 FR-002 uses it as
+// the client name of a call that has no MCP clientInfo.
+func restClientSurface(r *http.Request) string {
+	switch s := telemetry.ParseClientSurface(r.Header.Get(XMCPProxyClientHeader)); s {
+	case telemetry.SurfaceCLI, telemetry.SurfaceWebUI, telemetry.SurfaceTray:
+		return s.String()
+	default:
+		return "rest"
+	}
 }
 
 // defaultRetryAfterSeconds is the hint used when the shedding scope reported no

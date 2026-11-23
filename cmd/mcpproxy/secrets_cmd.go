@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"golang.org/x/term"
 )
 
 // GetSecretsCommand returns the secrets management command
@@ -33,72 +35,142 @@ func GetSecretsCommand() *cobra.Command {
 	return secretsCmd
 }
 
+// secretsSetOptions are the flags of `secrets set`.
+type secretsSetOptions struct {
+	secretType string
+	fromEnv    string
+	fromStdin  bool
+}
+
+// secretsSetLong is the `secrets set --help` text. The macOS paragraph exists
+// because the opt-in is otherwise discoverable only by failing (GH #1924).
+const secretsSetLong = `Store a secret in the OS keyring. If no value is provided, will prompt for input.
+
+macOS: writing to the Keychain from a terminal requires an explicit opt-in,
+because a missing or locked keychain makes macOS show a system dialog that
+mcpproxy cannot cancel. Opt in for one command:
+
+  MCPPROXY_KEYRING_WRITE=1 mcpproxy secrets set <name>
+
+The tray app opts in automatically for the core it launches. Linux and Windows
+need no opt-in.`
+
 // getSecretsSetCommand returns the secrets set command
 func getSecretsSetCommand() *cobra.Command {
-	var (
-		secretType string
-		fromEnv    string
-		fromStdin  bool
-	)
+	var opts secretsSetOptions
 
 	cmd := &cobra.Command{
 		Use:   "set <name> [value]",
 		Short: "Store a secret in the keyring",
-		Long:  "Store a secret in the OS keyring. If no value is provided, will prompt for input.",
+		Long:  secretsSetLong,
 		Args:  cobra.RangeArgs(1, 2),
-		RunE: func(_ *cobra.Command, args []string) error {
-			name := args[0]
-			var value string
-
-			// Determine how to get the secret value
-			if len(args) >= 2 {
-				value = args[1]
-			} else if fromEnv != "" {
-				value = os.Getenv(fromEnv)
-				if value == "" {
-					return fmt.Errorf("environment variable %s is not set or empty", fromEnv)
-				}
-			} else {
-				// Both fromStdin and default case read from stdin
-				fmt.Print("Enter secret value: ")
-				var err error
-				value, err = readPassword()
-				if err != nil {
-					return fmt.Errorf("failed to read password: %w", err)
-				}
-			}
-
-			if value == "" {
-				return fmt.Errorf("secret value cannot be empty")
-			}
-
-			// Create resolver and store secret
-			resolver := secret.NewResolver()
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-
-			ref := secret.Ref{
-				Type: secretType,
-				Name: name,
-			}
-
-			err := resolver.Store(ctx, ref, value)
-			if err != nil {
-				return fmt.Errorf("failed to store secret: %w", err)
-			}
-
-			fmt.Printf("Secret '%s' stored successfully in %s\n", name, secretType)
-			fmt.Printf("Use in config: ${%s:%s}\n", secretType, name)
-
-			return nil
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// The arguments parsed; from here a failure is about the keyring,
+			// and the usage text would only bury the explanation.
+			cmd.SilenceUsage = true
+			return runSecretsSet(secret.NewResolver(), os.Stdin, os.Stdout, args, opts)
 		},
 	}
 
-	cmd.Flags().StringVar(&secretType, "type", "keyring", "Secret provider type (keyring, env)")
-	cmd.Flags().StringVar(&fromEnv, "from-env", "", "Read value from environment variable")
-	cmd.Flags().BoolVar(&fromStdin, "from-stdin", false, "Read value from stdin")
+	cmd.Flags().StringVar(&opts.secretType, "type", "keyring", "Secret provider type (keyring, env)")
+	cmd.Flags().StringVar(&opts.fromEnv, "from-env", "", "Read value from environment variable")
+	cmd.Flags().BoolVar(&opts.fromStdin, "from-stdin", false, "Read value from stdin")
 
 	return cmd
+}
+
+// runSecretsSet implements `secrets set`: args is <name> [value].
+func runSecretsSet(resolver *secret.Resolver, in io.Reader, out io.Writer, args []string, opts secretsSetOptions) error {
+	name := args[0]
+
+	// GH #1924: decide whether the write can happen BEFORE asking for the
+	// value. The keyring provider refuses a Store on macOS without the write
+	// opt-in, and the user used to learn that only after typing the secret.
+	if opts.secretType == secret.SecretTypeKeyring {
+		if err := keyringWritePreflight(resolver, name, len(args) >= 2, opts); err != nil {
+			return err
+		}
+	}
+
+	var value string
+
+	// Determine how to get the secret value
+	switch {
+	case len(args) >= 2:
+		value = args[1]
+	case opts.fromEnv != "":
+		value = os.Getenv(opts.fromEnv)
+		if value == "" {
+			return fmt.Errorf("environment variable %s is not set or empty", opts.fromEnv)
+		}
+	default:
+		// --from-stdin is piped input: a prompt there would only pollute the
+		// output of a script.
+		if !opts.fromStdin {
+			fmt.Fprint(out, "Enter secret value: ")
+		}
+		var err error
+		value, err = readPassword(in)
+		if err != nil {
+			return fmt.Errorf("failed to read password: %w", err)
+		}
+	}
+
+	if value == "" {
+		return fmt.Errorf("secret value cannot be empty")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ref := secret.Ref{
+		Type: opts.secretType,
+		Name: name,
+	}
+
+	if err := resolver.Store(ctx, ref, value); err != nil {
+		return fmt.Errorf("failed to store secret: %w", err)
+	}
+
+	fmt.Fprintf(out, "Secret '%s' stored successfully in %s\n", name, opts.secretType)
+	fmt.Fprintf(out, "Use in config: ${%s:%s}\n", opts.secretType, name)
+
+	return nil
+}
+
+// keyringWritePreflight reports why a keyring write cannot happen, or nil
+// when it can be attempted. It keeps two conditions apart that used to share
+// one "keyring unavailable" message (GH #1924):
+//
+//   - the macOS write opt-in is absent — nothing is wrong with the Keychain,
+//     and the user can lift it, so the error is the command to run;
+//   - the keyring really is unusable (headless session, locked or
+//     unresponsive backend) — the provider's own reason is reported.
+//
+// The opt-in is never taken on the user's behalf: it exists because a
+// Keychain write can raise a system dialog mcpproxy cannot cancel.
+func keyringWritePreflight(resolver *secret.Resolver, name string, valueAsArg bool, opts secretsSetOptions) error {
+	if resolver.KeyringWriteOptInRequired() {
+		// Repeat how the value was going to be supplied, so the command can
+		// be re-run as printed. A value given as an argument is never echoed.
+		retry := "MCPPROXY_KEYRING_WRITE=1 mcpproxy secrets set " + shellQuoteArg(name)
+		switch {
+		case valueAsArg:
+			retry += " <value>"
+		case opts.fromEnv != "":
+			retry += " --from-env=" + shellQuoteArg(opts.fromEnv)
+		case opts.fromStdin:
+			retry += " --from-stdin"
+		}
+		return fmt.Errorf("storing a secret in the macOS Keychain from a terminal requires an explicit opt-in; nothing was stored and the Keychain was not touched.\n\n"+
+			"Run:\n  %s\n\n"+
+			"Why: if the keychain is missing or locked, macOS shows a system dialog that mcpproxy cannot cancel, so it never writes without being asked. "+
+			"The tray app opts in automatically for the core it launches", retry)
+	}
+	if ok, reason := resolver.KeyringAvailability(); !ok {
+		return fmt.Errorf("cannot store secret: OS keyring unavailable (%s)", reason)
+	}
+	return nil
 }
 
 // getSecretsGetCommand returns the secrets get command
@@ -344,11 +416,53 @@ func getSecretsMigrateCommand() *cobra.Command {
 	return cmd
 }
 
-// readPassword reads a password from stdin without echoing
-func readPassword() (string, error) {
-	// For now, use a simple implementation
-	// In production, you'd want to use something like golang.org/x/term
-	var password string
-	_, err := fmt.Scanln(&password)
-	return password, err
+// shellQuoteArg renders arg so a POSIX shell reads it back as one word. A
+// plain word is returned as is; anything else is single-quoted ("=" included:
+// zsh expands a leading "=name" to a command path), so a secret
+// name with a space or a shell metacharacter survives being copied from a
+// printed command.
+func shellQuoteArg(arg string) string {
+	plain := arg != ""
+	for _, r := range arg {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && !strings.ContainsRune("_-./:@%+,", r) {
+			plain = false
+			break
+		}
+	}
+	if plain {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
+}
+
+// readPassword reads a secret without echoing the typed characters when the
+// input is a terminal. For piped input (including --from-stdin) there is
+// nothing to echo and the whole stream is the value.
+func readPassword(in io.Reader) (string, error) {
+	if fd, ok := terminalFd(in); ok {
+		password, err := term.ReadPassword(fd)
+		fmt.Println()
+		return string(password), err
+	}
+	return readSecretStdin(in)
+}
+
+// terminalFd reports the file descriptor of in when it is a terminal, which
+// is the only case where typed characters would otherwise be echoed.
+func terminalFd(in io.Reader) (int, bool) {
+	f, ok := in.(*os.File)
+	if !ok {
+		return 0, false
+	}
+	fd := int(f.Fd())
+	return fd, term.IsTerminal(fd)
+}
+
+// readSecretStdin reads all piped input and removes only line-ending bytes.
+func readSecretStdin(input io.Reader) (string, error) {
+	value, err := io.ReadAll(input)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(string(value), "\r\n"), nil
 }

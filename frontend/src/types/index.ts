@@ -48,6 +48,7 @@ export {
   AttentionKindServerError,
   AttentionKindServerReview,
   AttentionKindToolReview,
+  AttentionKindSkillReview,
   AttentionKindClientNeverSeen,
 } from './contracts'
 export { isAPIError, isAPISuccess } from './contracts'

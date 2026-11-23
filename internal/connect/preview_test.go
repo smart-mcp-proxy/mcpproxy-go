@@ -44,7 +44,7 @@ func seedClientConfig(t *testing.T, home, clientID string) {
 // FR-013). opencode requires a pre-existing config file (Connect refuses to
 // create one) and is exercised with a seeded file in the loop.
 var supportedPreviewClients = []string{
-	"claude-code", "claude-desktop", "cursor", "windsurf",
+	"claude-code", "claude-desktop", "copilot", "cursor", "windsurf",
 	"vscode", "codex", "gemini", "opencode",
 }
 

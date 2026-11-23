@@ -116,7 +116,7 @@ the read timeout — see its row). Valid range: `1s`–`24h`, or `0s`.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `tools_limit` | integer | `15` | Maximum tools to return in a single request |
-| `tool_response_limit` | integer | `20000` | Maximum characters in tool response |
+| `tool_response_limit` | integer | `20000` | Maximum characters in tool response (0 = unlimited). Also bounds `structuredContent`: when its JSON is longer than the limit it is withheld and delivered as a text block (sanitised, then truncated with a `read_cache` handle), or left out when a text block already carries the same JSON. On the direct surface a tool listed with an `outputSchema` keeps its `structuredContent` |
 | `instructions` | string | _(built-in)_ | Custom text for the MCP `initialize` response, sent verbatim to every client. Do not put server names or secrets in it. A per-caller access block is always appended; see [Agent Instructions](/features/agent-instructions). |
 | `advertise_upstream_servers` | boolean | `true` | Name the caller's reachable upstream servers in the initialize instructions and the `retrieve_tools` description, filtered to its profile and agent-token scope. Set `false` to keep server names out of client context. Hot-reloadable. See [Agent Instructions](/features/agent-instructions). |
 
@@ -470,6 +470,15 @@ A profile is a named view over your upstream servers with a tool policy. The ful
 A profile that sets only `name` and `servers` behaves exactly as before: no cap, unannotated tools count as read, no rules. Invalid input (an unknown tier or `unannotated` value, a malformed pattern, `switchable_to` naming the profile itself) is refused with the same message on every surface. Both `profiles` and `anonymous_profile` are **live**: an edit takes effect without a restart, and `PATCH /api/v1/config` reports them in `changed_fields`.
 
 With `require_mcp_auth` off, a change that would let a client bound to a profile escape it by omitting its credential is refused with `409 binding_bypassable_without_auth` (see [Profiles, the binding guard](/features/profiles#the-binding-guard)). **Before downgrading to a pre-profiles-v3 binary, turn `require_mcp_auth` on**; the older binary does not know client credentials or `anonymous_profile`.
+
+### Skills (`enable_skills`) {#skills}
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enable_skills` | boolean | `false` | Read the skills that upstream servers expose through the MCP skills extension. In this release they are shown to administrators only and are not offered to agents. Hot-reloaded. |
+| `mcpServers[].expose_skills` | boolean | follows `enable_skills` | Per-server override. `false` excludes the server: it is not asked for skills. Hot-reloaded. |
+
+See [Skills over MCP](/features/skills).
 
 ### MCP Servers
 

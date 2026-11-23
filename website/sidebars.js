@@ -100,6 +100,7 @@ const sidebars = {
       link: { type: 'generated-index', slug: '/features', description: 'Explore tool discovery, routing, client connections and security controls.' },
       items: [
         'features/routing-modes',
+        'features/single-server-endpoints',
         'features/schema-deferred-direct-mode',
         'features/search-discovery',
         'features/tools-preflight',
@@ -107,6 +108,7 @@ const sidebars = {
         'features/profiles',
         'features/mcp-credential-lifecycle',
         'features/connect-clients',
+        'features/skills',
         'features/agent-instructions',
         'features/config-import',
         'features/registry-add',

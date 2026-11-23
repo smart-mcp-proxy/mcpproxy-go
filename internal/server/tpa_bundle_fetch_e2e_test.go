@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,7 +14,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -209,8 +210,80 @@ type e2eFixture struct {
 	keyID    string
 	genAt    string
 	upstream *httptest.Server
-	upCalls  atomic.Int64
+	up       *e2eUpstream
 	acts     *e2eActivations
+}
+
+// e2eUpstream is the fake upstream the re-protection sweep must never reach.
+//
+// It is configured at a path unique to this fixture (target, a random token).
+// A request counts as a call from the proxy under test, whatever its method or
+// headers, when its path
+//   - contains the token: the target itself and path-derived discovery such as
+//     /.well-known/oauth-protected-resource/<target>; or
+//   - is one the proxy derives from the origin alone: any /.well-known/ path
+//     (RFC 8414 / OpenID metadata at the host root) and the default OAuth
+//     endpoints /authorize, /token and /register (mcp-go getDefaultEndpoints).
+//
+// Any other request is recorded separately, by method and path only (never
+// headers or session IDs), and logged rather than counted: the proxy builds
+// no other path from this fixture's config. A likely source is shown by #1918
+// CI run 44349461004, which logged 1,335 refused `DELETE http://127.0.0.1:<port>`
+// session-close requests from clients of earlier tests closing after their
+// servers were gone; one that reaches a port reused for this upstream is
+// answered and never logged, and it never has one of the counted shapes.
+type e2eUpstream struct {
+	target string
+
+	mu     sync.Mutex
+	calls  []string // requests to this fixture's configured target
+	others []string // requests to any other path
+}
+
+func newE2EUpstream(t *testing.T) *e2eUpstream {
+	t.Helper()
+	token := make([]byte, 8)
+	_, err := rand.Read(token)
+	require.NoError(t, err)
+	return &e2eUpstream{target: "/mcp-e2e-" + hex.EncodeToString(token)}
+}
+
+func (u *e2eUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	line := r.Method + " " + r.URL.Path
+	u.mu.Lock()
+	if u.isProxyCall(r.URL.Path) {
+		u.calls = append(u.calls, line)
+	} else {
+		u.others = append(u.others, line)
+	}
+	u.mu.Unlock()
+	http.Error(w, "the re-protection sweep must never reach an upstream", http.StatusTeapot)
+}
+
+// isProxyCall reports whether the proxy under test could have built path from
+// this fixture's config (see e2eUpstream).
+func (u *e2eUpstream) isProxyCall(path string) bool {
+	switch {
+	case strings.Contains(path, strings.TrimPrefix(u.target, "/")),
+		strings.HasPrefix(path, "/.well-known/"),
+		path == "/authorize", path == "/token", path == "/register":
+		return true
+	}
+	return false
+}
+
+// callsToTarget returns the requests the proxy under test could have made.
+func (u *e2eUpstream) callsToTarget() []string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]string(nil), u.calls...)
+}
+
+// otherRequests returns the requests to any other path.
+func (u *e2eUpstream) otherRequests() []string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]string(nil), u.others...)
 }
 
 // e2eActivations records the scanner's activation notifications.
@@ -236,10 +309,14 @@ func newE2EFixture(t *testing.T, fetchPath string, withApprovedTool bool) *e2eFi
 	}
 
 	f := &e2eFixture{channel: newE2EChannel(t), acts: &e2eActivations{}}
-	f.upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		f.upCalls.Add(1)
-		http.Error(w, "the re-protection sweep must never reach an upstream", http.StatusTeapot)
-	}))
+	f.up = newE2EUpstream(t)
+	f.upstream = httptest.NewServer(f.up)
+	// Registered first so it runs after the upstream is closed (LIFO).
+	t.Cleanup(func() {
+		if others := f.up.otherRequests(); len(others) > 0 {
+			t.Logf("the fake upstream also received %d request(s) on paths this fixture's config does not produce (not counted): %v", len(others), others)
+		}
+	})
 	t.Cleanup(f.upstream.Close)
 
 	f.priv = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x5a}, ed25519.SeedSize))
@@ -262,7 +339,7 @@ func newE2EFixture(t *testing.T, fetchPath string, withApprovedTool bool) *e2eFi
 	work := &config.ServerConfig{
 		// Disabled so the runtime's own background start never dials it: any
 		// request the fake upstream sees would then come from the sweep.
-		Name: "work", Enabled: false, Protocol: "http", URL: f.upstream.URL + "/mcp",
+		Name: "work", Enabled: false, Protocol: "http", URL: f.upstream.URL + f.up.target,
 		TrustMode: string(config.TrustModeManual),
 	}
 	// An operator-decided, unquarantined server: without the explicit mark the
@@ -404,6 +481,12 @@ func TestTPAFetchLifecycle_ActivatesReprotectsAndRefusesBadReleases(t *testing.T
 	require.NotNil(t, info.LastActivatedAt)
 	assert.Equal(t, scanner.RefreshTriggerTimer, info.Refresh.LastTrigger, "the scheduler, not a manual refresh, fetched it")
 	require.NotNil(t, f.rt.TelemetryRegistry())
+	// The source flips inside the cycle's fetch leg; the cycle reports its
+	// outcome to the telemetry observer only after that leg returns (recordCycle,
+	// logOutcome, then notifyRefreshObserver), so the counter lags the status.
+	e2eEventually(t, "the activating cycle is counted", func() bool {
+		return f.rt.TelemetryRegistry().Snapshot().TPABundleRefreshActivations >= 1
+	})
 	assert.EqualValues(t, 1, f.rt.TelemetryRegistry().Snapshot().TPABundleRefreshActivations, "exactly one cycle reported activated")
 
 	// Later cycles see the asset's sequence at or below the watermark and skip
@@ -446,7 +529,7 @@ func TestTPAFetchLifecycle_ActivatesReprotectsAndRefusesBadReleases(t *testing.T
 	stored, err := f.rt.StorageManager().GetUpstreamServer("work")
 	require.NoError(t, err)
 	assert.False(t, stored.Quarantined, "the server is not quarantined")
-	assert.Zero(t, f.upCalls.Load(), "the fake upstream gets zero calls: the sweep is cached-only")
+	assert.Empty(t, f.up.callsToTarget(), "the fake upstream gets zero calls: the sweep is cached-only (other paths: %v)", f.up.otherRequests())
 	reg := f.rt.TelemetryRegistry()
 	require.NotNil(t, reg)
 	assert.EqualValues(t, 1, reg.Snapshot().TPABundleReprotectHits, "bundle_reprotect_hits counts the one server")

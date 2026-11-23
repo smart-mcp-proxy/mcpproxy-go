@@ -106,6 +106,9 @@ type Server struct {
 	// default aggregation". Surfaced on GET so a caller that PATCHed the override
 	// can read it back; PATCH/POST accept it via AddServerRequest.
 	ExposePrompts *bool `json:"expose_prompts,omitempty"`
+	// ExposeSkills mirrors config.ServerConfig.ExposeSkills: the per-server
+	// skills override. Tri-state *bool; nil/omitted means "inherit".
+	ExposeSkills *bool `json:"expose_skills,omitempty"`
 	// ForwardHeaders mirrors config.ServerConfig.ForwardHeaders (Spec 112): the
 	// allowlist of inbound MCP client header NAMES forwarded to this server on
 	// tools/call. Names only, never values. Omitted when empty.
@@ -821,7 +824,29 @@ type Diagnostics struct {
 	// counts by state, the undecryptable servers and the compaction advice.
 	// It never carries key material or the key reference.
 	OAuthTokenStorage *OAuthTokenStorageReport `json:"oauth_token_storage,omitempty"`
+	// ActivityRetention (Spec 124 FR-035) reports whether the activity caps
+	// hold the whole work-session retention window. Administrators only.
+	ActivityRetention *ActivityRetentionReport `json:"activity_retention,omitempty"`
 	Timestamp         time.Time                `json:"timestamp"`
+}
+
+// ActivityRetentionReport is the activity retention section of doctor and of
+// GET /api/v1/diagnostics (Spec 124 FR-035).
+type ActivityRetentionReport struct {
+	// WindowDays is the work-session retention window.
+	WindowDays int `json:"window_days"`
+	// Shortfall is true when a work session inside the window lost rows
+	// because a cap was reached, and a full window has not passed since.
+	Shortfall bool `json:"shortfall"`
+	// Cause is age_cap, record_cap or size_cap.
+	Cause string `json:"cause,omitempty"`
+	// ObservedAt is when the shortfall was last observed.
+	ObservedAt *time.Time `json:"observed_at,omitempty"`
+	// OldestCompleteSessionAt is the start of the oldest session that still
+	// has all of its rows: complete history reaches back to here.
+	OldestCompleteSessionAt *time.Time `json:"oldest_complete_session_at,omitempty"`
+	// Raise names the settings to raise for the cause.
+	Raise []string `json:"raise,omitempty"`
 }
 
 // OAuthTokenStorageReport is the OAuth token storage section of doctor and of

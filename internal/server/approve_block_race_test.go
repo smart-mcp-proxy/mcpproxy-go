@@ -89,6 +89,7 @@ func TestApproveWithBlockNeverDispatchesBlockedTool(t *testing.T) {
 	var preApprovalCalls atomic.Int64
 	var postApprovalCalls atomic.Int64
 	var approvalReturned atomic.Bool
+	var workerOutcome atomic.Value // a worker's last post-approval non-refusal, for the failure message
 	quarantineResponse := func(result *mcp.CallToolResult) bool {
 		if result == nil || !result.IsError || len(result.Content) == 0 {
 			return false
@@ -127,12 +128,35 @@ func TestApproveWithBlockNeverDispatchesBlockedTool(t *testing.T) {
 				if postApproval {
 					if blockedResponse(result) {
 						postApprovalCalls.Add(1)
+					} else {
+						workerOutcome.Store(describeCallOutcome(result, err))
 					}
 				} else if quarantineResponse(result) {
 					preApprovalCalls.Add(1)
 				}
 			}
 		}()
+	}
+	// Join the workers on every path, a failed require included, so none of
+	// them outlives the test and reports into a finished *testing.T.
+	stopWorkers := sync.OnceFunc(func() {
+		cancel()
+		workers.Wait()
+	})
+	defer stopWorkers()
+	// The unquarantiner's background discovery pass may reconnect the client
+	// after the synchronous discovery below and re-stamp the StateView with
+	// the runtime manager's connection token, undoing the fixture's rebind to
+	// the proxy manager's client (the two hold independent counters only in
+	// tests). Re-binding the live epoch repairs only that fixture split; it
+	// never counts a refusal and never dispatches.
+	rebindLiveEpoch := func() {
+		if client, ok := proxy.upstreamManager.GetClient("filesystem"); ok && client.IsConnected() {
+			epoch := client.ConnectionEpoch()
+			rt.Supervisor().StateView().UpdateServer("filesystem", func(s *stateview.ServerStatus) {
+				s.DiscoveryEpoch = epoch
+			})
+		}
 	}
 
 	// A completed pre-approval call proves the workers exercised the
@@ -154,30 +178,27 @@ func TestApproveWithBlockNeverDispatchesBlockedTool(t *testing.T) {
 	runRuntimeDiscovery(t, proxy, rt, up)
 	var lastOutcome atomic.Value
 	if !assert.Eventually(t, func() bool {
-		// The unquarantiner's background discovery pass may reconnect the
-		// client after the synchronous discovery above and re-stamps the
-		// StateView with the runtime manager's connection token, undoing the
-		// fixture's rebind to the proxy manager's client (the two hold
-		// independent counters only in tests). Re-bind the live epoch on every
-		// poll so the probe measures the disabled-tool refusal rather than
-		// that reconnect timing.
-		if client, ok := proxy.upstreamManager.GetClient("filesystem"); ok && client.IsConnected() {
-			epoch := client.ConnectionEpoch()
-			rt.Supervisor().StateView().UpdateServer("filesystem", func(s *stateview.ServerStatus) {
-				s.DiscoveryEpoch = epoch
-			})
-		}
+		// Re-bind on every poll so the probe measures the disabled-tool
+		// refusal rather than that reconnect timing.
+		rebindLiveEpoch()
 		result, callErr := proxy.handleCallToolVariant(adminCtx(), callRequest(), contracts.ToolVariantDestructive)
 		lastOutcome.Store(describeCallOutcome(result, callErr))
 		return callErr == nil && blockedResponse(result)
 	}, 15*time.Second, time.Millisecond) {
 		t.Fatalf("disabled tool was never refused after approval; last outcome: %v", lastOutcome.Load())
 	}
-	// A completed post-approval call proves the disabled approval record gates
-	// callers after unquarantine, rather than only the original quarantine.
-	require.Eventually(t, func() bool { return postApprovalCalls.Load() > 0 }, 15*time.Second, time.Millisecond)
-	cancel()
-	workers.Wait()
+	// A completed post-approval call by a worker proves the disabled approval
+	// record gates callers after unquarantine, rather than only the original
+	// quarantine. Only the workers count; this loop re-binds the epoch, since
+	// the background pass can re-stamp it again after the probe above returned
+	// and would otherwise leave every worker on the stale-connection refusal.
+	if !assert.Eventually(t, func() bool {
+		rebindLiveEpoch()
+		return postApprovalCalls.Load() > 0
+	}, 15*time.Second, time.Millisecond) {
+		t.Fatalf("no worker saw the disabled-tool refusal after approval; last worker outcome: %v", workerOutcome.Load())
+	}
+	stopWorkers()
 
 	blocked, err := proxy.storage.GetToolApproval("filesystem", "delete_0")
 	require.NoError(t, err)

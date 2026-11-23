@@ -124,6 +124,7 @@ func p109AttentionRanks() map[string]int {
 		runtime.AttentionKindServerError:                   runtime.AttentionRankServerError,
 		runtime.AttentionKindServerReview:                  runtime.AttentionRankServerReview,
 		runtime.AttentionKindToolReview:                    runtime.AttentionRankToolReviewChanged,
+		runtime.AttentionKindSkillReview:                   runtime.AttentionRankSkillReviewChanged,
 		runtime.AttentionKindClientNeverSeen:               runtime.AttentionRankClientNeverSeen,
 	}
 }
@@ -253,7 +254,7 @@ func p109TSUnion(ordered []string, name string) []string {
 // TestSpec109ContractsTSExactLines pins every enum value against the generated
 // contracts.ts with an EXACT line per constant and an exact union per family
 // (never strings.Contains). It folds in 109-l's
-// TestAttention108KindsMatchGeneratedTypeScript unchanged: the 13 attention
+// TestAttention108KindsMatchGeneratedTypeScript unchanged: the 14 attention
 // kinds and the AttentionSubject `setting` type.
 func TestSpec109ContractsTSExactLines(t *testing.T) {
 	g := p109ReadTerminology(t)
@@ -276,7 +277,7 @@ func TestSpec109ContractsTSExactLines(t *testing.T) {
 
 	// 109-l P13, folded: the attention subject union lists `setting`.
 	assert.True(t, lines["  type: 'server' | 'tool' | 'client' | 'setting';"], "AttentionSubject.type must list setting")
-	assert.Len(t, runtime.AttentionKinds(), 13)
+	assert.Len(t, runtime.AttentionKinds(), 14)
 }
 
 // TestSpec109TerminologyGoldenSelfCheck proves the checks above bite: a

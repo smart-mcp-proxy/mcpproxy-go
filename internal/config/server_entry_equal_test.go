@@ -41,18 +41,19 @@ func TestServerEntryEqual(t *testing.T) {
 	}
 
 	cases := map[string]func(sc *ServerConfig){
-		"args":        func(sc *ServerConfig) { sc.Args = []string{"a"} },
-		"env":         func(sc *ServerConfig) { sc.Env["K"] = "w" },
-		"enabled":     func(sc *ServerConfig) { sc.Enabled = false },
-		"quarantined": func(sc *ServerConfig) { sc.Quarantined = true },
-		"explicit":    func(sc *ServerConfig) { sc.MarkQuarantineExplicitlySet(false) },
-		"shared":      func(sc *ServerConfig) { sc.Shared = false },
-		"auth_broker": func(sc *ServerConfig) { sc.AuthBroker = nil },
-		"forward":     func(sc *ServerConfig) { sc.ForwardHeaders = nil },
-		"trust_mode":  func(sc *ServerConfig) { sc.TrustMode = "manual" },
-		"toon":        func(sc *ServerConfig) { sc.ToonOutput = "off" },
-		"disabled":    func(sc *ServerConfig) { sc.DisabledTools = []string{"x"} },
-		"expose":      func(sc *ServerConfig) { f := false; sc.ExposePrompts = &f },
+		"args":          func(sc *ServerConfig) { sc.Args = []string{"a"} },
+		"env":           func(sc *ServerConfig) { sc.Env["K"] = "w" },
+		"enabled":       func(sc *ServerConfig) { sc.Enabled = false },
+		"quarantined":   func(sc *ServerConfig) { sc.Quarantined = true },
+		"explicit":      func(sc *ServerConfig) { sc.MarkQuarantineExplicitlySet(false) },
+		"shared":        func(sc *ServerConfig) { sc.Shared = false },
+		"auth_broker":   func(sc *ServerConfig) { sc.AuthBroker = nil },
+		"forward":       func(sc *ServerConfig) { sc.ForwardHeaders = nil },
+		"trust_mode":    func(sc *ServerConfig) { sc.TrustMode = "manual" },
+		"toon":          func(sc *ServerConfig) { sc.ToonOutput = "off" },
+		"disabled":      func(sc *ServerConfig) { sc.DisabledTools = []string{"x"} },
+		"expose":        func(sc *ServerConfig) { f := false; sc.ExposePrompts = &f },
+		"expose_skills": func(sc *ServerConfig) { f := false; sc.ExposeSkills = &f },
 	}
 	for name, mutate := range cases {
 		changed := CopyServerConfig(base)

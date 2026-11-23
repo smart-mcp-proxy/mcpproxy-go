@@ -120,3 +120,16 @@ func TestHandlePatchServer_ForwardHeaders(t *testing.T) {
 		assert.Nil(t, ctrl.capturedUpdates)
 	})
 }
+
+func TestHandleAddServer_ExposeSkills(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	ctrl := &mockAddServerController{apiKey: "test-key"}
+	w := fwdPost(t, NewServer(ctrl, logger, nil), "/api/v1/servers", http.MethodPost, map[string]any{
+		"name": "up", "url": "https://example.com/mcp", "protocol": "streamable-http",
+		"expose_skills": false,
+	})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.NotNil(t, ctrl.captured)
+	require.NotNil(t, ctrl.captured.ExposeSkills)
+	assert.False(t, *ctrl.captured.ExposeSkills)
+}

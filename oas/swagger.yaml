@@ -71,7 +71,7 @@ components:
           description: 'Background cleanup interval in minutes (default: 60)'
           type: integer
         activity_max_records:
-          description: 'Max records before pruning (default: 100000)'
+          description: 'Max records before pruning (default: 400000)'
           type: integer
         activity_max_response_size:
           description: 'Response truncation limit in bytes (default: 65536)'
@@ -189,6 +189,13 @@ components:
           type: boolean
         enable_prompts:
           description: Prompts settings
+          type: boolean
+        enable_skills:
+          description: |-
+            EnableSkills, when true, makes mcpproxy read the skills that upstream
+            servers expose through the MCP skills extension. OFF by default. Unlike
+            EnablePrompts this is hot-reloadable. No CLI flag, no environment
+            variable.
           type: boolean
         enable_socket:
           description: 'Enable Unix socket/named pipe for local IPC (default: true)'
@@ -403,6 +410,11 @@ components:
           $ref: '#/components/schemas/config.SensitiveDataDetectionConfig'
         server_concurrency_defaults:
           $ref: '#/components/schemas/config.ConcurrencyDefaults'
+        session_retention_days:
+          description: |-
+            SessionRetentionDays is how long a work session is listed and kept whole
+            in the activity log (Spec 124, default 7). Read at start.
+          type: integer
         telemetry:
           $ref: '#/components/schemas/config.TelemetryConfig'
         tls:
@@ -1255,6 +1267,12 @@ components:
             default-aggregate behavior (included if the server advertises
             Capabilities.Prompts); false excludes it regardless of capability.
           type: boolean
+        expose_skills:
+          description: |-
+            ExposeSkills overrides whether this server's skills (MCP skills
+            extension) are read when Config.EnableSkills is on. nil (default)
+            inherits (included if the server supports skills); false excludes it.
+          type: boolean
         forward_headers:
           description: |-
             ForwardHeaders lists inbound MCP-client header NAMES (never values) that
@@ -1656,6 +1674,9 @@ components:
           type: string
       type: object
     contracts.ActivityRecord:
+      description: |-
+        Activity is the stored row; absent on a session_start or session_end
+        row.
       properties:
         agent_name:
           description: Agent token name when auth_type is "agent"
@@ -1778,6 +1799,37 @@ components:
         work_session_id:
           description: 'Spec 082: one client, one project, across reconnects'
           type: string
+      type: object
+    contracts.ActivityRetentionReport:
+      description: |-
+        ActivityRetention (Spec 124 FR-035) reports whether the activity caps
+        hold the whole work-session retention window. Administrators only.
+      properties:
+        cause:
+          description: Cause is age_cap, record_cap or size_cap.
+          type: string
+        observed_at:
+          description: ObservedAt is when the shortfall was last observed.
+          type: string
+        oldest_complete_session_at:
+          description: |-
+            OldestCompleteSessionAt is the start of the oldest session that still
+            has all of its rows: complete history reaches back to here.
+          type: string
+        raise:
+          description: Raise names the settings to raise for the cause.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        shortfall:
+          description: |-
+            Shortfall is true when a work session inside the window lost rows
+            because a cap was reached, and a full window has not passed since.
+          type: boolean
+        window_days:
+          description: WindowDays is the work-session retention window.
+          type: integer
       type: object
     contracts.ActivitySource:
       description: 'How activity was triggered: "mcp", "cli", "api"'
@@ -2087,6 +2139,8 @@ components:
       type: object
     contracts.Diagnostics:
       properties:
+        activity_retention:
+          $ref: '#/components/schemas/contracts.ActivityRetentionReport'
         deprecated_configs:
           description: Deprecated config fields found
           items:
@@ -3191,6 +3245,11 @@ components:
             default aggregation". Surfaced on GET so a caller that PATCHed the override
             can read it back; PATCH/POST accept it via AddServerRequest.
           type: boolean
+        expose_skills:
+          description: |-
+            ExposeSkills mirrors config.ServerConfig.ExposeSkills: the per-server
+            skills override. Tri-state *bool; nil/omitted means "inherit".
+          type: boolean
         forward_headers:
           description: |-
             ForwardHeaders mirrors config.ServerConfig.ForwardHeaders (Spec 112): the
@@ -3389,6 +3448,239 @@ components:
         total_server_tool_list_size:
           description: All upstream tools combined (tokens)
           type: integer
+      type: object
+    contracts.SkillContentResponse:
+      properties:
+        digest:
+          type: string
+        next_offset:
+          description: NextOffset is the byte offset of the next chunk; absent at
+            the end.
+          type: integer
+        offset:
+          type: integer
+        size:
+          type: integer
+        text:
+          type: string
+      type: object
+    contracts.SkillEntry:
+      properties:
+        approved_at:
+          description: ApprovedAt is omitted when the skill was never approved.
+          type: string
+        approved_by:
+          type: string
+        approved_files:
+          description: |-
+            ApprovedFiles is the file set of the approved copy; omitted when the
+            skill has no approved copy. `skills show --diff` compares it with Files.
+          items:
+            $ref: '#/components/schemas/contracts.SkillFileInfo'
+          type: array
+          uniqueItems: false
+        approved_hash:
+          type: string
+        available:
+          type: boolean
+        blocked:
+          type: boolean
+        current_hash:
+          type: string
+        description:
+          type: string
+        files:
+          items:
+            $ref: '#/components/schemas/contracts.SkillFileInfo'
+          type: array
+          uniqueItems: false
+        id:
+          type: string
+        listed:
+          type: boolean
+        name:
+          type: string
+        path:
+          type: string
+        scan:
+          $ref: '#/components/schemas/contracts.SkillScanInfo'
+        status:
+          type: string
+        total_size:
+          type: integer
+        unusable_reason:
+          type: string
+        uri:
+          type: string
+      type: object
+    contracts.SkillFileInfo:
+      properties:
+        digest:
+          type: string
+        path:
+          type: string
+        size:
+          type: integer
+        text:
+          type: boolean
+      type: object
+    contracts.SkillScanFinding:
+      properties:
+        evidence:
+          type: string
+        file:
+          type: string
+        offset:
+          type: integer
+        rule:
+          type: string
+        severity:
+          type: string
+      type: object
+    contracts.SkillScanInfo:
+      properties:
+        complete:
+          type: boolean
+        findings:
+          items:
+            $ref: '#/components/schemas/contracts.SkillScanFinding'
+          type: array
+          uniqueItems: false
+        findings_truncated:
+          description: FindingsTruncated is true when more findings existed than are
+            listed.
+          type: boolean
+        incomplete:
+          description: |-
+            Incomplete says why Complete is false: size_cap, time_limit, coverage or
+            interrupted; empty when the scan is complete.
+          type: string
+        scanned_at:
+          description: ScannedAt is omitted when no scan of the current content exists.
+          type: string
+        verdict:
+          type: string
+      type: object
+    contracts.SkillsApproveRequest:
+      properties:
+        expected_hashes:
+          additionalProperties:
+            type: string
+          description: |-
+            ExpectedHashes maps each skill path to the current_hash the reviewer
+            saw. A skill without an entry is refused as unreviewed.
+          type: object
+        expected_incarnation:
+          description: |-
+            ExpectedIncarnation binds the approval to the server the reviewer saw;
+            0 (or absent) binds to the incarnation current when the request starts.
+          type: integer
+        skills:
+          description: Skills are skill paths (the part of the id after "<server>:"),
+            1 to 200.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    contracts.SkillsApproveResponse:
+      properties:
+        approved:
+          description: |-
+            Approved counts the skills newly approved; a skill already approved for
+            its current content is not counted.
+          type: integer
+      type: object
+    contracts.SkillsBlockRequest:
+      properties:
+        expected_incarnation:
+          type: integer
+        skills:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    contracts.SkillsBlockResponse:
+      properties:
+        changed:
+          description: Changed counts the skills whose blocked mark changed.
+          type: integer
+      type: object
+    contracts.SkillsErrorResponse:
+      properties:
+        error:
+          type: string
+        error_code:
+          type: string
+        request_id:
+          type: string
+        success:
+          type: boolean
+      type: object
+    contracts.SkillsListResponse:
+      properties:
+        enabled:
+          type: boolean
+        error:
+          type: string
+        expose_skills:
+          type: boolean
+        incarnation:
+          description: |-
+            Incarnation is the server's approval incarnation: send it back as
+            expected_incarnation on approve, block and unblock.
+          type: integer
+        last_refresh:
+          type: string
+        server:
+          type: string
+        skills:
+          items:
+            $ref: '#/components/schemas/contracts.SkillEntry'
+          type: array
+          uniqueItems: false
+        supported:
+          type: boolean
+        truncated:
+          type: boolean
+      type: object
+    contracts.SkillsStaleReviewResponse:
+      properties:
+        changed:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        error:
+          type: string
+        error_code:
+          type: string
+        request_id:
+          type: string
+        success:
+          type: boolean
+        unreviewed:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    contracts.SkillsUnusableResponse:
+      properties:
+        error:
+          type: string
+        error_code:
+          type: string
+        request_id:
+          type: string
+        skills:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        success:
+          type: boolean
       type: object
     contracts.SuccessResponse:
       allOf:
@@ -3867,6 +4159,193 @@ components:
         visible:
           type: integer
       type: object
+    contracts.WorkSession:
+      properties:
+        attempts:
+          description: |-
+            Attempts, Failures and PolicyBlocks are lifetime counts of the session.
+            PolicyBlocks are included in Failures.
+          type: integer
+        client_id:
+          type: string
+        client_name:
+          type: string
+        connection_count:
+          description: Administrators only.
+          type: integer
+        duration_ms:
+          type: integer
+        ended_at:
+          type: string
+        failures:
+          type: integer
+        first_failure_at:
+          type: string
+        id:
+          type: string
+        last_activity_at:
+          type: string
+        last_failure:
+          $ref: '#/components/schemas/contracts.WorkSessionFailure'
+        ownerless:
+          type: boolean
+        policy_blocks:
+          type: integer
+        profile:
+          description: Profile is returned to administrators only.
+          type: string
+        profile_source:
+          type: string
+        project_name:
+          description: |-
+            ProjectName is the basename of the client's workspace, when it
+            disclosed one.
+          type: string
+        rebuilt:
+          type: boolean
+        run_name:
+          type: string
+        started_at:
+          type: string
+        status:
+          description: Status is "active" or "ended".
+          type: string
+        stored_failures:
+          description: |-
+            StoredFailures counts the failures whose rows are still in the log;
+            it is what the timeline can navigate.
+          type: integer
+        surface:
+          type: string
+        token_name:
+          type: string
+        truncated_start_at:
+          type: string
+      type: object
+    contracts.WorkSessionEnvelope:
+      properties:
+        data:
+          $ref: '#/components/schemas/contracts.WorkSession'
+        success:
+          type: boolean
+      type: object
+    contracts.WorkSessionFailure:
+      properties:
+        at:
+          type: string
+        error_class:
+          type: string
+        error_code:
+          type: string
+        policy_block:
+          description: PolicyBlock is true when the failure was a refusal by MCPProxy
+            itself.
+          type: boolean
+        reason:
+          description: |-
+            Reason is at most 200 characters and never contains argument or
+            response bodies.
+          type: string
+        server:
+          type: string
+        tool:
+          type: string
+      type: object
+    contracts.WorkSessionListEnvelope:
+      properties:
+        data:
+          $ref: '#/components/schemas/contracts.WorkSessionListResponse'
+        success:
+          type: boolean
+      type: object
+    contracts.WorkSessionListResponse:
+      properties:
+        limit:
+          type: integer
+        offset:
+          type: integer
+        sessions:
+          items:
+            $ref: '#/components/schemas/contracts.WorkSession'
+          type: array
+          uniqueItems: false
+        total:
+          type: integer
+      type: object
+    contracts.WorkSessionTimelineEnvelope:
+      properties:
+        data:
+          $ref: '#/components/schemas/contracts.WorkSessionTimelineResponse'
+        success:
+          type: boolean
+      type: object
+    contracts.WorkSessionTimelineResponse:
+      properties:
+        earlier_failures_not_stored:
+          type: boolean
+        failure_index:
+          description: |-
+            FailureIndex is the 1-based number of the failure at or before the
+            position among the stored failures in reach (0 when none), and
+            FailureTotal their count.
+          type: integer
+        failure_total:
+          type: integer
+        has_after:
+          type: boolean
+        has_before:
+          type: boolean
+        lifetime_failures:
+          description: |-
+            LifetimeFailures is the session's lifetime failure count in reach.
+            EarlierFailuresNotStored says some of them are no longer in the log.
+          type: integer
+        position:
+          description: |-
+            Position is the index of the row the page is positioned at; TotalRows
+            is the number of rows in the caller's view.
+          type: integer
+        rows:
+          items:
+            $ref: '#/components/schemas/contracts.WorkSessionTimelineRow'
+          type: array
+          uniqueItems: false
+        session:
+          $ref: '#/components/schemas/contracts.WorkSession'
+        total_rows:
+          type: integer
+      type: object
+    contracts.WorkSessionTimelineRow:
+      properties:
+        activity:
+          $ref: '#/components/schemas/contracts.ActivityRecord'
+        at:
+          description: At is the time of the row.
+          type: string
+        bodies_removed:
+          description: |-
+            BodiesRemoved is true when retention removed the row's argument and
+            response bodies to keep the row.
+          type: boolean
+        failed:
+          description: |-
+            Failed marks the counted row of a failed attempt; PolicyBlock marks a
+            refusal by MCPProxy itself.
+          type: boolean
+        index:
+          description: Index is the row's position in the caller's view of the timeline.
+          type: integer
+        kind:
+          type: string
+        policy_block:
+          type: boolean
+        precedes_session:
+          description: |-
+            PrecedesSession marks an upstream event from before the session
+            started: the latest event of a server the session then failed on,
+            still unresolved when the session began (release QA F2, SC-005).
+          type: boolean
+      type: object
     data:
       properties:
         data:
@@ -3974,6 +4453,12 @@ components:
             prompts/list. Tri-state *bool mirroring config.ServerConfig.ExposePrompts —
             a nil pointer means "leave unchanged" on PATCH (and "inherit the default
             aggregate behavior" on create); a present value (including false) is applied.
+          type: boolean
+        expose_skills:
+          description: |-
+            ExposeSkills is the per-server skills override (MCP skills extension).
+            Tri-state *bool mirroring config.ServerConfig.ExposeSkills: nil means
+            "leave unchanged" on PATCH and "inherit" on create.
           type: boolean
         forward_headers:
           description: |-
@@ -6184,6 +6669,7 @@ paths:
           - preflight
           - prompt_get
           - profile_change
+          - upstream_event
           type: string
       - description: Filter by server name
         in: query
@@ -6842,7 +7328,8 @@ paths:
         reads from it. Filtered per caller: an administrator sees every item; a scoped
         caller (agent token, or a non-admin server-edition OAuth user session) sees
         only server items whose server it may enumerate (for a profile-pinned token:
-        servers within its pin); every other subject type (client, setting) is administrator-only.'
+        servers within its pin); every other subject type (client, setting) and the
+        skill_review kind (Spec 125 held skills) are administrator-only.'
       responses:
         "200":
           content:
@@ -7788,8 +8275,8 @@ paths:
         Creates a backup of the existing config before modifying.
         Also revokes the client's credential (it stops authenticating at once); the result names it in credential_revoked, or reports credential_revoke_error when the revoke failed after the entry was removed. Undoing a disconnect does not restore the credential: a later connect mints a new one.
       parameters:
-      - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode, zcode)
+      - description: Client ID (claude-code, claude-desktop, copilot, cursor, windsurf,
+          vscode, codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
@@ -7850,8 +8337,8 @@ paths:
         key), none, revoked (a rotated-away or revoked credential) or expired. The
         credential value is classified and never echoed.
       parameters:
-      - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode, zcode)
+      - description: Client ID (claude-code, claude-desktop, copilot, cursor, windsurf,
+          vscode, codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
@@ -7910,8 +8397,8 @@ paths:
         (nothing minted or written); a token named client-<id> held by a regular agent
         token is refused with 409 conflicting_token.
       parameters:
-      - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode, zcode)
+      - description: Client ID (claude-code, claude-desktop, copilot, cursor, windsurf,
+          vscode, codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
@@ -7996,8 +8483,8 @@ paths:
         refuse regardless of intent, e.g. a non-create-capable client with no config —
         treat its presence as "Connect unavailable").
       parameters:
-      - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode, zcode)
+      - description: Client ID (claude-code, claude-desktop, copilot, cursor, windsurf,
+          vscode, codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
@@ -8084,8 +8571,8 @@ paths:
         client credential the connect minted or rotated is revoked unless the restored
         config still holds it, and the result names it in credential_revoked.
       parameters:
-      - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode, zcode)
+      - description: Client ID (claude-code, claude-desktop, copilot, cursor, windsurf,
+          vscode, codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
@@ -9388,9 +9875,11 @@ paths:
       - registries
   /api/v1/review:
     get:
-      description: 'Returns one row per quarantined server or trusted server with
-        pending or changed tools. Scoped callers see only servers they may enumerate
-        (for a profile-pinned token: servers within its pin), with count recomputed.'
+      description: 'Returns one row per quarantined server, trusted server with pending
+        or changed tools, or (Spec 125) server with held skills (kind skill_review;
+        skills_pending / skills_changed counts). Scoped callers see only servers they
+        may enumerate (for a profile-pinned token: servers within its pin), with count
+        recomputed; held-skill counts and skill_review rows are administrator-only.'
       responses:
         "200":
           content:
@@ -10558,6 +11047,397 @@ paths:
       summary: Approve a server after security review
       tags:
       - security
+  /api/v1/servers/{id}/skills:
+    get:
+      description: 'Lists the skills of one upstream server. An administrator sees
+        every record: status, hashes, files, scan result and the availability an agent
+        would see. A scoped agent token with the server in its reach sees only the
+        available skills, as the approved copy (id, uri, path, name, description,
+        status "approved", approved_hash, files, total_size; contracts.SkillsAgentListResponse)
+        and nothing about any other skill; a server outside its reach is 404. With
+        enable_skills off the answer is {"enabled": false, "skills": []} and no upstream
+        is contacted.'
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillsListResponse'
+          description: Skills of the server
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server not found, or outside the caller's reach
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: List the skills of a server
+      tags:
+      - servers
+  /api/v1/servers/{id}/skills/approve:
+    post:
+      description: 'Administrator only. Approves the named skills for exactly the
+        content the reviewer saw: expected_hashes maps each skill path to the current_hash
+        from the listing, and expected_incarnation (the listing''s incarnation) binds
+        the approval to the server that was reviewed. When a hash differs, or a named
+        skill has no expected hash, the response is 409 review_out_of_date with the
+        changed and unreviewed names and nothing is approved; 409 server_replaced
+        when the server was removed or replaced since the review; 422 skill_unusable
+        for a skill that cannot be approved (a failed check or a dynamic file list).
+        A skill already approved for its current content is left as it is and not
+        counted. The blocked mark is never touched. A scoped agent token is refused
+        with 403.'
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/contracts.SkillsApproveRequest'
+        description: Skills to approve, with the review binding
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillsApproveResponse'
+          description: Number of skills newly approved (inside the data envelope)
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Invalid request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server or skill not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillsStaleReviewResponse'
+          description: review_out_of_date, server_replaced or skills_disabled
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillsUnusableResponse'
+          description: skill_unusable
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Approve skills of a server
+      tags:
+      - servers
+  /api/v1/servers/{id}/skills/block:
+    post:
+      description: 'Administrator only. Sets the blocked mark on the named skills:
+        a blocked skill is never offered to an agent, and no refresh, content change
+        or automatic approval clears the mark. expected_incarnation is optional (0
+        binds to the current server). 409 server_replaced when the server was removed
+        or replaced since it was reviewed. A scoped agent token is refused with 403.'
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/contracts.SkillsBlockRequest'
+        description: Skills to block
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillsBlockResponse'
+          description: Number of skills whose mark changed (inside the data envelope)
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Invalid request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server or skill not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillsErrorResponse'
+          description: server_replaced or skills_disabled
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Block skills of a server
+      tags:
+      - servers
+  /api/v1/servers/{id}/skills/content:
+    get:
+      description: Returns a chunk of one stored text file of a skill. An administrator
+        reads the current copy by default; a scoped agent token with the server in
+        its reach reads the approved copy of an available skill only (copy is forced
+        to approved), and gets one 404 for every other skill or file. A server outside
+        its reach is 404. Offsets are byte positions; a chunk never splits a UTF-8
+        character, so it can be a few bytes shorter than limit. next_offset is absent
+        at the end of the file. 404 for an unknown skill or file (or with enable_skills
+        off), 415 for a binary file, 409 stored_copy_damaged when the stored bytes
+        no longer match their digest.
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - description: Skill path, e.g. hf-cli
+        in: query
+        name: skill
+        required: true
+        schema:
+          type: string
+      - description: File path inside the skill (default SKILL.md)
+        in: query
+        name: file
+        schema:
+          type: string
+      - description: current (default) or approved
+        in: query
+        name: copy
+        schema:
+          type: string
+      - description: Byte offset to start at (default 0)
+        in: query
+        name: offset
+        schema:
+          type: integer
+      - description: Maximum bytes (default and maximum 65536)
+        in: query
+        name: limit
+        schema:
+          type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillContentResponse'
+          description: A chunk of the file
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad parameters
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillsErrorResponse'
+          description: 'output_blocked: the output sanitisation policy withholds the
+            text (scoped caller)'
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server, skill or file not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillsErrorResponse'
+          description: stored_copy_damaged (administrator)
+        "415":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: The file is binary
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Read one text file of a skill
+      tags:
+      - servers
+  /api/v1/servers/{id}/skills/refresh:
+    post:
+      description: Administrator only. Reads the server's skills from the upstream
+        again, verifies every file and returns the listing once applied. A refresh
+        that is already running is joined. 409 skills_disabled when enable_skills
+        is off; 409 skills_not_supported when the server does not announce the skills
+        extension.
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillsListResponse'
+          description: Skills of the server after the refresh
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillsErrorResponse'
+          description: skills_disabled, skills_not_supported or refresh_superseded
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Refresh failed
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Refresh the skills of a server
+      tags:
+      - servers
+  /api/v1/servers/{id}/skills/unblock:
+    post:
+      description: 'Administrator only. Clears the blocked mark on the named skills.
+        The skill''s approval state is not changed: a skill that is not approved stays
+        unavailable. expected_incarnation is optional (0 binds to the current server).
+        409 server_replaced when the server was removed or replaced since it was reviewed.
+        A scoped agent token is refused with 403.'
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/contracts.SkillsBlockRequest'
+        description: Skills to unblock
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillsBlockResponse'
+          description: Number of skills whose mark changed (inside the data envelope)
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Invalid request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server or skill not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SkillsErrorResponse'
+          description: server_replaced or skills_disabled
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Unblock skills of a server
+      tags:
+      - servers
   /api/v1/servers/{id}/tool-calls:
     get:
       description: Retrieves tool call history filtered by upstream server ID. Returns
@@ -11767,6 +12647,179 @@ paths:
       summary: Call a tool
       tags:
       - tools
+  /api/v1/work-sessions:
+    get:
+      description: Lists work sessions (one agent's run of work) with their failure
+        facts. An agent token sees only its own sessions, and only the part of each
+        that touched servers in its reach.
+      parameters:
+      - description: Only sessions with at least one failure
+        in: query
+        name: failed
+        schema:
+          type: boolean
+      - description: 'With failed: count policy blocks as failures (default true)'
+        in: query
+        name: include_blocked
+        schema:
+          type: boolean
+      - description: Filter by agent token name
+        in: query
+        name: token
+        schema:
+          type: string
+      - description: Filter by client id
+        in: query
+        name: client
+        schema:
+          type: string
+      - description: Filter by profile (administrators only)
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: Filter by run name
+        in: query
+        name: run
+        schema:
+          type: string
+      - description: Filter by the error class of the last failure
+        in: query
+        name: error_class
+        schema:
+          type: string
+      - description: Only sessions active at or after this time (RFC3339)
+        in: query
+        name: since
+        schema:
+          type: string
+      - description: Only sessions active at or before this time (RFC3339)
+        in: query
+        name: until
+        schema:
+          type: string
+      - description: last_activity (default) or last_failure
+        in: query
+        name: sort
+        schema:
+          enum:
+          - last_activity
+          - last_failure
+          type: string
+      - description: Page size (default 25, max 100)
+        in: query
+        name: limit
+        schema:
+          type: integer
+      - description: Page offset
+        in: query
+        name: offset
+        schema:
+          type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.WorkSessionListEnvelope'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad Request
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: List work sessions
+      tags:
+      - activity
+  /api/v1/work-sessions/{id}:
+    get:
+      parameters:
+      - description: Work session id
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.WorkSessionEnvelope'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Not Found
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get one work session
+      tags:
+      - activity
+  /api/v1/work-sessions/{id}/timeline:
+    get:
+      description: Returns the session's activity rows and the upstream events of
+        the servers it called, in time order, positioned at a failure, a row or the
+        end. Bodies are omitted unless include_bodies is set.
+      parameters:
+      - description: Work session id
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - description: first_failure (default), failure:<n>, row:<activity id> or end
+        in: query
+        name: at
+        schema:
+          type: string
+      - description: Rows before the position (default 20, max 250)
+        in: query
+        name: before
+        schema:
+          type: integer
+      - description: Rows after the position (default 20, max 250)
+        in: query
+        name: after
+        schema:
+          type: integer
+      - description: Include argument and response bodies
+        in: query
+        name: include_bodies
+        schema:
+          type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.WorkSessionTimelineEnvelope'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Not Found
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get a work session's timeline
+      tags:
+      - activity
   /healthz:
     get:
       description: Get comprehensive health status including all component health

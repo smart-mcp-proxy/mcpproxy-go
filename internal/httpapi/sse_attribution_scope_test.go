@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -136,4 +137,33 @@ func TestSSE_FlatProfileKeyOnlyOnOwnEventsForScopedSubscriber(t *testing.T) {
 	assert.Equal(t, "work-full", srv.renderEventPayloadForCaller(admin, legacy)["profile"])
 	// Shared payload untouched.
 	assert.Equal(t, "work-full", foreign.Payload["profile"])
+}
+
+// Review round 4 (Spec 124): the attribution fields that exist only for the
+// activity service (the owning user id, the work-session id, the counting
+// marks, the token prefix) reach no subscriber, administrator included.
+func TestRenderActivityAttribution_StripsEveryInternalField(t *testing.T) {
+	payload := map[string]interface{}{
+		"tool_name": "list_issues",
+		"attribution": map[string]any{
+			"token_name": "ci", "client_name": "rest", "run_name": "nightly",
+			"_token_prefix": "mcp_agt_aaaa", "_user_id": "u-secret", "_work_session_id": "ws-1",
+			"_companion": true, "_policy_refusal": true,
+		},
+	}
+	for name, ctx := range map[string]context.Context{
+		"admin": auth.WithAuthContext(context.Background(), auth.AdminContext()),
+		"owner": auth.WithAuthContext(context.Background(), &auth.AuthContext{
+			Type: auth.AuthTypeAgent, AgentName: "ci", TokenPrefix: "mcp_agt_aaaa", AllowedServers: []string{"alpha"},
+		}),
+	} {
+		out := renderActivityAttributionForCaller(ctx, internalRuntime.EventTypeActivityToolCallCompleted, payload)
+		view, ok := out["attribution"].(map[string]any)
+		require.True(t, ok, name)
+		for k := range view {
+			assert.False(t, strings.HasPrefix(k, "_"), "%s: internal key %s reached the subscriber", name, k)
+		}
+		assert.Equal(t, "ci", view["token_name"], name)
+		assert.Equal(t, "nightly", view["run_name"], name)
+	}
 }

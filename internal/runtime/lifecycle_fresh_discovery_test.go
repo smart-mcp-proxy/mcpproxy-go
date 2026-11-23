@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -75,7 +76,14 @@ func (h *heldToolsListHandler) ServeHTTP(w http.ResponseWriter, req *http.Reques
 // persists when periodic discovery is disabled.
 func TestToolsListChanged_TrustedServer_DoesNotJoinPreChangeList(t *testing.T) {
 	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
-	mcpSrv := mcpserver.NewMCPServer("stage", "0.0.1", mcpserver.WithToolCapabilities(true))
+	// tools.listChanged is NOT advertised. The test delivers the one
+	// notification itself, below, and requires that very call to own the
+	// discovery. An advertising upstream gets a standing GET stream (GH
+	// #1910), so DeleteTools/AddTool would also push a real list_changed:
+	// whichever of the two took the discovery marker first ran, the other was
+	// coalesced and returned at once, and the record was read before the
+	// owning run had stored it ("approved", in 0.27s, on CI).
+	mcpSrv := mcpserver.NewMCPServer("stage", "0.0.1", mcpserver.WithToolCapabilities(false))
 	handler := func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return mcp.NewToolResultText("ok"), nil
 	}
@@ -110,20 +118,28 @@ func TestToolsListChanged_TrustedServer_DoesNotJoinPreChangeList(t *testing.T) {
 		IdentityKeyed:      true,
 	}))
 
+	// Installed before any runtime goroutine starts. The hook counts runs of
+	// the test's own notification call (the only one whose context carries
+	// ownNotificationRun; a coalesced follow-up runs on a fresh runtime
+	// context).
+	var ownRuns atomic.Int32
+	rt.notificationDiscoverHook = func(ctx context.Context, serverName string) error {
+		if ctx.Value(ownNotificationRun{}) != nil {
+			ownRuns.Add(1)
+		}
+		return rt.DiscoverAndIndexToolsForServer(ctx, serverName)
+	}
+
 	rt.StartBackgroundInitialization()
 	require.Eventually(t, func() bool {
 		client, ok := rt.UpstreamManager().GetClient("trusted")
 		return ok && client.IsConnected() && !rt.serverIsQuarantined("trusted")
 	}, 15*time.Second, 50*time.Millisecond, "the trusted server must connect unquarantined")
-	// The trusted server's connect-time discovery keeps the baseline approved.
-	require.Eventually(t, func() bool {
-		rec, err := rt.storageManager.GetToolApproval("trusted", "calendar_get_events")
-		return err == nil && rec.Status == storage.ToolApprovalStatusApproved
-	}, 15*time.Second, 50*time.Millisecond, "the trusted baseline must be approved")
-	require.Eventually(t, func() bool {
-		_, busy := rt.discoveryInProgress.Load("trusted")
-		return !busy
-	}, 10*time.Second, 20*time.Millisecond)
+	// The trusted server's startup discovery keeps the baseline approved.
+	// Wait for it to have run and settled, not only for the pre-seeded
+	// record: a discovery still running, or still to be dispatched, would
+	// otherwise take the marker after arming and absorb the notification.
+	requireDiscoverySettled(t, rt, "trusted")
 
 	client, ok := rt.UpstreamManager().GetClient("trusted")
 	require.True(t, ok)
@@ -177,7 +193,8 @@ func TestToolsListChanged_TrustedServer_DoesNotJoinPreChangeList(t *testing.T) {
 	mcpSrv.DeleteTools("calendar_get_events")
 	mcpSrv.AddTool(mcp.NewTool("calendar_get_events", mcp.WithDescription("armed definition")), handler)
 	notified := make(chan error, 1)
-	go func() { notified <- rt.onUpstreamToolsListChanged(ctx, "trusted") }()
+	ownCtx := context.WithValue(ctx, ownNotificationRun{}, true)
+	go func() { notified <- rt.onUpstreamToolsListChanged(ownCtx, "trusted") }()
 	// Release the pre-change response only once the notification's
 	// discovery has attached to that in-flight list: a discovery that joins
 	// it (the old coalescing) would then adopt the stale response.
@@ -198,9 +215,160 @@ func TestToolsListChanged_TrustedServer_DoesNotJoinPreChangeList(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("notification discovery did not finish")
 	}
+	require.Equal(t, int32(1), ownRuns.Load(),
+		"the test's own notification call must have run its discovery, not been coalesced into another owner's")
 	rec, err := rt.storageManager.GetToolApproval("trusted", "calendar_get_events")
 	require.NoError(t, err)
 	require.Equal(t, storage.ToolApprovalStatusChanged, rec.Status,
 		"the notification's discovery must hash the post-change contract, not the pre-change in-flight list")
 	require.Equal(t, "armed definition", rec.CurrentDescription)
+}
+
+// ownNotificationRun marks the context of a test's own notification call.
+type ownNotificationRun struct{}
+
+// discoverySettleWindow is how long every settle condition must hold without
+// a break: a connected event already being dispatched (the supervisor runs
+// its callback on a new goroutine) has that long to take the marker first.
+const discoverySettleWindow = 200 * time.Millisecond
+
+// requireDiscoverySettled waits until the server's startup discovery has
+// settled, whichever trigger ran it: the connected event, a session
+// re-initialise or the background sweep. It does not count one trigger's runs,
+// because the trigger that owns the per-server marker decides which closure a
+// coalesced follow-up runs. Settled means, continuously for
+// discoverySettleWindow:
+//   - the StateView records a completed discovery on the live connection,
+//   - no discovery holds the per-server marker or has a follow-up pending,
+//   - the approved baseline is still approved.
+//
+// A timeout names the condition that was still false.
+func requireDiscoverySettled(t *testing.T, rt *Runtime, server string) {
+	t.Helper()
+	unsettled := func() string {
+		client, ok := rt.UpstreamManager().GetClient(server)
+		if !ok || !client.IsConnected() {
+			return "the client is not connected"
+		}
+		status, ok := rt.Supervisor().StateView().GetServer(server)
+		switch {
+		case !ok:
+			return "the StateView has no entry for the server"
+		case !status.ToolsDiscovered:
+			return "no discovery has completed (StateView ToolsDiscovered=false)"
+		case status.DiscoveryEpoch != client.ConnectionEpoch():
+			return "the last discovery ran on an earlier connection (StateView DiscoveryEpoch is stale)"
+		}
+		if _, busy := rt.discoveryInProgress.Load(server); busy {
+			return "a discovery holds the per-server marker"
+		}
+		if _, pending := rt.discoveryRerunPending.Load(server); pending {
+			return "a coalesced discovery follow-up is pending"
+		}
+		rec, err := rt.storageManager.GetToolApproval(server, "calendar_get_events")
+		switch {
+		case err != nil:
+			return "the approval record cannot be read: " + err.Error()
+		case rec.Status != storage.ToolApprovalStatusApproved:
+			return "the baseline is " + rec.Status + ", not approved"
+		}
+		return ""
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	var heldSince time.Time
+	for {
+		reason := unsettled()
+		switch {
+		case reason != "":
+			heldSince = time.Time{}
+		case heldSince.IsZero():
+			heldSince = time.Now()
+		case time.Since(heldSince) >= discoverySettleWindow:
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("startup discovery never settled for %s: %s", server, reason)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestToolsListChanged_AdvertisedPush_HoldsChangedContract is the transport
+// path the test above deliberately avoids: an upstream that advertises
+// tools.listChanged gets a standing GET stream (GH #1910), changes a trusted
+// server's approved tool, and pushes notifications/tools/list_changed itself.
+// Nothing in the test calls the handler. Once discovery settles, the changed
+// contract must be held as "changed" with the old approval kept (no
+// auto_approve_tool_changes), and the run that recorded it must be the
+// notification's.
+func TestToolsListChanged_AdvertisedPush_HoldsChangedContract(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+	mcpSrv := mcpserver.NewMCPServer("stage", "0.0.1", mcpserver.WithToolCapabilities(true))
+	handler := func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return mcp.NewToolResultText("ok"), nil
+	}
+	mcpSrv.AddTool(mcp.NewTool("calendar_get_events", mcp.WithDescription("Lists calendar events.")), handler)
+	upstream := httptest.NewServer(mcpserver.NewStreamableHTTPServer(mcpSrv))
+	t.Cleanup(upstream.Close)
+
+	cfg := &config.ServerConfig{Name: "trusted", URL: upstream.URL, Protocol: "streamable-http", Enabled: true, TrustMode: string(config.TrustModeManual)}
+	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfg}}, "", zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rt.Close() })
+
+	require.NoError(t, rt.storageManager.SaveUpstreamServer(&config.ServerConfig{
+		Name: "trusted", URL: upstream.URL, Protocol: "streamable-http", Enabled: true, TrustMode: string(config.TrustModeManual),
+	}))
+	approvedSchema := normalizeJSON(`{"type":"object","properties":{},"required":[]}`)
+	approvedHash := calculateToolApprovalHashWithOutputSchema("calendar_get_events", "Lists calendar events.", approvedSchema, "", nil)
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "trusted", ToolName: "calendar_get_events",
+		ApprovedHash: approvedHash, CurrentHash: approvedHash,
+		HashSchemaVersion:  storage.ToolApprovalHashSchemaVersion,
+		Status:             storage.ToolApprovalStatusApproved,
+		ApprovedBy:         "operator",
+		CurrentDescription: "Lists calendar events.",
+		CurrentSchema:      approvedSchema,
+		CurrentAnnotations: mcpGoDefaultAnnotations(),
+		IdentityKeyed:      true,
+	}))
+
+	// Installed before any runtime goroutine starts. The notification hook is
+	// read only by the notification handler, so a run it counts came from a
+	// list_changed — or from a session re-initialise, which goes through the
+	// same handler; requireDiscoverySettled waits out one that starts within
+	// its settle window.
+	var notificationRuns atomic.Int32
+	rt.notificationDiscoverHook = func(ctx context.Context, serverName string) error {
+		notificationRuns.Add(1)
+		return rt.DiscoverAndIndexToolsForServer(ctx, serverName)
+	}
+
+	rt.StartBackgroundInitialization()
+	require.Eventually(t, func() bool {
+		client, ok := rt.UpstreamManager().GetClient("trusted")
+		return ok && client.IsConnected() && !rt.serverIsQuarantined("trusted")
+	}, 15*time.Second, 50*time.Millisecond, "the trusted server must connect unquarantined")
+	// Arm only after startup discovery settled: otherwise it can take the
+	// marker after the change and absorb the push into its own follow-up.
+	requireDiscoverySettled(t, rt, "trusted")
+	before := notificationRuns.Load()
+
+	// The upstream changes the tool and pushes the notification itself.
+	mcpSrv.DeleteTools("calendar_get_events")
+	mcpSrv.AddTool(mcp.NewTool("calendar_get_events", mcp.WithDescription("armed definition")), handler)
+
+	require.Eventually(t, func() bool {
+		rec, err := rt.storageManager.GetToolApproval("trusted", "calendar_get_events")
+		_, busy := rt.discoveryInProgress.Load("trusted")
+		return err == nil && !busy && notificationRuns.Load() > before &&
+			rec.Status == storage.ToolApprovalStatusChanged && rec.CurrentDescription == "armed definition"
+	}, 15*time.Second, 20*time.Millisecond, "the pushed list_changed must leave the changed contract held")
+
+	rec, err := rt.storageManager.GetToolApproval("trusted", "calendar_get_events")
+	require.NoError(t, err)
+	require.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
+	require.Equal(t, approvedHash, rec.ApprovedHash, "the change must not be approved without auto_approve_tool_changes")
+	require.NotEqual(t, approvedHash, rec.CurrentHash)
+	require.Equal(t, "Lists calendar events.", rec.PreviousDescription)
 }

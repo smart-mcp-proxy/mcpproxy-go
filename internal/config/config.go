@@ -467,6 +467,12 @@ type Config struct {
 	// aggregation performed by RefreshPrompts. Hot-reloadable.
 	AggregateUpstreamPrompts bool `json:"aggregate_upstream_prompts" mapstructure:"aggregate-upstream-prompts"`
 
+	// EnableSkills, when true, makes mcpproxy read the skills that upstream
+	// servers expose through the MCP skills extension. OFF by default. Unlike
+	// EnablePrompts this is hot-reloadable. No CLI flag, no environment
+	// variable.
+	EnableSkills bool `json:"enable_skills" mapstructure:"enable-skills"`
+
 	// Repository detection settings
 	CheckServerRepo bool `json:"check_server_repo" mapstructure:"check-server-repo"`
 
@@ -533,7 +539,10 @@ type Config struct {
 
 	// Activity logging settings (RFC-003)
 	ActivityRetentionDays int `json:"activity_retention_days,omitempty" mapstructure:"activity-retention-days"` // Max age before pruning (default: 90)
-	ActivityMaxRecords    int `json:"activity_max_records,omitempty" mapstructure:"activity-max-records"`       // Max records before pruning (default: 100000)
+	ActivityMaxRecords    int `json:"activity_max_records,omitempty" mapstructure:"activity-max-records"`       // Max records before pruning (default: 400000)
+	// SessionRetentionDays is how long a work session is listed and kept whole
+	// in the activity log (Spec 124, default 7). Read at start.
+	SessionRetentionDays int `json:"session_retention_days,omitempty" mapstructure:"session-retention-days"`
 	// ActivityMaxSizeMB caps the total activity-log size in MB before the
 	// oldest records are pruned. Omit the key for the 256MB default; set it to
 	// 0 to disable the size cap.
@@ -779,6 +788,11 @@ type ServerConfig struct {
 	// default-aggregate behavior (included if the server advertises
 	// Capabilities.Prompts); false excludes it regardless of capability.
 	ExposePrompts *bool `json:"expose_prompts,omitempty" mapstructure:"expose-prompts"`
+
+	// ExposeSkills overrides whether this server's skills (MCP skills
+	// extension) are read when Config.EnableSkills is on. nil (default)
+	// inherits (included if the server supports skills); false excludes it.
+	ExposeSkills *bool `json:"expose_skills,omitempty" mapstructure:"expose-skills"`
 
 	// ForwardHeaders lists inbound MCP-client header NAMES (never values) that
 	// are copied into this server's upstream tools/call requests (Spec 112).
@@ -1883,6 +1897,9 @@ func DefaultConfig() *Config {
 		// Upstream prompt aggregation OFF by default (opt-in) — see field doc.
 		AggregateUpstreamPrompts: false,
 
+		// Upstream skills OFF by default (opt-in).
+		EnableSkills: false,
+
 		// Repository detection enabled by default
 		CheckServerRepo: true,
 
@@ -1938,7 +1955,8 @@ func DefaultConfig() *Config {
 
 		// Activity logging defaults (RFC-003)
 		ActivityRetentionDays:   90,     // 90 days retention
-		ActivityMaxRecords:      100000, // 100K records max
+		ActivityMaxRecords:      400000, // 400K records max (Spec 124)
+		SessionRetentionDays:    7,      // work sessions kept whole for a week
 		ActivityMaxResponseSize: 65536,  // 64KB response truncation
 
 		ToolCallMaxResponseSize:     65536, // 64KB per stored tool-call response

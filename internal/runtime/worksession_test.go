@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -227,4 +228,224 @@ func TestWorkSession_ReapDropsOnlyIdleEntries(t *testing.T) {
 
 	assert.Equal(t, 1, tr.Reap(4*time.Hour), "only the idle entry is dropped")
 	assert.Equal(t, liveID, tr.Resolve(active), "the live work session is untouched")
+}
+
+// Spec 124 FR-003/FR-008: the run name splits one principal's work, and is a
+// field of its own: the same name under two principals is two sessions.
+func TestWorkSession_RunNameSplitsWithinAPrincipalOnly(t *testing.T) {
+	tr, _ := fixedClock(time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC))
+	base := WorkSessionIdentity{Principal: "agent:ci:mcp_agt_aaaa", ClientName: "rest"}
+
+	unnamed := tr.Resolve(base)
+	a := base
+	a.RunName = "nightly-1"
+	b := base
+	b.RunName = "nightly-2"
+	other := a
+	other.Principal = "agent:ci:mcp_agt_bbbb"
+
+	ida, idb, ido := tr.Resolve(a), tr.Resolve(b), tr.Resolve(other)
+	assert.NotEqual(t, unnamed, ida)
+	assert.NotEqual(t, ida, idb)
+	assert.NotEqual(t, ida, ido, "a run name must never join two principals")
+	assert.Equal(t, ida, tr.Resolve(a), "the same run stays one session")
+
+	// A run name alone is an identity: an unauthenticated REST script that
+	// names its run is grouped by it.
+	assert.NotEmpty(t, tr.Resolve(WorkSessionIdentity{RunName: "solo"}))
+}
+
+// Spec 124 FR-009: the credential generation is part of the principal, so a
+// regenerated token starts a new session inside the idle window.
+func TestWorkSession_GenerationInPrincipalSplits(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC))
+	old := tr.Resolve(WorkSessionIdentity{Principal: "agent:ci:mcp_agt_old1", ClientName: "c"})
+	advance(time.Minute)
+	regenerated := tr.Resolve(WorkSessionIdentity{Principal: "agent:ci:mcp_agt_new1", ClientName: "c"})
+	assert.NotEqual(t, old, regenerated)
+}
+
+// Spec 124 FR-019: Touch moves the idle clock of a session that is reused
+// without a new Resolve.
+func TestWorkSession_TouchKeepsALongConnectionAlive(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC))
+	id := WorkSessionIdentity{Principal: "p", ClientName: "ide"}
+	ws := tr.Resolve(id)
+
+	for i := 0; i < 5; i++ {
+		advance(20 * time.Minute)
+		tr.Touch(ws, id)
+	}
+	assert.Equal(t, ws, tr.Resolve(id), "100 minutes of steady calls is one session")
+}
+
+// A reaped or idle entry is reinstated under the id the connection still
+// stamps, so a second connection joins it.
+func TestWorkSession_TouchReinstatesAReapedEntry(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC))
+	id := WorkSessionIdentity{Principal: "p", ClientName: "ide"}
+	ws := tr.Resolve(id)
+
+	advance(3 * time.Hour)
+	require.Equal(t, 1, tr.Reap(time.Hour))
+	tr.Touch(ws, id)
+	assert.Equal(t, ws, tr.Resolve(id))
+}
+
+// Touch never steals an identity that a newer live session owns.
+func TestWorkSession_TouchLeavesANewerLiveSessionAlone(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC))
+	id := WorkSessionIdentity{Principal: "p", ClientName: "ide"}
+	old := tr.Resolve(id)
+	advance(time.Hour)
+	fresh := tr.Resolve(id)
+	require.NotEqual(t, old, fresh)
+
+	tr.Touch(old, id)
+	assert.Equal(t, fresh, tr.Resolve(id))
+}
+
+// Spec 124 FR-008: past the daily bound the name is ignored, the call is not
+// refused, and the count restarts the next day.
+func TestWorkSession_NamedSessionsAreBoundedPerPrincipalPerDay(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 11, 15, 0, 0, 1, 0, time.UTC))
+	id := WorkSessionIdentity{Principal: "agent:ci:mcp_agt_aaaa", ClientName: "rest"}
+	unnamed := tr.Resolve(id)
+
+	seen := map[string]bool{}
+	for i := 0; i < MaxNamedWorkSessionsPerDay; i++ {
+		n := id
+		n.RunName = "run-" + time.Duration(i).String()
+		seen[tr.Resolve(n)] = true
+	}
+	require.Len(t, seen, MaxNamedWorkSessionsPerDay)
+
+	over := id
+	over.RunName = "one-too-many"
+	assert.Equal(t, unnamed, tr.Resolve(over), "the name is ignored past the bound")
+
+	// Another principal is not affected.
+	otherP := over
+	otherP.Principal = "agent:other:mcp_agt_bbbb"
+	assert.NotEqual(t, unnamed, tr.Resolve(otherP))
+
+	advance(24 * time.Hour)
+	assert.NotEqual(t, unnamed, tr.Resolve(over), "the bound is per day")
+}
+
+// Review finding: work sessions are now resolved from any request goroutine,
+// so the runtime's lazily created tracker must be one instance under
+// concurrent first use. Run with -race.
+func TestRuntime_WorkSessionTrackerIsCreatedOnce(t *testing.T) {
+	r := &Runtime{}
+	id := WorkSessionIdentity{Principal: "p", ClientName: "rest"}
+	const n = 32
+	got := make([]string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			got[i] = r.ResolveWorkSession(id)
+			r.TouchWorkSession(got[i], id)
+		}(i)
+	}
+	wg.Wait()
+	for i := 1; i < n; i++ {
+		assert.Equal(t, got[0], got[i], "one tracker, one session for one identity")
+	}
+}
+
+// The effective identity drops a run name that is over the bound.
+func TestWorkSession_ResolveEffectiveReportsADroppedRunName(t *testing.T) {
+	tr, _ := fixedClock(time.Date(2026, 11, 15, 0, 0, 1, 0, time.UTC))
+	id := WorkSessionIdentity{Principal: "p", ClientName: "rest"}
+	unnamed := tr.Resolve(id)
+	for i := 0; i < MaxNamedWorkSessionsPerDay; i++ {
+		n := id
+		n.RunName = "run-" + time.Duration(i).String()
+		_, eff := tr.ResolveEffective(n)
+		require.Equal(t, n.RunName, eff.RunName)
+	}
+	over := id
+	over.RunName = "one-too-many"
+	ws, eff := tr.ResolveEffective(over)
+	assert.Equal(t, unnamed, ws)
+	assert.Empty(t, eff.RunName, "the caller caches and touches under the unnamed identity")
+}
+
+// Review round 3 (Spec 124): a connection pinned a session before its
+// workspace was known; another connection then opened a session under the
+// full identity. Touching the first session with the full identity must keep
+// its own entry alive, not let it be reaped while the connection still writes
+// to it.
+func TestWorkSession_TouchRefreshesASessionFiledUnderAnEarlierIdentity(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC))
+	early := WorkSessionIdentity{Principal: "agent-1", ClientName: "ide", ClientVersion: "1.0"}
+	full := early
+	full.WorkspaceRoot = "/repos/project"
+
+	w1 := tr.Resolve(early)
+	w2 := tr.Resolve(full)
+	require.NotEqual(t, w1, w2)
+
+	// Both connections stay busy for longer than the idle window.
+	for i := 0; i < 4; i++ {
+		advance(20 * time.Minute)
+		tr.Touch(w1, full) // the first connection now knows its workspace
+		tr.Touch(w2, full)
+	}
+	assert.Equal(t, w2, tr.Resolve(full), "the full identity keeps its own session")
+	assert.Equal(t, w1, tr.Resolve(early), "the earlier session was kept alive under its own identity")
+	assert.Zero(t, tr.Reap(30*time.Minute))
+}
+
+// Review round 6 (Spec 124 FR-019): a session known only by its id (pinned on
+// a request) has its idle clock moved by TouchID, so a later request of the
+// same identity inside the idle window joins it.
+func TestWorkSession_TouchIDMovesTheIdleClock(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC))
+	id := WorkSessionIdentity{Principal: "agent-1", ClientName: "rest", RunName: "nightly"}
+	ws := tr.Resolve(id)
+
+	advance(25 * time.Minute)
+	tr.TouchID(ws) // a late sub-call's row
+	advance(25 * time.Minute)
+	assert.Equal(t, ws, tr.Resolve(id), "50 minutes after the start, 25 after the last row: the same session")
+
+	tr.TouchID("") // no-ops
+	tr.TouchID("unknown")
+}
+
+// Review round 8: Adopt files an identity under the session a connection
+// keeps, replacing one that was opened beside it.
+func TestWorkSession_AdoptReplacesACompetingSession(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC))
+	id := WorkSessionIdentity{Principal: "agent-1", ClientName: "ide", ClientVersion: "1.0"}
+	kept := tr.Resolve(id)
+	advance(time.Hour) // idle: the next resolve opens another
+	beside := tr.Resolve(id)
+	require.NotEqual(t, kept, beside)
+
+	tr.Adopt(kept, id)
+	assert.Equal(t, kept, tr.Resolve(id), "a reconnect joins the session the connection writes to")
+	tr.Adopt("", id) // no-ops
+	tr.Adopt(kept, WorkSessionIdentity{})
+}
+
+// Review round 9: TouchID refreshes every identity the session is filed under.
+func TestWorkSession_TouchIDRefreshesEveryAlias(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC))
+	early := WorkSessionIdentity{Principal: "agent-1", ClientName: "ide", ClientVersion: "1.0"}
+	full := early
+	full.WorkspaceRoot = "/repos/project"
+	w := tr.Resolve(early)
+	tr.Touch(w, full) // the workspace arrived: the same session under the full identity too
+
+	for i := 0; i < 3; i++ {
+		advance(25 * time.Minute)
+		tr.TouchID(w)
+	}
+	assert.Equal(t, w, tr.Resolve(full))
+	assert.Equal(t, w, tr.Resolve(early))
 }

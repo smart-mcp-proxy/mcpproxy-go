@@ -278,8 +278,15 @@ func connectLatencyPromptUpstream(t *testing.T, proxy *MCPProxyServer, server st
 	qOff := false
 	proxy.config.QuarantineEnabled = &qOff
 
+	// Shut the manager down when the test ends; a running one keeps its
+	// network-recovery watcher for the rest of the package run. Inlined, not
+	// newTestUpstreamManager, for the same merge-base reason as below.
 	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
-	t.Cleanup(func() { um.DisconnectAll() })
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = um.ShutdownAll(ctx)
+	})
 	mcpSrv := mcpserver.NewMCPServer(server, "1.0.0-test", mcpserver.WithPromptCapabilities(true))
 	for _, p := range prompts {
 		text := p.Description
@@ -290,7 +297,16 @@ func connectLatencyPromptUpstream(t *testing.T, proxy *MCPProxyServer, server st
 		})
 	}
 	testServer := servertest.NewTestStreamableHTTPServer(mcpSrv)
-	t.Cleanup(testServer.Close)
+	// Cut held connections first (a GH #1910 GET stream) so Close does not
+	// wait on them. Inlined, not closeHTTPFixture: the scope-latency workflow
+	// copies only this file onto the merge-base checkout.
+	t.Cleanup(func() {
+		testServer.CloseClientConnections()
+		testServer.Close()
+	})
+	// Registered after the close, so it runs before it: the client leaves
+	// while its upstream still listens instead of redialing a closed port.
+	t.Cleanup(func() { um.RemoveServer(server) })
 	require.NoError(t, um.AddServerConfig(server, &config.ServerConfig{
 		Name: server, Protocol: "streamable-http", URL: testServer.URL, Enabled: true,
 	}))

@@ -2,6 +2,10 @@ package upstream
 
 import (
 	"context"
+	"crypto/rand"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,7 +55,7 @@ func TestRetire_HTTPDialParked_OldEndpointReceivesNothing(t *testing.T) {
 				parked, release := parkFirstAdmit(inst)
 				defer release()
 				errc := connectAsync(inst)
-				<-parked
+				waitHook(t, parked, errc)
 
 				competingCommit(t, m, op, cfg)
 				require.True(t, inst.Retired(), "the commit retired the instance before it returned")
@@ -114,7 +118,7 @@ func TestRetire_HTTPDialInsideSection_ClosedNoRequest(t *testing.T) {
 		}
 	}})
 	errc := connectAsync(inst)
-	<-inSection
+	waitHook(t, inSection, errc)
 
 	committed := make(chan struct{})
 	go func() {
@@ -133,4 +137,130 @@ func TestRetire_HTTPDialInsideSection_ClosedNoRequest(t *testing.T) {
 	req, auth := up.counts()
 	assert.Zero(t, req)
 	assert.Zero(t, auth)
+}
+
+// Cross-process isolation: `go test ./...` runs packages in parallel, and other
+// packages' test clients keep reconnecting to the ports of their own closed
+// fixtures (POST / initialize, GET / listen stream, DELETE / close, none with
+// credentials). When the OS hands one of those ports to this fixture, that
+// traffic arrives here (CI job 135134947938: 3 requests, 0 Authorization). It
+// is not traffic to the old endpoint. The fixture counts only requests to its
+// own endpoint, so the zero-request invariant stays exact while strangers on
+// the same port are recorded apart.
+func TestRetire_HTTPDialParked_StrayTrafficOnThePortIsNotTheOldEndpoint(t *testing.T) {
+	for _, kind := range []string{"http", "sse"} {
+		t.Run(kind, func(t *testing.T) {
+			up := newCountingUpstream(t, kind)
+			m := newGenTestManager(t)
+			cfg := httpServerConfig("acme", up.url, kind)
+			m.AdvanceGenerations([]GenerationChange{present(cfg.Name, 1, cfg)})
+			require.NoError(t, m.AddServerConfigAt(cfg.Name, cfg, 1))
+			inst := registered(t, m, cfg.Name)
+
+			parked, release := parkFirstAdmit(inst)
+			defer release()
+			errc := connectAsync(inst)
+			waitHook(t, parked, errc)
+
+			competingCommit(t, m, "remove", cfg)
+			require.True(t, inst.Retired())
+			reqBefore, authBefore := up.counts()
+
+			// A stranger on the same port, as another package's test client.
+			// A real one may add more strays; only these are asserted.
+			injected := sendStrayTraffic(t, up.srv.URL)
+
+			release()
+			require.Error(t, waitErr(t, errc))
+			time.Sleep(100 * time.Millisecond)
+			req, auth := up.counts()
+			assert.Equal(t, reqBefore, req, "stray traffic on the port is not a request to the old endpoint")
+			assert.Equal(t, authBefore, auth)
+			assert.Zero(t, auth)
+			assert.Subset(t, up.strays(), injected, "the fixture saw the stray requests and kept them apart")
+		})
+	}
+}
+
+// sendStrayTraffic sends what other packages' reconnecting test clients send
+// to a reused port (POST / initialize, GET / listen stream, DELETE / close, no
+// credentials), each marked with a unique query so the caller can find it
+// among any real strays. It returns the strays() entries to expect.
+func sendStrayTraffic(t *testing.T, base string) []string {
+	t.Helper()
+	mark := "qa-stray=" + rand.Text()
+	var want []string
+	for _, method := range []string{http.MethodPost, http.MethodGet, http.MethodDelete} {
+		var body io.Reader
+		if method == http.MethodPost {
+			body = strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"mcpproxy-go","version":"1.0.0"},"capabilities":{}}}`)
+		}
+		req, err := http.NewRequest(method, base+"/?"+mark, body)
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		want = append(want, method+" /?"+mark)
+	}
+	return want
+}
+
+// The fixture's controls, one request at a time with its own counter delta:
+// a request to the real endpoint is counted with or without credentials, this
+// fixture's own credential is counted on any path (a misrouted credential is
+// still caught), and origin-level OAuth paths are counted whoever sends them.
+// A stranger's request to another path, with or without its own credential,
+// is kept apart.
+func TestCountingUpstream_CountsItsEndpointAndItsCredentialAnywhere(t *testing.T) {
+	for _, kind := range []string{"http", "sse"} {
+		t.Run(kind, func(t *testing.T) {
+			up := newCountingUpstream(t, kind)
+			own := fixtureBearer(up.url)
+			require.Equal(t, own, httpServerConfig("acme", up.url, kind).Headers["Authorization"],
+				"the instance carries the credential the fixture recognises")
+			require.NotEqual(t, own, fixtureBearer(newCountingUpstream(t, kind).url), "credentials are unique per fixture")
+			mark := "qa-control=" + rand.Text()
+			cases := []struct {
+				name, method, url, auth string
+				counted, withAuth       bool
+			}{
+				{"endpoint, no credentials", http.MethodDelete, up.url, "", true, false},
+				{"endpoint, own credential", http.MethodDelete, up.url, own, true, true},
+				{"own credential, another path", http.MethodGet, up.srv.URL + "/elsewhere", own, true, true},
+				{"own credential, stranger's path", http.MethodPost, up.srv.URL + "/mcp", own, true, true},
+				{"well-known authorization server", http.MethodGet, up.srv.URL + "/.well-known/oauth-authorization-server", "", true, false},
+				{"well-known protected resource", http.MethodGet, up.srv.URL + "/.well-known/oauth-protected-resource", "", true, false},
+				{"default authorize endpoint", http.MethodGet, up.srv.URL + "/authorize", "", true, false},
+				{"default token endpoint", http.MethodPost, up.srv.URL + "/token", "", true, false},
+				{"default register endpoint", http.MethodPost, up.srv.URL + "/register", "", true, false},
+				{"stranger, root", http.MethodGet, up.srv.URL + "/?" + mark + "-root", "", false, false},
+				{"stranger with its own credential", http.MethodGet, up.srv.URL + "/?" + mark + "-cred", "Bearer someone-else", false, false},
+				{"stranger, its own endpoint path", http.MethodPost, up.srv.URL + "/mcp?" + mark + "-mcp", "", false, false},
+			}
+			for _, tc := range cases {
+				req0, auth0 := up.counts()
+				req, err := http.NewRequest(tc.method, tc.url, nil)
+				require.NoError(t, err)
+				if tc.auth != "" {
+					req.Header.Set("Authorization", tc.auth)
+				}
+				resp, err := http.DefaultClient.Do(req)
+				require.NoError(t, err)
+				_ = resp.Body.Close()
+				req1, auth1 := up.counts()
+				wantReq, wantAuth := int64(0), int64(0)
+				if tc.counted {
+					wantReq = 1
+				}
+				if tc.withAuth {
+					wantAuth = 1
+				}
+				assert.Equal(t, wantReq, req1-req0, "%s: request counted", tc.name)
+				assert.Equal(t, wantAuth, auth1-auth0, "%s: Authorization counted", tc.name)
+			}
+			assert.Subset(t, up.strays(), []string{"GET /?" + mark + "-root", "GET /?" + mark + "-cred", "POST /mcp?" + mark + "-mcp"},
+				"each stranger is recorded apart")
+		})
+	}
 }

@@ -81,6 +81,30 @@ Agent token created successfully.
   Expires:     2026-04-05 14:30
 ```
 
+### Tokens That Never Expire
+
+By default a token expires after 30 days, and a duration can be at most 365
+days. For a token that stays on one machine you control (for example in the
+macOS Keychain, read by a client's `headersHelper`), a yearly expiry only brings
+back a yearly sign-out. Pass `--expires never` to mint a token with no expiry:
+
+```bash
+mcpproxy token create --name keychain-claude --profile work-readonly --expires never
+```
+
+`never` is stored as a zero expiry time. Tokens list and show it as `never`; the
+REST API returns Go's zero time (`0001-01-01T00:00:00Z`) as `expires_at`; the Web
+UI and the macOS app read that as "Never expires". Such a token is never expired,
+never a task lease, and never flagged as expiring soon. Revoke it with
+`mcpproxy token revoke` when it should stop working.
+
+Only the admin can mint one, through the CLI or `POST /api/v1/tokens` with
+`"expires_in": "never"`. An agent token cannot manage tokens, the MCP
+`credentials` tool (`create_token`) still requires an explicit expiry of at most
+365 days, and per-client credentials (`mcpproxy client add`, `POST /api/v1/clients`)
+keep their 365-day cap and refuse `never`. The server edition's per-user token
+endpoint is unchanged.
+
 ### Use the Token
 
 Agents authenticate by passing the token via any standard method:
@@ -652,6 +676,16 @@ The limit is per process and is not persisted: a restart gives every token a ful
 bucket. Changing a budget keeps the calls a token has already spent; it does not
 refund them.
 
+## One Token per Agent
+
+MCPProxy groups an agent's calls into a *work session* and records, per session, what failed and what led to it ([Activity log](activity-log.md#work-sessions-and-the-failure-timeline)). The session is derived from the credential, so:
+
+- **Give each agent its own token.** Two agents that share one token and report the same client name cannot be told apart, and their calls form one work session.
+- If agents must share a token, have each send a run name in the `X-MCPProxy-Run` header. The name splits that token's work into named sessions; it is a label, not a credential.
+- A regenerated token starts a new work session. Sessions made with the old secret are not the new token's own and read as not found for it.
+
+An agent token can read its own sessions through `GET /api/v1/work-sessions`, narrowed to the servers in its reach.
+
 ## Managing Tokens
 
 ### Token Limit
@@ -800,6 +834,9 @@ curl -X POST http://localhost:8080/api/v1/tokens \
   }'
 ```
 
+`expires_in` is a duration (`30d`, `720h`; default `30d`, at most `365d`), or
+`"never"` for a token that does not expire (see [Tokens That Never Expire](#tokens-that-never-expire)).
+
 Add `"rate_limit": {"per_minute": 120, "burst": 20}` to give the token its own
 [call budget](#call-rate-limit); `"rate_limit": {"per_minute": 0}` exempts it from
 the config default. `GET /api/v1/tokens` and `GET /api/v1/tokens/{name}` return it
@@ -809,7 +846,7 @@ as `rate_limit` when the token has one.
 
 - **HMAC-SHA256 hashing** — raw tokens are never stored; only HMAC hashes are persisted
 - **Constant-time comparison** — prevents timing attacks during token validation
-- **Automatic expiry** — tokens expire after a configurable duration (default: 30 days)
+- **Automatic expiry** — tokens expire after a configurable duration (default: 30 days, at most 365 days); an admin can opt a token out with `--expires never`
 - **Revocation** — tokens can be immediately invalidated
 - **Prefix identification** — the `mcp_agt_` prefix distinguishes agent tokens from admin API keys without database lookups
 - **Tray bypass** — local tray/socket connections always get admin access (authenticated by OS-level socket permissions)
@@ -846,7 +883,7 @@ mcpproxy serve --require-mcp-auth    # Enforce /mcp authentication
 | `--profile` | One of `--profile` or `--servers`/`--permissions` | — | Pin the token to a single profile; its scope comes from the profile (see [Profile Pinning](#profile-pinning)) |
 | `--servers` | Legacy scope | — | Comma-separated server names or `"*"` (prefer `--profile`) |
 | `--permissions` | Legacy scope | — | Comma-separated: `read`, `write`, `destructive` (prefer `--profile`) |
-| `--expires` | No | `30d` | Expiry duration (e.g., `7d`, `90d`, `365d`) |
+| `--expires` | No | `30d` | Expiry duration (e.g., `7d`, `90d`, `365d`), or `never` for a token that does not expire |
 | `--profile-pin` | No | — | Deprecated alias of `--profile` |
 | `--rate-limit` | No | config default | Calls per minute this token may make; `0` exempts it from `agent_token_rate_limit` (see [Call Rate Limit](#call-rate-limit)) |
 | `--rate-burst` | No | `--rate-limit` | Calls the token may make at once after a quiet spell; needs `--rate-limit` above 0 |

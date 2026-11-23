@@ -203,6 +203,13 @@ type Runtime struct {
 	refreshManager    *oauth.RefreshManager // Proactive OAuth token refresh
 	updateChecker     *updatecheck.Checker  // Background version checking
 	telemetryService  *telemetry.Service    // Anonymous usage telemetry (Spec 036)
+	// starterClassifier decides starter-ness of a (server, incarnation) for the
+	// schema-17 completion counters (Spec 126 FR-037). nil: the default, which
+	// answers false. See upstream_outcome.go.
+	starterClassifier atomic.Pointer[starterClassifierHolder]
+	// successScopeReached caches the success_scope_ever ordinal this process
+	// has persisted, so RecordUpstreamOutcome skips the store once reached.
+	successScopeReached atomic.Uint32
 
 	// bundleRefresher is the TPA bundle refresh scheduler (Spec 087 / Spec 101
 	// US3 B19), registered by the server and started in
@@ -241,9 +248,16 @@ type Runtime struct {
 	// counter matters — is exactly when that happens.
 	rejectionMetric atomic.Pointer[RejectionMetricSink]
 
+	// requestSessionFacts resolves the work session, owning user and run name
+	// of a request from its context (Spec 124). Installed by the server, which
+	// owns the request-level resolution; used by rows the runtime writes
+	// itself.
+	requestSessionFacts atomic.Pointer[RequestSessionFacts]
+
 	// workSessions derives a unit of USER WORK from the churn of transport
 	// sessions underneath it (Spec 082).
-	workSessions *WorkSessionTracker
+	workSessions     *WorkSessionTracker
+	workSessionsOnce sync.Once
 
 	// Spec 047: coalesces servers.changed bursts and embeds the server list +
 	// stats payload so SSE subscribers can update without a follow-up
@@ -261,6 +275,9 @@ type Runtime struct {
 
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
 	supervisor *supervisor.Supervisor
+
+	// skills is the Spec 125 skills catalog state (skills_catalog.go).
+	skills skillsCatalogState
 
 	// Tool discovery deduplication: tracks servers with in-progress reactive discovery
 	// Key: serverName, Value: struct{} (presence indicates discovery in progress)
@@ -531,6 +548,16 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 			zap.String("key_id", oauthTokenKey.ID()), zap.Int("sealed_plaintext_rows", sealed))
 	}
 
+	// Spec 126 FR-033: record the install anchor right after the shutdown
+	// marker (Spec 080 FR-010 keeps that the first DB operation) and the
+	// Spec 123 OAuth boot sweep, and before every other startup write, before
+	// telemetry is wired (SetTelemetry reads the anchor once, for day_two and
+	// window_age) and before the HTTP server and MCP initialisation. Emptiness
+	// was decided when the store opened, so those earlier writes cannot change
+	// it; an early write only shrinks the window in which a crash would leave
+	// a new store without an anchor. Whatever the telemetry opt-out setting.
+	ensureInstallAnchor(storageManager, logger)
+
 	// Close any stale sessions from previous runs
 	if err := storageManager.CloseAllActiveSessions(); err != nil {
 		logger.Warn("Failed to close stale sessions on startup", zap.Error(err))
@@ -653,6 +680,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		// value (>= 0 is applied; -1 would mean "unchanged").
 		maxSizeBytes := int64(cfg.EffectiveActivityMaxSizeMB()) * 1024 * 1024
 		activityService.SetRetentionConfig(maxAge, cfg.EffectiveActivityMaxRecords(), checkInterval, maxSizeBytes)
+		activityService.SetSessionWindow(time.Duration(cfg.EffectiveSessionRetentionDays()) * 24 * time.Hour)
 		logger.Info("Activity retention config applied",
 			zap.Int("max_response_size", cfg.ActivityMaxResponseSize),
 			zap.Int("retention_days", cfg.EffectiveActivityRetentionDays()),
@@ -770,6 +798,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// in the MCP dispatch layer) so code_execution and activity replay are
 	// covered by construction.
 	rt.installRejectionObserver()
+	rt.installUpstreamEventObserver()
 
 	return rt, nil
 }
@@ -1319,6 +1348,12 @@ func (r *Runtime) Close() error {
 	// evicting a replacement installed by someone else.
 	r.stopBundleRefresher()
 
+	// Spec 125: background skill refreshes write BBolt state (staged file
+	// rows, records) from their own goroutines, so they are joined here,
+	// before the storage manager starts to stop. appCancel above ended their
+	// context; no new one starts once this returns.
+	r.skills.close()
+
 	// The index closes AFTER the telemetry flush above, not before it. That
 	// flush builds one last heartbeat, and tool_count is read from this index
 	// (GetToolCount). Closing first made GetDocumentCount fail, which sent the
@@ -1485,25 +1520,21 @@ func (r *Runtime) NotifySecretsChanged(ctx context.Context, operation, secretNam
 		return fmt.Errorf("config not available")
 	}
 
-	// Find all servers that reference this secret in their env vars or args
+	// Find all servers that reference this secret, in any field that is
+	// resolved when the connection is created: env, args, working dir, and
+	// for remote servers the URL, headers and OAuth settings (release QA F9:
+	// a header reference was never restarted).
 	secretRef := fmt.Sprintf("${keyring:%s}", secretName)
 	var affectedServers []string
 
 	for _, server := range cfg.Servers {
-		// Check environment variables
-		for _, value := range server.Env {
-			if strings.Contains(value, secretRef) {
-				affectedServers = append(affectedServers, server.Name)
-				break
-			}
+		// A restart enables a disabled server (RestartServerCtx), and a
+		// secret change is no reason to undo the operator's disable.
+		if !server.Enabled {
+			continue
 		}
-
-		// Check arguments
-		for _, arg := range server.Args {
-			if strings.Contains(arg, secretRef) {
-				affectedServers = append(affectedServers, server.Name)
-				break
-			}
+		if serverReferencesSecret(server, secretRef) {
+			affectedServers = append(affectedServers, server.Name)
 		}
 	}
 
@@ -3240,6 +3271,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		if serverStatus.Config != nil && serverStatus.Config.ExposePrompts != nil {
 			serverMap["expose_prompts"] = *serverStatus.Config.ExposePrompts
 		}
+		if serverStatus.Config != nil && serverStatus.Config.ExposeSkills != nil {
+			serverMap["expose_skills"] = *serverStatus.Config.ExposeSkills
+		}
 
 		// Spec 112: surface the forward_headers allowlist (names only).
 		if serverStatus.Config != nil && len(serverStatus.Config.ForwardHeaders) > 0 {
@@ -3386,6 +3420,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			RetryStoppedReason: serverStatus.RetryStoppedReason,
 			RetryCount:         serverStatus.RetryCount,
 		}
+		healthInput.NetworkFailure, healthInput.NetworkGaveUp, healthInput.NextRetryAt = r.NetworkRetryState(serverStatus.Name)
 		if oauthUndecryptable != nil {
 			healthInput.OAuthTokenUndecryptable = oauth.TokenUndecryptableDetail(oauthUndecryptable)
 		}
@@ -3583,6 +3618,9 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 		// path. Tri-state *bool — only emit when set.
 		if srv.ExposePrompts != nil {
 			serverInfo["expose_prompts"] = *srv.ExposePrompts
+		}
+		if srv.ExposeSkills != nil {
+			serverInfo["expose_skills"] = *srv.ExposeSkills
 		}
 
 		// Spec 112: forward_headers allowlist in parity with the StateView path.
@@ -3832,7 +3870,61 @@ func (r *Runtime) HealthRefreshState(name string, cfg *config.ServerConfig) *oau
 	if r.refreshManager == nil || !r.StoredOAuthTokenInPlay(name, cfg) {
 		return nil
 	}
-	return r.refreshManager.GetRefreshState(name)
+	info := r.refreshManager.GetRefreshState(name)
+	if info != nil && (info.State == oauth.RefreshStateRetrying || info.State == oauth.RefreshStateFailed) {
+		return info
+	}
+	// GH #1929: refreshes that failed transiently outside the proactive
+	// schedule (a tool call's reactive refresh while offline, a token that was
+	// already expired so nothing was scheduled) still mean "being retried",
+	// not "sign in again".
+	if cfg != nil && cfg.URL != "" {
+		var binding commitview.CredentialBinding
+		if r.upstreamManager != nil {
+			if client, ok := r.upstreamManager.GetClient(name); ok && client != nil {
+				binding = client.CredentialBinding()
+			}
+		}
+		if st, ok := oauth.DefaultRefreshCoordinator().TransientRefreshStatus(oauth.GenerateServerKey(name, cfg.URL), binding); ok {
+			out := &oauth.RefreshStateInfo{State: oauth.RefreshStateRetrying, RetryCount: st.Failures, LastError: st.LastError}
+			if info != nil {
+				out.ExpiresAt = info.ExpiresAt
+			}
+			if !st.RetryAt.IsZero() {
+				at := st.RetryAt
+				out.NextAttempt = &at
+			}
+			return out
+		}
+	}
+	return info
+}
+
+// NetworkRetryState reports whether the named server's current failure is a
+// network failure, whether its client gave up the regular retries, and when
+// its next automatic reconnect is due (GH #1929), so health can present an
+// outage as temporary. nextRetry is nil when unknown.
+func (r *Runtime) NetworkRetryState(name string) (networkFailure, gaveUp bool, nextRetry *time.Time) {
+	if r.upstreamManager == nil {
+		return false, false, nil
+	}
+	client, ok := r.upstreamManager.GetClient(name)
+	if !ok || client == nil {
+		return false, false, nil
+	}
+	info := client.GetConnectionInfo()
+	if info.State != upstreamtypes.StateError || !info.NetworkFailure {
+		return false, false, nil
+	}
+	if info.LastRetryTime.IsZero() {
+		return true, info.GaveUp, nil
+	}
+	wait := upstreamtypes.RetryBackoffDuration(info.RetryCount)
+	if info.GaveUp {
+		wait = upstreamtypes.GaveUpProbeInterval
+	}
+	at := info.LastRetryTime.Add(wait)
+	return true, info.GaveUp, &at
 }
 
 // serverConnectedWithOAuth reports whether the named server's live connection
@@ -4212,6 +4304,10 @@ func (r *Runtime) SetTelemetry(version, edition string) {
 			if err := funnelStore.RecordActivity(db, time.Now().UTC()); err != nil {
 				r.logger.Debug("Failed to record funnel activity at startup", zap.Error(err))
 			}
+
+			// Spec 126 (schema 17): install anchor provider for day_two and
+			// window_age, and the first counter window's coverage.
+			r.wireDayTwoTelemetry()
 		}
 	}
 
@@ -4346,19 +4442,112 @@ func (r *Runtime) SetWorkSessionResolver(resolver SessionWorkSessionResolver) {
 // ResolveWorkSession derives the work session for an identity, opening a new one
 // when it has been idle past the window. Called once per connection.
 func (r *Runtime) ResolveWorkSession(id WorkSessionIdentity) string {
-	if r.workSessions == nil {
-		r.workSessions = NewWorkSessionTracker(DefaultWorkSessionIdleWindow)
+	return r.workSessionTracker().Resolve(id)
+}
+
+// ResolveWorkSessionEffective is ResolveWorkSession that also returns the
+// identity the session was filed under (see WorkSessionTracker.ResolveEffective).
+func (r *Runtime) ResolveWorkSessionEffective(id WorkSessionIdentity) (string, WorkSessionIdentity) {
+	return r.workSessionTracker().ResolveEffective(id)
+}
+
+// EffectiveWorkSessionIdentity returns the identity a work session would be
+// filed under, without resolving it (see WorkSessionTracker.EffectiveIdentity).
+func (r *Runtime) EffectiveWorkSessionIdentity(id WorkSessionIdentity) WorkSessionIdentity {
+	return r.workSessionTracker().EffectiveIdentity(id)
+}
+
+// workSessionTracker returns the one tracker of this runtime. Spec 124: work
+// sessions are resolved per request, from any request goroutine, so the lazy
+// creation must be safe for concurrent first use.
+func (r *Runtime) workSessionTracker() *WorkSessionTracker {
+	r.workSessionsOnce.Do(func() {
+		if r.workSessions == nil {
+			r.workSessions = NewWorkSessionTracker(DefaultWorkSessionIdleWindow)
+		}
+	})
+	return r.workSessions
+}
+
+// ActivityRetentionState implements management.ActivityRetentionOperations
+// (Spec 124 FR-035).
+func (r *Runtime) ActivityRetentionState() (*storage.RetentionShortfall, time.Duration, error) {
+	if r.activityService == nil {
+		return nil, DefaultSessionWindow, nil
 	}
-	return r.workSessions.Resolve(id)
+	return r.activityService.RetentionShortfall()
+}
+
+// Work-session reads (Spec 124). Thin pass-throughs to storage.
+
+// ListWorkSessionSummaries returns every work-session summary.
+func (r *Runtime) ListWorkSessionSummaries() ([]*storage.WorkSessionSummary, error) {
+	return r.storageManager.ListWorkSessionSummaries()
+}
+
+// GetWorkSessionSummary returns one summary, or nil.
+func (r *Runtime) GetWorkSessionSummary(id string) (*storage.WorkSessionSummary, error) {
+	return r.storageManager.GetWorkSessionSummary(id)
+}
+
+// WorkSessionRowRefs returns a session's index entries in time order.
+func (r *Runtime) WorkSessionRowRefs(id string) ([]storage.WorkSessionRowRef, error) {
+	return r.storageManager.WorkSessionRowRefs(id)
+}
+
+// WalkWorkSessionTimeline visits a work session's index entries merged with
+// the upstream events of the given servers, in time order.
+func (r *Runtime) WalkWorkSessionTimeline(id string, servers []string, from, to time.Time, fn func(storage.WorkSessionRowRef) bool) error {
+	return r.storageManager.WalkWorkSessionTimeline(id, servers, from, to, fn)
+}
+
+// OpenUpstreamEventsBefore returns the latest unresolved upstream event of
+// each server before a time (release QA F2).
+func (r *Runtime) OpenUpstreamEventsBefore(kinds map[string][]string, before, until, notBefore time.Time, visible func(owner string) bool) ([]storage.WorkSessionRowRef, error) {
+	return r.storageManager.OpenUpstreamEventsBefore(kinds, before, until, notBefore, visible)
+}
+
+// GetActivitiesByKeys loads activity rows by key.
+func (r *Runtime) GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error) {
+	return r.storageManager.GetActivitiesByKeys(keys)
+}
+
+// RequestSessionFacts returns the attribution of the request in ctx: its
+// credential, client, profile, work session, owning user and run name. A row
+// the runtime writes itself must carry the same attribution as the rows the
+// dispatch writes for that request, or it would look like another caller's
+// row inside the session.
+type RequestSessionFacts func(ctx context.Context) ActivityAttribution
+
+// SetRequestSessionFacts installs the request-level session resolver.
+func (r *Runtime) SetRequestSessionFacts(f RequestSessionFacts) {
+	if f == nil {
+		r.requestSessionFacts.Store(nil)
+		return
+	}
+	r.requestSessionFacts.Store(&f)
+}
+
+// TouchWorkSession moves the idle clock of a work session that a connection
+// reuses without resolving it again (Spec 124 FR-019).
+func (r *Runtime) TouchWorkSession(workSessionID string, id WorkSessionIdentity) {
+	r.workSessionTracker().Touch(workSessionID, id)
+}
+
+// AdoptWorkSession files an identity under an existing work session.
+func (r *Runtime) AdoptWorkSession(workSessionID string, id WorkSessionIdentity) {
+	r.workSessionTracker().Adopt(workSessionID, id)
+}
+
+// TouchWorkSessionID refreshes the idle clock of a work session by its id.
+func (r *Runtime) TouchWorkSessionID(workSessionID string) {
+	r.workSessionTracker().TouchID(workSessionID)
 }
 
 // ReapWorkSessions drops work sessions idle past maxIdle, so a long-lived daemon
 // does not accumulate one map entry per identity forever.
 func (r *Runtime) ReapWorkSessions(maxIdle time.Duration) int {
-	if r.workSessions == nil {
-		return 0
-	}
-	return r.workSessions.Reap(maxIdle)
+	return r.workSessionTracker().Reap(maxIdle)
 }
 
 // RecordRealToolCallForActivation marks the first-ever real (upstream) tool
@@ -4931,4 +5120,41 @@ func (r *Runtime) callTimeOAuthRequired(name string) bool {
 // FR-031), so the row is probed (for that outcome only).
 func shouldProbeStoredOAuthRow(url string, haveStorage, tokenInPlay, callTimeOAuthRequired bool) bool {
 	return url != "" && haveStorage && (tokenInPlay || callTimeOAuthRequired)
+}
+
+// serverReferencesSecret reports whether any field of server that is expanded
+// when its connection is created contains ref (e.g. "${keyring:name}").
+func serverReferencesSecret(server *config.ServerConfig, ref string) bool {
+	if server == nil {
+		return false
+	}
+	has := func(v string) bool { return strings.Contains(v, ref) }
+	anyOf := func(vs []string) bool {
+		for _, v := range vs {
+			if has(v) {
+				return true
+			}
+		}
+		return false
+	}
+	values := func(m map[string]string) bool {
+		for _, v := range m {
+			if has(v) {
+				return true
+			}
+		}
+		return false
+	}
+	if has(server.URL) || has(server.Command) || has(server.WorkingDir) ||
+		anyOf(server.Args) || values(server.Env) || values(server.Headers) {
+		return true
+	}
+	if o := server.OAuth; o != nil {
+		if has(o.ClientID) || has(o.ClientSecret) || has(o.RedirectURI) || has(o.CallbackBaseURL) ||
+			has(o.AuthorizationEndpoint) || has(o.TokenEndpoint) || has(o.RegistrationEndpoint) ||
+			has(o.AuthServerMetadataURL) || anyOf(o.Scopes) || values(o.ExtraParams) {
+			return true
+		}
+	}
+	return false
 }

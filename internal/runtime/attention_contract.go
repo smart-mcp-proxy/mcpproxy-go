@@ -14,6 +14,10 @@ const (
 	AttentionKindServerReview    = "server_review"
 	AttentionKindToolReview      = "tool_review"
 	AttentionKindClientNeverSeen = "client_never_seen"
+	// AttentionKindSkillReview (Spec 125) is a server's held skills. It is
+	// administrator-only: the REST layer drops it for every scoped caller,
+	// from GET /attention and from the attention.changed frame.
+	AttentionKindSkillReview = "skill_review"
 )
 
 // Spec 108 warning kinds surfaced as attention items (Spec 109-l FR-093). The
@@ -44,6 +48,7 @@ func AttentionKinds() []string {
 		AttentionKindServerError,
 		AttentionKindServerReview,
 		AttentionKindToolReview,
+		AttentionKindSkillReview,
 		AttentionKindClientNeverSeen,
 	}
 }
@@ -67,6 +72,8 @@ const (
 	AttentionRankServerReview             = 50
 	AttentionRankToolReviewChanged        = 60
 	AttentionRankToolReviewPending        = 61
+	AttentionRankSkillReviewChanged       = 62
+	AttentionRankSkillReviewPending       = 63
 	AttentionRankClientNeverSeen          = 70
 )
 

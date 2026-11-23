@@ -135,8 +135,23 @@ func (p *MCPProxyServer) resolveDirectDescribeIDWith(ctx context.Context, cat *d
 		// canonical-shadow fallback), and an ambiguous canonical id never
 		// resolves via the admin-only LookupCanonical.
 		entry, ok := cat.Lookup(id)
+		// Confined to one server (/mcp/s/<server>, #1909): a display match on
+		// another server cannot be this endpoint's tool, so the id is read as
+		// this server's canonical form instead ("x__y:z" is server x's "y:z"
+		// displayed, and also server x__y's "z").
+		confined, isConfined := describeConfinedServer(ctx)
+		if ok && isConfined && entry != nil && entry.ServerName != confined {
+			ok = false
+		}
 		if !ok {
-			entry, ok = cat.LookupCanonical(id)
+			if isConfined {
+				// The id may have been withdrawn from the canonical map for
+				// colliding with that other server's display name; confined,
+				// the visible candidate is the one answer.
+				entry, ok = cat.LookupCanonicalForAuth(id, visible)
+			} else {
+				entry, ok = cat.LookupCanonical(id)
+			}
 		}
 		if !ok || entry == nil {
 			return nil, false
@@ -199,6 +214,12 @@ func (p *MCPProxyServer) resolveDirectDescribeIDWith(ctx context.Context, cat *d
 // applies to the same entry: profile scope, agent-token server scope, the
 // operation-permission tier, and agent callability.
 func (p *MCPProxyServer) directEntryVisibleToSession(ctx context.Context, entry *directCatalogEntry) bool {
+	// describe_tool on /mcp/s/<server> sees only that server's entries, so
+	// neither resolution (display or canonical form) nor the did_you_mean
+	// corpus can reach another server's tool (#1909).
+	if confined, ok := describeConfinedServer(ctx); ok && entry.ServerName != confined {
+		return false
+	}
 	authCtx := auth.AuthContextFromContext(ctx)
 	view := p.directProfileViewFor(ctx)
 	isScopedAgent := isScopeRestrictedCaller(authCtx)

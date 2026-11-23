@@ -128,7 +128,11 @@ If the `publish-linux-repos` job failed for a specific tag and you need to re-ru
 3. Click "Re-run failed jobs" — only the `publish-linux-repos` job re-runs
 4. Scripts are stateless; a retry converges to the correct final state
 
-If the workflow_dispatch trigger is enabled, you can also dispatch manually with the tag as input.
+When the tagged publisher itself needs a fix, dispatch the corrected revision of
+**Retry Sign & Release** with `linux_repos_only=true`, the current stable tag,
+and its original release run ID. This mode verifies the published packages
+against the signed checksum manifest and republishes the package repositories.
+It leaves the tag, installers and GitHub release in place.
 
 For a completely offline republish from the maintainer workstation (last resort):
 

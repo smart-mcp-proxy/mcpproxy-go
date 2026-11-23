@@ -515,3 +515,108 @@ func TestForgetClientCredential_NotFoundAndConflict(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, stored.Revoked, "a grandfathered agent token must not be revoked")
 }
+
+// Spec 124 FR-009: during a staged rotation each secret authenticates with its
+// OWN prefix, and the new secret keeps that prefix across finalize, so a work
+// session keyed on the credential generation neither merges the two secrets
+// nor changes under the new one. The stored record is not altered.
+func TestClientCredentialRotation_AuthContextCarriesTheMatchedSecretPrefix(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	oldRaw, _ := auth.GenerateClientToken()
+	_, err := mgr.MintClientCredential("cursor", oldRaw, testHMACKey, auth.ProfileModeLocked, "work-readonly", time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	newRaw, _ := auth.GenerateClientToken()
+	_, err = mgr.StageClientCredentialRotation("cursor", newRaw, testHMACKey)
+	require.NoError(t, err)
+
+	oldTok, err := mgr.ValidateAgentToken(oldRaw, testHMACKey)
+	require.NoError(t, err)
+	newTok, err := mgr.ValidateAgentToken(newRaw, testHMACKey)
+	require.NoError(t, err)
+
+	oldPrefix, newPrefix := auth.TokenPrefix(oldRaw), auth.TokenPrefix(newRaw)
+	require.NotEqual(t, oldPrefix, newPrefix)
+	assert.Equal(t, oldPrefix, oldTok.AuthContext().TokenPrefix)
+	assert.Equal(t, newPrefix, newTok.AuthContext().TokenPrefix, "the pending secret must not borrow the old prefix")
+	assert.Equal(t, oldPrefix, newTok.TokenPrefix, "the stored record is unchanged during the overlap")
+
+	_, err = mgr.FinalizeClientCredentialRotation("cursor")
+	require.NoError(t, err)
+	after, err := mgr.ValidateAgentToken(newRaw, testHMACKey)
+	require.NoError(t, err)
+	assert.Equal(t, newPrefix, after.AuthContext().TokenPrefix, "the same prefix before and after finalize")
+}
+
+// Spec 124 FR-009 (review): two secrets of one credential authenticate with
+// different generations even if their display prefixes were equal, and the
+// pending secret keeps its generation across finalize.
+func TestValidateAgentToken_SetsACollisionResistantGeneration(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	oldRaw, _ := auth.GenerateClientToken()
+	_, err := mgr.MintClientCredential("cursor", oldRaw, testHMACKey, auth.ProfileModeLocked, "work-readonly", time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	newRaw, _ := auth.GenerateClientToken()
+	_, err = mgr.StageClientCredentialRotation("cursor", newRaw, testHMACKey)
+	require.NoError(t, err)
+
+	oldTok, err := mgr.ValidateAgentToken(oldRaw, testHMACKey)
+	require.NoError(t, err)
+	newTok, err := mgr.ValidateAgentToken(newRaw, testHMACKey)
+	require.NoError(t, err)
+
+	oldGen, newGen := oldTok.AuthContext().TokenGeneration, newTok.AuthContext().TokenGeneration
+	require.NotEmpty(t, oldGen)
+	require.NotEmpty(t, newGen)
+	assert.NotEqual(t, oldGen, newGen)
+	assert.GreaterOrEqual(t, len(newGen), 24, "far more than the four random characters of the display prefix")
+	assert.NotContains(t, newRaw, newGen, "the generation is derived from the keyed hash, not from the secret text")
+
+	_, err = mgr.FinalizeClientCredentialRotation("cursor")
+	require.NoError(t, err)
+	after, err := mgr.ValidateAgentToken(newRaw, testHMACKey)
+	require.NoError(t, err)
+	assert.Equal(t, newGen, after.AuthContext().TokenGeneration, "the same generation before and after finalize")
+}
+
+// A client credential must carry an expiry. A persisted kind=client record
+// with a zero ExpiresAt is unusable (authentication rejects it), so a fresh
+// mint for that client must replace it instead of reporting it as active.
+func TestMintClientCredential_ReplacesZeroExpiryRecord(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	rawOld, err := auth.GenerateClientToken()
+	require.NoError(t, err)
+	stale := auth.AgentToken{
+		Name:           "client-cursor",
+		Kind:           auth.KindClient,
+		ClientID:       "cursor",
+		ProfileMode:    auth.ProfileModeSwitchable,
+		AllowedServers: []string{"*"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+		CreatedAt:      time.Now(),
+	}
+	hash := auth.HashToken(rawOld, testHMACKey)
+	stale.TokenHash = hash
+	stale.TokenPrefix = auth.TokenPrefix(rawOld)
+	data, err := json.Marshal(stale)
+	require.NoError(t, err)
+	require.NoError(t, mgr.db.db.Update(func(tx *bbolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte(AgentTokensBucket))
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(hash), data)
+	}))
+
+	rawNew, err := auth.GenerateClientToken()
+	require.NoError(t, err)
+	_, err = mgr.MintClientCredential("cursor", rawNew, testHMACKey, auth.ProfileModeSwitchable, "", time.Now().Add(24*time.Hour))
+	require.NoError(t, err, "a zero-expiry client record must be replaceable")
+	_, err = mgr.ValidateAgentToken(rawNew, testHMACKey)
+	require.NoError(t, err)
+}

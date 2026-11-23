@@ -16,7 +16,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toonenc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 // toonModes is every toon_output value under which the out-of-scope surfaces
@@ -127,7 +126,7 @@ func TestSurfaceIsolation_CodeExecution(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { idx.Close() })
 
-	um := upstream.NewManager(logger, cfg, sm.GetBoltDB(), secret.NewResolver(), sm)
+	um := newTestUpstreamManager(t, logger, cfg, sm.GetBoltDB(), secret.NewResolver(), sm)
 
 	cm, err := cache.NewManager(sm.GetDB(), logger)
 	require.NoError(t, err)
@@ -173,7 +172,7 @@ func TestSurfaceIsolation_DirectMode(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { sm.Close() })
 
-	um := upstream.NewManager(logger, cfg, sm.GetBoltDB(), secret.NewResolver(), sm)
+	um := newTestUpstreamManager(t, logger, cfg, sm.GetBoltDB(), secret.NewResolver(), sm)
 
 	proxy := &MCPProxyServer{
 		config:          cfg,

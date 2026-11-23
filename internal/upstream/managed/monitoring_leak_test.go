@@ -1,7 +1,9 @@
 package managed
 
 import (
+	"fmt"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,20 +23,34 @@ func newTestClientForMonitoring(t *testing.T) *Client {
 	return mc
 }
 
-// settledGoroutines polls runtime.NumGoroutine until it stops changing, so the
-// assertions below compare stable counts rather than racing the scheduler.
-func settledGoroutines() int {
-	prev := -1
-	for i := 0; i < 100; i++ {
-		runtime.Gosched()
-		time.Sleep(2 * time.Millisecond)
-		n := runtime.NumGoroutine()
-		if n == prev {
-			return n
+// healthChecksOf counts the backgroundHealthCheck goroutines running for mc,
+// read from the goroutine stacks (the receiver is the first printed argument).
+// Counting only this client's goroutines keeps the check independent of
+// goroutines other tests leave behind or end while this one measures, which a
+// plain runtime.NumGoroutine comparison was not under -shuffle.
+func healthChecksOf(mc *Client) int {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
 		}
-		prev = n
+		buf = make([]byte, 2*len(buf))
 	}
-	return runtime.NumGoroutine()
+	return strings.Count(string(buf), fmt.Sprintf("(*Client).backgroundHealthCheck(%p", mc))
+}
+
+// settledHealthChecks polls healthChecksOf until it reaches want or the wait
+// runs out, so the assertions compare a settled count rather than racing the
+// scheduler.
+func settledHealthChecks(mc *Client, want int) int {
+	n := healthChecksOf(mc)
+	for i := 0; i < 250 && n != want; i++ {
+		time.Sleep(2 * time.Millisecond)
+		n = healthChecksOf(mc)
+	}
+	return n
 }
 
 // TestStartBackgroundMonitoring_IsIdempotent pins the fix for a goroutine leak
@@ -53,18 +69,20 @@ func settledGoroutines() int {
 func TestStartBackgroundMonitoring_IsIdempotent(t *testing.T) {
 	mc := newTestClientForMonitoring(t)
 
-	base := settledGoroutines()
+	assert.Equal(t, 0, healthChecksOf(mc), "no health check before the first start")
 
 	// Simulates Connect() → reconnect → reconnect on one managed client.
 	mc.startBackgroundMonitoring()
 	mc.startBackgroundMonitoring()
 	mc.startBackgroundMonitoring()
 
-	assert.Equal(t, 1, settledGoroutines()-base,
+	assert.Equal(t, 1, settledHealthChecks(mc, 1),
 		"repeated startBackgroundMonitoring must run exactly one health-check goroutine")
+	time.Sleep(20 * time.Millisecond)
+	assert.Equal(t, 1, healthChecksOf(mc), "no second health check appears later")
 
 	mc.stopBackgroundMonitoring()
 
-	assert.Equal(t, base, settledGoroutines(),
+	assert.Equal(t, 0, settledHealthChecks(mc, 0),
 		"stopBackgroundMonitoring must leave no health-check goroutine behind")
 }

@@ -1,5 +1,5 @@
 {
-  "count": 6,
+  "count": 8,
   "items": [
     {
       "id": "client_holds_admin_key:client:cursor",
@@ -89,6 +89,40 @@
         "target": "/review/changed-tools?change=changed"
       },
       "since": "2026-10-02T09:00:00Z"
+    },
+    {
+      "id": "skill_review:server:held-skills:changed",
+      "kind": "skill_review",
+      "rank": 62,
+      "subject": {
+        "type": "server",
+        "id": "held-skills",
+        "name": "held-skills"
+      },
+      "summary": "held-skills: 1 skill(s) changed, needs review",
+      "fix": {
+        "verb": "review",
+        "label": "Review",
+        "target": "/servers/held-skills?tab=skills"
+      },
+      "since": "2026-10-02T08:00:00Z"
+    },
+    {
+      "id": "skill_review:server:held-skills:pending",
+      "kind": "skill_review",
+      "rank": 63,
+      "subject": {
+        "type": "server",
+        "id": "held-skills",
+        "name": "held-skills"
+      },
+      "summary": "held-skills: 3 new skill(s), needs review",
+      "fix": {
+        "verb": "review",
+        "label": "Review",
+        "target": "/servers/held-skills?tab=skills"
+      },
+      "since": "2026-10-02T08:00:00Z"
     },
     {
       "id": "client_never_seen:client:codex",

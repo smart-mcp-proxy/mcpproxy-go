@@ -17,7 +17,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 // Spec 103 (T005). The activity log stores the FULL pre-truncation
@@ -61,7 +60,7 @@ func newTruncatingRetrieveToolsProxy(t *testing.T, responseLimit int) (*MCPProxy
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = idx.Close() })
 
-	um := upstream.NewManager(logger, cfg, nil, secret.NewResolver(), nil)
+	um := newTestUpstreamManager(t, logger, cfg, nil, secret.NewResolver(), nil)
 
 	cm, err := cache.NewManager(sm.GetDB(), logger)
 	require.NoError(t, err)

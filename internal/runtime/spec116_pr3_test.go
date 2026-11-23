@@ -27,7 +27,7 @@ import (
 func pr3Upstream(t *testing.T, name, tool string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(captureTestServer(name, tool))
-	t.Cleanup(srv.Close)
+	t.Cleanup(func() { closeHTTPFixture(srv) })
 	return srv
 }
 

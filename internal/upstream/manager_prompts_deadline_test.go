@@ -110,7 +110,7 @@ func TestManager_ListPrompts_SharedNotPerServerDeadline(t *testing.T) {
 				return &mcp.GetPromptResult{Messages: []mcp.PromptMessage{{Role: mcp.RoleAssistant, Content: mcp.TextContent{Type: "text", Text: "ok"}}}}, nil
 			})
 		slowServer := servertest.NewTestStreamableHTTPServer(slowUpstream)
-		t.Cleanup(slowServer.Close)
+		t.Cleanup(func() { closeHTTPFixture(slowServer) })
 		require.NoError(t, m.AddServerConfig(id, &config.ServerConfig{
 			Name: name, Protocol: "streamable-http", URL: slowServer.URL, Enabled: true,
 		}))
@@ -213,7 +213,7 @@ func TestManager_ListPrompts_SharedBudgetCannotFitAllServersEvenWithGenerousDead
 				return &mcp.GetPromptResult{Messages: []mcp.PromptMessage{{Role: mcp.RoleAssistant, Content: mcp.TextContent{Type: "text", Text: "ok"}}}}, nil
 			})
 		slowServer := servertest.NewTestStreamableHTTPServer(slowUpstream)
-		t.Cleanup(slowServer.Close)
+		t.Cleanup(func() { closeHTTPFixture(slowServer) })
 		require.NoError(t, m.AddServerConfig(id, &config.ServerConfig{
 			Name: name, Protocol: "streamable-http", URL: slowServer.URL, Enabled: true,
 		}))

@@ -407,6 +407,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             self, selector: #selector(openWebUI),
             name: .openWebUI, object: nil
         )
+        // Spec 125: a Web UI route with no native screen (a server's Skills tab).
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(openWebUIPath(_:)),
+            name: .openWebUIPath, object: nil
+        )
 
         // Spec 091: the one route into the native Connect Client form. Presented
         // directly from here — no delayed notification chains, which is what
@@ -1207,6 +1212,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     rowMenu.addItem(details)
 
                     item.submenu = rowMenu
+                } else if attentionItem.kind == ReviewQueuePresentation.skillReviewKind && attentionItem.fix.verb == "review" {
+                    item.action = #selector(showSkillReviewFromMenu(_:))
+                    item.target = self
+                    item.representedObject = attentionItem.fix.target
                 } else if attentionItem.subject.type == "server" {
                     // Nothing to run — quarantine review, a missing secret, a
                     // configuration problem. Review opens its own sheet;
@@ -2106,6 +2115,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 ? "\(baseURL)/ui/"
                 : "\(baseURL)/ui/?apikey=\(apiKey)"
             if let url = URL(string: urlString) {
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+
+    @objc private func showSkillReviewFromMenu(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        NotificationCenter.default.post(name: .openWebUIPath, object: path)
+    }
+
+    /// Opens one Web UI route (`note.object`, e.g. `/servers/hf?tab=skills`)
+    /// in the browser, with the API key as "Open Web UI in Browser" sends it.
+    @objc private func openWebUIPath(_ note: Notification) {
+        guard let path = note.object as? String else { return }
+        Task {
+            let apiKey = await coreManager?.currentAPIKey ?? ""
+            let baseURL = await MainActor.run { appState.webUIBaseURL }
+            if let url = WebUILink.url(base: baseURL, path: path, apiKey: apiKey) {
                 NSWorkspace.shared.open(url)
             }
         }

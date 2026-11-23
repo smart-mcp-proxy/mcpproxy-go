@@ -42,6 +42,10 @@ type BoltDB struct {
 	// oauthKey seals and opens oauth_tokens values (Spec 123); nil when
 	// encryption is off. Set once at open, never changed.
 	oauthKey *tokenseal.Key
+	// wasEmptyAtOpen is true when config.db held no prior data when this
+	// process opened it (absent, 0 bytes, or no record in any bucket). Decided once in
+	// NewBoltDB before initBuckets creates anything (Spec 126 FR-033).
+	wasEmptyAtOpen bool
 }
 
 // noSync opens databases with bbolt's NoSync. Only tests set it, through
@@ -57,10 +61,18 @@ var noSync atomic.Bool
 // production code.
 func DisableSyncForTesting() { noSync.Store(true) }
 
+// testHookBeforeOpen, when set by a test, runs right before bbolt.Open: the
+// window in which another process can populate the store while this one waits
+// for the lock. Always nil in production.
+var testHookBeforeOpen func(dbPath string)
+
 // NewBoltDB creates a new BoltDB instance
 func NewBoltDB(dataDir string, logger *zap.SugaredLogger, opts ...Option) (*BoltDB, error) {
 	o := resolveOpenOptions(opts)
 	dbPath := filepath.Join(dataDir, "config.db")
+	if testHookBeforeOpen != nil {
+		testHookBeforeOpen(dbPath)
+	}
 
 	// Try to open with timeout, if it fails, immediately return database locked error.
 	// The database holds OAuth tokens and DCR client secrets as plain JSON
@@ -94,6 +106,12 @@ func NewBoltDB(dataDir string, logger *zap.SugaredLogger, opts ...Option) (*Bolt
 		db:       db,
 		logger:   logger,
 		oauthKey: o.oauthKey,
+		// Spec 126 FR-033: "no prior data" is decided from the database itself,
+		// under its lock and before initBuckets writes anything. A stat taken
+		// before bbolt.Open could be stale: another process may populate the
+		// store while this one waits up to 10 s for the lock. A file that
+		// bbolt.Open just created holds no records, so it reads as empty.
+		wasEmptyAtOpen: !storeHasRecords(db),
 	}
 
 	// Initialize buckets and schema
@@ -148,6 +166,8 @@ func (b *BoltDB) initBuckets() error {
 			ToolHashBucket,
 			ToolApprovalBucket,
 			PromptApprovalBucket,
+			SkillApprovalBucket,
+			SkillFileBucket,
 			OAuthTokenBucket,
 			MetaBucket,
 			ActivityRecordsBucket,
@@ -159,6 +179,9 @@ func (b *BoltDB) initBuckets() error {
 			IntegrityBaselinesBucket,
 			OnboardingBucket,
 			SessionsBucket,
+			WorkSessionsBucket,
+			WorkSessionRowsBucket,
+			UpstreamEventsByServerBucket,
 		}
 
 		for _, bucket := range buckets {

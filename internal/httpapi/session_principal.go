@@ -133,6 +133,17 @@ func tenantSessionAllowlist(method, path string) bool {
 		return true
 	}
 
+	// Spec 124 FR-046: a user reads their own work sessions. The three doors
+	// decide ownership and reach themselves and answer 404 for anything else.
+	const workSessionsPrefix = "/api/v1/work-sessions"
+	if path == workSessionsPrefix {
+		return true
+	}
+	if rest, ok := strings.CutPrefix(path, workSessionsPrefix+"/"); ok {
+		id, sub, hasSub := strings.Cut(rest, "/")
+		return id != "" && (!hasSub || sub == "timeline")
+	}
+
 	// The static /servers/import/paths route (host filesystem paths, not a
 	// server subtree) must be denied explicitly, ahead of the {id} subtree
 	// rule below — a raw-path matcher cannot otherwise tell "import" from a
@@ -156,6 +167,12 @@ func tenantSessionAllowlist(method, path string) bool {
 		}
 		if sub == "tool-calls" {
 			return false // named must-refuse: /servers/{id}/tool-calls
+		}
+		// Named must-refuse: the skills catalog (Spec 125) is administrator-
+		// only. A held skill is upstream instruction text nobody approved, and
+		// a server being in a tenant's reach is no reason to show it.
+		if sub == "skills" || strings.HasPrefix(sub, "skills/") {
+			return false
 		}
 		return true // every other GET under /servers/{id}/**
 	}
