@@ -133,6 +133,28 @@ func (p *FilePolicy) deniedByPath(resolvedPath string) bool {
 	return false
 }
 
+// PathWithinAllowList reports whether path passes the allow-list part of the
+// policy: absolute, no raw "..", and (unless wildcard) contained in an allowed
+// root after resolving symlinks. No file is opened and the deny list is not
+// consulted; it answers only "would secret_file_dirs let this path through".
+func (p *FilePolicy) PathWithinAllowList(path string) bool {
+	if p == nil || p.Disabled {
+		return false
+	}
+	if path == "" || !filepath.IsAbs(path) || containsRawDotDot(path) {
+		return false
+	}
+	if p.Wildcard {
+		return true
+	}
+	resolved, err := resolveSymlinks(path)
+	if err != nil {
+		return false
+	}
+	root, err := p.matchingRoot(resolved)
+	return err == nil && root != ""
+}
+
 // ReadFileWithPolicy reads a secret file according to policy.
 func ReadFileWithPolicy(path string, policy *FilePolicy) (string, error) {
 	if path == "" {

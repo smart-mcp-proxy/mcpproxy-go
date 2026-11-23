@@ -330,6 +330,19 @@ The proxy’s own `api_key` and `data_dir` use the same `secret_file_dirs` polic
 when they carry `${file:}` references. `MCPPROXY_API_KEY_FILE` is separate: it is
 not limited by `secret_file_dirs` (see the config-file section above).
 
+**Upgrading from a release without `secret_file_dirs`:** before #1721 any
+absolute `${file:}` path resolved. After the upgrade, a reference outside the
+effective allow-list stops resolving, and that server fails to connect with
+`secret file is missing, unreadable or outside secret_file_dirs`. With the key
+omitted, macOS and Windows allow only `<data-dir>/secrets`, so a reference such
+as `${file:/Users/me/.config/tokens/github}` is affected. At startup mcpproxy
+logs one warning naming every such server
+(`upstream ${file:} references are outside secret_file_dirs and will not resolve`).
+To migrate, either add the file's directory to `secret_file_dirs` in the config
+file (for example `"secret_file_dirs": ["/Users/me/.config/tokens"]`; the
+platform defaults are then replaced by your list, so add `<data-dir>/secrets`
+too if you use it), or move the file under `<data-dir>/secrets`.
+
 #### Reserved proxy namespace
 
 Upstream expansion refuses the whole `MCPPROXY_` environment namespace (including
@@ -345,9 +358,20 @@ upstream-scoped read refuses:
 - The active config file and the active admin API key source file(s)
 - Regular files directly under `<data-dir>` (except under `<data-dir>/secrets`)
 - Regular files one level below `<data-dir>/certs`, `<data-dir>/index.bleve`, or `<data-dir>/tpa-lkg` (not deeper subtrees)
+- Any file with more than one hard link
+- An earlier version of the config file that this process replaced on save, when a hardlink to it was made before the save
 
 Checks use the opened file’s identity (device and inode), so hardlinks, aliases,
 and a config file replaced by rename are refused — not only a literal path match.
+Secret files have no reason to be hardlinked: the link-count rule refuses a
+hardlink to any live proxy file, wherever it is under `<data-dir>`. Earlier
+config versions are remembered for the life of the process only; a hardlink to
+a version replaced by an earlier run is not recognised, so keep allowed
+directories writable only by the account that runs mcpproxy.
+
+`["*"]` resolves the path and then opens it by path, so it does not protect
+against a concurrent filesystem writer that swaps a symlink in between; the
+allow-list mode opens through the allowed root and does.
 
 #### Policy denials vs load failures
 

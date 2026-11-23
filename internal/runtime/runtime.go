@@ -499,6 +499,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	for _, w := range config.DrainLoadWarnings() {
 		logger.Warn(w.Message, zap.String("key", w.Key), zap.String("value", w.Value))
 	}
+	warnUpstreamFileRefsOutsideAllowList(logger, cfg)
 
 	// Spec 123 FR-020/FR-022: resolve the OAuth token key once, before
 	// config.db is opened. An unresolvable or malformed key stops here with a
