@@ -35,10 +35,10 @@ func newFailureTestManager(t *testing.T, serverName string) (*Manager, *managed.
 	manager := &Manager{
 		clients:        make(map[string]*managed.Client),
 		logger:         logger,
-		secretResolver: secret.NewResolver(),
+		secretResolver: secret.NewTestWildcardResolver(),
 	}
 
-	client, err := managed.NewClient(serverName, serverConfig, logger, nil, &config.Config{}, nil, secret.NewResolver())
+	client, err := managed.NewClient(serverName, serverConfig, logger, nil, &config.Config{}, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	manager.clients[serverName] = client
 

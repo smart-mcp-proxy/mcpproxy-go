@@ -80,7 +80,7 @@ func TestRefreshOAuthToken_DynamicOAuthDiscovery(t *testing.T) {
 		clients:        make(map[string]*managed.Client),
 		logger:         logger,
 		storage:        db,
-		secretResolver: secret.NewResolver(),
+		secretResolver: secret.NewTestWildcardResolver(),
 	}
 
 	// Create a managed client for the server
@@ -91,7 +91,7 @@ func TestRefreshOAuthToken_DynamicOAuthDiscovery(t *testing.T) {
 		nil,              // logConfig
 		&config.Config{}, // globalConfig
 		db,               // bolt storage
-		secret.NewResolver(),
+		secret.NewTestWildcardResolver(),
 	)
 	require.NoError(t, err)
 	manager.clients["test-dynamic-oauth"] = client
@@ -140,7 +140,7 @@ func TestRefreshOAuthToken_StaticOAuthConfig(t *testing.T) {
 		clients:        make(map[string]*managed.Client),
 		logger:         logger,
 		storage:        db,
-		secretResolver: secret.NewResolver(),
+		secretResolver: secret.NewTestWildcardResolver(),
 	}
 
 	client, err := managed.NewClient(
@@ -150,7 +150,7 @@ func TestRefreshOAuthToken_StaticOAuthConfig(t *testing.T) {
 		nil,
 		&config.Config{},
 		db,
-		secret.NewResolver(),
+		secret.NewTestWildcardResolver(),
 	)
 	require.NoError(t, err)
 	manager.clients["test-static-oauth"] = client
@@ -245,12 +245,12 @@ func TestScanForNewTokens_OnlyOnNewToken(t *testing.T) {
 		clients:           make(map[string]*managed.Client),
 		logger:            logger,
 		storage:           db,
-		secretResolver:    secret.NewResolver(),
+		secretResolver:    secret.NewTestWildcardResolver(),
 		tokenReconnect:    make(map[string]time.Time),
 		tokenFingerprints: make(map[string]string),
 	}
 
-	client, err := managed.NewClient("parked-server", serverConfig, logger, nil, &config.Config{}, db, secret.NewResolver())
+	client, err := managed.NewClient("parked-server", serverConfig, logger, nil, &config.Config{}, db, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	manager.clients["parked-server"] = client
 

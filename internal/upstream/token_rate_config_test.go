@@ -17,7 +17,7 @@ import (
 func TestAgentTokenRateLimit_FollowsTheConfig(t *testing.T) {
 	t.Setenv("CI", "")
 
-	m := NewManager(zap.NewNop(), &config.Config{}, nil, secret.NewResolver(), nil)
+	m := NewManager(zap.NewNop(), &config.Config{}, nil, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { m.shutdownCancel() })
 	rates := m.Limiters().TokenRates()
 	assert.False(t, rates.Default().Enabled(), "no config, no limit")
@@ -43,7 +43,7 @@ func TestNewManager_AppliesTheConfiguredAgentTokenRateLimit(t *testing.T) {
 	t.Setenv("CI", "")
 
 	cfg := &config.Config{AgentTokenRateLimit: &config.AgentTokenRateLimit{PerMinute: 30, Burst: 3}}
-	m := NewManager(zap.NewNop(), cfg, nil, secret.NewResolver(), nil)
+	m := NewManager(zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { m.shutdownCancel() })
 	assert.Equal(t, limiter.RateSpec{PerMinute: 30, Burst: 3}, m.Limiters().TokenRates().Default())
 }

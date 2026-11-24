@@ -103,7 +103,7 @@ func TestResolver_KeyringWriteOptInRequired(t *testing.T) {
 		t.Fatalf("KeyringWriteOptInRequired() = %v, want %v on %s", got, want, runtime.GOOS)
 	}
 
-	r.RegisterProvider("keyring", NewEnvProvider())
+	r.RegisterProvider("keyring", NewEnvProvider(false))
 	if r.KeyringWriteOptInRequired() {
 		t.Fatal("a provider without a write gate requires no opt-in")
 	}

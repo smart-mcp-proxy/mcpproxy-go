@@ -42,7 +42,7 @@ func newManualOAuthManager(t *testing.T, url string) *Manager {
 	t.Helper()
 	t.Setenv("CI", "")
 	t.Setenv("HEADLESS", "")
-	m := NewManager(zap.NewNop(), &config.Config{}, nil, secret.NewResolver(), nil)
+	m := NewManager(zap.NewNop(), &config.Config{}, nil, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { m.shutdownCancel() })
 	require.NoError(t, m.AddServerConfig("srv", &config.ServerConfig{
 		Name: "srv", URL: url, Protocol: "http", Enabled: true,

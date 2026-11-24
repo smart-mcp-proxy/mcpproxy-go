@@ -55,7 +55,7 @@ func TestCodeExecution_WithNilMainServer(t *testing.T) {
 	require.NoError(t, err)
 	defer indexManager.Close()
 
-	secretResolver := secret.NewResolver()
+	secretResolver := secret.NewTestWildcardResolver()
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
 	defer shutdownUpstreamManager(upstreamManager)
 
@@ -122,7 +122,7 @@ func newCodeExecProxy(t *testing.T) *server.MCPProxyServer {
 	require.NoError(t, err)
 	t.Cleanup(func() { indexManager.Close() })
 
-	secretResolver := secret.NewResolver()
+	secretResolver := secret.NewTestWildcardResolver()
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
 	t.Cleanup(func() { shutdownUpstreamManager(upstreamManager) })
 
@@ -256,7 +256,7 @@ func TestCodeExecution_TypeScript(t *testing.T) {
 	require.NoError(t, err)
 	defer indexManager.Close()
 
-	secretResolver := secret.NewResolver()
+	secretResolver := secret.NewTestWildcardResolver()
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
 	defer shutdownUpstreamManager(upstreamManager)
 
@@ -319,7 +319,7 @@ func TestCodeExecution_JavaScriptBackwardCompat(t *testing.T) {
 	require.NoError(t, err)
 	defer indexManager.Close()
 
-	secretResolver := secret.NewResolver()
+	secretResolver := secret.NewTestWildcardResolver()
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
 	defer shutdownUpstreamManager(upstreamManager)
 
@@ -382,7 +382,7 @@ func TestCodeExecution_InvalidLanguage(t *testing.T) {
 	require.NoError(t, err)
 	defer indexManager.Close()
 
-	secretResolver := secret.NewResolver()
+	secretResolver := secret.NewTestWildcardResolver()
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
 	defer shutdownUpstreamManager(upstreamManager)
 

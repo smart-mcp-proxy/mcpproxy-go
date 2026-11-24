@@ -119,7 +119,8 @@ func resolveAPIKeyRef(c *Config) error {
 	if envKey.Set && envKey.Key != "" {
 		return nil
 	}
-	resolved, err := secret.NewResolver().ExpandSecretRefs(context.Background(), c.APIKey)
+	resolver := BuildSecretResolver(c, c.loadConfigPath, secret.ScopeProxy)
+	resolved, err := resolver.ExpandSecretRefs(context.Background(), c.APIKey)
 	if err != nil {
 		// The error is deliberately a fixed sentence: ExpandSecretRefs' own
 		// text quotes the reference, and the api_key field is the one value

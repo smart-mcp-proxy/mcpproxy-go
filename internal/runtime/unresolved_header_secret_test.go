@@ -129,7 +129,7 @@ func testUnresolvedHeaderSecret(t *testing.T, restart func(*Runtime) error) {
 	t.Cleanup(func() { _ = rt.Close() })
 
 	keyring := &fakeKeyring{values: map[string]string{"f9-present": presentValue}}
-	rt.secretResolver.RegisterProvider("keyring", keyring)
+	rt.secretResolver.Load().RegisterProvider("keyring", keyring)
 	for _, c := range []*config.ServerConfig{secretCfg, otherCfg} {
 		require.NoError(t, rt.storageManager.SaveUpstreamServer(c))
 	}

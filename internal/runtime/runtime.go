@@ -191,8 +191,8 @@ type Runtime struct {
 	// swap/read race-free (#861) and independent of r.mu, so the accessor stays
 	// lock-free on the hot path and composes with the config commit serialization.
 	truncator      atomic.Pointer[truncate.Truncator]
-	sigCache       *toolsig.Cache // Spec 085 FR-008: single process-wide signature cache (indexing warms, MCP reads)
-	secretResolver *secret.Resolver
+	sigCache       *toolsig.Cache                  // Spec 085 FR-008: single process-wide signature cache (indexing warms, MCP reads)
+	secretResolver atomic.Pointer[secret.Resolver] // swapped on secret_file_dirs hot reload
 	tokenizer      tokens.Tokenizer
 
 	// tokenSavingsCache holds the last tokenized savings estimate and
@@ -493,6 +493,14 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		return nil, fmt.Errorf("config cannot be nil")
 	}
 
+	config.SetLoadWarningRecorder(func(message, key, value string) {
+		logger.Warn(message, zap.String("key", key), zap.String("value", value))
+	})
+	for _, w := range config.DrainLoadWarnings() {
+		logger.Warn(w.Message, zap.String("key", w.Key), zap.String("value", w.Value))
+	}
+	warnUpstreamFileRefsOutsideAllowList(logger, cfg)
+
 	// Spec 123 FR-020/FR-022: resolve the OAuth token key once, before
 	// config.db is opened. An unresolvable or malformed key stops here with a
 	// *config.StartupError (exit 4) and no byte of the database written.
@@ -572,8 +580,8 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		return nil, fmt.Errorf("failed to initialize index manager: %w", err)
 	}
 
-	// Initialize secret resolver
-	secretResolver := secret.NewResolver()
+	// Initialize secret resolver (upstream scope: server entries + guards).
+	secretResolver := config.BuildSecretResolver(cfg, cfgPath, secret.ScopeUpstream)
 
 	if hook := runtimeNewStageHook; hook != nil {
 		hook(runtimeStageUpstreamManager, storageManager)
@@ -722,7 +730,6 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		cacheManager:       cacheManager,
 		popularityProvider: popularityProvider,
 		sigCache:           toolsig.NewCache(),
-		secretResolver:     secretResolver,
 		tokenizer:          tokenizer,
 		refreshManager:     refreshManager,
 		activityService:    activityService,
@@ -744,6 +751,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		lastGoodTools:     make(map[string][]*config.ToolMetadata),
 		profileMembership: make(map[string][]string),
 	}
+	rt.secretResolver.Store(secretResolver)
 	rt.truncator.Store(truncator)
 
 	// Spec 108 FR-026: the one clients service behind every client-credential
@@ -1525,7 +1533,7 @@ func extractToolCount(stats map[string]interface{}) int {
 
 // GetSecretResolver returns the secret resolver instance
 func (r *Runtime) GetSecretResolver() *secret.Resolver {
-	return r.secretResolver
+	return r.secretResolver.Load()
 }
 
 // NotifySecretsChanged notifies the runtime that secrets have changed and restarts affected servers.
@@ -4180,6 +4188,14 @@ func (r *Runtime) applyComponentConfigLocked(oldCfg, newCfg *config.Config) {
 		r.logger.Info("Observability usage persist interval changed",
 			zap.Duration("new_interval", newCfg.Observability.UsagePersistInterval.Duration()))
 		r.activityService.SetUsagePersistInterval(newCfg.Observability.UsagePersistInterval.Duration())
+	}
+
+	if oldCfg.DataDir != newCfg.DataDir || !config.SecretFileDirsEqual(oldCfg.SecretFileDirs, newCfg.SecretFileDirs) {
+		resolver := config.BuildSecretResolver(newCfg, r.cfgPath, secret.ScopeUpstream)
+		r.secretResolver.Store(resolver)
+		if r.upstreamManager != nil {
+			r.upstreamManager.SetSecretResolver(resolver)
+		}
 	}
 }
 
