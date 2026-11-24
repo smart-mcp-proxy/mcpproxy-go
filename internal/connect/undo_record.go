@@ -71,9 +71,12 @@ func undoRecordPath(cfgPath, backupPath string) string {
 	return backupPath + ".undo"
 }
 
+// fileDigest is the SHA-256 of a whole config file, in hex. It is a change
+// detector for the file a connect wrote, not a way to store a credential.
 func fileDigest(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+	h := sha256.New()
+	_, _ = h.Write(b)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // stagedRecord is a record written to a temp file but not yet published. A
