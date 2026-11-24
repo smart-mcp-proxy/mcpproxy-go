@@ -204,21 +204,39 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 		return nil, fmt.Errorf("safety backup failed: %w", err)
 	}
 
+	// Undo writes the config too: with browser-login undo state present, that
+	// state moves on with it (see undo_state.go); otherwise this is a no-op.
+	tx, txErr := beginConfigTx(cfgPath, false)
+	if txErr != nil {
+		return nil, txErr
+	}
+	failed := func(err error) error {
+		if rb := tx.rollback(); rb != nil {
+			return fmt.Errorf("%w (and the undo state could not be restored: %v)", err, rb)
+		}
+		return err
+	}
+
 	if backupPath == "" {
 		// Connect created this file; pre-connect state is "no file".
 		if err := os.Remove(cfgPath); err != nil {
-			return nil, fmt.Errorf("remove created config: %w", err)
+			return nil, failed(fmt.Errorf("remove created config: %w", err))
 		}
 		removeUndoRecord(recPath)
 		_ = removeCreatedFileRecords(cfgPath, client.ID, serverName, "")
+		stateNote := ""
+		if ferr := tx.finishAfterRemoval(); ferr != nil {
+			stateNote = "undo state not finished, Undo will refuse older records: " + ferr.Error()
+		}
 		res := &ConnectResult{
-			Success:    true,
-			Client:     client.ID,
-			ConfigPath: cfgPath,
-			BackupPath: safetyPath,
-			ServerName: serverName,
-			Action:     "deleted",
-			Message:    fmt.Sprintf("Removed %s — it did not exist before mcpproxy connected (a safety copy was saved to %s)", cfgPath, safetyPath),
+			Success:      true,
+			Client:       client.ID,
+			ConfigPath:   cfgPath,
+			BackupPath:   safetyPath,
+			ServerName:   serverName,
+			Action:       "deleted",
+			Message:      fmt.Sprintf("Removed %s — it did not exist before mcpproxy connected (a safety copy was saved to %s)", cfgPath, safetyPath),
+			CleanupError: stateNote,
 		}
 		if oauthEntry {
 			return res, nil // minted nothing, so there is nothing to revoke
@@ -231,19 +249,24 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 		perm = info.Mode()
 	}
 	if err := atomicWriteFile(cfgPath, backupRaw, perm, nil); err != nil {
-		return nil, fmt.Errorf("restore from backup: %w", err)
+		return nil, failed(fmt.Errorf("restore from backup: %w", err))
 	}
 	removeUndoRecord(recPath)
 	_ = removeCreatedFileRecords(cfgPath, client.ID, serverName, "")
+	stateNote := ""
+	if ferr := tx.finishAfterRemoval(); ferr != nil {
+		stateNote = "undo state not finished, Undo will refuse older records: " + ferr.Error()
+	}
 
 	res := &ConnectResult{
-		Success:    true,
-		Client:     client.ID,
-		ConfigPath: cfgPath,
-		BackupPath: safetyPath,
-		ServerName: serverName,
-		Action:     "restored",
-		Message:    fmt.Sprintf("Restored %s from backup %s", cfgPath, backupPath),
+		Success:      true,
+		Client:       client.ID,
+		ConfigPath:   cfgPath,
+		BackupPath:   safetyPath,
+		ServerName:   serverName,
+		Action:       "restored",
+		Message:      fmt.Sprintf("Restored %s from backup %s", cfgPath, backupPath),
+		CleanupError: stateNote,
 	}
 	if oauthEntry {
 		return res, nil // an oauth connect minted nothing; the API key is left alone

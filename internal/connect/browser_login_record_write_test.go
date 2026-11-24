@@ -94,13 +94,23 @@ func TestOAuthConnect_CreatedFileRecordsAreUniquePerConnect(t *testing.T) {
 		t.Fatalf("each connect keeps its own record, got %v", got)
 	}
 
-	// the file is the first connect's, as if it had won the race to write last
+	// The generations settle the race fail-closed: the second connect is the
+	// current generation, so the first connect's record no longer authorises (its
+	// file was replaced), even when the file is put back to the first's bytes.
+	second := readConfig(t, home, "claude-code")
 	if err := os.WriteFile(path, []byte(first), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if undone, err := svc.Undo("claude-code", "one", ""); err != nil || undone.Action != "deleted" {
-		t.Fatalf("a file matching one of the records is untouched: %v %+v", err, undone)
+	if undone, err := svc.Undo("claude-code", "one", ""); err != nil || undone.Action != "conflict" {
+		t.Fatalf("a superseded record must not authorise: %v %+v", err, undone)
 	}
+	if err := os.WriteFile(path, []byte(second), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if undone, err := svc.Undo("claude-code", "two", ""); err != nil || undone.Action != "deleted" {
+		t.Fatalf("the current generation's record authorises its untouched file: %v %+v", err, undone)
+	}
+	_ = os.WriteFile(path, []byte(first), 0o600)
 
 	// a file matching none is a conflict
 	_ = os.WriteFile(path, []byte("{}\n"), 0o600)

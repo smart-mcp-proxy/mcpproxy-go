@@ -156,7 +156,7 @@ func recordFilesIn(t *testing.T, cfgPath string) []string {
 	}
 	var out []string
 	for _, e := range entries {
-		if n := e.Name(); len(n) > len(filepath.Base(cfgPath)) && n[:len(filepath.Base(cfgPath))] == filepath.Base(cfgPath) && contains(n[len(filepath.Base(cfgPath)):], ".undo.") {
+		if n := e.Name(); len(n) > len(filepath.Base(cfgPath)) && n[:len(filepath.Base(cfgPath))] == filepath.Base(cfgPath) && contains(n[len(filepath.Base(cfgPath)):], ".undo.") && !contains(n, ".undo.state") {
 			out = append(out, n)
 		}
 	}

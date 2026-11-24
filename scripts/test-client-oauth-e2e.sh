@@ -625,8 +625,9 @@ hasnt "no credential line in the output" "$OUT" "Credential:"
 has "the output says it is a browser sign-in" "$OUT" "Sign-in: browser"
 has "the output says the API key is not revoked" "$OUT" "does not revoke"
 # an oauth connect leaves one undo record beside the backup; nothing else is new
-UNDO_N="$(ls "$CLAUDE_CFG".undo.* 2>/dev/null | wc -l | tr -d ' ')"
+UNDO_N="$(ls "$CLAUDE_CFG".undo.* 2>/dev/null | grep -v '\.undo\.state$' | wc -l | tr -d ' ')"
 eq "an oauth connect writes one undo record" 1 "$UNDO_N"
+[ -f "$CLAUDE_CFG.undo.state" ] && ok "...and the per-config undo state" || bad "no undo state file"
 # an unsupported client is refused and its config is left alone
 connect_cli true cursor --auth oauth
 [ "$CODE" -ne 0 ] && ok "connect cursor --auth oauth is refused (exit $CODE)" || bad "connect cursor --auth oauth exited 0"

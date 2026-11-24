@@ -906,10 +906,28 @@ func (s *Service) Disconnect(clientID, serverName string) (res *ConnectResult, e
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
 
+	// A config that holds browser-login undo state has that state moved on by any
+	// write of it, a disconnect included (see undo_state.go); with no state file
+	// this is a no-op and nothing new is written.
+	tx, txErr := beginConfigTx(cfgPath, false)
+	if txErr != nil {
+		return nil, txErr
+	}
 	if client.Format == "toml" {
 		res, err = s.disconnectTOML(client, cfgPath, serverName)
 	} else {
 		res, err = s.disconnectJSON(client, cfgPath, serverName)
+	}
+	if tx != nil && (err != nil || res == nil || !res.Success) {
+		// Nothing was written: the state is put back exactly as it was.
+		if rb := tx.rollback(); rb != nil {
+			if err != nil {
+				err = fmt.Errorf("%w (and the undo state could not be restored: %v)", err, rb)
+			} else if res != nil {
+				res.CleanupError = "undo state could not be restored, Undo will refuse older records: " + rb.Error()
+			}
+		}
+		tx = nil
 	}
 	// OpenCode candidate drift (#922): if the entry was written to opencode.json
 	// and OpenCode later bootstrapped opencode.jsonc, the resolver now targets
@@ -936,9 +954,16 @@ func (s *Service) Disconnect(clientID, serverName string) (res *ConnectResult, e
 		}
 	}
 	if err == nil && res != nil && res.Success {
+		var notes []string
 		if cerr := removeUndoRecords(res.ConfigPath, clientID, serverName); cerr != nil {
 			// The entry is gone; only the cleanup of its undo records failed.
-			res.CleanupError = cerr.Error()
+			notes = append(notes, cerr.Error())
+		}
+		if ferr := tx.finishAfterRemoval(); ferr != nil {
+			notes = append(notes, "undo state not finished, Undo will refuse older records: "+ferr.Error())
+		}
+		if len(notes) > 0 {
+			res.CleanupError = strings.Join(notes, "; ")
 		}
 	}
 	return res, s.asAccessError(client, cfgPath, err)
@@ -1192,24 +1217,38 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	// and published, with the retirement of the older ones, only after the config
 	// write succeeded, so a connect that fails changes no record.
 	var staged *stagedRecord
+	gen := ""
 	if cred.oauth {
 		var recErr error
-		if staged, recErr = stageUndoRecord(cfgPath, backupPath, client.ID, serverName, encoded, currentPerm(cfgPath, perm)); recErr != nil {
+		if gen, recErr = newGeneration(); recErr != nil {
 			return nil, recErr
 		}
+		if staged, recErr = stageUndoRecord(cfgPath, backupPath, client.ID, serverName, gen, encoded, currentPerm(cfgPath, perm)); recErr != nil {
+			return nil, recErr
+		}
+	}
+	// The undo state goes pending before the write (created by a browser-login
+	// connect, only updated by any other write if it already exists).
+	tx, txErr := beginConfigTx(cfgPath, cred.oauth)
+	if txErr != nil {
+		staged.discard()
+		return nil, txErr
 	}
 	if err := atomicWriteFile(cfgPath, encoded, currentPerm(cfgPath, perm), func() error {
 		return s.refuseIfServersSectionRaced(client, cfgPath)
 	}); err != nil {
 		staged.discard()
+		if rbErr := tx.rollback(); rbErr != nil {
+			return nil, fmt.Errorf("write config: %w (and the undo state could not be restored: %v; Undo refuses until the next successful write)", err, rbErr)
+		}
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 	cred.markWritten()
-	recordNote := finishUndoRecords(staged, cfgPath, backupPath, client.ID, serverName, cred.oauth)
+	recordNote := finishUndoRecords(staged, tx, gen, cfgPath, backupPath, client.ID, serverName, cred.oauth)
 
 	// Verify by re-reading
 	if err := s.verifyJSONEntry(client, cfgPath, serverName); err != nil {
-		return nil, fmt.Errorf("verification failed: %w", err)
+		return nil, verifyFailure(err, cred.oauth, backupPath, recordNote)
 	}
 
 	return &ConnectResult{
@@ -1401,20 +1440,34 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 	// and published, with the retirement of the older ones, only after the config
 	// write succeeded, so a connect that fails changes no record.
 	var staged *stagedRecord
+	gen := ""
 	if cred.oauth {
 		var recErr error
-		if staged, recErr = stageUndoRecord(cfgPath, backupPath, client.ID, serverName, buf.Bytes(), currentPerm(cfgPath, perm)); recErr != nil {
+		if gen, recErr = newGeneration(); recErr != nil {
 			return nil, recErr
 		}
+		if staged, recErr = stageUndoRecord(cfgPath, backupPath, client.ID, serverName, gen, buf.Bytes(), currentPerm(cfgPath, perm)); recErr != nil {
+			return nil, recErr
+		}
+	}
+	// The undo state goes pending before the write (created by a browser-login
+	// connect, only updated by any other write if it already exists).
+	tx, txErr := beginConfigTx(cfgPath, cred.oauth)
+	if txErr != nil {
+		staged.discard()
+		return nil, txErr
 	}
 	if err := atomicWriteFile(cfgPath, buf.Bytes(), currentPerm(cfgPath, perm), func() error {
 		return s.refuseIfServersSectionRaced(client, cfgPath)
 	}); err != nil {
 		staged.discard()
+		if rbErr := tx.rollback(); rbErr != nil {
+			return nil, fmt.Errorf("write config: %w (and the undo state could not be restored: %v; Undo refuses until the next successful write)", err, rbErr)
+		}
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 	cred.markWritten()
-	recordNote := finishUndoRecords(staged, cfgPath, backupPath, client.ID, serverName, cred.oauth)
+	recordNote := finishUndoRecords(staged, tx, gen, cfgPath, backupPath, client.ID, serverName, cred.oauth)
 
 	return &ConnectResult{
 		Success:    true,

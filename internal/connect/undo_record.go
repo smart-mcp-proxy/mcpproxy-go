@@ -10,9 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
-	"time"
 )
 
 // Write provenance for Undo (Spec 132 PR-3). Replaying a connect cannot tell
@@ -53,10 +51,10 @@ type undoRecord struct {
 	// Auth is "oauth" or "key".
 	Auth   string `json:"auth"`
 	SHA256 string `json:"sha256"`
-	// Created is when the connect wrote the record (Unix nanoseconds). Among the
-	// created-file records of one entry only the newest can authorise an Undo, so
-	// an older one that outlived its retirement never can.
-	Created int64 `json:"created,omitempty"`
+	// Gen is the generation that was current after this connect (see
+	// undo_state.go). A created-file record authorises an Undo only while the
+	// state file still names it.
+	Gen string `json:"gen,omitempty"`
 }
 
 // undoRecordPath is where the record of the write that took backupPath lives.
@@ -90,8 +88,8 @@ type stagedRecord struct {
 // `written`. It creates the directory if needed and writes the complete record
 // into an exclusively created temp file beside its final name; any failure
 // removes the temp file.
-func stageUndoRecord(cfgPath, backupPath, clientID, serverName string, written []byte, perm os.FileMode) (*stagedRecord, error) {
-	rec := undoRecord{Version: undoRecordVersion, Client: clientID, Server: serverName, Auth: AuthOAuth, SHA256: fileDigest(written), Created: time.Now().UnixNano()}
+func stageUndoRecord(cfgPath, backupPath, clientID, serverName, gen string, written []byte, perm os.FileMode) (*stagedRecord, error) {
+	rec := undoRecord{Version: undoRecordVersion, Client: clientID, Server: serverName, Auth: AuthOAuth, SHA256: fileDigest(written), Gen: gen}
 	if backupPath != "" {
 		rec.Backup = filepath.Base(backupPath)
 	}
@@ -111,24 +109,8 @@ func stageUndoRecord(cfgPath, backupPath, clientID, serverName string, written [
 	if err := os.MkdirAll(dir, newDirPerm); err != nil {
 		return nil, fmt.Errorf("create directory for undo record: %w", err)
 	}
-	tmp, err := os.CreateTemp(dir, filepath.Base(cfgPath)+".undo-tmp-*")
+	tmpName, err := stageSidecar(cfgPath, dir, raw, perm, recordWrite)
 	if err != nil {
-		return nil, fmt.Errorf("stage undo record: %w", err)
-	}
-	tmpName := tmp.Name()
-	fail := func(err error) (*stagedRecord, error) {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return nil, fmt.Errorf("write undo record: %w", err)
-	}
-	if err := recordWrite(tmp, raw); err != nil {
-		return fail(err)
-	}
-	if err := tmp.Chmod(perm.Perm()); err != nil && runtime.GOOS != "windows" {
-		return fail(err)
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
 		return nil, fmt.Errorf("write undo record: %w", err)
 	}
 	return &stagedRecord{tmp: tmpName, final: path}, nil
@@ -153,15 +135,24 @@ func (r *stagedRecord) publish() (string, error) {
 	return r.final, nil
 }
 
-// finishUndoRecords runs right after a successful config write: it publishes
-// the staged record (browser-login connects) and then retires the older records
-// this write superseded. Neither can fail the connect, which has already
-// happened: a problem is returned as a note for the result. A record that
-// outlives its retirement is harmless: it is older than the published one (see
-// Created), and with no published record there is nothing it could wrongly
-// authorise that Undo's whole-file digest and key replay would not also refuse.
-func finishUndoRecords(staged *stagedRecord, cfgPath, backupPath, clientID, serverName string, strict bool) string {
+// finishUndoRecords runs right after a successful config write: it commits the
+// new generation (which at once supersedes every older created-file record),
+// publishes the staged record (browser-login connects) and then retires the
+// older records. None of it can fail the connect, which has already happened: a
+// problem is returned as a note for the result. A record that outlives its
+// retirement, a failed publish or a failed commit cannot authorise anything: the
+// state is pending (fail closed) or names another generation.
+func finishUndoRecords(staged *stagedRecord, tx *configTx, gen, cfgPath, backupPath, clientID, serverName string, strict bool) string {
 	var notes []string
+	var cerr error
+	if gen != "" {
+		cerr = tx.commit(gen)
+	} else {
+		cerr = tx.commitNew()
+	}
+	if cerr != nil {
+		notes = append(notes, "undo state not updated, Undo will refuse older records: "+cerr.Error())
+	}
 	keep, err := staged.publish()
 	if err != nil {
 		notes = append(notes, err.Error())
@@ -203,13 +194,13 @@ func checkUndoRecord(cfgPath, backupPath, clientID, serverName string, current [
 			return undoLegacy, "", ""
 		}
 	}
-	newest := int64(0)
+	gate := stateGate{}
 	if backupPath == "" {
-		newest = newestCreated(paths, clientID, serverName)
+		gate = readStateGate(cfgPath)
 	}
 	verdict, auth, matched := undoLegacy, "", ""
 	for _, p := range paths {
-		v, a := checkUndoRecordFile(p, backupPath, clientID, serverName, current, newest)
+		v, a := checkUndoRecordFile(p, backupPath, clientID, serverName, current, gate)
 		if v == undoForeign {
 			continue // another client's or entry's record says nothing about this file
 		}
@@ -224,24 +215,25 @@ func checkUndoRecord(cfgPath, backupPath, clientID, serverName string, current [
 	return verdict, auth, matched
 }
 
-// newestCreated is the creation time of the newest readable created-file record
-// of this client and entry among paths.
-func newestCreated(paths []string, clientID, serverName string) int64 {
-	var newest int64
-	for _, p := range paths {
-		raw, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		var rec undoRecord
-		if json.Unmarshal(raw, &rec) == nil && rec.Client == clientID && rec.Server == serverName && rec.Created > newest {
-			newest = rec.Created
-		}
-	}
-	return newest
+// stateGate is what the per-config state allows created-file records to do.
+type stateGate struct {
+	ok      bool   // readable, well formed and not pending
+	current string // the generation a record must carry
 }
 
-func checkUndoRecordFile(path, backupPath, clientID, serverName string, current []byte, newest int64) (undoVerdict, string) {
+func readStateGate(cfgPath string) stateGate {
+	raw, exists, err := readUndoStateRaw(cfgPath)
+	if err != nil || !exists {
+		return stateGate{}
+	}
+	st, ok := parseUndoState(raw)
+	if !ok || st.Pending || st.Current == "" {
+		return stateGate{}
+	}
+	return stateGate{ok: true, current: st.Current}
+}
+
+func checkUndoRecordFile(path, backupPath, clientID, serverName string, current []byte, gate stateGate) (undoVerdict, string) {
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return undoLegacy, ""
@@ -266,8 +258,11 @@ func checkUndoRecordFile(path, backupPath, clientID, serverName string, current 
 	if rec.Backup != wantBackup {
 		return undoConflict, ""
 	}
-	if backupPath == "" && rec.Created < newest {
-		return undoForeign, "" // superseded by a newer connect of this entry
+	// A created-file record counts only for the generation the state names; a
+	// missing, unreadable, malformed or pending state, or another generation,
+	// fails closed.
+	if backupPath == "" && (!gate.ok || rec.Gen != gate.current) {
+		return undoConflict, ""
 	}
 	if subtle.ConstantTimeCompare([]byte(rec.SHA256), []byte(fileDigest(current))) != 1 {
 		return undoConflict, ""
@@ -349,7 +344,7 @@ func removeCreatedFileRecords(cfgPath, clientID, serverName, keep string) error 
 		}
 		var rec undoRecord
 		if json.Unmarshal(raw, &rec) == nil && rec.Client == clientID && rec.Server == serverName {
-			if err := os.Remove(m); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
+			if err := removeRecordFile(m); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
 				firstErr = err
 			}
 		}
@@ -392,7 +387,7 @@ func retireStaleUndoRecords(cfgPath, backupPath, clientID, serverName, keep stri
 			// backupFileAvoiding never hands out a name with a foreign record.
 			return fmt.Errorf("retire stale undo record: %s belongs to another entry", filepath.Base(rp))
 		default:
-			if err := os.Remove(rp); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := removeRecordFile(rp); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("retire stale undo record: %w", err)
 			}
 		}
@@ -431,7 +426,7 @@ func removeUndoRecords(cfgPath, clientID, serverName string) error {
 		}
 		var rec undoRecord
 		if json.Unmarshal(raw, &rec) == nil && rec.Client == clientID && rec.Server == serverName {
-			if err := os.Remove(m); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
+			if err := removeRecordFile(m); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
 				firstErr = err
 			}
 		}
@@ -447,3 +442,7 @@ func defaultRecordWrite(f *os.File, b []byte) error {
 	_, err := f.Write(b)
 	return err
 }
+
+// removeRecordFile removes a retired record. A seam, so a test can make a
+// retirement fail the way a sticky directory or an ACL would.
+var removeRecordFile = os.Remove

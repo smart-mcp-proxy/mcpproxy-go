@@ -220,7 +220,9 @@ What Connect does with `--auth oauth` (REST `auth: "oauth"`, preview `?auth=oaut
   connect restores the earlier config and revokes nothing, since the connect minted nothing.
   Undo of a browser-login connect trusts a digest of the file recorded in a sidecar beside the backup
   (`<config>.undo.<timestamp>`, removed on a successful Undo or Disconnect), so any edit of the
-  address, in either direction, is a conflict. An API-key connect writes no sidecar and is undone
+  address, in either direction, is a conflict. A record of a file Connect created is valid only for
+  the generation named in `<config>.undo.state`, which every later write of that config moves on,
+  so a stale record never authorises an Undo (it fails closed instead). An API-key connect writes no sidecar and is undone
   exactly as before.
 - `GET /api/v1/connect` and `GET /api/v1/connect/{client}` report `supports_browser_login` and
   `browser_login_available` (the client is in the table **and** the feature is on, this is the

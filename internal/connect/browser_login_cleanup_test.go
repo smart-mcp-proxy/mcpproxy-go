@@ -5,6 +5,7 @@ package connect
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -14,7 +15,13 @@ func undoFiles(t *testing.T, home string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return m
+	var out []string
+	for _, f := range m {
+		if !strings.HasSuffix(f, ".undo.state") { // the per-config state is not a record
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // With browser login not used, a connect writes exactly the files it always
