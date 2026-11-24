@@ -15,6 +15,9 @@ import (
 
 // TestHelperWaitForInterrupt is the child process: it exits cleanly only on SIGINT.
 func TestHelperWaitForInterrupt(t *testing.T) {
+	if os.Getenv("MONITOR_HELPER") == "exit" {
+		os.Exit(0)
+	}
 	if os.Getenv("MONITOR_HELPER") != "1" {
 		t.Skip("helper process")
 	}
@@ -59,5 +62,28 @@ func TestStopIsGracefulForWindowlessProcess(t *testing.T) {
 	}
 	if code := pm.GetExitInfo().Code; code != 0 {
 		t.Fatalf("exit code %d, want 0", code)
+	}
+}
+
+// Stop on a child that has already exited must report that exit, never force-kill: with no
+// graceful signal possible the grace is 0, and a random select used to pick the force-kill.
+func TestStopDoesNotForceKillExitedProcess(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		pm := NewProcessMonitor(&ProcessConfig{
+			Binary: os.Args[0],
+			Args:   []string{"-test.run=^TestHelperWaitForInterrupt$"},
+			Env:    append(os.Environ(), "MONITOR_HELPER=exit"),
+		}, zap.NewNop().Sugar(), nil)
+		if err := pm.Start(); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-pm.doneCh:
+		case <-time.After(30 * time.Second):
+			t.Fatal("child never exited")
+		}
+		if err := pm.Stop(); err != nil && strings.Contains(err.Error(), "force killed") {
+			t.Fatalf("iteration %d: exited child was force-killed: %v", i, err)
+		}
 	}
 }
