@@ -14,50 +14,58 @@ type ClaudeCodeConfig struct {
 
 // ClaudeCodeServerConfig represents a single server in Claude Code config.
 type ClaudeCodeServerConfig struct {
-	Type    string                 `json:"type,omitempty"` // stdio, http, sse, websocket
-	Command string                 `json:"command,omitempty"`
-	Args    []string               `json:"args,omitempty"`
-	Env     map[string]string      `json:"env,omitempty"`
-	URL     string                 `json:"url,omitempty"`
-	Headers map[string]string      `json:"headers,omitempty"`
-	OAuth   *ClaudeCodeOAuthConfig `json:"oauth,omitempty"`
+	Type    string            `json:"type,omitempty"` // stdio, http, sse, websocket
+	Command string            `json:"command,omitempty"`
+	Args    []string          `json:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	URL     string            `json:"url,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+	// Raw so that a malformed block costs only this server its OAuth settings.
+	OAuth json.RawMessage `json:"oauth,omitempty"`
 }
 
 // ClaudeCodeOAuthConfig is the oauth block in Claude Code configs
 // (https://code.claude.com/docs/en/mcp). Scopes is a space-separated string
-// there, not a list. Unknown keys are collected for a warning instead of a
-// refusal: this is a foreign file format, and new Claude Code fields should
-// surface as "ignored", not break the import.
+// there, not a list. The client secret is not part of it: Claude Code keeps it
+// in the system keychain.
 type ClaudeCodeOAuthConfig struct {
-	ClientID              string   `json:"clientId,omitempty"`
-	ClientSecret          string   `json:"clientSecret,omitempty"`
-	Scopes                string   `json:"scopes,omitempty"`
-	CallbackPort          int      `json:"callbackPort,omitempty"`
-	AuthServerMetadataURL string   `json:"authServerMetadataUrl,omitempty"`
-	UnknownKeys           []string `json:"-"`
+	ClientID              string `json:"clientId,omitempty"`
+	Scopes                string `json:"scopes,omitempty"`
+	CallbackPort          int    `json:"callbackPort,omitempty"`
+	AuthServerMetadataURL string `json:"authServerMetadataUrl,omitempty"`
 }
 
-// UnmarshalJSON decodes the known fields and records everything else.
-func (c *ClaudeCodeOAuthConfig) UnmarshalJSON(data []byte) error {
-	type plain ClaudeCodeOAuthConfig
-	var p plain
-	if err := json.Unmarshal(data, &p); err != nil {
-		return err
-	}
-	*c = ClaudeCodeOAuthConfig(p)
+var claudeCodeOAuthKeys = []string{"clientId", "scopes", "callbackPort", "authServerMetadataUrl"}
 
-	var keys map[string]json.RawMessage
-	if err := json.Unmarshal(data, &keys); err != nil {
-		return err
+// parseClaudeCodeOAuth decodes an oauth block. This is a foreign file format,
+// so a malformed block or an unknown key is a warning, never a failed import.
+func parseClaudeCodeOAuth(raw json.RawMessage) (*ClaudeCodeOAuthConfig, []string) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
 	}
+
+	var oauth ClaudeCodeOAuthConfig
+	var keys map[string]json.RawMessage
+	err := json.Unmarshal(raw, &oauth)
+	if err == nil {
+		err = json.Unmarshal(raw, &keys)
+	}
+	if err != nil {
+		return nil, []string{fmt.Sprintf("oauth block is malformed and was ignored: %v", err)}
+	}
+
+	var unknown []string
 	for k := range keys {
-		switch k {
-		case "clientId", "clientSecret", "scopes", "callbackPort", "authServerMetadataUrl":
-		default:
-			c.UnknownKeys = append(c.UnknownKeys, k)
+		// Case-insensitive, like the decoder above.
+		if !slices.ContainsFunc(claudeCodeOAuthKeys, func(known string) bool { return strings.EqualFold(k, known) }) {
+			unknown = append(unknown, k)
 		}
 	}
-	return nil
+	if len(unknown) == 0 {
+		return &oauth, nil
+	}
+	slices.Sort(unknown)
+	return &oauth, []string{fmt.Sprintf("oauth block has unknown keys %s; they were ignored", strings.Join(unknown, ", "))}
 }
 
 // ClaudeCodeParser parses Claude Code configuration files.
@@ -97,6 +105,8 @@ func (p *ClaudeCodeParser) Parse(content []byte) ([]*ParsedServer, error) {
 			}
 		}
 
+		oauth, warnings := parseClaudeCodeOAuth(serverCfg.OAuth)
+
 		parsed := &ParsedServer{
 			Name:         name,
 			SourceFormat: FormatClaudeCode,
@@ -107,9 +117,9 @@ func (p *ClaudeCodeParser) Parse(content []byte) ([]*ParsedServer, error) {
 				"url":      serverCfg.URL,
 				"headers":  serverCfg.Headers,
 				"protocol": protocol,
-				"oauth":    serverCfg.OAuth,
+				"oauth":    oauth,
 			},
-			Warnings: []string{},
+			Warnings: append([]string{}, warnings...),
 		}
 
 		// Validate required fields based on protocol
@@ -118,10 +128,6 @@ func (p *ClaudeCodeParser) Parse(content []byte) ([]*ParsedServer, error) {
 		}
 		if (protocol == "http" || protocol == "sse" || protocol == "websocket") && serverCfg.URL == "" {
 			parsed.Warnings = append(parsed.Warnings, fmt.Sprintf("%s server missing url field", protocol))
-		}
-		if serverCfg.OAuth != nil && len(serverCfg.OAuth.UnknownKeys) > 0 {
-			slices.Sort(serverCfg.OAuth.UnknownKeys)
-			parsed.Warnings = append(parsed.Warnings, fmt.Sprintf("oauth block has unknown keys %s; they were ignored", strings.Join(serverCfg.OAuth.UnknownKeys, ", ")))
 		}
 
 		servers = append(servers, parsed)

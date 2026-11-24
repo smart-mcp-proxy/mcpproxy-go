@@ -208,7 +208,6 @@ func TestMapToServerConfig(t *testing.T) {
 				"protocol": "http",
 				"oauth": &ClaudeCodeOAuthConfig{
 					ClientID:              "claude-client",
-					ClientSecret:          "claude-secret",
 					Scopes:                "read write",
 					CallbackPort:          8080,
 					AuthServerMetadataURL: "https://auth.example.com/.well-known/oauth-authorization-server",
@@ -223,9 +222,6 @@ func TestMapToServerConfig(t *testing.T) {
 		}
 		if server.OAuth.ClientID != "claude-client" {
 			t.Errorf("OAuth.ClientID = %s, want claude-client", server.OAuth.ClientID)
-		}
-		if server.OAuth.ClientSecret != "claude-secret" {
-			t.Errorf("OAuth.ClientSecret = %s, want claude-secret", server.OAuth.ClientSecret)
 		}
 		// Claude Code writes scopes as a space-separated string; mcpproxy wants []string.
 		if len(server.OAuth.Scopes) != 2 || server.OAuth.Scopes[0] != "read" || server.OAuth.Scopes[1] != "write" {
@@ -244,6 +240,57 @@ func TestMapToServerConfig(t *testing.T) {
 		}
 		if !portWarned {
 			t.Errorf("dropping callbackPort must be warned about, got %v", warnings)
+		}
+		if !strings.Contains(strings.Join(warnings, "\n"), "oauth.client_secret") {
+			t.Errorf("the missing client secret must be warned about, got %v", warnings)
+		}
+	})
+
+	t.Run("claude_code_oauth_callback_port_only", func(t *testing.T) {
+		parsed := &ParsedServer{
+			Name:         "oauth-server",
+			SourceFormat: FormatClaudeCode,
+			Fields: map[string]interface{}{
+				"url":      "https://example.com/mcp",
+				"protocol": "http",
+				"oauth":    &ClaudeCodeOAuthConfig{CallbackPort: 8080},
+			},
+		}
+
+		server, _, warnings := MapToServerConfig(parsed, now)
+
+		if server.OAuth != nil {
+			t.Errorf("OAuth = %+v, want nil", server.OAuth)
+		}
+		if len(warnings) != 1 || !strings.Contains(warnings[0], "callbackPort 8080") {
+			t.Errorf("warnings = %v, want only the dropped callbackPort", warnings)
+		}
+	})
+
+	t.Run("claude_code_oauth_invalid_metadata_url_dropped", func(t *testing.T) {
+		for _, bad := range []string{"http://auth.example.com/meta", "https://user:hunter2@auth.example.com/meta", "https://auth.example.com/meta?token=hunter2"} {
+			parsed := &ParsedServer{
+				Name:         "oauth-server",
+				SourceFormat: FormatClaudeCode,
+				Fields: map[string]interface{}{
+					"url":      "https://example.com/mcp",
+					"protocol": "http",
+					"oauth":    &ClaudeCodeOAuthConfig{ClientID: "claude-client", AuthServerMetadataURL: bad},
+				},
+			}
+
+			server, _, warnings := MapToServerConfig(parsed, now)
+
+			if server.OAuth == nil || server.OAuth.ClientID != "claude-client" || server.OAuth.AuthServerMetadataURL != "" {
+				t.Errorf("%s: OAuth = %+v, want client id without metadata URL", bad, server.OAuth)
+			}
+			joined := strings.Join(warnings, "\n")
+			if !strings.Contains(joined, "authServerMetadataUrl") {
+				t.Errorf("%s: no warning about the dropped URL: %v", bad, warnings)
+			}
+			if strings.Contains(joined, "hunter2") {
+				t.Errorf("%s: warning echoes the URL: %v", bad, warnings)
+			}
 		}
 	})
 

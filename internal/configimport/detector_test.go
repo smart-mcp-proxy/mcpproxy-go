@@ -27,6 +27,33 @@ func TestDetectFormat(t *testing.T) {
 			wantConfidence: "high",
 		},
 		{
+			name: "claude_code_sse_with_oauth",
+			content: `{
+				"mcpServers": {
+					"remote": {
+						"type": "sse",
+						"url": "https://example.com/sse",
+						"oauth": {"clientId": "example-client", "callbackPort": 8080}
+					}
+				}
+			}`,
+			wantFormat:     FormatClaudeCode,
+			wantConfidence: "medium",
+		},
+		{
+			name: "gemini_oauth_is_not_claude_code",
+			content: `{
+				"mcpServers": {
+					"remote": {
+						"url": "https://example.com/sse",
+						"oauth": {"enabled": true, "clientId": "example-client"}
+					}
+				}
+			}`,
+			wantFormat:     FormatCursor,
+			wantConfidence: "low",
+		},
+		{
 			name: "claude_desktop_stdio_only",
 			content: `{
 				"mcpServers": {

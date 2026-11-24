@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestClaudeCodeParser_Parse(t *testing.T) {
@@ -85,7 +86,6 @@ func TestClaudeCodeParser_Parse(t *testing.T) {
 					"url": "https://example.com/mcp",
 					"oauth": {
 						"clientId": "example-client",
-						"clientSecret": "example-secret",
 						"scopes": "read write",
 						"callbackPort": 8080,
 						"authServerMetadataUrl": "https://auth.example.com/.well-known/oauth-authorization-server"
@@ -109,9 +109,6 @@ func TestClaudeCodeParser_Parse(t *testing.T) {
 		if oauth.ClientID != "example-client" {
 			t.Errorf("clientId = %s, want example-client", oauth.ClientID)
 		}
-		if oauth.ClientSecret != "example-secret" {
-			t.Errorf("clientSecret = %s, want example-secret", oauth.ClientSecret)
-		}
 		if oauth.Scopes != "read write" {
 			t.Errorf("scopes = %s, want 'read write'", oauth.Scopes)
 		}
@@ -120,9 +117,6 @@ func TestClaudeCodeParser_Parse(t *testing.T) {
 		}
 		if oauth.AuthServerMetadataURL != "https://auth.example.com/.well-known/oauth-authorization-server" {
 			t.Errorf("authServerMetadataUrl = %s", oauth.AuthServerMetadataURL)
-		}
-		if len(oauth.UnknownKeys) != 0 {
-			t.Errorf("UnknownKeys = %v, want none", oauth.UnknownKeys)
 		}
 		if len(servers[0].Warnings) != 0 {
 			t.Errorf("warnings = %v, want none", servers[0].Warnings)
@@ -136,7 +130,8 @@ func TestClaudeCodeParser_Parse(t *testing.T) {
 					"type": "http",
 					"url": "https://example.com/mcp",
 					"oauth": {
-						"clientId": "example-client",
+						"ClientID": "example-client",
+						"clientSecret": "example-secret",
 						"futureField": true
 					}
 				}
@@ -148,20 +143,38 @@ func TestClaudeCodeParser_Parse(t *testing.T) {
 			t.Fatalf("Parse() error = %v", err)
 		}
 		oauth, _ := servers[0].Fields["oauth"].(*ClaudeCodeOAuthConfig)
-		if oauth == nil {
-			t.Fatal("oauth field should be set")
+		if oauth == nil || oauth.ClientID != "example-client" {
+			t.Fatalf("oauth = %+v, want the known field in another case applied", oauth)
 		}
-		if len(oauth.UnknownKeys) != 1 || oauth.UnknownKeys[0] != "futureField" {
-			t.Errorf("UnknownKeys = %v, want [futureField]", oauth.UnknownKeys)
+		// Only the unknown key, and never its value.
+		if len(servers[0].Warnings) != 1 || !strings.Contains(servers[0].Warnings[0], "unknown keys clientSecret, futureField;") {
+			t.Errorf("warnings = %v, want one naming clientSecret and futureField", servers[0].Warnings)
 		}
-		found := false
-		for _, w := range servers[0].Warnings {
-			if strings.Contains(w, "futureField") {
-				found = true
+	})
+
+	t.Run("oauth_malformed_keeps_servers", func(t *testing.T) {
+		for _, block := range []string{`false`, `"x"`, `[]`, `{"scopes":["read"]}`, `{"callbackPort":"8080"}`} {
+			content := []byte(`{"mcpServers":{
+				"bad": {"type":"http","url":"https://bad.example.com/mcp","oauth":` + block + `},
+				"good": {"type":"http","url":"https://good.example.com/mcp"}
+			}}`)
+
+			servers, err := parser.Parse(content)
+			if err != nil {
+				t.Fatalf("%s: Parse() error = %v", block, err)
 			}
-		}
-		if !found {
-			t.Errorf("no warning mentions futureField: %v", servers[0].Warnings)
+			if len(servers) != 2 {
+				t.Fatalf("%s: Parse() returned %d servers, want 2", block, len(servers))
+			}
+			for _, s := range servers {
+				warned := len(s.Warnings) == 1 && strings.Contains(s.Warnings[0], "malformed")
+				if warned != (s.Name == "bad") {
+					t.Errorf("%s: %s warnings = %v", block, s.Name, s.Warnings)
+				}
+				if server, _, _ := MapToServerConfig(s, time.Now()); server.OAuth != nil {
+					t.Errorf("%s: %s OAuth = %+v, want nil", block, s.Name, server.OAuth)
+				}
+			}
 		}
 	})
 

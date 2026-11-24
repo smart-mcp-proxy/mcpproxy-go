@@ -82,14 +82,9 @@ func MapToServerConfig(parsed *ParsedServer, now time.Time) (*config.ServerConfi
 			warnings = append(warnings, "OAuth credentials imported; you may need to reconfigure")
 		}
 	case FormatClaudeCode:
-		if oauth := mapClaudeCodeOAuth(parsed.Fields); oauth != nil {
-			if raw, ok := parsed.Fields["oauth"].(*ClaudeCodeOAuthConfig); ok && raw.CallbackPort != 0 {
-				// mcpproxy has no port-only callback pin; oauth.redirect_uri
-				// is the full URL, so half a pin would fail validation. Claude
-				// Code also just allocates the port for its own callback, so
-				// leaving it unset matches the source behavior.
-				warnings = append(warnings, fmt.Sprintf("oauth.callbackPort %d has no mcpproxy equivalent and was dropped; set oauth.redirect_uri in config or the web UI if you need a fixed callback", raw.CallbackPort))
-			}
+		oauth, oauthWarnings := mapClaudeCodeOAuth(parsed.Fields)
+		warnings = append(warnings, oauthWarnings...)
+		if oauth != nil {
 			server.OAuth = oauth
 			warnings = append(warnings, "OAuth credentials imported; you may need to reconfigure")
 		}
@@ -138,27 +133,43 @@ func mapGeminiOAuth(fields map[string]interface{}) *config.OAuthConfig {
 	}
 }
 
-// mapClaudeCodeOAuth extracts OAuth config from Claude Code's oauth field.
+// mapClaudeCodeOAuth extracts OAuth config from Claude Code's oauth field, with
+// a warning for everything that could not be carried over.
 // Claude Code's dialect: scopes is a space-separated string and the auth
 // server is named by authServerMetadataUrl. An empty client_id stays empty:
 // mcpproxy falls back to DCR or public-client PKCE, which is what a server
 // without a static client needs anyway.
-func mapClaudeCodeOAuth(fields map[string]interface{}) *config.OAuthConfig {
-	oauth, ok := fields["oauth"].(*ClaudeCodeOAuthConfig)
-	if !ok || oauth == nil {
-		return nil
+func mapClaudeCodeOAuth(fields map[string]interface{}) (*config.OAuthConfig, []string) {
+	src, ok := fields["oauth"].(*ClaudeCodeOAuthConfig)
+	if !ok || src == nil {
+		return nil, nil
 	}
 
-	if oauth.ClientID != "" || oauth.ClientSecret != "" || oauth.Scopes != "" || oauth.AuthServerMetadataURL != "" {
-		return &config.OAuthConfig{
-			ClientID:              oauth.ClientID,
-			ClientSecret:          oauth.ClientSecret,
-			Scopes:                strings.Fields(oauth.Scopes),
-			AuthServerMetadataURL: oauth.AuthServerMetadataURL,
-		}
+	var warnings []string
+	if src.CallbackPort != 0 {
+		// mcpproxy has no port-only callback pin; oauth.redirect_uri is the
+		// full URL, so half a pin would fail validation.
+		warnings = append(warnings, fmt.Sprintf("oauth.callbackPort %d has no mcpproxy equivalent and was dropped; set oauth.redirect_uri in config or the web UI if you need a fixed callback", src.CallbackPort))
 	}
 
-	return nil
+	oauth := &config.OAuthConfig{
+		ClientID:              src.ClientID,
+		Scopes:                strings.Fields(src.Scopes),
+		AuthServerMetadataURL: src.AuthServerMetadataURL,
+	}
+	// The only value here that Validate can reject; its error does not echo it.
+	if err := oauth.Validate(); err != nil {
+		warnings = append(warnings, fmt.Sprintf("oauth.authServerMetadataUrl is not usable by mcpproxy and was dropped: %v", err))
+		oauth.AuthServerMetadataURL = ""
+	}
+	if oauth.ClientID != "" {
+		warnings = append(warnings, "Claude Code does not store the OAuth client secret in its config; set oauth.client_secret if this client has one")
+	}
+
+	if oauth.ClientID == "" && len(oauth.Scopes) == 0 && oauth.AuthServerMetadataURL == "" {
+		return nil, warnings
+	}
+	return oauth, warnings
 }
 
 // getSkippedFields returns a list of fields that couldn't be mapped.

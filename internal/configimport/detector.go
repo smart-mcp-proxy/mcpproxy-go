@@ -270,6 +270,24 @@ func tryDetectJSON(content []byte) *DetectionResult {
 		}
 	}
 
+	// Claude Code: an oauth object. Gemini has one too, told apart by its
+	// "enabled" key; Cursor's equivalent is "auth".
+	for _, server := range serversMap {
+		serverMap, ok := server.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if oauth, hasOAuth := serverMap["oauth"].(map[string]interface{}); hasOAuth {
+			if _, isGemini := oauth["enabled"]; !isGemini {
+				return &DetectionResult{
+					Format:     FormatClaudeCode,
+					Confidence: "medium",
+					Indicators: []string{"json_format", "mcpServers_key", "oauth_object"},
+				}
+			}
+		}
+	}
+
 	// Default fallback: Cursor IDE is the most generic JSON format
 	// Claude Desktop requires command-only servers (no url), check for that
 	allStdio := true
