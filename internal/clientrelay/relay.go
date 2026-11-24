@@ -18,30 +18,68 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // ErrNoClient means no MCP client that can answer the request is attached to
 // the call.
 var ErrNoClient = errors.New("no MCP client in this call can answer")
 
+// ErrBusy means the upstream already has maxInFlight requests being answered.
+var ErrBusy = errors.New("too many requests from this server are waiting for an answer")
+
+// maxInFlight is how many requests of one upstream are answered at a time.
+// The rest are shed at once and leave no audit event, so a flood costs nothing.
+const maxInFlight = 4
+
+// InFlight counts the requests of one upstream being answered. The zero value
+// is ready to use.
+type InFlight struct{ n atomic.Int32 }
+
+// acquire takes a slot, reporting false when there is none. A nil InFlight has
+// no limit.
+func (f *InFlight) acquire() bool {
+	if f == nil || f.n.Add(1) <= maxInFlight {
+		return true
+	}
+	f.n.Add(-1)
+	return false
+}
+
+func (f *InFlight) release() {
+	if f != nil {
+		f.n.Add(-1)
+	}
+}
+
 // lastCallerTimeout bounds a roots/list asked of the last caller, whose
 // session may be gone.
 const lastCallerTimeout = 10 * time.Second
 
-// Capabilities is what mcpproxy declares to an upstream it can relay for.
-func Capabilities() mcp.ClientCapabilities {
-	return mcp.ClientCapabilities{
-		Roots: &struct {
+// Capabilities is what mcpproxy declares to an upstream granted features
+// (config.ClientFeaturesFor).
+func Capabilities(features []string) mcp.ClientCapabilities {
+	var c mcp.ClientCapabilities
+	if slices.Contains(features, config.ClientFeatureRoots) {
+		c.Roots = &struct {
 			ListChanged bool `json:"listChanged,omitempty"`
-		}{ListChanged: true},
-		Sampling:    &mcp.SamplingCapability{},
-		Elicitation: &mcp.ElicitationCapability{Form: &struct{}{}, URL: &struct{}{}},
+		}{ListChanged: true}
 	}
+	if slices.Contains(features, config.ClientFeatureSampling) {
+		c.Sampling = &mcp.SamplingCapability{}
+	}
+	if slices.Contains(features, config.ClientFeatureElicitation) {
+		c.Elicitation = &mcp.ElicitationCapability{Form: &struct{}{}, URL: &struct{}{}}
+	}
+	return c
 }
 
 // Event is one upstream request and how it was answered, for the activity log.
@@ -62,6 +100,12 @@ type Handler struct {
 	// Server is the upstream's name. Elicitation messages are prefixed with
 	// "[Server] " so the user can tell which server is asking.
 	Server string
+	// Features are the client features the upstream was granted; a request for
+	// any other is refused.
+	Features []string
+	// InFlight limits how many of the upstream's requests are answered at a
+	// time. nil is no limit.
+	InFlight *InFlight
 	// Caller maps the context mcp-go hands the handler to the context of the
 	// call the request belongs to, which carries the client's session.
 	Caller func(context.Context) context.Context
@@ -75,19 +119,35 @@ type Handler struct {
 	Audit func(Event)
 }
 
-// Options returns the mcp-go client options that declare Capabilities and
-// install h. Only for transports that can receive requests from the server.
+// Options returns the mcp-go client options that declare the granted features
+// and install h for them. Only for transports that can receive requests from
+// the server.
 func (h Handler) Options() []client.ClientOption {
-	return []client.ClientOption{
-		client.WithClientCapabilities(Capabilities()),
-		client.WithElicitationHandler(h),
-		client.WithSamplingHandler(h),
-		client.WithRootsHandler(h),
+	opts := []client.ClientOption{client.WithClientCapabilities(Capabilities(h.Features))}
+	if h.granted(config.ClientFeatureElicitation) {
+		opts = append(opts, client.WithElicitationHandler(h))
 	}
+	if h.granted(config.ClientFeatureSampling) {
+		opts = append(opts, client.WithSamplingHandler(h))
+	}
+	if h.granted(config.ClientFeatureRoots) {
+		opts = append(opts, client.WithRootsHandler(h))
+	}
+	return opts
+}
+
+func (h Handler) granted(feature string) bool { return slices.Contains(h.Features, feature) }
+
+func declined() *mcp.ElicitationResult {
+	return &mcp.ElicitationResult{ElicitationResponse: mcp.ElicitationResponse{Action: mcp.ElicitationResponseActionDecline}}
 }
 
 // Elicit forwards elicitation/create, or declines when no client can answer.
 func (h Handler) Elicit(ctx context.Context, req mcp.ElicitationRequest) (res *mcp.ElicitationResult, err error) {
+	if !h.InFlight.acquire() {
+		return declined(), nil
+	}
+	defer h.InFlight.release()
 	start := time.Now()
 	ctx = h.caller(ctx)
 	asked := req.Params
@@ -106,7 +166,7 @@ func (h Handler) Elicit(ctx context.Context, req mcp.ElicitationRequest) (res *m
 	res, err = Elicit(ctx, req)
 	reported := err
 	if errors.Is(err, ErrNoClient) {
-		res, err = &mcp.ElicitationResult{ElicitationResponse: mcp.ElicitationResponse{Action: mcp.ElicitationResponseActionDecline}}, nil
+		res, err = declined(), nil
 	}
 	h.audit(ctx, mcp.MethodElicitationCreate, asked, res, reported, start)
 	return res, err
@@ -115,6 +175,10 @@ func (h Handler) Elicit(ctx context.Context, req mcp.ElicitationRequest) (res *m
 // CreateMessage forwards sampling/createMessage, or fails when no client can
 // answer (sampling has no "declined" result).
 func (h Handler) CreateMessage(ctx context.Context, req mcp.CreateMessageRequest) (*mcp.CreateMessageResult, error) {
+	if !h.InFlight.acquire() {
+		return nil, ErrBusy
+	}
+	defer h.InFlight.release()
 	start := time.Now()
 	ctx = h.caller(ctx)
 	res, err := CreateMessage(ctx, req)
@@ -125,6 +189,10 @@ func (h Handler) CreateMessage(ctx context.Context, req mcp.CreateMessageRequest
 // ListRoots forwards roots/list to the calling client, else to the last client
 // that called the server, or returns no roots when neither can answer.
 func (h Handler) ListRoots(ctx context.Context, req mcp.ListRootsRequest) (*mcp.ListRootsResult, error) {
+	if !h.InFlight.acquire() {
+		return nil, ErrBusy
+	}
+	defer h.InFlight.release()
 	start := time.Now()
 	ctx = h.caller(ctx)
 	usedLast := false
@@ -139,7 +207,7 @@ func (h Handler) ListRoots(ctx context.Context, req mcp.ListRootsRequest) (*mcp.
 	res, err := ListRoots(ctx, req)
 	if err != nil && usedLast && !errors.Is(err, ErrNoClient) {
 		// The last caller may be long gone: answer no roots, as for nobody.
-		err = fmt.Errorf("%w: last caller: %v", ErrNoClient, err)
+		err = fmt.Errorf("%w: the last caller did not answer", ErrNoClient)
 	}
 	reported := err
 	if errors.Is(err, ErrNoClient) {
@@ -156,8 +224,12 @@ func (h Handler) Answer(ctx context.Context, method string, params json.RawMessa
 		res any
 		err error
 	)
+	notFound := &mcp.JSONRPCErrorDetails{Code: mcp.METHOD_NOT_FOUND, Message: "method not supported by mcpproxy: " + method}
 	switch mcp.MCPMethod(method) {
 	case mcp.MethodElicitationCreate:
+		if !h.granted(config.ClientFeatureElicitation) {
+			return nil, notFound
+		}
 		var req mcp.ElicitationRequest
 		if err = decode(params, &req.Params); err == nil {
 			if err = req.Params.Validate(); err != nil {
@@ -166,14 +238,20 @@ func (h Handler) Answer(ctx context.Context, method string, params json.RawMessa
 			res, err = h.Elicit(ctx, req)
 		}
 	case mcp.MethodSamplingCreateMessage:
+		if !h.granted(config.ClientFeatureSampling) {
+			return nil, notFound
+		}
 		var req mcp.CreateMessageRequest
 		if err = decode(params, &req.CreateMessageParams); err == nil {
 			res, err = h.CreateMessage(ctx, req)
 		}
 	case mcp.MethodListRoots:
+		if !h.granted(config.ClientFeatureRoots) {
+			return nil, notFound
+		}
 		res, err = h.ListRoots(ctx, mcp.ListRootsRequest{})
 	default:
-		return nil, &mcp.JSONRPCErrorDetails{Code: mcp.METHOD_NOT_FOUND, Message: "method not supported by mcpproxy: " + method}
+		return nil, notFound
 	}
 	if err != nil {
 		return nil, &mcp.JSONRPCErrorDetails{Code: mcp.INTERNAL_ERROR, Message: err.Error()}

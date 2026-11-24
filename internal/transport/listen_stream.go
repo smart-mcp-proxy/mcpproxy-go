@@ -83,6 +83,10 @@ type ListenEnd struct {
 	Detail string
 }
 
+// maxListenRequests is how many server-to-client requests of one stream are
+// answered at a time.
+const maxListenRequests = 4
+
 // ListenStreamOptions tunes a ListenStream. Zero durations take the defaults.
 type ListenStreamOptions struct {
 	// ProtocolVersion is sent as Mcp-Protocol-Version (the negotiated one).
@@ -91,7 +95,8 @@ type ListenStreamOptions struct {
 	// on the stream's goroutine and is never called after Run's context ends.
 	OnNotification func(mcp.JSONRPCNotification)
 	// OnRequest answers a server-to-client request other than ping (#1964).
-	// It runs on its own goroutine. nil answers method-not-found.
+	// It runs on its own goroutine, at most maxListenRequests at a time; the
+	// rest are refused. nil answers method-not-found.
 	OnRequest func(ctx context.Context, method string, params json.RawMessage) (any, *mcp.JSONRPCErrorDetails)
 	Logger    *zap.Logger
 
@@ -128,6 +133,7 @@ type ListenStream struct {
 	protocolVersion string
 	onNotification  func(mcp.JSONRPCNotification)
 	onRequest       func(context.Context, string, json.RawMessage) (any, *mcp.JSONRPCErrorDetails)
+	requestSlots    chan struct{}
 	logger          *zap.Logger
 	minBackoff      time.Duration
 	maxBackoff      time.Duration
@@ -198,6 +204,7 @@ func (cfg *HTTPTransportConfig) NewListenStream(sh *mcptransport.StreamableHTTP,
 		protocolVersion: opts.ProtocolVersion,
 		onNotification:  opts.OnNotification,
 		onRequest:       opts.OnRequest,
+		requestSlots:    make(chan struct{}, maxListenRequests),
 		logger:          logger,
 		minBackoff:      orDefault(opts.MinBackoff, defaultListenMinBackoff),
 		maxBackoff:      orDefault(opts.MaxBackoff, defaultListenMaxBackoff),
@@ -436,8 +443,19 @@ func (s *ListenStream) handle(ctx context.Context, raw []byte, sid string) {
 			Code: mcp.METHOD_NOT_FOUND, Message: "method not supported by mcpproxy: " + head.Method,
 		})
 	default:
+		select {
+		case s.requestSlots <- struct{}{}:
+		default:
+			// Answered on the stream's goroutine, so a flood waits for its own
+			// refusals instead of piling up goroutines.
+			s.answer(ctx, head.ID, head.Method, sid, nil, &mcp.JSONRPCErrorDetails{
+				Code: mcp.INTERNAL_ERROR, Message: "too many requests in flight",
+			})
+			return
+		}
 		// An elicitation waits for a person: never on the stream's goroutine.
 		go func() {
+			defer func() { <-s.requestSlots }()
 			result, rpcErr := s.onRequest(ctx, head.Method, head.Params)
 			s.answer(ctx, head.ID, head.Method, sid, result, rpcErr)
 		}()

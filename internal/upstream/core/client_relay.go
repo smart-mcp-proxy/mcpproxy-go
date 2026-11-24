@@ -14,18 +14,19 @@ import (
 // rootsChangedTimeout bounds sending notifications/roots/list_changed upstream.
 const rootsChangedTimeout = 10 * time.Second
 
-// relayEnabled reports whether this server may use the calling MCP client's
-// elicitation, sampling and roots (enable_client_features / client_features).
-func (c *Client) relayEnabled() bool {
-	return c.globalConfig.ClientFeaturesEnabled(c.config)
+// relayFeatures returns which of the calling MCP client's features this server
+// may use. A change to client_features or the quarantine builds a new Client,
+// so the answer holds for this one's lifetime.
+func (c *Client) relayFeatures() []string {
+	return c.globalConfig.ClientFeaturesFor(c.config)
 }
 
 // relayOptions installs the clientrelay handler on an mcp-go client, so the
 // upstream's elicitation, sampling and roots requests reach the MCP client
-// whose tool call caused them (#1964, #1965, #1966). With client features off
-// it returns none: the upstream sees no capability, exactly as before.
+// whose tool call caused them (#1964, #1965, #1966). With no granted feature it
+// returns none: the upstream sees no capability, exactly as before.
 func (c *Client) relayOptions() []client.ClientOption {
-	if !c.relayEnabled() {
+	if len(c.relayFeatures()) == 0 {
 		return nil
 	}
 	return c.relayHandler().Options()
@@ -36,6 +37,8 @@ func (c *Client) relayOptions() []client.ClientOption {
 func (c *Client) relayHandler() clientrelay.Handler {
 	return clientrelay.Handler{
 		Server:     c.config.Name,
+		Features:   c.relayFeatures(),
+		InFlight:   &c.relayInFlight,
 		Caller:     c.callerContext,
 		LastCaller: c.calls.lastCaller,
 		URLs:       &c.urlElicitations,

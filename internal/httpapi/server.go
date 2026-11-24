@@ -2309,11 +2309,10 @@ type AddServerRequest struct {
 	// Tri-state *bool mirroring config.ServerConfig.ExposeSkills: nil means
 	// "leave unchanged" on PATCH and "inherit" on create.
 	ExposeSkills *bool `json:"expose_skills,omitempty"`
-	// ClientFeatures overrides whether this server may use the calling client's
-	// elicitation, sampling and roots. Tri-state *bool mirroring
-	// config.ServerConfig.ClientFeatures: nil means "leave unchanged" on PATCH
-	// and "inherit" on create.
-	ClientFeatures *bool `json:"client_features,omitempty"`
+	// ClientFeatures lists which of the calling client's features this server
+	// may use: elicitation, sampling, roots. On PATCH a nil slice (field
+	// omitted) leaves the stored list unchanged and [] clears it.
+	ClientFeatures []string `json:"client_features,omitempty"`
 	// ForwardHeaders is the per-server allowlist of inbound MCP client header
 	// NAMES forwarded to this server on tools/call (Spec 112). Names only, never
 	// values. On PATCH a nil slice (field omitted) leaves the stored allowlist
@@ -2681,9 +2680,11 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	if req.ExposeSkills != nil {
 		serverConfig.ExposeSkills = req.ExposeSkills
 	}
-	if req.ClientFeatures != nil {
-		serverConfig.ClientFeatures = req.ClientFeatures
+	if errs := config.ClientFeaturesValidationErrors("client_features", req.ClientFeatures); len(errs) > 0 {
+		s.writeError(w, r, http.StatusBadRequest, joinValidationMessages(errs))
+		return
 	}
+	serverConfig.ClientFeatures = append([]string(nil), req.ClientFeatures...)
 	// Spec 112: carry the forward_headers allowlist through on create, after
 	// validating the names (write-time layer of FR-005).
 	if len(req.ForwardHeaders) > 0 {
@@ -2992,9 +2993,12 @@ func resolveServerPatch(serverName string, req *AddServerRequest, existingSrv *c
 	} else if existingSrv != nil {
 		updates.ExposeSkills = existingSrv.ExposeSkills
 	}
-	// client_features: same tri-state preserve-the-existing-pointer rule.
+	// client_features: nil preserves the existing list, [] clears it.
 	if req.ClientFeatures != nil {
-		updates.ClientFeatures = req.ClientFeatures
+		if errs := config.ClientFeaturesValidationErrors("client_features", req.ClientFeatures); len(errs) > 0 {
+			return nil, &patchError{status: http.StatusBadRequest, msg: joinValidationMessages(errs)}
+		}
+		updates.ClientFeatures = append([]string{}, req.ClientFeatures...)
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.ClientFeatures = existingSrv.ClientFeatures

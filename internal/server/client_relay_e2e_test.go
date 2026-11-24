@@ -48,6 +48,7 @@ func newRelayUpstream(t *testing.T) string {
 		})
 	srv.AddTool(mcp.Tool{Name: "sample", Description: "Asks the client's model", InputSchema: noArgs},
 		func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			//nolint:staticcheck // SA1019: the legacy sampling request is the behavior under test.
 			res, err := srv.RequestSampling(ctx, mcp.CreateMessageRequest{CreateMessageParams: mcp.CreateMessageParams{
 				Messages:  []mcp.SamplingMessage{{Role: mcp.RoleUser, Content: mcp.NewTextContent("hi")}},
 				MaxTokens: 5,
@@ -79,6 +80,9 @@ type relayClient struct {
 	mu      sync.Mutex
 	asked   []string
 	message string // the last elicitation message shown to the user
+
+	action mcp.ElicitationResponseAction // the user's answer; accept when empty
+	wait   func()                        // runs before the user answers
 }
 
 func (c *relayClient) record(s string) {
@@ -92,7 +96,14 @@ func (c *relayClient) Elicit(_ context.Context, req mcp.ElicitationRequest) (*mc
 	c.mu.Lock()
 	c.message = req.Params.Message
 	c.mu.Unlock()
-	return &mcp.ElicitationResult{ElicitationResponse: mcp.ElicitationResponse{Action: mcp.ElicitationResponseActionAccept}}, nil
+	if c.wait != nil {
+		c.wait()
+	}
+	action := c.action
+	if action == "" {
+		action = mcp.ElicitationResponseActionAccept
+	}
+	return &mcp.ElicitationResult{ElicitationResponse: mcp.ElicitationResponse{Action: action}}, nil
 }
 
 func (c *relayClient) CreateMessage(context.Context, mcp.CreateMessageRequest) (*mcp.CreateMessageResult, error) {
@@ -110,6 +121,7 @@ func (c *relayClient) ListRoots(context.Context, mcp.ListRootsRequest) (*mcp.Lis
 func (env *TestEnvironment) relayMCPClient(path string, h *relayClient) *client.Client {
 	t := env.t
 	t.Helper()
+	//nolint:staticcheck // SA1019: the legacy GET stream is the behavior under test.
 	tr, err := transport.NewStreamableHTTP(env.baseURL()+path, transport.WithContinuousListening())
 	require.NoError(t, err)
 	c := client.NewClient(tr, client.WithElicitationHandler(h), client.WithSamplingHandler(h), client.WithRootsHandler(h))
@@ -144,8 +156,44 @@ func upstreamAsks(asked []string) []string {
 	return asked
 }
 
+func withClientFeatures(sc *config.ServerConfig) { sc.ClientFeatures = config.ClientFeatureNames }
+
+// Two clients with a call in flight to the same HTTP upstream at the same time
+// each answer their own call's request.
+func TestClientRelay_ConcurrentClientsAreRoutedSeparately(t *testing.T) {
+	env := startFwdEnv(t, []*config.ServerConfig{fwdServerCfg("relay", newRelayUpstream(t), withClientFeatures)}, nil)
+
+	// Neither user answers before both have been asked.
+	var both sync.WaitGroup
+	both.Add(2)
+	wait := func() {
+		both.Done()
+		both.Wait()
+	}
+	answers := map[mcp.ElicitationResponseAction]*relayClient{
+		mcp.ElicitationResponseActionAccept:  {wait: wait, action: mcp.ElicitationResponseActionAccept},
+		mcp.ElicitationResponseActionDecline: {wait: wait, action: mcp.ElicitationResponseActionDecline},
+	}
+	var wg sync.WaitGroup
+	for action, h := range answers {
+		c := env.relayMCPClient("/mcp", h)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := fwdCallReadRaw(c, "relay", "confirm")
+			if assert.NoError(t, err) {
+				assert.Equal(t, string(action), fwdText(res))
+			}
+		}()
+	}
+	wg.Wait()
+	for action, h := range answers {
+		assert.Equal(t, []string{"elicit"}, upstreamAsks(h.take()), "the %s client is asked once", action)
+	}
+}
+
 func TestClientRelay_UpstreamRequestsReachTheCallingClient(t *testing.T) {
-	env := startFwdEnv(t, []*config.ServerConfig{fwdServerCfg("relay", newRelayUpstream(t))}, nil)
+	env := startFwdEnv(t, []*config.ServerConfig{fwdServerCfg("relay", newRelayUpstream(t), withClientFeatures)}, nil)
 
 	surfaces := []struct {
 		name string

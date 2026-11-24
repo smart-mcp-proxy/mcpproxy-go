@@ -18,25 +18,25 @@ MCPProxy passes these requests to the MCP client that made the tool call and ret
 
 The message of an elicitation starts with the server's name, like `[ssh] Confirm destructive command…`, so the user can tell which server is asking.
 
-## Turning it off
+## Turning it on
 
-It is on by default. Turn it off for every server:
+It is off until you list, per server, what that server may use:
+
+```json
+{ "mcpServers": [ { "name": "ssh", "command": "ssh-mcp", "client_features": ["elicitation"] } ] }
+```
+
+The values are `elicitation`, `sampling` and `roots`. A server is offered only the ones it lists, and a quarantined server is offered none. Changing `client_features` reconnects the server.
+
+To turn it off for every server at once, whatever they list (takes effect after a restart):
 
 ```json
 { "enable_client_features": false }
 ```
 
-or for one server:
-
-```json
-{ "mcpServers": [ { "name": "ssh", "command": "ssh-mcp", "client_features": false } ] }
-```
-
-A server with client features off is offered none of them, so it behaves as if its client did not support them. `enable_client_features` takes effect after a restart; changing a server's `client_features` reconnects that server.
-
 ## What upstream servers see
 
-MCPProxy declares `elicitation` (form and URL modes), `sampling` and `roots` (with `listChanged`) when it connects to a stdio or streamable-HTTP upstream. Legacy SSE upstreams cannot send requests to their client, so they get none.
+When it connects to a stdio or streamable-HTTP upstream, MCPProxy declares the features listed in `client_features`: `elicitation` (form and URL modes), `sampling` and `roots` (with `listChanged`). Legacy SSE upstreams cannot send requests to their client, so they get none.
 
 These requests exist on protocol revisions up to `2025-11-25`, which MCPProxy uses on every upstream connection.
 
@@ -63,11 +63,13 @@ The upstream gets an immediate answer instead of waiting:
 | Sampling | an error |
 | Roots | an empty list |
 
-This happens for calls from the REST API or the CLI (roots then go to the last client that called the server), requests sent outside a tool call, concurrent calls to a stdio server, and clients without the capability.
+This happens for calls from the REST API or the CLI (roots then go to the last client that called the server), requests sent outside a tool call, concurrent calls to a stdio server, and clients without the capability. The upstream cannot tell a `decline` given here from the user's own.
+
+At most 4 requests of one server are answered at a time. The rest are refused at once (elicitation `decline`, otherwise an error) and not recorded.
 
 ## Activity log
 
-Every request is recorded as a `client_request` activity: the server, the method, what the server asked, what it got back and whether the client was asked (`metadata.outcome`: `forwarded`, `unanswered` or `failed`). Both sides are scanned for sensitive data, like tool calls.
+Every request is recorded as a `client_request` activity: the server, the method, what the server asked (the first 4 KB, scanned for sensitive data) and whether the client was asked (`metadata.outcome`: `forwarded`, `unanswered` or `failed`). What the user, the model or the client answered is never stored, only its shape: the elicitation action with field names and sizes, the size of the sampling response, and the number of roots. Only administrators can read these rows.
 
 ```bash
 mcpproxy activity list --type client_request

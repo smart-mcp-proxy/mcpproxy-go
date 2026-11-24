@@ -36,7 +36,7 @@ func ConnectionEquivalent(a, b *ServerConfig) bool {
 		equalStringMap(a.Headers, b.Headers) &&
 		equalDurationPtr(a.InitTimeout, b.InitTimeout) &&
 		// Declared to the upstream at initialize.
-		equalBoolPtr(a.ClientFeatures, b.ClientFeatures) &&
+		equalStringSlice(a.ClientFeatures, b.ClientFeatures) &&
 		reflect.DeepEqual(a.OAuth, b.OAuth) &&
 		reflect.DeepEqual(a.Isolation, b.Isolation)
 }
@@ -64,13 +64,6 @@ func equalStringMap(a, b map[string]string) bool {
 		}
 	}
 	return true
-}
-
-func equalBoolPtr(a, b *bool) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return *a == *b
 }
 
 func equalDurationPtr(a, b *Duration) bool {

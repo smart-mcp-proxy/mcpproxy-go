@@ -9,6 +9,8 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // fakeSession is a client session that records the requests relayed to it.
@@ -157,7 +159,7 @@ func TestHandler_ElicitationModes(t *testing.T) {
 
 func TestHandler_AnswerDispatchesByMethod(t *testing.T) {
 	s := &fakeSession{caps: allCaps()}
-	h := Handler{}
+	h := Handler{Features: config.ClientFeatureNames}
 	ctx := withSession(s)
 
 	res, rpcErr := h.Answer(ctx, string(mcp.MethodElicitationCreate), json.RawMessage(`{"message":"ok?","requestedSchema":{"type":"object"}}`))

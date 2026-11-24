@@ -987,7 +987,7 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 		// lost or restored connection. That is not the outcome of a call and
 		// not traffic to the server, and Usage never counts it, so it stays out
 		// of the call tiles and the top lists (Usage errors = errors + blocked
-		// here, F1). The administrator-only skill rows (Spec 125) are not
+		// here, F1). The administrator-only rows (Spec 125, #1964) are not
 		// tool calls either: a skill access stores the outcome of a search,
 		// load or read, and a skill approval change stores its action
 		// ("blocked" when an administrator blocks a skill).

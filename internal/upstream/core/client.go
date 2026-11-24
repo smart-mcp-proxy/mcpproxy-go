@@ -129,6 +129,8 @@ type Client struct {
 	// not arrive on a call's own stream can be relayed to its client
 	// (client_relay.go).
 	calls inflightCalls
+	// relayInFlight limits the upstream requests being answered at a time.
+	relayInFlight clientrelay.InFlight
 	// urlElicitations routes the upstream's URL elicitation completions.
 	urlElicitations clientrelay.URLElicitations
 	// requestObserver records every relayed request (activity log).

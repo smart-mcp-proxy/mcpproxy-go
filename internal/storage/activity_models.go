@@ -81,9 +81,10 @@ const (
 	// ActivityTypeClientRequest represents a request an upstream server sent to
 	// the calling MCP client: elicitation, sampling or roots (#1964). ServerName
 	// is the upstream, ToolName the method (elicitation/create,
-	// sampling/createMessage, roots/list), Arguments what it asked, Response
-	// what it got back; both are scanned for sensitive data. Metadata: outcome
-	// (forwarded | unanswered | failed).
+	// sampling/createMessage, roots/list), Arguments what it asked (capped and
+	// scanned for sensitive data). What it got back is never stored: Metadata
+	// carries the outcome (forwarded | unanswered | failed) and the shape of
+	// the answer (action, field names and sizes, response_bytes, root_count).
 	ActivityTypeClientRequest ActivityType = "client_request"
 )
 
@@ -112,9 +113,11 @@ var ValidActivityTypes = []string{
 // IsAdminOnlyActivityType reports whether rows of the type may be read by
 // administrators only. A skill approval row names a skill that may be
 // unapproved, even on a server a scoped caller may see, and a skill access row
-// names whatever id its caller asked for (Spec 125 FR-019a).
+// names whatever id its caller asked for (Spec 125 FR-019a). A client request
+// row describes an exchange between a server and another caller's client
+// (#1964).
 func IsAdminOnlyActivityType(t ActivityType) bool {
-	return t == ActivityTypeSkillQuarantineChange || t == ActivityTypeSkillAccess
+	return t == ActivityTypeSkillQuarantineChange || t == ActivityTypeSkillAccess || t == ActivityTypeClientRequest
 }
 
 // Activity status vocabulary. Activity status is a CLOSED vocabulary: every

@@ -186,11 +186,10 @@ components:
           $ref: '#/components/schemas/config.DockerRecoveryConfig'
         enable_client_features:
           description: |-
-            EnableClientFeatures lets upstream servers use the calling MCP client's
-            elicitation, sampling and roots through mcpproxy (#1964-#1966). nil
-            (default) is on; false declares none of them to any upstream. Read when
-            an upstream connects, so a change needs a restart. Resolved by
-            ClientFeaturesEnabled.
+            EnableClientFeatures is the kill switch for the per-server
+            client_features (#1964-#1966). nil (default) leaves them in effect; false
+            declares none of them to any upstream. Read when an upstream connects, so
+            a change needs a restart. Resolved by ClientFeaturesFor.
           type: boolean
         enable_code_execution:
           description: Code execution settings
@@ -1253,11 +1252,14 @@ components:
           type: boolean
         client_features:
           description: |-
-            ClientFeatures overrides whether this server may use the calling MCP
-            client's elicitation, sampling and roots when Config.EnableClientFeatures
-            is on. nil (default) inherits; false turns them off for this server. A
-            change reconnects the server (ConnectionEquivalent).
-          type: boolean
+            ClientFeatures lists what this server may use of the calling MCP client:
+            "elicitation", "sampling", "roots" (ClientFeatureNames). Unset or empty
+            (default) is none of them. A change reconnects the server
+            (ConnectionEquivalent).
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         command:
           type: string
         created:
@@ -3258,10 +3260,13 @@ components:
           type: boolean
         client_features:
           description: |-
-            ClientFeatures mirrors config.ServerConfig.ClientFeatures: whether this
-            server may use the calling client's elicitation, sampling and roots.
-            Tri-state *bool; nil/omitted means "inherit".
-          type: boolean
+            ClientFeatures mirrors config.ServerConfig.ClientFeatures: which of the
+            calling client's elicitation, sampling and roots this server may use.
+            Omitted when none.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         command:
           type: string
         connected:
@@ -4484,11 +4489,13 @@ components:
           type: boolean
         client_features:
           description: |-
-            ClientFeatures overrides whether this server may use the calling client's
-            elicitation, sampling and roots. Tri-state *bool mirroring
-            config.ServerConfig.ClientFeatures: nil means "leave unchanged" on PATCH
-            and "inherit" on create.
-          type: boolean
+            ClientFeatures lists which of the calling client's features this server
+            may use: elicitation, sampling, roots. On PATCH a nil slice (field
+            omitted) leaves the stored list unchanged and [] clears it.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         command:
           type: string
         enabled:

@@ -109,10 +109,10 @@ type Server struct {
 	// ExposeSkills mirrors config.ServerConfig.ExposeSkills: the per-server
 	// skills override. Tri-state *bool; nil/omitted means "inherit".
 	ExposeSkills *bool `json:"expose_skills,omitempty"`
-	// ClientFeatures mirrors config.ServerConfig.ClientFeatures: whether this
-	// server may use the calling client's elicitation, sampling and roots.
-	// Tri-state *bool; nil/omitted means "inherit".
-	ClientFeatures *bool `json:"client_features,omitempty"`
+	// ClientFeatures mirrors config.ServerConfig.ClientFeatures: which of the
+	// calling client's elicitation, sampling and roots this server may use.
+	// Omitted when none.
+	ClientFeatures []string `json:"client_features,omitempty"`
 	// ForwardHeaders mirrors config.ServerConfig.ForwardHeaders (Spec 112): the
 	// allowlist of inbound MCP client header NAMES forwarded to this server on
 	// tools/call. Names only, never values. Omitted when empty.

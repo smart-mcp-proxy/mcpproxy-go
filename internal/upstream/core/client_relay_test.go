@@ -65,6 +65,7 @@ func relayUpstream() *mcpserver.MCPServer {
 		return text(string(res.Action)), nil
 	})
 	srv.AddTool(mcp.NewTool("sample"), func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		//nolint:staticcheck // SA1019: the legacy sampling request is the behavior under test.
 		res, err := srv.RequestSampling(ctx, mcp.CreateMessageRequest{CreateMessageParams: mcp.CreateMessageParams{MaxTokens: 5}})
 		if err != nil {
 			return text("error: " + err.Error()), nil
@@ -227,19 +228,21 @@ func assertRelays(t *testing.T, c *Client) {
 	assert.GreaterOrEqual(t, methods[mcp.MethodListRoots], 4, "two in calls, two after list_changed")
 }
 
-// With client features off, globally or for the server, the upstream is
-// offered none of them: exactly the pre-#1964 behaviour.
+// A server that was granted nothing, or is quarantined, or is under the kill
+// switch, is offered nothing: exactly the pre-#1964 behaviour. What it asks
+// anyway is refused, and leaves no audit event.
 func TestRelay_SwitchedOff(t *testing.T) {
 	disableOAuthForTest(t)
 	off := false
 	for name, setup := range map[string]func(*config.ServerConfig) *config.Config{
-		"global":     func(*config.ServerConfig) *config.Config { return &config.Config{EnableClientFeatures: &off} },
-		"per-server": func(sc *config.ServerConfig) *config.Config { sc.ClientFeatures = &off; return &config.Config{} },
+		"kill switch": func(*config.ServerConfig) *config.Config { return &config.Config{EnableClientFeatures: &off} },
+		"not granted": func(sc *config.ServerConfig) *config.Config { sc.ClientFeatures = nil; return &config.Config{} },
+		"quarantined": func(sc *config.ServerConfig) *config.Config { sc.Quarantined = true; return &config.Config{} },
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := httptest.NewServer(mcpserver.NewStreamableHTTPServer(relayUpstream()))
 			t.Cleanup(srv.Close)
-			cfg := &config.ServerConfig{Name: "relay-off", Protocol: "streamable-http", URL: srv.URL, Enabled: true}
+			cfg := &config.ServerConfig{Name: "relay-off", Protocol: "streamable-http", URL: srv.URL, Enabled: true, ClientFeatures: config.ClientFeatureNames}
 			global := setup(cfg)
 			c, err := NewClient("relay-off", cfg, zap.NewNop(), nil, global, nil, secret.NewResolver())
 			require.NoError(t, err)
@@ -247,21 +250,49 @@ func TestRelay_SwitchedOff(t *testing.T) {
 			defer cancel()
 			require.NoError(t, c.Connect(ctx))
 			t.Cleanup(func() { _ = c.Disconnect() })
+			c.SetClientRequestObserver(func(e clientrelay.Event) { t.Errorf("audited %s", e.Method) })
 
 			assert.Equal(t, "{}", callText(t, c, context.Background(), "caps"))
 			down := &downstreamSession{}
 			dctx := mcpserver.NewMCPServer("down", "1").WithContext(context.Background(), down)
-			callText(t, c, dctx, "confirm")
+			assert.Contains(t, callText(t, c, dctx, "confirm"), "error:")
+			assert.Contains(t, callText(t, c, dctx, "sample"), "error:")
+			assert.Contains(t, callText(t, c, dctx, "roots"), "error:")
 			assert.Empty(t, down.asked, "nothing reaches the client")
 		})
 	}
+}
+
+// A server granted one feature gets that one only.
+func TestRelay_OnlyTheGrantedFeature(t *testing.T) {
+	disableOAuthForTest(t)
+	srv := httptest.NewServer(mcpserver.NewStreamableHTTPServer(relayUpstream()))
+	t.Cleanup(srv.Close)
+	cfg := &config.ServerConfig{Name: "relay-one", Protocol: "streamable-http", URL: srv.URL, Enabled: true, ClientFeatures: []string{config.ClientFeatureElicitation}}
+	c, err := NewClient("relay-one", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, c.Connect(ctx))
+	t.Cleanup(func() { _ = c.Disconnect() })
+
+	caps := callText(t, c, context.Background(), "caps")
+	assert.Contains(t, caps, "elicitation")
+	assert.NotContains(t, caps, "sampling")
+	assert.NotContains(t, caps, "roots")
+	down := &downstreamSession{}
+	dctx := mcpserver.NewMCPServer("down", "1").WithContext(context.Background(), down)
+	assert.Equal(t, "accept", callText(t, c, dctx, "confirm"))
+	assert.Contains(t, callText(t, c, dctx, "sample"), "error:")
+	assert.Contains(t, callText(t, c, dctx, "roots"), "error:")
+	assert.Equal(t, []string{"elicit"}, down.asked)
 }
 
 func TestRelay_StreamableHTTPUpstream(t *testing.T) {
 	disableOAuthForTest(t)
 	srv := httptest.NewServer(mcpserver.NewStreamableHTTPServer(relayUpstream()))
 	t.Cleanup(srv.Close)
-	cfg := &config.ServerConfig{Name: "relay-http", Protocol: "streamable-http", URL: srv.URL, Enabled: true}
+	cfg := &config.ServerConfig{Name: "relay-http", Protocol: "streamable-http", URL: srv.URL, Enabled: true, ClientFeatures: config.ClientFeatureNames}
 	c, err := NewClient("relay-http", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -292,7 +323,8 @@ func TestRelay_StdioUpstream(t *testing.T) {
 	cfg := &config.ServerConfig{
 		Name: "relay-stdio", Protocol: "stdio", Enabled: true,
 		Command: os.Args[0], Args: []string{"-test.run=^TestRelayStdioHelper$"},
-		Env: map[string]string{relayStdioHelperEnv: "1"},
+		Env:            map[string]string{relayStdioHelperEnv: "1"},
+		ClientFeatures: config.ClientFeatureNames,
 	}
 	c, err := NewClient("relay-stdio", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
 	require.NoError(t, err)
@@ -309,7 +341,8 @@ func TestInflightCalls_Only(t *testing.T) {
 	_, ok := f.only()
 	assert.False(t, ok, "no call in flight")
 
-	a := context.WithValue(context.Background(), struct{}{}, "a")
+	type ctxKey struct{}
+	a := context.WithValue(context.Background(), ctxKey{}, "a")
 	doneA, _ := f.add(a)
 	got, ok := f.only()
 	require.True(t, ok)

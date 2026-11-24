@@ -223,7 +223,7 @@ func (c *Client) newListChangedStream(cl *client.Client, info *mcp.InitializeRes
 		}
 		queue.push(n)
 	}
-	if c.relayEnabled() {
+	if len(c.relayFeatures()) > 0 {
 		opts.OnRequest = c.relayHandler().Answer
 	}
 	ls := cfg.NewListenStream(sh, opts)

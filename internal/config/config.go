@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -478,11 +479,10 @@ type Config struct {
 	// variable.
 	EnableSkills bool `json:"enable_skills" mapstructure:"enable-skills"`
 
-	// EnableClientFeatures lets upstream servers use the calling MCP client's
-	// elicitation, sampling and roots through mcpproxy (#1964-#1966). nil
-	// (default) is on; false declares none of them to any upstream. Read when
-	// an upstream connects, so a change needs a restart. Resolved by
-	// ClientFeaturesEnabled.
+	// EnableClientFeatures is the kill switch for the per-server
+	// client_features (#1964-#1966). nil (default) leaves them in effect; false
+	// declares none of them to any upstream. Read when an upstream connects, so
+	// a change needs a restart. Resolved by ClientFeaturesFor.
 	EnableClientFeatures *bool `json:"enable_client_features,omitempty" mapstructure:"enable-client-features"`
 
 	// Repository detection settings
@@ -806,11 +806,11 @@ type ServerConfig struct {
 	// inherits (included if the server supports skills); false excludes it.
 	ExposeSkills *bool `json:"expose_skills,omitempty" mapstructure:"expose-skills"`
 
-	// ClientFeatures overrides whether this server may use the calling MCP
-	// client's elicitation, sampling and roots when Config.EnableClientFeatures
-	// is on. nil (default) inherits; false turns them off for this server. A
-	// change reconnects the server (ConnectionEquivalent).
-	ClientFeatures *bool `json:"client_features,omitempty" mapstructure:"client-features"`
+	// ClientFeatures lists what this server may use of the calling MCP client:
+	// "elicitation", "sampling", "roots" (ClientFeatureNames). Unset or empty
+	// (default) is none of them. A change reconnects the server
+	// (ConnectionEquivalent).
+	ClientFeatures []string `json:"client_features,omitempty" mapstructure:"client-features"`
 
 	// ForwardHeaders lists inbound MCP-client header NAMES (never values) that
 	// are copied into this server's upstream tools/call requests (Spec 112).
@@ -2493,6 +2493,7 @@ func (v ValidationError) Error() string {
 func (c *Config) ValidateDetailed() []ValidationError {
 	errors := append(c.validateDetailedCore(), c.oauthRedirectURIErrors()...)
 	errors = append(errors, c.forwardHeadersErrors()...)
+	errors = append(errors, c.clientFeaturesErrors()...)
 	errors = append(errors, c.oauthEndpointOverrideErrors()...)
 	errors = append(errors, c.oauthRefreshReplayErrors()...)
 	errors = append(errors, c.tpaTrustRootErrors()...)
@@ -3961,10 +3962,55 @@ func (c *Config) AdvertiseUpstreamServersEnabled() bool {
 	return c == nil || c.AdvertiseUpstreamServers == nil || *c.AdvertiseUpstreamServers
 }
 
-// ClientFeaturesEnabled reports whether server sc may use the calling MCP
-// client's elicitation, sampling and roots: enable_client_features (unset is
-// on) and the server's client_features override (unset inherits).
-func (c *Config) ClientFeaturesEnabled(sc *ServerConfig) bool {
-	global := c == nil || c.EnableClientFeatures == nil || *c.EnableClientFeatures
-	return global && (sc == nil || sc.ClientFeatures == nil || *sc.ClientFeatures)
+// Client features an upstream can be granted (ServerConfig.ClientFeatures).
+const (
+	ClientFeatureElicitation = "elicitation"
+	ClientFeatureSampling    = "sampling"
+	ClientFeatureRoots       = "roots"
+)
+
+// ClientFeatureNames are the accepted client_features values.
+var ClientFeatureNames = []string{ClientFeatureElicitation, ClientFeatureSampling, ClientFeatureRoots}
+
+// ClientFeaturesFor returns the client features server sc may use: the ones it
+// lists, or none when it is quarantined or enable_client_features is false.
+// Names that are not a client feature grant nothing.
+func (c *Config) ClientFeaturesFor(sc *ServerConfig) []string {
+	if sc == nil || sc.Quarantined || (c != nil && c.EnableClientFeatures != nil && !*c.EnableClientFeatures) {
+		return nil
+	}
+	var out []string
+	for _, name := range ClientFeatureNames {
+		if slices.Contains(sc.ClientFeatures, name) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// ClientFeaturesValidationErrors validates one server's client_features list.
+// Shared by ValidateDetailed and the REST single-server write paths.
+func ClientFeaturesValidationErrors(field string, names []string) []ValidationError {
+	var errors []ValidationError
+	for _, name := range names {
+		if !slices.Contains(ClientFeatureNames, name) {
+			errors = append(errors, ValidationError{
+				Field:   field,
+				Message: fmt.Sprintf("unknown client feature %q; accepted: %s", name, strings.Join(ClientFeatureNames, ", ")),
+			})
+		}
+	}
+	return errors
+}
+
+// clientFeaturesErrors is write-time only, like forwardHeadersErrors: a
+// hand-edited bad entry must not brick boot, and it grants nothing.
+func (c *Config) clientFeaturesErrors() []ValidationError {
+	var errors []ValidationError
+	for i, server := range c.Servers {
+		if server != nil {
+			errors = append(errors, ClientFeaturesValidationErrors(fmt.Sprintf("mcpServers[%d].client_features", i), server.ClientFeatures)...)
+		}
+	}
+	return errors
 }

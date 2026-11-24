@@ -383,13 +383,12 @@ func MergeServerConfig(base, patch *ServerConfig, opts MergeOptions) (*ServerCon
 		merged.ExposeSkills = &v
 	}
 
-	// ClientFeatures: same tri-state patch semantics as ExposePrompts.
+	// ClientFeatures: same patch semantics as ForwardHeaders.
 	if patch.ClientFeatures != nil {
-		v := *patch.ClientFeatures
-		if diff != nil && (base.ClientFeatures == nil || *base.ClientFeatures != v) {
+		if diff != nil && !slices.Equal(base.ClientFeatures, patch.ClientFeatures) {
 			diff.Modified["client_features"] = FieldChange{Path: "client_features", From: base.ClientFeatures, To: patch.ClientFeatures}
 		}
-		merged.ClientFeatures = &v
+		merged.ClientFeatures = append([]string{}, patch.ClientFeatures...)
 	}
 
 	// Per-server concurrency overrides (spec 093, FR-020(c)): same tri-state
@@ -759,8 +758,7 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 		dst.ExposeSkills = &exposeSkills
 	}
 	if src.ClientFeatures != nil {
-		clientFeatures := *src.ClientFeatures
-		dst.ClientFeatures = &clientFeatures
+		dst.ClientFeatures = append([]string{}, src.ClientFeatures...)
 	}
 
 	// Copy nested structs

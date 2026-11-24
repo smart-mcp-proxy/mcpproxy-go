@@ -71,6 +71,53 @@ func TestHandler_GoneLastCallerAnswersNoRoots(t *testing.T) {
 }
 
 func TestCapabilities_RootsListChanged(t *testing.T) {
-	require.NotNil(t, Capabilities().Roots)
-	assert.True(t, Capabilities().Roots.ListChanged)
+	require.NotNil(t, Capabilities([]string{"roots"}).Roots)
+	assert.True(t, Capabilities([]string{"roots"}).Roots.ListChanged)
+}
+
+func TestCapabilities_OnlyTheGrantedFeatures(t *testing.T) {
+	assert.Equal(t, mcp.ClientCapabilities{}, Capabilities(nil))
+	c := Capabilities([]string{"elicitation"})
+	assert.NotNil(t, c.Elicitation)
+	assert.Nil(t, c.Sampling)
+	assert.Nil(t, c.Roots)
+}
+
+// The fifth request in flight is shed at once: declined, or an error, and
+// without an audit event.
+func TestHandler_ShedsBeyondTheInFlightLimit(t *testing.T) {
+	var events []Event
+	s := &fakeSession{caps: allCaps()}
+	h := Handler{InFlight: &InFlight{}, Audit: func(e Event) { events = append(events, e) }}
+	for range maxInFlight {
+		require.True(t, h.InFlight.acquire())
+	}
+
+	er, err := h.Elicit(withSession(s), formRequest())
+	require.NoError(t, err)
+	assert.Equal(t, mcp.ElicitationResponseActionDecline, er.Action)
+	_, err = h.CreateMessage(withSession(s), mcp.CreateMessageRequest{})
+	assert.ErrorIs(t, err, ErrBusy)
+	_, err = h.ListRoots(withSession(s), mcp.ListRootsRequest{})
+	assert.ErrorIs(t, err, ErrBusy)
+	assert.Empty(t, s.asked)
+	assert.Empty(t, events)
+
+	h.InFlight.release()
+	_, err = h.Elicit(withSession(s), formRequest())
+	require.NoError(t, err)
+	_, err = h.ListRoots(withSession(s), mcp.ListRootsRequest{})
+	require.NoError(t, err, "a slot is released after each request")
+	assert.Equal(t, []string{"elicit", "roots"}, s.asked)
+}
+
+func TestHandler_AnswerRefusesFeaturesNotGranted(t *testing.T) {
+	s := &fakeSession{caps: allCaps()}
+	h := Handler{Features: []string{"elicitation"}}
+	for _, method := range []mcp.MCPMethod{mcp.MethodSamplingCreateMessage, mcp.MethodListRoots} {
+		_, rpcErr := h.Answer(withSession(s), string(method), nil)
+		require.NotNil(t, rpcErr)
+		assert.Equal(t, mcp.METHOD_NOT_FOUND, rpcErr.Code)
+	}
+	assert.Empty(t, s.asked)
 }

@@ -485,8 +485,8 @@ See [Skills over MCP](/features/skills).
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `enable_client_features` | boolean | `true` | Let upstream servers use the calling MCP client's elicitation, sampling and roots. `false` offers none of them to any server. Takes effect after a restart. |
-| `mcpServers[].client_features` | boolean | follows `enable_client_features` | Per-server override. `false` offers this server none of them. A change reconnects the server. |
+| `enable_client_features` | boolean | `true` | Kill switch. `false` offers the calling MCP client's elicitation, sampling and roots to no server, whatever its `client_features`. Takes effect after a restart. |
+| `mcpServers[].client_features` | array | none | What this server may use of the calling MCP client: any of `"elicitation"`, `"sampling"`, `"roots"`. A change reconnects the server. |
 
 See [Upstream requests to the client](/features/client-requests).
 
