@@ -15,6 +15,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/launcher"
 )
 
@@ -338,6 +339,7 @@ func (c *Client) buildLauncherCmd(_ context.Context, willUseDocker bool) (*exec.
 	}
 
 	cmd := exec.Command(finalCommand, finalArgs...)
+	shellwrap.UseVerbatimCmdLine(cmd)
 	cmd.Env = envVars
 	if c.config.WorkingDir != "" {
 		cmd.Dir = c.config.WorkingDir

@@ -132,7 +132,7 @@ func TestKeyringProvider_IsAvailableWithReason_ProbeFails(t *testing.T) {
 // registered keyring provider's reasoned probe.
 func TestResolver_KeyringAvailability(t *testing.T) {
 	t.Setenv("CI", "true")
-	r := NewResolver()
+	r := NewTestWildcardResolver()
 	ok, reason := r.KeyringAvailability()
 	if ok {
 		t.Fatal("expected unavailable in CI")

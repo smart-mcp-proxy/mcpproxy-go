@@ -2,6 +2,7 @@ package connect
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -118,11 +119,45 @@ func (s *Service) UndoWithIntent(clientID, serverName, backupName string, intent
 		if matched != filepath.Base(cfgPath) {
 			cfgPath = filepath.Join(filepath.Dir(cfgPath), matched)
 		}
-		backupPath = filepath.Join(filepath.Dir(cfgPath), base)
+		// The path is built from the directory's own listing, not from the
+		// request: the request only selects which listed backup is meant.
+		listed, found, lerr := listedFileName(filepath.Dir(cfgPath), base)
+		if lerr != nil {
+			return nil, s.asAccessError(client, cfgPath, fmt.Errorf("read backup: %w", lerr))
+		}
+		if !found {
+			return &ConnectResult{
+				Success:    false,
+				Client:     client.ID,
+				ConfigPath: cfgPath,
+				ServerName: serverName,
+				Action:     "not_found",
+				Message:    fmt.Sprintf("Backup %s no longer exists; cannot restore. Use disconnect to remove the mcpproxy entry instead.", filepath.Join(filepath.Dir(cfgPath), base)),
+			}, nil
+		}
+		backupPath = filepath.Join(filepath.Dir(cfgPath), listed)
 	}
 
 	res, err = s.undo(client, cfgPath, serverName, backupPath, intent)
 	return res, s.asAccessError(client, cfgPath, err)
+}
+
+// listedFileName looks for a file called name in dir and returns the name as
+// the directory lists it. A missing directory means the file is not there.
+func listedFileName(dir, name string) (string, bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	for _, e := range entries {
+		if e.Name() == name {
+			return e.Name(), true, nil
+		}
+	}
+	return "", false, nil
 }
 
 func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string, intent CredentialIntent) (*ConnectResult, error) {

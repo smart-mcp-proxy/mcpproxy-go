@@ -51,7 +51,7 @@ func connectToRateLimited(t *testing.T, url, protocol string, headers ...map[str
 		cfg.Headers = headers[0]
 	}
 
-	client, err := managed.NewClient("retry-after-test", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	client, err := managed.NewClient("retry-after-test", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -183,7 +183,7 @@ func TestConnect_RetryAfterIsPerAttempt(t *testing.T) {
 		Created:  time.Now(),
 	}
 
-	client, err := core.NewClient("retry-after-attempt-test", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	client, err := core.NewClient("retry-after-attempt-test", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

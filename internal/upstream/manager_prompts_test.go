@@ -49,7 +49,7 @@ func newTestManager(t *testing.T) *Manager {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = storageManager.Close() })
 
-	m := NewManager(zap.NewNop(), cfg, storageManager, secret.NewResolver(), nil)
+	m := NewManager(zap.NewNop(), cfg, storageManager, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { m.DisconnectAll() })
 	return m
 }

@@ -7,7 +7,16 @@ import (
 	"path/filepath"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 )
+
+// cliUpstreamSecretResolver matches the daemon's upstream ${file:}/env policy.
+func cliUpstreamSecretResolver(cfg *config.Config) *secret.Resolver {
+	if cfg == nil {
+		return config.BuildSecretResolver(&config.Config{}, "", secret.ScopeUpstream)
+	}
+	return config.BuildSecretResolver(cfg, cfg.ConfigFilePathForPolicy(), secret.ScopeUpstream)
+}
 
 // cliDiagnosticsWriter receives the loader's removed-key / deprecated-key
 // findings (Spec 107 FR-032) for every CLI command that loads the config

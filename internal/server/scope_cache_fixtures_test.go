@@ -64,7 +64,7 @@ func newRestartableProxy(t *testing.T, dir string) (*MCPProxyServer, func()) {
 	cfg := config.DefaultConfig()
 	cfg.DataDir = dir
 	cfg.ToolsLimit = 20
-	um := newTestUpstreamManager(t, logger, cfg, nil, secret.NewResolver(), nil)
+	um := newTestUpstreamManager(t, logger, cfg, nil, secret.NewTestWildcardResolver(), nil)
 	cm, err := cache.NewManager(sm.GetDB(), logger)
 	require.NoError(t, err)
 	tr := truncate.NewTruncator(0)

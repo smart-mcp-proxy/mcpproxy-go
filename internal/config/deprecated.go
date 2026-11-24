@@ -113,6 +113,7 @@ func CleanDeprecatedFields(configPath string) ([]DeprecatedField, error) {
 	if err := os.WriteFile(tmpPath, cleaned, perm); err != nil {
 		return nil, fmt.Errorf("writing cleaned config: %w", err)
 	}
+	noteSupersededConfig(configPath)
 	if err := os.Rename(tmpPath, configPath); err != nil {
 		os.Remove(tmpPath) // best-effort cleanup
 		return nil, fmt.Errorf("replacing config: %w", err)

@@ -71,6 +71,8 @@ func undoRecordPath(cfgPath, backupPath string) string {
 	return backupPath + ".undo"
 }
 
+// fileDigest is the SHA-256 of a whole config file, in hex. It is a change
+// detector for the file a connect wrote, not a way to store a credential.
 func fileDigest(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
