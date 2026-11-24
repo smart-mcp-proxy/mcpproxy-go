@@ -128,7 +128,8 @@ Examples:
 		Long: `Add a new upstream MCP server using a JSON configuration object.
 
 Accepted keys: url, command, args, env, headers, working_dir, protocol
-(or its alias type), trust_mode, oauth. Any other key is refused.
+(or its alias type), trust_mode, oauth. Any other top-level key is ignored
+with a warning on stderr; an unknown key inside oauth is refused.
 
 Examples:
   mcpproxy upstream add-json weather '{"url":"https://api.weather.com/mcp","headers":{"Authorization":"Bearer token"}}'
@@ -1966,25 +1967,35 @@ func runUpstreamRemoveConfigMode(serverName string, globalConfig *config.Config)
 // silently downgraded.
 //
 // The same happened to oauth, and to every other key the struct did not name,
-// so any key outside addJSONKeys is now refused, and so is an unknown key
-// inside oauth. "type" (the Claude Desktop / VS Code spelling) is accepted as
+// so any key outside addJSONKeys is now reported on stderr (the server is still
+// added: refusing would break payloads that used to succeed), while an unknown
+// key inside oauth is refused (oauth was never carried before). "type" (the Claude Desktop / VS Code spelling) is accepted as
 // an alias for protocol so configs pasted from those clients still work.
 func parseAddJSONRequest(serverName, jsonStr string) (*cliclient.AddServerRequest, error) {
+	req, _, err := parseAddJSON(serverName, jsonStr)
+	return req, err
+}
+
+// parseAddJSON is parseAddJSONRequest plus the sorted top-level keys it did not
+// apply, so the caller can warn about them.
+func parseAddJSON(serverName, jsonStr string) (*cliclient.AddServerRequest, []string, error) {
 	var keys map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(jsonStr), &keys); err != nil {
-		return nil, fmt.Errorf("invalid JSON: %w", err)
+		return nil, nil, fmt.Errorf("invalid JSON: %w", err)
 	}
 	var unknown []string
 	for k := range keys {
 		if !slices.Contains(addJSONKeys, k) {
-			unknown = append(unknown, strconv.Quote(k))
+			unknown = append(unknown, k)
+			delete(keys, k) // reported, not decoded: the strict decode below is for oauth
 		}
 	}
-	if len(unknown) > 0 {
-		sort.Strings(unknown)
-		return nil, fmt.Errorf("unsupported key(s) %s: add-json accepts only %s",
-			strings.Join(unknown, ", "), strings.Join(addJSONKeys, ", "))
+	sort.Strings(unknown)
+	known, err := json.Marshal(keys)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid JSON: %w", err)
 	}
+	jsonStr = string(known)
 
 	var jsonConfig struct {
 		URL        string              `json:"url"`
@@ -2001,13 +2012,13 @@ func parseAddJSONRequest(serverName, jsonStr string) (*cliclient.AddServerReques
 	dec := json.NewDecoder(strings.NewReader(jsonStr))
 	dec.DisallowUnknownFields() // catches a misspelled key inside oauth
 	if err := dec.Decode(&jsonConfig); err != nil {
-		return nil, fmt.Errorf("invalid JSON: %w", err)
+		return nil, nil, fmt.Errorf("invalid JSON: %w", err)
 	}
 
 	protocol := jsonConfig.Protocol
 	if jsonConfig.Type != "" {
 		if protocol != "" && protocol != jsonConfig.Type {
-			return nil, fmt.Errorf("conflicting protocol %q and type %q: set only one", protocol, jsonConfig.Type)
+			return nil, nil, fmt.Errorf("conflicting protocol %q and type %q: set only one", protocol, jsonConfig.Type)
 		}
 		protocol = jsonConfig.Type
 	}
@@ -2023,16 +2034,16 @@ func parseAddJSONRequest(serverName, jsonStr string) (*cliclient.AddServerReques
 
 	// Validate
 	if jsonConfig.URL == "" && jsonConfig.Command == "" {
-		return nil, fmt.Errorf("JSON must contain either 'url' or 'command'")
+		return nil, nil, fmt.Errorf("JSON must contain either 'url' or 'command'")
 	}
 	if err := validateTrustModeFlag(jsonConfig.TrustMode); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := jsonConfig.OAuth.Validate(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := jsonConfig.OAuth.ValidateRefreshReplay(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	return &cliclient.AddServerRequest{
@@ -2046,7 +2057,18 @@ func parseAddJSONRequest(serverName, jsonStr string) (*cliclient.AddServerReques
 		Protocol:   protocol,
 		TrustMode:  jsonConfig.TrustMode,
 		OAuth:      jsonConfig.OAuth,
-	}, nil
+	}, unknown, nil
+}
+
+// addJSONUnknownKeysWarning is the stderr line for top-level keys add-json did
+// not apply.
+func addJSONUnknownKeysWarning(unknown []string) string {
+	quoted := make([]string, len(unknown))
+	for i, k := range unknown {
+		quoted[i] = strconv.Quote(k)
+	}
+	return fmt.Sprintf("warning: ignored unsupported key(s) %s: add-json accepts only %s",
+		strings.Join(quoted, ", "), strings.Join(addJSONKeys, ", "))
 }
 
 // addJSONKeys are the top-level keys `upstream add-json` understands.
@@ -2062,9 +2084,12 @@ func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	req, err := parseAddJSONRequest(serverName, jsonStr)
+	req, unknown, err := parseAddJSON(serverName, jsonStr)
 	if err != nil {
 		return err
+	}
+	if len(unknown) > 0 {
+		fmt.Fprintln(os.Stderr, addJSONUnknownKeysWarning(unknown))
 	}
 
 	// Create context

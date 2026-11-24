@@ -103,11 +103,21 @@ func TestParseAddJSONOAuthAndUnknownKeys(t *testing.T) {
 		assert.Contains(t, err.Error(), "token_endpoint")
 	})
 
-	t.Run("unknown top-level keys refused and all listed", func(t *testing.T) {
-		_, err := parseAddJSONRequest("srv", `{"url":"https://example.com/mcp","enabled":true,"isolation":{}}`)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), `"enabled", "isolation"`)
-		assert.Contains(t, err.Error(), "oauth")
+	t.Run("unknown top-level keys are reported, not refused", func(t *testing.T) {
+		req, unknown, err := parseAddJSON("srv", `{"url":"https://example.com/mcp","isolation":{},"enabled":true}`)
+		require.NoError(t, err)
+		require.NotNil(t, req)
+		assert.Equal(t, "https://example.com/mcp", req.URL)
+		assert.Equal(t, []string{"enabled", "isolation"}, unknown)
+
+		msg := addJSONUnknownKeysWarning(unknown)
+		assert.Contains(t, msg, `"enabled", "isolation"`)
+		assert.Contains(t, msg, "oauth")
+		assert.Contains(t, msg, "ignored")
+
+		_, unknown, err = parseAddJSON("srv", `{"url":"https://example.com/mcp"}`)
+		require.NoError(t, err)
+		assert.Empty(t, unknown)
 	})
 
 	t.Run("unknown key inside oauth refused", func(t *testing.T) {

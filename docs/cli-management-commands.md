@@ -229,7 +229,7 @@ mcpproxy upstream add-json <name> '<json>'
 - `trust_mode` - Per-server trust tier: `auto`, `scan` or `manual`
 - `oauth` - OAuth settings, the same block as in `mcp_config.json` (`client_id`, `client_secret`, `redirect_uri`, `scopes`, `extra_params`, …), validated before the server is added
 
-Any other key, at the top level or inside `oauth`, is refused with an error that names it, instead of being dropped.
+Any other top-level key is not applied: the command prints a warning on stderr that lists those keys and the accepted ones, and still adds the server (a later release will refuse them). An unknown key inside `oauth` is refused with an error that names it.
 
 **Examples:**
 ```bash
