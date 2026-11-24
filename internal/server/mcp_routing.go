@@ -897,9 +897,11 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// sanitisation (see withholdOversizeStructured) — except for a tool whose
 		// listing carries an outputSchema: MCP clients require such a tool to
 		// return structured content.
+		// Issue #2027: the effective profile may carry its own limit.
+		responseLimit := responseLimitForProfile(profileIndex, profileSlug, p.config.ToolResponseLimit)
 		var withheld withheldStructured
 		if !entry.OutputSchemaListed {
-			withheld = withholdOversizeStructured(result, p.config.ToolResponseLimit, p.logger, toolName)
+			withheld = withholdOversizeStructured(result, structuredWithholdLimit(responseLimit, p.config.ToolResponseLimit, p.outputSanitisationRewrites()), p.logger, toolName)
 		}
 		if blockResult := p.applyOutputSanitisation(ctx, serverName, toolName, requestID, directContentTrust, result); blockResult != nil {
 			// The upstream ran, so the started record is closed with the block
@@ -931,7 +933,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		if ctr, ok := result.(*mcp.CallToolResult); ok && ctr != nil {
 			newContent := make([]mcp.Content, 0, len(ctr.Content))
 			var parts []string
-			limit := p.config.ToolResponseLimit
+			limit := responseLimit
 			for _, c := range ctr.Content {
 				switch tc := c.(type) {
 				case mcp.TextContent:
@@ -976,8 +978,8 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 					responseText = string(responseBytes)
 				}
 			}
-			if p.config.ToolResponseLimit > 0 && len(responseText) > p.config.ToolResponseLimit {
-				responseText = responseText[:p.config.ToolResponseLimit]
+			if responseLimit > 0 && len(responseText) > responseLimit {
+				responseText = responseText[:responseLimit]
 				truncated = true
 			}
 			forwarded = mcp.NewToolResultText(responseText)

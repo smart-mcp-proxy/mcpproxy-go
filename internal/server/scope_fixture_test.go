@@ -108,6 +108,9 @@ type countingUpstream struct {
 	// okMeta, when set, is attached as the successful answer's result _meta
 	// (Spec 058 FR-016b: what the proxy relays, and what it must strip).
 	okMeta atomic.Pointer[mcp.Meta]
+	// okStructured, when set, is attached as the successful answer's
+	// structuredContent.
+	okStructured atomic.Pointer[map[string]any]
 }
 
 // serve registers one more tool on the running stub upstream, for tests
@@ -142,6 +145,9 @@ func (u *countingUpstream) serve(spec toolSpec) {
 			}
 			res := mcp.NewToolResultText(body)
 			res.Meta = u.okMeta.Load()
+			if structured := u.okStructured.Load(); structured != nil {
+				res.StructuredContent = *structured
+			}
 			return res, nil
 		})
 }

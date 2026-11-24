@@ -66,6 +66,9 @@ type ProfileView struct {
 	CodeExecution   *bool     `json:"code_execution,omitempty"`
 	ManagementTools *bool     `json:"management_tools,omitempty"`
 	SwitchableTo    *[]string `json:"switchable_to,omitempty"`
+	// ToolResponseLimit is the profile's own response limit (issue #2027):
+	// absent = inherits the global tool_response_limit, 0 = no limit.
+	ToolResponseLimit *int `json:"tool_response_limit,omitempty"`
 
 	EffectiveServers       []string `json:"effective_servers"`
 	EffectiveUnannotated   string   `json:"effective_unannotated"`
