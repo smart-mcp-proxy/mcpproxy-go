@@ -2345,8 +2345,17 @@ type AddServerRequest struct {
 	// applied field-by-field ON TOP of the persisted overrides, so omitting a
 	// field leaves it alone; clear an individual override by sending it
 	// explicitly (`"enabled": null`, `"image": ""`).
-	Isolation *IsolationRequest `json:"isolation,omitempty"`
+	Isolation *IsolationRequest   `json:"isolation,omitempty"`
+	OAuth     *config.OAuthConfig `json:"oauth,omitempty"`
 }
+
+// oauthPatchUnsupportedMessage is the 400 body for a PATCH that carries `oauth`.
+// The block is accepted on create only (validated with OAuthConfig.Validate);
+// PATCH has no oauth merge (replacing a stored client_secret needs the mask
+// reverts the MCP `upstream_servers update` door runs), so without this refusal
+// the field would be decoded and then silently ignored.
+const oauthPatchUnsupportedMessage = "oauth cannot be changed with PATCH: remove and re-add the server with the new oauth block, " +
+	"or use the upstream_servers MCP tool (oauth_json)"
 
 // IsolationRequest is the request-body representation of
 // config.IsolationConfig, using pointer fields for PATCH semantics:
@@ -2596,6 +2605,16 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
+	if err := req.OAuth.Validate(); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Same check the MCP upstream_servers door runs: refresh_replay_enabled
+	// without an explicit token_endpoint fails config validation on next load.
+	if err := req.OAuth.ValidateRefreshReplay(); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Auto-detect protocol if not specified
 	protocol := req.Protocol
@@ -2652,6 +2671,7 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		Protocol:              protocol,
 		Enabled:               enabled,
 		Quarantined:           quarantined,
+		OAuth:                 req.OAuth,
 	}
 	if req.Quarantined != nil {
 		// The caller stated the value: record it as an operator statement so
@@ -3087,7 +3107,7 @@ func resolveServerPatch(serverName string, req *AddServerRequest, existingSrv *c
 
 // handlePatchServer godoc
 // @Summary Partially update an upstream server
-// @Description Update specific fields of an existing upstream MCP server configuration. Isolation: `isolation.enabled` is READ-ONLY (it reports the effective state on reads) and is rejected with 400; set the per-server override via `isolation.enabled_override` (true | false | null to clear, omit to leave unchanged). An unrecognized `isolation.mode_override` is rejected with 400.
+// @Description Update specific fields of an existing upstream MCP server configuration. Isolation: `isolation.enabled` is READ-ONLY (it reports the effective state on reads) and is rejected with 400; set the per-server override via `isolation.enabled_override` (true | false | null to clear, omit to leave unchanged). An unrecognized `isolation.mode_override` is rejected with 400. `oauth` is accepted on create only and is rejected with 400 here.
 // @Tags servers
 // @Accept json
 // @Produce json
@@ -3130,6 +3150,10 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	// isolation mode BEFORE anything is persisted.
 	if err := req.Isolation.validate(); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.OAuth != nil {
+		s.writeError(w, r, http.StatusBadRequest, oauthPatchUnsupportedMessage)
 		return
 	}
 

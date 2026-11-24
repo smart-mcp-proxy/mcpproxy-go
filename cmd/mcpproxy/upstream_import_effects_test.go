@@ -293,6 +293,32 @@ func TestApplyImportedServersConfigModeFailureReportsNoWrites(t *testing.T) {
 	require.Equal(t, "sentinel", string(contents))
 }
 
+func TestApplyImportedServersDaemonModeCarriesOauth(t *testing.T) {
+	var gotOAuth *config.OAuthConfig
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req cliclient.AddServerRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotOAuth = req.OAuth
+		_, _ = w.Write([]byte(`{"success":true,"data":{}}`))
+	}))
+	defer server.Close()
+	client := cliclient.NewClientWithAPIKey(server.URL, "scratch-key", nil)
+	oauth := &config.OAuthConfig{
+		ClientID:              "example-client",
+		Scopes:                []string{"example-scope"},
+		AuthServerMetadataURL: "https://auth.example.com/.well-known/oauth-authorization-server",
+	}
+	items := []*configimport.ImportedServer{{Server: &config.ServerConfig{Name: "example", Protocol: "http", URL: "https://example.com/mcp", OAuth: oauth}}}
+	applied, failed, err := applyImportedServersDaemonMode(context.Background(), client, items)
+	require.NoError(t, err)
+	require.Empty(t, failed)
+	require.Len(t, applied, 1)
+	require.NotNil(t, gotOAuth)
+	require.Equal(t, "example-client", gotOAuth.ClientID)
+	require.Equal(t, []string{"example-scope"}, gotOAuth.Scopes)
+	require.Equal(t, "https://auth.example.com/.well-known/oauth-authorization-server", gotOAuth.AuthServerMetadataURL)
+}
+
 func TestApplyImportedServersDaemonModeContinuesAfterFailure(t *testing.T) {
 	var added []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
