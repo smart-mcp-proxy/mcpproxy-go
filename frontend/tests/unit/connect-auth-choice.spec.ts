@@ -71,7 +71,15 @@ async function startClaude(wrapper: ReturnType<typeof mount>) {
 // snapshot beside this file was recorded from the component as it was before
 // Spec 132 PR-3, with the same normalization.
 function html(wrapper: ReturnType<typeof mount>): string {
-  return wrapper.html().replace(/<!--[\s\S]*?-->/g, '').replace(/^[ \t]*\n/gm, '')
+  // Repeated until nothing changes, so no comment opener can be left behind by
+  // a removal.
+  let out = wrapper.html()
+  let prev: string
+  do {
+    prev = out
+    out = out.replace(/<!--[\s\S]*?-->/g, '')
+  } while (out !== prev)
+  return out.replace(/^[ \t]*\n/gm, '')
 }
 
 describe('Connect screen: choice of how the client signs in (Spec 132 PR-3)', () => {
