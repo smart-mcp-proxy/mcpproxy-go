@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/sys/windows"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy-tray/internal/state"
 )
@@ -24,74 +25,74 @@ import (
 type ProcessStatus string
 
 const (
-    ProcessStatusStopped  ProcessStatus = "stopped"
-    ProcessStatusStarting ProcessStatus = "starting"
-    ProcessStatusRunning  ProcessStatus = "running"
-    ProcessStatusFailed   ProcessStatus = "failed"
-    ProcessStatusCrashed  ProcessStatus = "crashed"
+	ProcessStatusStopped  ProcessStatus = "stopped"
+	ProcessStatusStarting ProcessStatus = "starting"
+	ProcessStatusRunning  ProcessStatus = "running"
+	ProcessStatusFailed   ProcessStatus = "failed"
+	ProcessStatusCrashed  ProcessStatus = "crashed"
 )
 
 // ProcessEvent represents events from the process monitor
 type ProcessEvent struct {
-    Type      ProcessEventType
-    Data      map[string]interface{}
-    Error     error
-    Timestamp time.Time
+	Type      ProcessEventType
+	Data      map[string]interface{}
+	Error     error
+	Timestamp time.Time
 }
 
 type ProcessEventType string
 
 const (
-    ProcessEventStarted ProcessEventType = "started"
-    ProcessEventExited  ProcessEventType = "exited"
-    ProcessEventError   ProcessEventType = "error"
-    ProcessEventOutput  ProcessEventType = "output"
+	ProcessEventStarted ProcessEventType = "started"
+	ProcessEventExited  ProcessEventType = "exited"
+	ProcessEventError   ProcessEventType = "error"
+	ProcessEventOutput  ProcessEventType = "output"
 )
 
 // ExitInfo contains information about process exit
 type ExitInfo struct {
-    Code      int
-    Signal    string
-    Timestamp time.Time
-    Error     error
+	Code      int
+	Signal    string
+	Timestamp time.Time
+	Error     error
 }
 
 // ProcessConfig contains configuration for process monitoring
 type ProcessConfig struct {
-    Binary        string
-    Args          []string
-    Env           []string
-    WorkingDir    string
-    StartTimeout  time.Duration
-    CaptureOutput bool
+	Binary        string
+	Args          []string
+	Env           []string
+	WorkingDir    string
+	StartTimeout  time.Duration
+	CaptureOutput bool
 }
 
 // ProcessMonitor monitors a subprocess and reports its status (Windows)
 type ProcessMonitor struct {
-    config       ProcessConfig
-    logger       *zap.SugaredLogger
-    stateMachine *state.Machine
+	config       ProcessConfig
+	logger       *zap.SugaredLogger
+	stateMachine *state.Machine
 
-    mu        sync.RWMutex
-    cmd       *exec.Cmd
-    status    ProcessStatus
-    pid       int
-    exitInfo  *ExitInfo
-    startTime time.Time
+	mu        sync.RWMutex
+	cmd       *exec.Cmd
+	status    ProcessStatus
+	pid       int
+	exitInfo  *ExitInfo
+	startTime time.Time
 
-    // Channels
-    eventCh    chan ProcessEvent
-    shutdownCh chan struct{}
-    doneCh     chan struct{} // Closed when monitor() exits
+	// Channels
+	eventCh    chan ProcessEvent
+	shutdownCh chan struct{}
+	doneCh     chan struct{} // Closed when monitor() exits
 
-    // Output capture
-    stdoutBuf strings.Builder
-    stderrBuf strings.Builder
-    outputMu  sync.Mutex
+	// Output capture
+	stdoutBuf strings.Builder
+	stderrBuf strings.Builder
+	outputMu  sync.Mutex
 
-    // Context for cancellation
-    ctx    context.Context
-    cancel context.CancelFunc
+	// Context for cancellation
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // NewProcessMonitor creates a new process monitor (Windows)
@@ -142,10 +143,9 @@ func (pm *ProcessMonitor) Start() error {
 			"env_vars", pm.maskSensitiveEnv(pm.config.Env))
 	}
 
-	// Hide console window on Windows
-	// CREATE_NO_WINDOW = 0x08000000
+	// Hide the console window; a process group of its own lets Stop() send it CTRL_BREAK.
 	pm.cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+		CreationFlags: windows.CREATE_NO_WINDOW | windows.CREATE_NEW_PROCESS_GROUP,
 	}
 
 	// Set up output capture if enabled
@@ -198,14 +198,17 @@ func (pm *ProcessMonitor) Stop() error {
 
 	pm.logger.Infow("Stopping process", "pid", pid)
 
-	// Try graceful stop via taskkill without /F first
-	killCmd := exec.Command("taskkill", "/PID", fmt.Sprint(pid), "/T")
-	_ = killCmd.Run()
+	// Force kill after 45 seconds to allow core time to clean up Docker containers
+	// (typically 10-30s for 7 containers).
+	grace := 45 * time.Second
+	if err := requestGracefulStop(pid); err != nil {
+		pm.logger.Warnw("Could not ask process to stop gracefully, force killing", "pid", pid, "error", err)
+		grace = 0
+	}
 
 	// Wait for monitor goroutine to detect exit (via doneCh)
 	// This avoids the cmd.Wait() race condition
-	select {
-	case <-pm.doneCh:
+	exited := func() error {
 		// Monitor has detected process exit
 		pm.mu.RLock()
 		exitInfo := pm.exitInfo
@@ -217,12 +220,30 @@ func (pm *ProcessMonitor) Stop() error {
 		}
 		pm.logger.Infow("Process stopped (no exit info)", "pid", pid)
 		return nil
+	}
 
-	case <-time.After(45 * time.Second):
-		// Force kill after 45 seconds to allow core time to clean up Docker containers
-		// Core needs time for parallel container cleanup (typically 10-30s for 7 containers)
-		pm.logger.Warn("Process did not stop gracefully after 45s, sending force kill", "pid", pid)
-		killCmd := exec.Command("taskkill", "/PID", fmt.Sprint(pid), "/T", "/F")
+	// select picks at random when both cases are ready, and with grace == 0 the timer is ready
+	// at once: look at doneCh first so a child the monitor has already seen exit is not
+	// force-killed. A child that exits in the instant before the monitor closes doneCh can
+	// still get a harmless taskkill (the tray holds its process handle until Wait returns).
+	select {
+	case <-pm.doneCh:
+		return exited()
+	default:
+	}
+
+	select {
+	case <-pm.doneCh:
+		return exited()
+
+	case <-time.After(grace):
+		select {
+		case <-pm.doneCh: // exited just as the timer fired
+			return exited()
+		default:
+		}
+		pm.logger.Warnw("Process did not stop gracefully, sending force kill", "pid", pid, "grace", grace)
+		killCmd := HiddenCommand("taskkill", "/PID", fmt.Sprint(pid), "/T", "/F")
 		_ = killCmd.Run()
 
 		// Wait for monitor to detect the kill
@@ -232,12 +253,45 @@ func (pm *ProcessMonitor) Stop() error {
 	}
 }
 
+var (
+	kernel32          = windows.NewLazySystemDLL("kernel32.dll")
+	procAttachConsole = kernel32.NewProc("AttachConsole")
+	procFreeConsole   = kernel32.NewProc("FreeConsole")
+	consoleMu         sync.Mutex // the console a process is attached to is process-wide
+)
+
+// requestGracefulStop sends CTRL_BREAK to the process group led by pid; Go turns it into
+// SIGINT, so the core runs its normal graceful shutdown. taskkill without /F cannot do this:
+// it only sends WM_CLOSE, which a windowless console process never receives.
+func requestGracefulStop(pid int) error {
+	consoleMu.Lock()
+	defer consoleMu.Unlock()
+	_, _, _ = procFreeConsole.Call() // a tray started from a terminal must leave it to attach
+	if r, _, err := procAttachConsole.Call(uintptr(pid)); r == 0 {
+		return fmt.Errorf("attach to console of pid %d: %w", pid, err)
+	}
+	defer procFreeConsole.Call()
+	return windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(pid))
+}
+
+// HiddenCommand is exec.Command without the console window a GUI process would otherwise flash.
+func HiddenCommand(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+	return cmd
+}
+
 // setupOutputCapture sets up stdout/stderr capture (Windows shares POSIX impl)
 func (pm *ProcessMonitor) setupOutputCapture() error {
 	stdoutPipe, err := pm.cmd.StdoutPipe()
-	if err != nil { return fmt.Errorf("failed to create stdout pipe: %w", err) }
+	if err != nil {
+		return fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
 	stderrPipe, err := pm.cmd.StderrPipe()
-	if err != nil { stdoutPipe.Close(); return fmt.Errorf("failed to create stderr pipe: %w", err) }
+	if err != nil {
+		stdoutPipe.Close()
+		return fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
 	go pm.captureOutput(stdoutPipe, &pm.stdoutBuf, "stdout")
 	go pm.captureOutput(stderrPipe, &pm.stderrBuf, "stderr")
 	return nil
@@ -349,85 +403,83 @@ func (pm *ProcessMonitor) Shutdown() {
 
 // GetStatus returns the current process status (Windows)
 func (pm *ProcessMonitor) GetStatus() ProcessStatus {
-    pm.mu.RLock()
-    defer pm.mu.RUnlock()
-    return pm.status
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.status
 }
 
 // sendEvent sends an event to the channel (Windows)
 func (pm *ProcessMonitor) sendEvent(event ProcessEvent) {
-    select {
-    case pm.eventCh <- event:
-    default:
-        pm.logger.Warn("Process event channel full, dropping event", "event_type", event.Type)
-    }
+	select {
+	case pm.eventCh <- event:
+	default:
+		pm.logger.Warn("Process event channel full, dropping event", "event_type", event.Type)
+	}
 }
 
 // maskSensitiveArgs masks sensitive data in command arguments (Windows)
 func (pm *ProcessMonitor) maskSensitiveArgs(args []string) []string {
-    masked := make([]string, len(args))
-    copy(masked, args)
-    for i, arg := range masked {
-        low := strings.ToLower(arg)
-        if strings.Contains(low, "key") || strings.Contains(low, "secret") || strings.Contains(low, "token") || strings.Contains(low, "password") {
-            if len(arg) > 8 {
-                masked[i] = arg[:4] + "****" + arg[len(arg)-4:]
-            } else {
-                masked[i] = "****"
-            }
-        }
-    }
-    return masked
+	masked := make([]string, len(args))
+	copy(masked, args)
+	for i, arg := range masked {
+		low := strings.ToLower(arg)
+		if strings.Contains(low, "key") || strings.Contains(low, "secret") || strings.Contains(low, "token") || strings.Contains(low, "password") {
+			if len(arg) > 8 {
+				masked[i] = arg[:4] + "****" + arg[len(arg)-4:]
+			} else {
+				masked[i] = "****"
+			}
+		}
+	}
+	return masked
 }
 
 // maskSensitiveEnv masks sensitive data in environment variables (Windows)
 func (pm *ProcessMonitor) maskSensitiveEnv(env []string) []string {
-    masked := make([]string, len(env))
-    for i, envVar := range env {
-        parts := strings.SplitN(envVar, "=", 2)
-        if len(parts) != 2 {
-            masked[i] = envVar
-            continue
-        }
-        keyLower := strings.ToLower(parts[0])
-        value := parts[1]
-        if strings.Contains(keyLower, "key") || strings.Contains(keyLower, "secret") || strings.Contains(keyLower, "token") || strings.Contains(keyLower, "password") {
-            if len(value) > 8 {
-                masked[i] = parts[0] + "=" + value[:4] + "****" + value[len(value)-4:]
-            } else {
-                masked[i] = parts[0] + "=****"
-            }
-        } else {
-            masked[i] = envVar
-        }
-    }
-    return masked
+	masked := make([]string, len(env))
+	for i, envVar := range env {
+		parts := strings.SplitN(envVar, "=", 2)
+		if len(parts) != 2 {
+			masked[i] = envVar
+			continue
+		}
+		keyLower := strings.ToLower(parts[0])
+		value := parts[1]
+		if strings.Contains(keyLower, "key") || strings.Contains(keyLower, "secret") || strings.Contains(keyLower, "token") || strings.Contains(keyLower, "password") {
+			if len(value) > 8 {
+				masked[i] = parts[0] + "=" + value[:4] + "****" + value[len(value)-4:]
+			} else {
+				masked[i] = parts[0] + "=****"
+			}
+		} else {
+			masked[i] = envVar
+		}
+	}
+	return masked
 }
-
-
 
 // GetPID returns the process ID (Windows)
 func (pm *ProcessMonitor) GetPID() int {
-    pm.mu.RLock()
-    defer pm.mu.RUnlock()
-    return pm.pid
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.pid
 }
 
 // GetExitInfo returns information about process exit (Windows)
 func (pm *ProcessMonitor) GetExitInfo() *ExitInfo {
-    pm.mu.RLock()
-    defer pm.mu.RUnlock()
-    return pm.exitInfo
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.exitInfo
 }
 
 // GetOutput returns captured stdout and stderr (Windows)
 func (pm *ProcessMonitor) GetOutput() (stdout, stderr string) {
-    pm.outputMu.Lock()
-    defer pm.outputMu.Unlock()
-    return pm.stdoutBuf.String(), pm.stderrBuf.String()
+	pm.outputMu.Lock()
+	defer pm.outputMu.Unlock()
+	return pm.stdoutBuf.String(), pm.stderrBuf.String()
 }
 
 // EventChannel returns a channel for receiving process events (Windows)
 func (pm *ProcessMonitor) EventChannel() <-chan ProcessEvent {
-    return pm.eventCh
+	return pm.eventCh
 }

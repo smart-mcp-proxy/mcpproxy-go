@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy-tray/internal/monitor"
 )
 
 // Windows doesn't have POSIX signals, so we create dummy constants for compatibility
@@ -28,7 +30,7 @@ func (cpl *CoreProcessLauncher) forceKillCore() {
 	cpl.logger.Warn("Force killing core process", zap.Int("pid", pid))
 
 	// Kill the entire process tree using taskkill /T /F
-	killCmd := exec.Command("taskkill", "/PID", fmt.Sprint(pid), "/T", "/F")
+	killCmd := monitor.HiddenCommand("taskkill", "/PID", fmt.Sprint(pid), "/T", "/F")
 	if err := killCmd.Run(); err != nil {
 		cpl.logger.Error("Failed to force kill process", zap.Int("pid", pid), zap.Error(err))
 	}
@@ -46,10 +48,10 @@ func (cpl *CoreProcessLauncher) signalProcessTree(pid int, sig syscall.Signal) e
 	// Map Unix signals to Windows taskkill behavior
 	if sig == _SIGKILL {
 		// Force kill
-		killCmd = exec.Command("taskkill", "/PID", fmt.Sprint(pid), "/T", "/F")
+		killCmd = monitor.HiddenCommand("taskkill", "/PID", fmt.Sprint(pid), "/T", "/F")
 	} else {
 		// Graceful shutdown (SIGTERM equivalent)
-		killCmd = exec.Command("taskkill", "/PID", fmt.Sprint(pid), "/T")
+		killCmd = monitor.HiddenCommand("taskkill", "/PID", fmt.Sprint(pid), "/T")
 	}
 
 	if err := killCmd.Run(); err != nil {
@@ -68,7 +70,7 @@ func (cpl *CoreProcessLauncher) waitForProcessExit(pid int, timeout time.Duratio
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		// Check if process exists using tasklist
-		checkCmd := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH")
+		checkCmd := monitor.HiddenCommand("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH")
 		output, err := checkCmd.Output()
 		if err != nil || len(output) == 0 {
 			return true // Process doesn't exist
@@ -89,7 +91,7 @@ func (cpl *CoreProcessLauncher) isProcessAlive(pid int) bool {
 		return false
 	}
 
-	checkCmd := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH")
+	checkCmd := monitor.HiddenCommand("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH")
 	output, err := checkCmd.Output()
 	if err != nil || len(output) == 0 {
 		return false

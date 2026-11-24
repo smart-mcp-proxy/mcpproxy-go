@@ -225,7 +225,11 @@ mcpproxy upstream add-json <name> '<json>'
 - `headers` - HTTP headers (object)
 - `env` - Environment variables (object)
 - `working_dir` - Working directory (for stdio)
-- `protocol` - Transport type (auto-detected if not specified)
+- `protocol` - Transport type (auto-detected if not specified); `type` is accepted as an alias, so configs copied from Claude Desktop or VS Code work as-is
+- `trust_mode` - Per-server trust tier: `auto`, `scan` or `manual`
+- `oauth` - OAuth settings, the same block as in `mcp_config.json` (`client_id`, `client_secret`, `redirect_uri`, `scopes`, `extra_params`, …), validated before the server is added
+
+Any other top-level key is not applied: the command prints a warning on stderr that lists those keys and the accepted ones, and still adds the server (a later release will refuse them). An unknown key inside `oauth` is refused with an error that names it.
 
 **Examples:**
 ```bash
@@ -241,6 +245,16 @@ mcpproxy upstream add-json complex-server '{
   "args": ["./server.js"],
   "env": {"NODE_ENV": "production", "PORT": "3000"},
   "working_dir": "/opt/mcp-server"
+}'
+
+# OAuth provider without Dynamic Client Registration (e.g. Home Assistant,
+# where the client_id is a URL and the redirect must share its host and port)
+mcpproxy upstream add-json home-assistant '{
+  "url": "https://ha.example.com/api/mcp",
+  "oauth": {
+    "client_id": "http://127.0.0.1:8765/",
+    "redirect_uri": "http://127.0.0.1:8765/oauth/callback"
+  }
 }'
 ```
 
