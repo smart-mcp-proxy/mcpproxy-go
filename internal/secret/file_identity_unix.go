@@ -1,0 +1,86 @@
+//go:build unix
+
+package secret
+
+import (
+	"errors"
+	"os"
+	"syscall"
+)
+
+// fileIdentity is a file's device and inode, captured eagerly so it keeps
+// naming the same file after the path is renamed over.
+type fileIdentity struct {
+	dev, ino uint64
+}
+
+var errIdentityNotRegular = errors.New("not a regular file")
+
+func identityFromInfo(info os.FileInfo) (fileIdentity, bool) {
+	if info == nil {
+		return fileIdentity{}, false
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || st == nil {
+		return fileIdentity{}, false
+	}
+	return fileIdentity{dev: uint64(st.Dev), ino: uint64(st.Ino)}, true //nolint:unconvert // widths differ by platform
+}
+
+// identityOfPathErr stats path (following symlinks) and returns its identity.
+// A missing file reports an error matching fs.ErrNotExist.
+func identityOfPathErr(path string) (fileIdentity, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return fileIdentity{}, err
+	}
+	if !fi.Mode().IsRegular() {
+		return fileIdentity{}, errIdentityNotRegular
+	}
+	id, ok := identityFromInfo(fi)
+	if !ok {
+		return fileIdentity{}, errors.New("file identity unavailable")
+	}
+	return id, nil
+}
+
+func identityOfPath(path string) (fileIdentity, bool) {
+	id, err := identityOfPathErr(path)
+	return id, err == nil
+}
+
+// identityOfHandle returns the identity of an opened file from its fstat info.
+func identityOfHandle(_ *os.File, info os.FileInfo) (fileIdentity, bool) {
+	return identityFromInfo(info)
+}
+
+func stampFromInfo(info os.FileInfo) (supersededStamp, bool) {
+	id, ok := identityFromInfo(info)
+	if !ok {
+		return supersededStamp{}, false
+	}
+	return supersededStamp{id: id, mtime: info.ModTime().UnixNano()}, true
+}
+
+// stampOfPathErr stats path once (following symlinks) and returns its
+// identity and modification time from that one stat.
+func stampOfPathErr(path string) (supersededStamp, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return supersededStamp{}, err
+	}
+	if !fi.Mode().IsRegular() {
+		return supersededStamp{}, errIdentityNotRegular
+	}
+	st, ok := stampFromInfo(fi)
+	if !ok {
+		return supersededStamp{}, errors.New("file identity unavailable")
+	}
+	return st, nil
+}
+
+// stampOfHandle returns an opened file's identity and modification time from
+// its fstat info.
+func stampOfHandle(_ *os.File, info os.FileInfo) (supersededStamp, bool) {
+	return stampFromInfo(info)
+}

@@ -34,7 +34,7 @@ func createTestManagerWithClient(t *testing.T, serverConfig *config.ServerConfig
 		clients:        make(map[string]*managed.Client),
 		logger:         logger,
 		storage:        db,
-		secretResolver: secret.NewResolver(),
+		secretResolver: secret.NewTestWildcardResolver(),
 	}
 
 	client, err := managed.NewClient(
@@ -44,7 +44,7 @@ func createTestManagerWithClient(t *testing.T, serverConfig *config.ServerConfig
 		nil,
 		&config.Config{},
 		db,
-		secret.NewResolver(),
+		secret.NewTestWildcardResolver(),
 	)
 	require.NoError(t, err)
 	manager.clients[serverConfig.Name] = client
@@ -232,7 +232,7 @@ func TestTryReconnectSync_PreventsStorms(t *testing.T) {
 		nil,
 		&config.Config{},
 		db,
-		secret.NewResolver(),
+		secret.NewTestWildcardResolver(),
 	)
 	require.NoError(t, err)
 
@@ -288,7 +288,7 @@ func TestTryReconnectSync_RespectsContextCancellation(t *testing.T) {
 		nil,
 		&config.Config{},
 		db,
-		secret.NewResolver(),
+		secret.NewTestWildcardResolver(),
 	)
 	require.NoError(t, err)
 

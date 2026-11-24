@@ -143,7 +143,7 @@ func newSessionClient(t *testing.T) (*Client, *sessUpstream) {
 	t.Cleanup(srv.Close)
 
 	cfg := &config.ServerConfig{Name: "sess", Protocol: "streamable-http", URL: srv.URL, Enabled: true}
-	mc, err := NewClient("sess", cfg, zap.NewNop(), nil, &config.Config{}, nil, secret.NewResolver())
+	mc, err := NewClient("sess", cfg, zap.NewNop(), nil, &config.Config{}, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

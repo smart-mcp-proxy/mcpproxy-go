@@ -42,7 +42,7 @@ func TestStartManualOAuthQuick_RecentCompletionDoesNotCancelLogin(t *testing.T) 
 		}
 	})
 
-	m := NewManager(zap.NewNop(), &config.Config{}, db, secret.NewResolver(), nil)
+	m := NewManager(zap.NewNop(), &config.Config{}, db, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { m.shutdownCancel() })
 	require.NoError(t, m.AddServerConfig(name, &config.ServerConfig{
 		Name: name, URL: srv.MCPURL, Protocol: "http", Enabled: true,

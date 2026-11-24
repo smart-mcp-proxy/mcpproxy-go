@@ -64,7 +64,7 @@ func newPreflightFixture(t *testing.T, mutate func(cfg *config.Config)) *preflig
 		mutate(cfg)
 	}
 
-	um := newTestUpstreamManager(t, logger, cfg, nil, secret.NewResolver(), nil)
+	um := newTestUpstreamManager(t, logger, cfg, nil, secret.NewTestWildcardResolver(), nil)
 	cm, err := cache.NewManager(sm.GetDB(), logger)
 	require.NoError(t, err)
 	t.Cleanup(func() { cm.Close() })

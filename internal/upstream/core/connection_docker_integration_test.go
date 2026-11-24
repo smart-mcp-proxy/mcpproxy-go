@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -190,6 +191,30 @@ func TestIntegration_DockerUnresolvable_FallsBackToBareDocker(t *testing.T) {
 	cmdStr := shellArgs[len(shellArgs)-1]
 	assert.True(t, strings.HasPrefix(cmdStr, "docker run"),
 		"only a genuinely-absent docker should degrade to bare 'docker', got %q", cmdStr)
+}
+
+// TestIntegration_NewDockerCmd_UnresolvableFallsBackToShellWrap covers the
+// newDockerCmd spawn fallback: with docker genuinely absent it must degrade to
+// the user-shell wrap of bare `docker` — the wrap that on Windows needs the
+// verbatim cmd.exe command line (#1960) to survive quoted paths.
+func TestIntegration_NewDockerCmd_UnresolvableFallsBackToShellWrap(t *testing.T) {
+	shellwrap.ResetDockerPathCacheForTest()
+	t.Cleanup(shellwrap.ResetDockerPathCacheForTest)
+	restore := shellwrap.SetWellKnownDockerPathsForTest(func() []string { return nil })
+	t.Cleanup(restore)
+	t.Setenv("PATH", t.TempDir())
+	if runtime.GOOS == osWindows {
+		t.Setenv("SHELL", "") // force cmd.exe even under Git Bash
+	} else {
+		t.Setenv("SHELL", "/nonexistent/shell-must-not-be-invoked")
+	}
+
+	c := newIsolatedTestClient()
+	cmd := c.newDockerCmd(context.Background(), "run", "img")
+	require.NotNil(t, cmd)
+	cmdStr := cmd.Args[len(cmd.Args)-1]
+	assert.True(t, strings.HasPrefix(cmdStr, "docker run"),
+		"unresolvable docker must degrade to the shell wrap, got %q", cmd.Args)
 }
 
 // TestIntegration_StatusAndSpawnResolverDoNotDiverge guards the invariant the

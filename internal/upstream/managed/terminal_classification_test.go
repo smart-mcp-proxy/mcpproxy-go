@@ -19,7 +19,7 @@ import (
 func newClientForConnect(t *testing.T, cfg *config.ServerConfig) *Client {
 	t.Helper()
 	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
-	mc, err := NewClient(cfg.Name, cfg, zap.NewNop(), nil, &config.Config{}, nil, secret.NewResolver())
+	mc, err := NewClient(cfg.Name, cfg, zap.NewNop(), nil, &config.Config{}, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	return mc
 }

@@ -70,7 +70,7 @@ func TestSecureEnvironmentIntegration(t *testing.T) {
 
 	// Create upstream client
 	logger := zap.NewNop()
-	client, err := managed.NewClient("test-id", serverConfig, logger, nil, cfg, nil, secret.NewResolver())
+	client, err := managed.NewClient("test-id", serverConfig, logger, nil, cfg, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
@@ -154,7 +154,7 @@ func TestConfigurationIntegration(t *testing.T) {
 		cfg := config.DefaultConfig()
 		logger := zap.NewNop()
 
-		manager := NewManager(logger, cfg, nil, secret.NewResolver(), nil)
+		manager := NewManager(logger, cfg, nil, secret.NewTestWildcardResolver(), nil)
 		require.NotNil(t, manager)
 		assert.Equal(t, cfg, manager.globalConfig.Load())
 	})
@@ -183,7 +183,7 @@ func TestServerSpecificEnvironmentVariables(t *testing.T) {
 	globalConfig.Environment.CustomVars["OVERRIDE_VAR"] = "global_value"
 
 	logger := zap.NewNop()
-	client, err := managed.NewClient("test-id", serverConfig, logger, nil, globalConfig, nil, secret.NewResolver())
+	client, err := managed.NewClient("test-id", serverConfig, logger, nil, globalConfig, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 
 	envVars := client.GetEnvManager().(*secureenv.Manager).BuildSecureEnvironment()
@@ -242,7 +242,7 @@ func TestEnvironmentInheritanceDisabled(t *testing.T) {
 	}
 
 	logger := zap.NewNop()
-	client, err := managed.NewClient("test-id", serverConfig, logger, nil, cfg, nil, secret.NewResolver())
+	client, err := managed.NewClient("test-id", serverConfig, logger, nil, cfg, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 
 	envVars := client.GetEnvManager().(*secureenv.Manager).BuildSecureEnvironment()
@@ -293,7 +293,7 @@ func TestRealWorldNpxScenario(t *testing.T) {
 	}
 
 	logger := zap.NewNop()
-	client, err := managed.NewClient("test-id", serverConfig, logger, nil, cfg, nil, secret.NewResolver())
+	client, err := managed.NewClient("test-id", serverConfig, logger, nil, cfg, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 
 	// Verify that PATH is available in the secure environment
@@ -356,7 +356,7 @@ func TestSecurityCompliance(t *testing.T) {
 	}
 
 	logger := zap.NewNop()
-	client, err := managed.NewClient("test-id", serverConfig, logger, nil, cfg, nil, secret.NewResolver())
+	client, err := managed.NewClient("test-id", serverConfig, logger, nil, cfg, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 
 	envVars := client.GetEnvManager().(*secureenv.Manager).BuildSecureEnvironment()
@@ -409,7 +409,7 @@ func TestWildcardMatching(t *testing.T) {
 	}
 
 	logger := zap.NewNop()
-	client, err := managed.NewClient("test-id", serverConfig, logger, nil, cfg, nil, secret.NewResolver())
+	client, err := managed.NewClient("test-id", serverConfig, logger, nil, cfg, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 
 	envVars := client.GetEnvManager().(*secureenv.Manager).BuildSecureEnvironment()
@@ -450,7 +450,7 @@ func TestProxyForwardingWiring(t *testing.T) {
 	buildEnvMap := func(forward bool) map[string]string {
 		cfg := config.DefaultConfig()
 		cfg.ForwardProxyEnv = forward
-		client, err := managed.NewClient("test-id", serverConfig, logger, nil, cfg, nil, secret.NewResolver())
+		client, err := managed.NewClient("test-id", serverConfig, logger, nil, cfg, nil, secret.NewTestWildcardResolver())
 		require.NoError(t, err)
 		envMap := make(map[string]string)
 		for _, envVar := range client.GetEnvManager().(*secureenv.Manager).BuildSecureEnvironment() {

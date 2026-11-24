@@ -379,13 +379,12 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	}
 
 	// Initialize management service and set it on runtime
-	secretResolver := secret.NewResolver()
 	mgmtService := management.NewService(
-		rt,              // RuntimeOperations
-		cfg,             // Config
-		rt.ConfigPath(), // Config file path for deprecation checks
-		rt,              // EventEmitter
-		secretResolver,  // SecretResolver
+		rt,                     // RuntimeOperations
+		cfg,                    // Config
+		rt.ConfigPath(),        // Config file path for deprecation checks
+		rt,                     // EventEmitter
+		rt.GetSecretResolver(), // SecretResolver
 		logger.Sugar(),
 	)
 	rt.SetManagementService(mgmtService)
@@ -3765,7 +3764,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 				secService.InvalidateServerState(name)
 			}
 		})
-		secService.SetSecretStore(&keyringSecretStore{resolver: secret.NewResolver()})
+		secService.SetSecretStore(&keyringSecretStore{resolver: s.runtime.GetSecretResolver()})
 		secService.CleanupStaleJobs()
 		httpAPIServer.SetSecurityController(secService)
 		// Plumb scan summaries through management.ListServers so the SSE

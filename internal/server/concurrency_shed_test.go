@@ -142,7 +142,7 @@ func TestCodeExecutionToolCaller_IsSubjectToAdmission(t *testing.T) {
 	}
 	cfg := &config.Config{Servers: []*config.ServerConfig{serverCfg}}
 
-	um := newTestUpstreamManager(t, zap.NewNop(), cfg, nil, secret.NewResolver(), nil)
+	um := newTestUpstreamManager(t, zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
 	require.NoError(t, um.AddServerConfig("db", serverCfg))
 	client, ok := um.GetClient("db")
 	require.True(t, ok)
@@ -185,7 +185,7 @@ func TestCodeExecutionToolCaller_ShedIsAttributedInternally(t *testing.T) {
 	}
 	cfg := &config.Config{Servers: []*config.ServerConfig{serverCfg}}
 
-	um := newTestUpstreamManager(t, zap.NewNop(), cfg, nil, secret.NewResolver(), nil)
+	um := newTestUpstreamManager(t, zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
 	require.NoError(t, um.AddServerConfig("db", serverCfg))
 	client, ok := um.GetClient("db")
 	require.True(t, ok)

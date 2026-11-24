@@ -60,7 +60,7 @@ func newTruncatingRetrieveToolsProxy(t *testing.T, responseLimit int) (*MCPProxy
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = idx.Close() })
 
-	um := newTestUpstreamManager(t, logger, cfg, nil, secret.NewResolver(), nil)
+	um := newTestUpstreamManager(t, logger, cfg, nil, secret.NewTestWildcardResolver(), nil)
 
 	cm, err := cache.NewManager(sm.GetDB(), logger)
 	require.NoError(t, err)

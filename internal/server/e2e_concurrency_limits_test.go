@@ -146,7 +146,7 @@ func newLimitedManager(t *testing.T, up *slowUpstream, maxConcurrent, queueSize 
 	// legal configuration (FR-023).
 	require.Empty(t, cfg.ValidateDetailed(), "concurrency limits must pass config validation")
 
-	um := newTestUpstreamManager(t, zap.NewNop(), cfg, nil, secret.NewResolver(), nil)
+	um := newTestUpstreamManager(t, zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
 
 	require.NoError(t, um.AddServerConfig(slowUpstreamName, serverCfg))
 	require.NoError(t, um.ConnectAll(context.Background()))

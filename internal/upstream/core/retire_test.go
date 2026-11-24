@@ -36,7 +36,7 @@ import (
 
 func newRetireCoreClient(t *testing.T, cfg *config.ServerConfig, st *storage.BoltDB) *Client {
 	t.Helper()
-	c, err := NewClient(cfg.Name, cfg, zap.NewNop(), nil, &config.Config{}, st, secret.NewResolver())
+	c, err := NewClient(cfg.Name, cfg, zap.NewNop(), nil, &config.Config{}, st, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	return c
 }
