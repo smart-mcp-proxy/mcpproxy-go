@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -143,4 +145,22 @@ func TestDenyPathsAtRead_CoveredDirsDoNotChargeBudget(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(nested, "state.db"), nil, 0o600))
 	p := &FilePolicy{Scope: ScopeUpstream, Deny: DenyPaths{DataDir: dataDir}}
 	require.Contains(t, p.denyPathsAtRead(), filepath.Join(nested, "state.db"))
+}
+
+// A path swapped for a FIFO between the Lstat and the open must not block.
+func TestOpenDirNoBlock_FIFODoesNotBlock(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "q")
+	require.NoError(t, syscall.Mkfifo(fifo, 0o600))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if f, err := openDirNoBlock(fifo); err == nil {
+			f.Close()
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("open of a FIFO blocked")
+	}
 }

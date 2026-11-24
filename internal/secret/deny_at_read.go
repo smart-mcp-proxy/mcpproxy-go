@@ -112,12 +112,13 @@ func walkDenyDir(cur denyWalkLevel, budget int, paths *[]string, queue *[]denyWa
 	if fi, err := os.Lstat(cur.dir); err != nil || !fi.IsDir() {
 		return budget
 	}
-	d, err := os.Open(cur.dir)
+	d, err := openDirNoBlock(cur.dir)
 	if err != nil {
 		return budget
 	}
 	defer d.Close()
-	for budget > 0 {
+	skipped := 0 // pass-1 files skipped here are not free either
+	for budget > 0 && skipped < maxDenyWalkEntries {
 		batch := budget
 		if batch > 256 {
 			batch = 256
@@ -125,6 +126,7 @@ func walkDenyDir(cur denyWalkLevel, budget int, paths *[]string, queue *[]denyWa
 		entries, err := d.ReadDir(batch)
 		for _, e := range entries {
 			if cur.covered && e.Type().IsRegular() {
+				skipped++
 				continue
 			}
 			budget--
