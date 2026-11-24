@@ -370,7 +370,7 @@ upstream-scoped read refuses:
 
 - The active config file and the active admin API key source file(s)
 - Regular files directly under `<data-dir>` (except under `<data-dir>/secrets`)
-- Regular files one level below `<data-dir>/certs`, `<data-dir>/index.bleve`, or `<data-dir>/tpa-lkg` (not deeper subtrees)
+- Regular files in the subdirectories of `<data-dir>`, except `<data-dir>/secrets`. The identity comparison walks the data directory breadth-first with a fixed budget (8 levels, 4096 directory entries per read, shallow entries first), so its cost does not grow with the data directory. A file beyond the budget is still refused by path (anything under `<data-dir>` other than `secrets/`) and by the link-count rule; only a path swapped to it after those checks goes unmatched
 - Any file with more than one hard link
 - An earlier version of the config file that this process replaced on save, when a hardlink to it was made before the save
 
@@ -389,9 +389,19 @@ same is true of a hardlink to a log file that has since been rotated or
 deleted: once the original name is gone, the link is the file's only link.
 Keep allowed directories writable only by the account that runs mcpproxy.
 
-`["*"]` resolves the path and then opens it by path, so it does not protect
-against a concurrent filesystem writer that swaps a symlink in between; the
-allow-list mode opens through the allowed root and does.
+`["*"]` resolves the path and then opens it by path, so there is no allowed root to
+hold the open inside: a concurrent filesystem writer can still point the path
+somewhere else between the check and the open. The refusals above are decided on the
+opened file itself (its identity and link count), so such a swap onto a proxy file
+or a hard-linked file is refused; the allow-list mode additionally opens through
+the allowed root.
+
+`mcpproxy doctor` and `GET /api/v1/diagnostics` list the upstream servers whose
+`${file:}` references are outside `secret_file_dirs` as a runtime warning (server
+names only; a scoped token sees only its own servers). A `secret_file_dirs` entry
+that does not exist, or exists but is not a directory or cannot be resolved, is
+named in a startup warning. A save that cannot record the identity of the config
+file it replaces prints that warning on standard error when no core is running.
 
 #### Policy denials vs load failures
 

@@ -17,6 +17,6 @@ const MsgSupersededConfigNotRecorded = "could not record the identity of the con
 // file only, when that fails.
 func noteSupersededConfig(path string) {
 	if err := secret.NoteSupersededProxyFile(path); err != nil {
-		emitLoadWarning(MsgSupersededConfigNotRecorded, "config_file", filepath.Base(path))
+		emitLoadWarningVisible(MsgSupersededConfigNotRecorded, "config_file", filepath.Base(path))
 	}
 }

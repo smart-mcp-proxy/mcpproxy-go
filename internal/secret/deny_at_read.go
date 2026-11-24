@@ -5,17 +5,22 @@ import (
 	"path/filepath"
 )
 
-// dataDirStateSubdirs are data-dir children that hold proxy state files. Files
-// directly inside these directories are refused (not deeper nesting). The
-// secrets/ subtree is always excluded.
-var dataDirStateSubdirs = []string{
-	"certs",
-	"index.bleve",
-	"tpa-lkg",
-}
+// The data directory is walked breadth-first for files to compare with the
+// opened handle. Cost must not depend on how large the data dir has grown
+// (the Bleve index holds many segment files), so the walk has fixed budgets:
+// at most maxDenyWalkDepth directory levels and maxDenyWalkEntries directory
+// entries per read, shallow entries first. A file beyond the budget is still
+// refused by path containment (deniedByPath) and, when it has another name,
+// by the link-count rule; only a path swapped to it after those checks goes
+// unmatched, which the budget trades for a bounded cost.
+const (
+	maxDenyWalkDepth   = 8
+	maxDenyWalkEntries = 4096
+)
 
 // denyPathsAtRead returns filesystem paths to stat for handle identity checks.
-// Paths are fresh on every read so renames and new inodes are caught.
+// Paths are fresh on every read so renames and new inodes are caught. The
+// secrets/ subtree is always excluded.
 func (p *FilePolicy) denyPathsAtRead() []string {
 	if p == nil || p.Scope != ScopeUpstream {
 		return nil
@@ -28,34 +33,35 @@ func (p *FilePolicy) denyPathsAtRead() []string {
 	if p.Deny.DataDir == "" {
 		return uniqueAbsPaths(paths)
 	}
-	entries, err := os.ReadDir(p.Deny.DataDir)
-	if err != nil {
-		return uniqueAbsPaths(paths)
+	type level struct {
+		dir   string
+		depth int
 	}
-	for _, e := range entries {
-		name := e.Name()
-		if name == "secrets" {
+	queue := []level{{p.Deny.DataDir, 1}}
+	budget := maxDenyWalkEntries
+	for len(queue) > 0 && budget > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		entries, err := os.ReadDir(cur.dir)
+		if err != nil {
 			continue
 		}
-		full := filepath.Join(p.Deny.DataDir, name)
-		if !e.IsDir() {
-			paths = append(paths, full)
-			continue
-		}
-		for _, sub := range dataDirStateSubdirs {
-			if name != sub {
-				continue
-			}
-			subEntries, err := os.ReadDir(full)
-			if err != nil {
+		for _, e := range entries {
+			if budget == 0 {
 				break
 			}
-			for _, se := range subEntries {
-				if !se.IsDir() {
-					paths = append(paths, filepath.Join(full, se.Name()))
-				}
+			budget--
+			full := filepath.Join(cur.dir, e.Name())
+			if cur.depth == 1 && e.Name() == "secrets" {
+				continue
 			}
-			break
+			if !e.IsDir() {
+				paths = append(paths, full)
+				continue
+			}
+			if cur.depth < maxDenyWalkDepth {
+				queue = append(queue, level{full, cur.depth + 1})
+			}
 		}
 	}
 	return uniqueAbsPaths(paths)

@@ -1,8 +1,10 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"io/fs"
+	"os"
 	"reflect"
 	"sort"
 	"sync"
@@ -505,6 +507,25 @@ func PersistableConfigWithEdits(effective, mergeBase *Config, path string) *Conf
 // value the file never held.
 var ErrSecretFileDirsUnverified = errors.New("config file cannot be decoded; refusing to save secret_file_dirs it does not hold")
 
+// fileMayHoldSecretFileDirs reports whether the file at path, which could not
+// be decoded as a config, still shows a secret_file_dirs key (or cannot be
+// read at all, so nothing shows it does not). A save that dropped the key
+// would turn an explicit setting (for instance [] = file references off) back
+// into the platform default. A file that is not even a JSON object holds no
+// readable setting and may be overwritten, so a repair save stays possible.
+func fileMayHoldSecretFileDirs(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return true
+	}
+	var top map[string]json.RawMessage
+	if json.Unmarshal(data, &top) != nil {
+		return false
+	}
+	_, ok := top["secret_file_dirs"]
+	return ok
+}
+
 // persistableConfigWithEdits is PersistableConfigWithEdits for the save path:
 // it fails closed (ErrSecretFileDirsUnverified) where the comparison helper
 // would fall back to the in-memory value. A missing file is not an error (the
@@ -525,7 +546,7 @@ func persistableConfigWithEdits(effective, mergeBase *Config, path string) (*Con
 		case err == nil:
 			base = onDisk
 		case !errors.Is(err, fs.ErrNotExist):
-			unverified = effective.SecretFileDirs != nil
+			unverified = effective.SecretFileDirs != nil || fileMayHoldSecretFileDirs(path)
 		}
 	}
 	if unverified {

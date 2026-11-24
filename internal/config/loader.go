@@ -66,6 +66,9 @@ func LoadFromFile(configPath string) (*Config, error) {
 	for _, root := range WarnMissingSecretFileDirRoots(cfg) {
 		emitLoadWarning("secret_file_dirs root does not exist yet", "secret_file_dirs", root)
 	}
+	for _, root := range UnusableSecretFileDirRoots(cfg) {
+		emitLoadWarning(MsgSecretFileDirsRootUnusable, "secret_file_dirs", root)
+	}
 	if cfg.SecretFileDirs != nil && SecretFileDirsWildcard([]string(*cfg.SecretFileDirs)) {
 		emitLoadWarning("secret_file_dirs is wildcard compatibility mode", "secret_file_dirs", "*")
 	}

@@ -216,6 +216,39 @@ func WarnMissingSecretFileDirRoots(cfg *Config) []string {
 	return missing
 }
 
+// MsgSecretFileDirsRootUnusable is the load warning for a secret_file_dirs
+// entry that exists (or cannot be shown not to) but cannot serve as a root: it
+// is not a directory, or its path cannot be resolved (loop, permission).
+const MsgSecretFileDirsRootUnusable = "secret_file_dirs root cannot be resolved to a directory and will not let any file through"
+
+// UnusableSecretFileDirRoots returns the configured entries that are neither
+// missing (see WarnMissingSecretFileDirRoots) nor a resolvable directory.
+func UnusableSecretFileDirRoots(cfg *Config) []string {
+	if cfg == nil || cfg.SecretFileDirs == nil || SecretFileDirsWildcard([]string(*cfg.SecretFileDirs)) {
+		return nil
+	}
+	var bad []string
+	for _, root := range []string(*cfg.SecretFileDirs) {
+		if !filepath.IsAbs(root) {
+			continue // rejected by validation
+		}
+		fi, err := os.Stat(root)
+		switch {
+		case err != nil && errors.Is(err, fs.ErrNotExist):
+			continue
+		case err != nil:
+			bad = append(bad, root)
+		case !fi.IsDir():
+			bad = append(bad, root)
+		default:
+			if _, err := filepath.EvalSymlinks(root); err != nil {
+				bad = append(bad, root)
+			}
+		}
+	}
+	return bad
+}
+
 // ResolveConfigPath returns the effective on-disk config path.
 func ResolveConfigPath(cfg *Config, configPath string) string {
 	if configPath != "" {
