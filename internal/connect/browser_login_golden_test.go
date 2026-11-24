@@ -58,8 +58,10 @@ func goldenPayloads(t *testing.T) []byte {
 }
 
 func TestFeatureOffPayloadsAreUnchanged(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the golden holds Unix config paths")
+	if runtime.GOOS != "darwin" {
+		// Client config locations differ per OS (~/Library/Application Support
+		// on macOS, ~/.config on Linux), and the golden was recorded on macOS.
+		t.Skip("the golden holds macOS config paths")
 	}
 	got := goldenPayloads(t)
 	if p := os.Getenv("GOLDEN_RECORD"); p != "" {
