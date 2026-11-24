@@ -452,12 +452,16 @@ func (s *service) fileRefsOutsideAllowListWarning(ctx context.Context) (string, 
 	if cfg == nil {
 		return "", false
 	}
-	var visible []string
-	for _, name := range config.UpstreamFileRefsOutsideAllowList(cfg) {
-		if auth.CanEnumerateServer(ctx, name) {
-			visible = append(visible, name)
+	// Filter by scope BEFORE resolving any path: an out-of-scope server's
+	// references must not cost the caller filesystem time.
+	scoped := *cfg
+	scoped.Servers = nil
+	for _, sc := range cfg.Servers {
+		if sc != nil && auth.CanEnumerateServer(ctx, sc.Name) {
+			scoped.Servers = append(scoped.Servers, sc)
 		}
 	}
+	visible := config.UpstreamFileRefsOutsideAllowList(&scoped)
 	if len(visible) == 0 {
 		return "", false
 	}
