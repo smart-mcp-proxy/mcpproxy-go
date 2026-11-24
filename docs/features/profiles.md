@@ -146,7 +146,7 @@ It lists the bindings concerned and two fixes: turn `require_mcp_auth` on, or se
 
 ## Response limit per profile
 
-The global [`tool_response_limit`](../configuration/config-file.md) bounds every tool response, `structuredContent` included, so that one large answer does not fill an agent's context. A program that parses the JSON itself needs the opposite: the whole result, with every field in place. `read_cache` cannot rebuild it, because it pages one array of records and leaves out the fields beside it.
+The global [`tool_response_limit`](../configuration/config-file.md) bounds tool responses, `structuredContent` included, so that one large answer does not fill an agent's context. A program that parses the JSON itself needs the opposite: the whole result, with every field in place. `read_cache` cannot rebuild it, because it pages one array of records and leaves out the fields beside it.
 
 Set `tool_response_limit` on a profile to give the callers of that profile their own limit:
 
