@@ -164,6 +164,12 @@ func (s *OAuthLoginService) clientExists(clientID string) bool {
 	return s.hasClientRecords(clientID)
 }
 
+// ClientExists reports whether clientID names a client a browser-login address
+// may fix: a connect-registry id (supported or not), or a client with an
+// API-key record or a browser-login binding. The HTTP layer answers 404 for
+// any other per-client address (Spec 132 FR-015).
+func (s *OAuthLoginService) ClientExists(clientID string) bool { return s.clientExists(clientID) }
+
 // hasClientRecords: the client has an API-key record or a browser-login entry
 // (a registry id alone does not count).
 func (s *OAuthLoginService) hasClientRecords(clientID string) bool {
@@ -207,6 +213,15 @@ type SuggestedClient struct {
 	DisplayName string `json:"display_name"`
 }
 
+// SuggestedExisting is the page's advice for the generic address: the one
+// existing client the reported name equals. Matched is the first field that
+// matched: "id", "display_name" or "known_name". Advice only: the server never
+// applies it (preview and approve take the client from their own body).
+type SuggestedExisting struct {
+	ID      string `json:"id"`
+	Matched string `json:"matched"`
+}
+
 // ProfileChoice names a profile the page may offer.
 type ProfileChoice struct {
 	Name string `json:"name"`
@@ -215,6 +230,7 @@ type ProfileChoice struct {
 // PreviousLogin is a live login of THIS registration.
 type PreviousLogin struct {
 	GrantID    string    `json:"grant_id"`
+	ClientID   string    `json:"client_id"` // the client that owns the login
 	ApprovedAt time.Time `json:"approved_at"`
 }
 
@@ -245,10 +261,14 @@ type AuthorizationView struct {
 	Client             *AuthorizationClientView `json:"client,omitempty"`
 	ExistingClients    []ExistingClientView     `json:"existing_clients,omitempty"`
 	SuggestedNewClient *SuggestedClient         `json:"suggested_new_client,omitempty"`
+	SuggestedClient    *SuggestedExisting       `json:"suggested_client,omitempty"`
 	Profiles           []ProfileChoice          `json:"profiles"`
 	ProfileRequired    bool                     `json:"profile_required"`
 	PreviousLogin      *PreviousLogin           `json:"previous_login,omitempty"`
-	Guard              *GuardVerdict            `json:"guard"`
+	// PreviousLogins is the newest live login of THIS registration under each
+	// client (generic address: the page picks the one for the selected client).
+	PreviousLogins []PreviousLogin `json:"previous_logins,omitempty"`
+	Guard          *GuardVerdict   `json:"guard"`
 }
 
 // PreviewAccess is the access sentence of a proposed choice.
@@ -327,16 +347,28 @@ func (s *OAuthLoginService) Describe(ctx context.Context, requestID string) (*Au
 		RedirectURI: req.RedirectURI, Resource: req.Resource, Profiles: profileChoices(cfg),
 	}
 	liveByClient := map[string]int{}
+	newestByClient := map[string]PreviousLogin{}
 	for i := range grants {
 		g := &grants[i]
 		if !g.Revoked && g.RefreshExpiresAt.After(now) {
 			liveByClient[g.Client]++
+			if g.RegistrationID == reg.ClientID && (req.PathClient == "" || g.Client == req.PathClient) {
+				if cur, ok := newestByClient[g.Client]; !ok || g.ApprovedAt.After(cur.ApprovedAt) {
+					newestByClient[g.Client] = PreviousLogin{GrantID: g.GrantID, ClientID: g.Client, ApprovedAt: g.ApprovedAt}
+				}
+			}
 			if g.RegistrationID == reg.ClientID && (req.PathClient == "" || g.Client == req.PathClient) &&
 				(v.PreviousLogin == nil || g.ApprovedAt.After(v.PreviousLogin.ApprovedAt)) {
-				v.PreviousLogin = &PreviousLogin{GrantID: g.GrantID, ApprovedAt: g.ApprovedAt}
+				v.PreviousLogin = &PreviousLogin{GrantID: g.GrantID, ClientID: g.Client, ApprovedAt: g.ApprovedAt}
 			}
 		}
 	}
+	defer func() {
+		for _, pl := range newestByClient {
+			v.PreviousLogins = append(v.PreviousLogins, pl)
+		}
+		sort.Slice(v.PreviousLogins, func(i, j int) bool { return v.PreviousLogins[i].ClientID < v.PreviousLogins[j].ClientID })
+	}()
 	bindingOf := func(id string) (*BindingView, bool) {
 		pin, mode, found, err := s.store.CurrentClientBinding(id)
 		if err != nil || !found {
@@ -396,6 +428,7 @@ func (s *OAuthLoginService) Describe(ctx context.Context, requestID string) (*Au
 		}
 		v.ProfileRequired = len(v.Profiles) > 0
 		v.SuggestedNewClient = s.suggestNewClient(reg.ReportedName, ids)
+		v.SuggestedClient = suggestExistingClient(reg.ReportedName, v.ExistingClients)
 	}
 	return v, nil
 }
@@ -426,6 +459,88 @@ func (s *OAuthLoginService) displayNameOf(id string, all []auth.AgentToken, bind
 		return b.DisplayName
 	}
 	return id
+}
+
+// stripTrailingGroup removes one balanced trailing parenthesised group
+// ("Claude Code (my (dev) server)" -> "Claude Code") and returns the trimmed
+// text before it. ok is false when the text does not end with a balanced group
+// or nothing is left before it.
+func stripTrailingGroup(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	if !strings.HasSuffix(s, ")") {
+		return "", false
+	}
+	depth := 0
+	for i := len(s) - 1; i >= 0; i-- {
+		switch s[i] {
+		case ')':
+			depth++
+		case '(':
+			depth--
+			if depth == 0 {
+				base := strings.TrimSpace(s[:i])
+				return base, base != ""
+			}
+		}
+	}
+	return "", false
+}
+
+// suggestExistingClient compares the sanitised reported name, trimmed and
+// without regard to case, with each offered client's id, display name and (for
+// a connect-registry client) known client names. The whole name is tried and,
+// when it ends with a parenthesised suffix, also the part before it. Matches
+// are counted by distinct client id: exactly one client yields a suggestion,
+// none or several yield nil. Pure advice, computed on read, never stored.
+func suggestExistingClient(reported string, clients []ExistingClientView) *SuggestedExisting {
+	name := strings.TrimSpace(reported)
+	if name == "" {
+		return nil
+	}
+	forms := []string{name}
+	if base, ok := stripTrailingGroup(name); ok {
+		forms = append(forms, base)
+	}
+	eq := func(candidate string) bool {
+		c := strings.TrimSpace(candidate)
+		if c == "" {
+			return false
+		}
+		for _, f := range forms {
+			if strings.EqualFold(f, c) {
+				return true
+			}
+		}
+		return false
+	}
+	var found *SuggestedExisting
+	for i := range clients {
+		c := &clients[i]
+		matched := ""
+		switch {
+		case eq(c.ID):
+			matched = "id"
+		case eq(c.DisplayName):
+			matched = "display_name"
+		default:
+			if def := connect.FindClient(c.ID); def != nil {
+				for _, n := range def.ClientInfoNames {
+					if eq(n) {
+						matched = "known_name"
+						break
+					}
+				}
+			}
+		}
+		if matched == "" {
+			continue
+		}
+		if found != nil {
+			return nil // several distinct clients
+		}
+		found = &SuggestedExisting{ID: c.ID, Matched: matched}
+	}
+	return found
 }
 
 // suggestNewClient derives an id from the reported name: lower-case slug of
@@ -588,7 +703,8 @@ func (s *OAuthLoginService) resolveChoice(req mcplogin.Request, c ApprovalChoice
 		if c.Client.ID != "" {
 			return nil, &ValidationError{Field: "client", Message: "choose an existing client or a new one, not both"}
 		}
-		n := c.Client.New
+		n := *c.Client.New
+		n.DisplayName = mcplogin.StripFormat(n.DisplayName)
 		if !auth.ValidClientID(n.ID) {
 			return nil, &ValidationError{Field: "client_new_id", Message: fmt.Sprintf(
 				"invalid client id %q: must be lower-case letters, digits, '-' or '_', start with a letter or digit, and be at most 56 characters", n.ID)}
@@ -658,10 +774,15 @@ func (s *OAuthLoginService) resolveChoice(req mcplogin.Request, c ApprovalChoice
 	}
 
 	// 3. Replace the previous login: only a live login of THIS registration
-	// and of this client; anything else is ignored, never revoked.
+	// and of this client; anything else is ignored, never revoked. A live login
+	// of this registration that belongs to ANOTHER client is refused: the page
+	// asked to replace a login of a client it is not signing in.
 	if c.ReplaceGrant != "" {
-		if g, err := s.store.GetOAuthGrant(c.ReplaceGrant); err == nil && g != nil && g.Client == rc.clientID &&
+		if g, err := s.store.GetOAuthGrant(c.ReplaceGrant); err == nil && g != nil &&
 			!g.Revoked && g.RefreshExpiresAt.After(s.now()) && g.RegistrationID == req.RegistrationID {
+			if g.Client != rc.clientID {
+				return nil, &ValidationError{Field: "replace_grant", Message: "that login belongs to another client"}
+			}
 			rc.replace = g.GrantID
 		}
 	}

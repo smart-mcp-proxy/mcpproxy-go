@@ -10,6 +10,7 @@ import (
 	"net/http"
 	httppprof "net/http/pprof"
 	"os"
+	"path"
 	"path/filepath"
 	gruntime "runtime"
 	"strings"
@@ -31,6 +32,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/mcplogin"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
@@ -125,6 +127,23 @@ type Server struct {
 	// oauthLoginEverUsed reports whether browser login was ever used on this
 	// install (Spec 132). nil means never; tests inject it.
 	oauthLoginEverUsed func() bool
+	// oauthLimiter rate limits the public browser-login endpoints (Spec 132);
+	// built on first use so a default-off install never allocates it.
+	// oauthStreams tracks authenticated browser-login requests so a revoke or
+	// a switch-off ends what is already open (oauth_login_streams.go); nil
+	// until the first one.
+	oauthStreams         atomic.Pointer[oauthStreamRegistry]
+	oauthStreamsMu       sync.Mutex // guards oauthStreamsStopping and the registry's creation
+	oauthStreamsRun      uint64     // server-run generation, bumped by resetOAuthStreams
+	oauthStreamsStopping bool       // set by stopOAuthStreams, cleared by a new run
+	// testHookAfterEpochCapture pauses oauthResourceAuth between the switch-off
+	// epoch capture and the authentication (tests only; nil in production).
+	testHookAfterEpochCapture func()
+	// testHookRunWatcher pauses the context watcher of a server run right after
+	// its context was cancelled (tests only; nil in production).
+	testHookRunWatcher func()
+	oauthLimiterOnce   sync.Once
+	oauthLimiter       *mcplogin.Limiter
 	// createAfterConfigRead is a Spec 116 test seam (nil in production): it
 	// runs in the create path after the runtime configuration was read and
 	// before the new server is published.
@@ -591,6 +610,19 @@ func (s *Server) logQueryAPIKeyRejection(r *http.Request) {
 		zap.String("path", r.URL.Path))
 }
 
+// mcpRequestMiddlewares wraps next in the per-request middlewares every MCP
+// route shares, whichever way the request authenticated (mcpAuthMiddleware and
+// the browser-login resource chain, Spec 132, both use it).
+func mcpRequestMiddlewares(next http.Handler) http.Handler {
+	next = directRequestKindMiddleware(next)
+	// Spec 124 FR-003: the run name header, for MCP over HTTP.
+	next = runNameMiddleware(next)
+	// Spec 058 US3 (R1): drop a modern client's separately posted
+	// notifications/cancelled before mcp-go can match it against another
+	// client's in-flight request — every modern request shares session id "".
+	return modernCancellationGuard(next)
+}
+
 // mcpAuthMiddleware wraps the MCP endpoint handler to inject AuthContext into the
 // request context. The MCP endpoint is not behind the REST API key middleware, so
 // this middleware extracts tokens from the request and creates the appropriate
@@ -618,13 +650,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 	// automatically, on top of whatever AuthContext that branch attaches.
 	// Harmless on every endpoint but /mcp/all, whose filters are the only
 	// consumers.
-	next = directRequestKindMiddleware(next)
-	// Spec 124 FR-003: the run name header, for MCP over HTTP.
-	next = runNameMiddleware(next)
-	// Spec 058 US3 (R1): drop a modern client's separately posted
-	// notifications/cancelled before mcp-go can match it against another
-	// client's in-flight request — every modern request shares session id "".
-	next = modernCancellationGuard(next)
+	next = mcpRequestMiddlewares(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// mcp_reject_query_apikey: refuse a URL-borne credential outright. It
 		// must be a 401 and not "no token": with require_mcp_auth off a request
@@ -670,6 +696,15 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 			// two apart.
 			ctx := auth.WithAuthContext(r.Context(), credentialKindContext(auth.AnonymousContext(), auth.CredentialKindAnonymous))
 			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		// Spec 132: a browser-login access token is valid only on its own
+		// /mcp/oauth address (audience binding). Anywhere else it is refused,
+		// also with require_mcp_auth off, but only while the feature is on or
+		// was used: with it off and never used every answer is the previous one.
+		if mcplogin.IsAccessToken(strings.TrimSpace(token)) && s.oauthLoginLive() {
+			http.Error(w, `{"error":"This token is not valid for this endpoint."}`, http.StatusUnauthorized)
 			return
 		}
 
@@ -775,9 +810,18 @@ func credentialKindContext(ac *auth.AuthContext, kind auth.CredentialKind) *auth
 // that should be served without authentication to allow the SPA to work properly.
 // API endpoints are protected separately by the httpAPIServer middleware.
 func (s *Server) createSelectiveWebUIProtectedHandler(handler http.Handler) http.Handler {
-	// Simply pass through all requests without authentication
-	// The handler is only mounted on /ui/* so it won't receive API requests
-	return handler
+	// No authentication here; the handler is only mounted on /ui/* so it won't
+	// receive API requests. The one addition: the sign-in consent page (Spec 132)
+	// is never framed, so a hostile page cannot overlay its Approve button.
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Vue Router matches case-insensitively and the SPA answers unknown
+		// paths, so compare the cleaned path without regard to case.
+		if p := strings.ToLower(path.Clean("/" + r.URL.Path)); p == "/ui/authorize" || strings.HasPrefix(p, "/ui/authorize/") {
+			w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+			w.Header().Set("X-Frame-Options", "DENY")
+		}
+		handler.ServeHTTP(w, r)
+	})
 }
 
 // GetStatus returns the current server status
@@ -1363,9 +1407,14 @@ func (s *Server) Start(ctx context.Context) error {
 	// Handle graceful shutdown when context is cancelled (for full application shutdown only)
 	go func() {
 		<-ctx.Done()
+		if h := s.testHookRunWatcher; h != nil {
+			h()
+		}
 		s.logger.Info("Main context cancelled, shutting down server")
-		// First shutdown the HTTP server
-		if err := s.StopServer(); err != nil {
+		// First shutdown the HTTP server. Bound to this run: after StopServer
+		// and a new StartServer in the same process, "the server" is a newer
+		// run with its own context and its own watcher, and is left alone.
+		if err := s.stopServer(&serverRun{ctx: ctx}); err != nil {
 			s.logger.Error("Error stopping server during context cancellation", zap.Error(err))
 		}
 		// Then shutdown the rest (only for full application shutdown, not server restarts)
@@ -1578,6 +1627,10 @@ func (s *Server) Shutdown() error {
 	}
 
 	s.logger.Info("Shutting down MCP proxy server...")
+
+	// Spec 132: end every tracked browser-login request and join the watcher
+	// first, or the HTTP shutdown below would wait for open streams.
+	s.stopOAuthStreams()
 
 	// Gracefully shutdown HTTP server first to stop accepting new connections
 	if httpServer != nil {
@@ -2691,17 +2744,27 @@ func (s *Server) StartServer(ctx context.Context) error {
 	}
 
 	s.serverCtx, s.serverCancel = context.WithCancel(ctx)
+	// Spec 132: a fresh browser-login stream-tracking lifecycle for this run.
+	s.resetOAuthStreams()
 
 	// MCP-32: project runtime events onto Prometheus metrics while running.
 	if s.observability != nil && s.observability.Metrics() != nil {
 		go s.runMetricsBridge(s.serverCtx, s.observability.Metrics())
 	}
 
+	runCtx := s.serverCtx
 	go func() {
 		var serverError error
 
 		defer func() {
+			// After StopServer and a new StartServer in the same process this
+			// run can finish after the next one has started. The state below
+			// then belongs to that newer run: leave it alone.
 			s.mu.Lock()
+			if s.serverCtx != runCtx {
+				s.mu.Unlock()
+				return
+			}
 			s.running = false
 			s.listenAddr = ""
 			s.mu.Unlock()
@@ -2724,7 +2787,7 @@ func (s *Server) StartServer(ctx context.Context) error {
 		// Notify about server start
 		s.updateStatus(runtime.PhaseStarting, "Server is starting...")
 
-		serverError = s.Start(s.serverCtx)
+		serverError = s.Start(runCtx)
 		if serverError != nil && !errors.Is(serverError, context.Canceled) {
 			s.logger.Error("Server error during background start", zap.Error(serverError))
 			s.updateStatus(runtime.PhaseError, fmt.Sprintf("Server error: %v", serverError))
@@ -2751,6 +2814,15 @@ func (s *Server) ServeErr() <-chan error {
 
 // StopServer stops the server if it's running
 func (s *Server) StopServer() error {
+	return s.stopServer(nil)
+}
+
+// serverRun names one StartServer run by the context it was started with.
+type serverRun struct{ ctx context.Context }
+
+// stopServer stops the server. With a non-nil run it stops only that run and
+// does nothing when a newer run is current.
+func (s *Server) stopServer(run *serverRun) error {
 	s.logger.Info("STOPSERVER CALLED - STARTING SHUTDOWN SEQUENCE")
 	_ = s.logger.Sync()
 
@@ -2761,6 +2833,11 @@ func (s *Server) StopServer() error {
 		s.logger.Debug("Server shutdown already in progress via Shutdown(), skipping StopServer")
 		return nil
 	}
+	if run != nil && s.serverCtx != run.ctx {
+		s.mu.Unlock()
+		s.logger.Debug("Server stop requested for a previous run, a newer run is current")
+		return nil
+	}
 	if !s.running {
 		s.mu.Unlock()
 		// Return nil instead of error to prevent race condition logs
@@ -2768,8 +2845,11 @@ func (s *Server) StopServer() error {
 		return nil
 	}
 
-	// Capture httpServer reference while holding the lock
+	// Capture httpServer reference while holding the lock, and the run being
+	// stopped: a StartServer that lands while this stop is still cleaning up
+	// installs a new context, which the tail below must not cancel or unmark.
 	httpServer := s.httpServer
+	stoppingCtx, stoppingCancel := s.serverCtx, s.serverCancel
 	s.mu.Unlock()
 
 	// Notify about server stopping
@@ -2777,6 +2857,10 @@ func (s *Server) StopServer() error {
 	_ = s.logger.Sync()
 
 	s.updateStatus(runtime.PhaseStopping, "Server is stopping...")
+
+	// Spec 132: end tracked browser-login requests (open SSE streams) and join
+	// their watcher, or the graceful shutdown below waits for them.
+	s.stopOAuthStreams()
 
 	// STEP 1: Gracefully shutdown HTTP server FIRST to stop accepting new connections
 	// This must happen before we disconnect upstream servers to prevent new requests
@@ -2834,9 +2918,16 @@ func (s *Server) StopServer() error {
 	// STEP 3: Cancel the server context to signal other components
 	s.logger.Info("STOPSERVER - Cancelling server context")
 	_ = s.logger.Sync()
+	if stoppingCancel != nil {
+		stoppingCancel()
+	}
 	s.mu.Lock()
-	if s.serverCancel != nil {
-		s.serverCancel()
+	if s.serverCtx != stoppingCtx {
+		// A newer run started while this one was being stopped; its state is
+		// not this stop's to clear.
+		s.mu.Unlock()
+		s.logger.Info("STOPSERVER - A newer run started during the stop, leaving its state alone")
+		return nil
 	}
 
 	// Set running to false immediately after server is shut down
@@ -3566,6 +3657,16 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 					return "", "", false
 				}
 				return c.Listen, c.APIKey, config.EffectiveRequireMCPAuth(c)
+			}).
+			// Spec 132: Connect offers the browser-login address only while the
+			// switch is on, read live like the rest.
+			WithMCPOAuthEnabled(func() bool {
+				c := s.runtime.Config()
+				return c != nil && c.MCPOAuthEnabled
+			}).
+			WithTLSEnabled(func() bool {
+				c := s.runtime.Config()
+				return c != nil && c.TLS != nil && c.TLS.Enabled
 			})
 		// Spec 108 FR-024: connect never writes the admin API key. Every write
 		// embeds a per-client `mcp_cli_` credential minted by the runtime's
@@ -3575,6 +3676,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 			connectSvc.WithCredentialMinter(clients.ConnectMinter())
 			clients.SetConfigReader(connectSvc)
 			httpAPIServer.SetClientsService(clients)
+			httpAPIServer.SetOAuthLoginService(s.runtime.OAuthLoginService())
 			go func() {
 				if err := clients.Reconcile(s.runtime.AppContext()); err != nil {
 					s.logger.Warn("client rotation reconcile failed", zap.Error(err))
@@ -3771,7 +3873,8 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux.Handle("/", rootHandler)
 	// Spec 132: opt-in browser login. Behaves exactly like the handlers above
 	// until mcp_oauth_enabled is switched on (or the feature has been used).
-	s.registerOAuthLoginRoutes(mux, mcpHandler, rootHandler)
+	oauthMCPHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.oauthResourceAuth(loggingHandler(streamableServer)))))
+	s.registerOAuthLoginRoutes(mux, mcpHandler, rootHandler, oauthMCPHandler)
 	s.logger.Info("Registered Web UI endpoints", zap.Strings("ui_endpoints", []string{"/ui/", "/"}))
 
 	// Determine actual TCP address for logging

@@ -77,7 +77,11 @@ type clientRow struct {
 	ProfileMissing  bool       `json:"profile_missing"`
 	ExpiresAt       *time.Time `json:"expires_at"`
 	RotationPending bool       `json:"rotation_pending"`
-	Sessions        []struct {
+	// Credentials and BrowserLoginDisabled exist only once browser login was
+	// used (Spec 132).
+	Credentials          []clientCredentialRow `json:"credentials"`
+	BrowserLoginDisabled *bool                 `json:"browser_login_disabled"`
+	Sessions             []struct {
 		ID            string    `json:"id"`
 		WorkSessionID string    `json:"work_session_id"`
 		StartedAt     time.Time `json:"started_at"`
@@ -207,6 +211,9 @@ func runClientShow(_ *cobra.Command, args []string) error {
 			fmt.Printf("Rotation: pending (finish with: mcpproxy client rotate %s --finalize)\n", row.ID)
 		}
 		fmt.Printf("Blocked 24h: %d\n", row.Blocked24h)
+	}
+	if err := printClientCredentials(row.Credentials, row.BrowserLoginDisabled); err != nil {
+		return err
 	}
 	fmt.Printf("Sessions: %d\n", len(row.Sessions))
 	if len(row.Sessions) > 0 {

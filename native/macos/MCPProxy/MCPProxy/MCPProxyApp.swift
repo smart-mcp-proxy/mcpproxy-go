@@ -1245,6 +1245,38 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             menu.addItem(.separator())
         }
 
+        // Browser sign-in requests (Spec 132): one "Approve sign-in for <client>…"
+        // row per waiting request, newest first, folded into a submenu past
+        // `maxMenuRows`. Absent while the feature is off or nothing waits. The
+        // row only opens the consent page in the Web UI (admin key as for
+        // "Open Web UI in Browser"); the tray never decides a request.
+        let signInRows = SignInPresentation.menuRows(appState.signInRequests)
+        if appState.coreState == .connected, !signInRows.shown.isEmpty {
+            for request in signInRows.shown {
+                let item = NSMenuItem(title: SignInPresentation.menuTitle(for: request),
+                                      action: #selector(approveSignInFromMenu(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = request.id
+                item.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: "sign-in request")
+                menu.addItem(item)
+            }
+            let rest = signInRows.overflow
+            if !rest.isEmpty {
+                let more = NSMenuItem(title: "\(rest.count) more sign-in \(rest.count == 1 ? "request" : "requests")", action: nil, keyEquivalent: "")
+                let sub = NSMenu(title: "Sign-in requests")
+                for request in rest {
+                    let item = NSMenuItem(title: SignInPresentation.menuTitle(for: request),
+                                          action: #selector(approveSignInFromMenu(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = request.id
+                    sub.addItem(item)
+                }
+                more.submenu = sub
+                menu.addItem(more)
+            }
+            menu.addItem(.separator())
+        }
+
         let reviewCount = appState.reviewQueueCount
         if reviewCount > 0 {
             let item = NSMenuItem(
@@ -1937,6 +1969,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             NotificationCenter.default.post(name: .showReview, object: serverName)
         }
+    }
+
+    /// Open the consent page of one sign-in request (Spec 132) through the same
+    /// Web UI link path the other deep links use.
+    @objc private func approveSignInFromMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let path = appState.signInPath(forRequest: id) else { return }
+        NotificationCenter.default.post(name: .openWebUIPath, object: path)
     }
 
     @objc private func showReviewQueueFromMenu(_ sender: NSMenuItem) {

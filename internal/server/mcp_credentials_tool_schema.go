@@ -25,14 +25,15 @@ var credentialsArgs = []struct {
 }{
 	{name: "client", desc: "create_client, get, revoke: custom client id (lower-case letters, digits, '-' or '_', at most 56 characters)."},
 	{name: "token", desc: "get, revoke: agent token name."},
+	{name: "grant", desc: "revoke: with client, revoke only this browser login (a login id from list or get). A login is created only by the user on the consent page."},
 	{name: "name", desc: "create_token: new token name (letters, digits, '_' or '-'; not starting with client-)."},
 	{name: "display_name", desc: "create_client: display name, at most 64 characters."},
 	{name: "profile", desc: "create_client, create_token: existing profile to lock or pin to (required, never All servers). list: keep only this profile."},
 	{name: "mode", enum: []string{"locked", "switchable"}, desc: "create_client: binding mode; omitted = locked."},
 	{name: "expires_in", desc: "create_client, create_token: required lifetime such as 30m, 4h or 7d; at most 365d. At most 24h is shown as a task lease."},
 	{name: "purpose", desc: "create_client, create_token: optional task brief and assumptions shown to the user, at most 500 characters; not enforced."},
-	{name: "kind", enum: []string{"client", "token", "all"}, desc: "list: credential kind; omitted = all."},
-	{name: "state", enum: []string{"active", "expired", "revoked", "all"}, desc: "list: credential state; omitted = all."},
+	{name: "kind", enum: []string{"client", "token", "browser_login", "all"}, desc: "list: credential kind; omitted = all."},
+	{name: "state", enum: []string{"active", "expired", "lapsed", "revoked", "all"}, desc: "list: credential state (lapsed = browser login past its refresh expiry); omitted = all."},
 }
 
 // credentialsOpArgs lists the arguments each operation accepts (besides
@@ -40,7 +41,7 @@ var credentialsArgs = []struct {
 var credentialsOpArgs = map[string]map[string]bool{
 	"list":          {"kind": true, "profile": true, "state": true},
 	"get":           {"client": true, "token": true},
-	"revoke":        {"client": true, "token": true},
+	"revoke":        {"client": true, "token": true, "grant": true},
 	"create_client": {"client": true, "profile": true, "expires_in": true, "mode": true, "display_name": true, "purpose": true},
 	"create_token":  {"name": true, "profile": true, "expires_in": true, "purpose": true},
 }

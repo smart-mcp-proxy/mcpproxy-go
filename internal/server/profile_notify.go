@@ -17,6 +17,11 @@ import (
 // request re-resolves against the credential's current binding, FR-020), but
 // no stale selection window is left either.
 func (p *MCPProxyServer) NotifyBindingChanged(tokenName string) {
+	// Spec 132: a revoked or forgotten browser login ends what it has open.
+	// The wake is a non-blocking channel send; the check runs in the watcher.
+	if p.mainServer != nil {
+		p.mainServer.wakeOAuthStreams()
+	}
 	if p.sessionStore == nil {
 		return
 	}

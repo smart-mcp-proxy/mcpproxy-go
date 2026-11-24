@@ -34,6 +34,7 @@ func (c *Client) newDockerCmd(ctx context.Context, args ...string) *exec.Cmd {
 	// interactive PATH the user sees in Terminal.
 	shell, shellArgs := c.wrapWithUserShell("docker", args)
 	cmd := exec.CommandContext(ctx, shell, shellArgs...)
+	shellwrap.UseVerbatimCmdLine(cmd)
 	if c.envManager != nil {
 		cmd.Env = c.envManager.BuildSecureEnvironment()
 	}

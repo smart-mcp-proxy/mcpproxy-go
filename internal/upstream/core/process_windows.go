@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/winjob"
 )
 
@@ -46,6 +47,7 @@ var (
 func createProcessGroupCommandFunc(client *Client, workingDir string, logger *zap.Logger) func(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
 	return func(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
 		cmd := exec.CommandContext(ctx, command, args...)
+		shellwrap.UseVerbatimCmdLine(cmd)
 		cmd.Env = env
 		// Start suspended: the child runs no code until it is in its Job
 		// Object (assignProcessTree resumes it), so it cannot fork a

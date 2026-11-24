@@ -76,6 +76,8 @@ export interface SettingField {
   defaultFor?: (cfg: any, ctx: DefaultContext) => unknown
   // Set for a textarea that edits a []string key (see ListKind).
   listKind?: ListKind
+  // Short label shown beside the field name (e.g. "Experimental").
+  badge?: string
 }
 
 export interface SettingsAccordion {
@@ -186,6 +188,13 @@ export const SECURITY_FIELDS: SettingField[] = [
     key: 'require_mcp_auth',
     label: 'Require API key for MCP clients',
     help: 'When on, AI clients connecting to the /mcp endpoint must send the API key above (as an "Authorization: Bearer <key>" header). Use “Connect a client” to configure this automatically. When off, any local client can connect without a key.',
+    control: 'toggle',
+  },
+  {
+    key: 'mcp_oauth_enabled',
+    badge: 'Experimental',
+    label: 'Browser login for MCP clients',
+    help: 'Lets an MCP client that supports it sign in through your browser: you approve each request on a consent page in this UI, and the approval can be revoked later. Off by default; turning it on or off needs no restart, and existing logins stay listed either way.',
     control: 'toggle',
   },
   {

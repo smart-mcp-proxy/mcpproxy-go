@@ -27,7 +27,7 @@ const adminKeyDocsURL = "https://docs.mcpproxy.app/configuration/config-file"
 
 func addClientBindingCommands(parent *cobra.Command) {
 	parent.AddCommand(newClientSetProfileCmd(), newClientLockCmd(true), newClientLockCmd(false),
-		newClientAddCmd(), newClientRotateCmd(), newClientUpgradeAdminKeyHoldersCmd(), newClientForgetCmd())
+		newClientAddCmd(), newClientRotateCmd(), newClientUpgradeAdminKeyHoldersCmd(), newClientForgetCmd(), newClientRevokeLoginCmd())
 }
 
 func clientPath(id string) string { return "/api/v1/clients/" + url.PathEscape(id) }

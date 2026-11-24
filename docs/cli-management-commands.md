@@ -531,6 +531,13 @@ credential is valid on MCP endpoints only, so it cannot open the REST API.
 - `--keyless` - write an entry with no credential; only possible while
   `require_mcp_auth` is off, and the client is then unidentified. It cannot be
   combined with `--profile`, `--lock` or `--switchable`
+- `--auth key|oauth` - how the client signs in (default `key`). `oauth` writes
+  only the client's browser sign-in address (`<mcp-url>/oauth/<client-id>`),
+  no header and no credential; it needs `mcp_oauth_enabled` and a client that
+  passed a real-client check (today `claude-code`), is refused in the server
+  edition and together with `--profile`, `--lock`, `--switchable` or
+  `--keyless`, and never revokes the client's existing API key. See
+  [Browser Login for MCP Clients](features/client-oauth-login.md#connecting-a-client-to-browser-login)
 - `--force` - overwrite an existing entry; `--name` - server name in the client
   config; `--all` - connect every supported client with the same options
   (a refusal for one client is reported and never aborts the others)

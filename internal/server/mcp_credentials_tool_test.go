@@ -111,7 +111,7 @@ func (f *credentialsToolFixture) internalCalls(n int) []*storage.ActivityRecord 
 
 func TestCredentialsTool_SchemaAndAnnotations(t *testing.T) {
 	tool := buildCredentialsTool()
-	want := []string{"client", "display_name", "expires_in", "kind", "mode", "name", "operation", "profile", "purpose", "state", "token"}
+	want := []string{"client", "display_name", "expires_in", "grant", "kind", "mode", "name", "operation", "profile", "purpose", "state", "token"}
 	assert.Equal(t, want, toolPropertyNames(t, tool))
 	assert.Equal(t, []string{"operation"}, tool.InputSchema.Required)
 	assert.Equal(t, false, tool.InputSchema.AdditionalProperties)

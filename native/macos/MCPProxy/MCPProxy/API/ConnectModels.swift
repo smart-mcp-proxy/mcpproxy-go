@@ -162,8 +162,17 @@ struct ConnectPreviewModel: Codable, Equatable {
     /// sent tokenless. Gating on the value alone left an app newer than its
     /// core showing a full preview with no action and no explanation.
     let coreSupportsPreconditionTokens: Bool
+    /// Spec 132: `"oauth"` when this preview shows the browser sign-in address
+    /// (no credential, nothing masked); nil for an API-key entry or a core that
+    /// predates the feature.
+    let auth: String?
+    /// What the write leaves alone: a browser-login connect does not revoke the
+    /// client's existing API key. Shown verbatim.
+    let authNote: String?
 
     enum CodingKeys: String, CodingKey {
+        case auth
+        case authNote = "auth_note"
         case client
         case configPath = "config_path"
         case displayPath = "display_path"
@@ -194,8 +203,12 @@ struct ConnectPreviewModel: Codable, Equatable {
         credential: String? = nil,
         profile: String? = nil,
         mode: BindingMode? = nil,
-        keyless: Bool = false
+        keyless: Bool = false,
+        auth: String? = nil,
+        authNote: String? = nil
     ) {
+        self.auth = auth
+        self.authNote = authNote
         self.client = client
         self.configPath = configPath
         self.displayPath = displayPath
@@ -242,7 +255,12 @@ struct ConnectPreviewModel: Codable, Equatable {
         profile = try container.decodeIfPresent(String.self, forKey: .profile)
         mode = try container.decodeIfPresent(BindingMode.self, forKey: .mode)
         keyless = try container.decodeIfPresent(Bool.self, forKey: .keyless) ?? false
+        auth = try container.decodeIfPresent(String.self, forKey: .auth)
+        authNote = try container.decodeIfPresent(String.self, forKey: .authNote)
     }
+
+    /// This preview shows the browser sign-in address, not an API-key entry.
+    var isBrowserLogin: Bool { auth == "oauth" }
 
     /// The entry name the form defaults to, matching the core's own default.
     static let defaultServerName = "mcpproxy"
@@ -314,6 +332,9 @@ struct ConnectPreviewModel: Codable, Equatable {
     /// says the admin key is not written; a keyless entry says it holds nothing.
     /// Falls back to the legacy API-key disclosure for an older core.
     func credentialDisclosure(clientName: String) -> String? {
+        if isBrowserLogin {
+            return "No credential is written. \(clientName) gets only the sign-in address; the first time it connects, your browser opens a page where you approve it."
+        }
         if keyless { return "No credential is written. The client connects anonymously." }
         if credential != nil && !containsAPIKey {
             return "MCPProxy writes a client credential for \(clientName). The admin API key is never written."

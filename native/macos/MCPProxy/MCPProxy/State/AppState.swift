@@ -41,7 +41,13 @@ final class AppState: ObservableObject {
     @Published var coreState: CoreState = .idle {
         didSet {
             if coreState != oldValue { connectionGeneration &+= 1 }
-            if coreState != .connected { clearGlanceState() }
+            if coreState != .connected {
+                clearGlanceState()
+                // Requests belong to the core that announced them (Spec 132).
+                var store = signInRequests
+                store.clear()
+                if store != signInRequests { signInRequests = store }
+            }
         }
     }
 
@@ -95,6 +101,94 @@ final class AppState: ObservableObject {
     /// One row per server from GET /review; intentionally separate from the
     /// attention count, which can contain multiple reasons for one server.
     @Published var reviewQueueCount: Int = 0
+
+    /// Browser sign-in requests waiting for the administrator (Spec 132). Fed by
+    /// SSE `oauth.authorization_pending` / `_decided` and by a reload of
+    /// `GET /api/v1/oauth/authorizations`; empty while the feature is off.
+    @Published private(set) var signInRequests = SignInRequestStore()
+
+    /// Returns true when the request is new (the caller sends the notification).
+    @MainActor @discardableResult
+    func addSignInRequest(id: String, rawLabel: String, now: Date = Date()) -> Bool {
+        var store = signInRequests
+        let added = store.add(
+            SignInRequest(id: id, clientLabel: SignInPresentation.sanitizedLabel(rawLabel),
+                          expiresAt: now.addingTimeInterval(SignInPresentation.defaultLifetime)),
+            now: now)
+        if store != signInRequests { signInRequests = store }
+        return added
+    }
+
+    @MainActor
+    func removeSignInRequest(id: String) {
+        var store = signInRequests
+        store.remove(id: id)
+        if store != signInRequests { signInRequests = store }
+    }
+
+    /// Replace the list with the core's (reconnect, periodic refresh).
+    @MainActor
+    func replaceSignInRequests(_ summaries: [SignInWire.Summary], now: Date = Date()) {
+        let fresh = summaries.map { s in
+            SignInRequest(
+                id: s.id,
+                clientLabel: SignInPresentation.sanitizedLabel(s.clientLabel ?? ""),
+                expiresAt: SignInPresentation.parseDate(s.expiresAt)
+                    ?? now.addingTimeInterval(SignInPresentation.defaultLifetime))
+        }
+        var store = signInRequests
+        store.replaceAll(with: fresh, now: now)
+        if store != signInRequests { signInRequests = store }
+    }
+
+    @MainActor
+    func expireSignInRequests(now: Date = Date()) {
+        var store = signInRequests
+        store.expire(now: now)
+        if store != signInRequests { signInRequests = store }
+    }
+
+    @MainActor
+    func clearSignInRequests() {
+        var store = signInRequests
+        store.clear()
+        if store != signInRequests { signInRequests = store }
+    }
+
+    /// What a list reload remembers from the moment its fetch started.
+    struct SignInReloadTicket: Equatable, Sendable {
+        let revision: Int
+        let generation: Int
+    }
+
+    enum SignInReloadResult: Equatable, Sendable { case applied, stale }
+
+    /// Take before the GET /oauth/authorizations fetch.
+    @MainActor
+    func signInReloadTicket() -> SignInReloadTicket {
+        SignInReloadTicket(revision: signInRequests.revision, generation: connectionGeneration)
+    }
+
+    /// Apply a reload (`nil` = feature off). It is stale, and changes nothing,
+    /// when the tray reconnected or an SSE event changed the list since the
+    /// ticket was taken; the caller refetches.
+    @MainActor
+    @discardableResult
+    func applySignInReload(_ summaries: [SignInWire.Summary]?, ticket: SignInReloadTicket,
+                           now: Date = Date()) -> SignInReloadResult {
+        guard isCurrentConnection(ticket.generation), ticket.revision == signInRequests.revision else {
+            return .stale
+        }
+        if let summaries { replaceSignInRequests(summaries, now: now) } else { clearSignInRequests() }
+        return .applied
+    }
+
+    /// The Web UI path a menu selection opens, or nil when the request is gone
+    /// or past its deadline (the menu may have been built a while ago).
+    func signInPath(forRequest id: String, now: Date = Date()) -> String? {
+        guard signInRequests.live(now: now).contains(where: { $0.id == id }) else { return nil }
+        return SignInPresentation.webUIPath(requestID: id)
+    }
 
     /// The `reload_hint` fix (`client_never_seen`, "How to restart") has no
     /// native client screen yet (109-h adds `/clients?focus=<id>`). Setting

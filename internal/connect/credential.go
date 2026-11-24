@@ -42,6 +42,9 @@ type CredentialIntent struct {
 	Profile *string
 	Mode    *string
 	Keyless bool
+	// Auth is "" or AuthKey (an API-key entry, the default) or AuthOAuth (the
+	// per-client browser login address, no credential; Spec 132).
+	Auth string
 
 	// Actor attribution for the profile_change record (FR-030).
 	ActorKind string

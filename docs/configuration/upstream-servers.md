@@ -29,6 +29,17 @@ Local servers that communicate via standard input/output:
 }
 ```
 
+To change `command` or `args` of a server you already added, use the Web UI
+(**Servers → (server) → Configuration → Process → Edit**, one argument per
+line) or the CLI:
+
+```bash
+mcpproxy upstream patch filesystem -- npx -y @modelcontextprotocol/server-filesystem /home/user/other
+```
+
+Arguments are replaced as a whole list, and the server restarts with the new
+command line. See [Management Commands](../cli/management-commands.md#change-command--args).
+
 ### HTTP Servers
 
 Remote servers accessible via HTTP/HTTPS:
