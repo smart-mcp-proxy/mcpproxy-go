@@ -26,6 +26,14 @@ func TestBuildUpstreamPatchBody_Command(t *testing.T) {
 	assert.JSONEq(t, `{"command":"uvx"}`, got, "args must be omitted so the stored vector is kept")
 }
 
+func TestBuildUpstreamPatchBody_CommandIsStoredAsGiven(t *testing.T) {
+	// A path may legitimately end in a space; only a blank value is refused.
+	got := patchBodyJSON(t, upstreamPatchInput{Command: "/opt/mcp/server ", CommandSet: true})
+	assert.JSONEq(t, `{"command":"/opt/mcp/server "}`, got)
+	got = patchBodyJSON(t, upstreamPatchInput{CommandLine: []string{"/opt/mcp/server ", "a"}})
+	assert.JSONEq(t, `{"command":"/opt/mcp/server ","args":["a"]}`, got)
+}
+
 func TestBuildUpstreamPatchBody_Args(t *testing.T) {
 	got := patchBodyJSON(t, upstreamPatchInput{Args: []string{"mcp-server-sqlite", "--db", "a,b.db"}})
 	assert.JSONEq(t, `{"args":["mcp-server-sqlite","--db","a,b.db"]}`, got)
@@ -117,7 +125,10 @@ func TestSplitUpstreamPatchArgs(t *testing.T) {
 		{"name and command line", []string{"sqlite", "uvx", "pkg"}, 1, "sqlite", []string{"uvx", "pkg"}, ""},
 		{"no name", []string{}, -1, "", nil, "exactly one server name"},
 		{"two names", []string{"a", "b"}, -1, "", nil, "exactly one server name"},
-		{"dash before name", []string{"uvx", "pkg"}, 0, "", nil, "exactly one server name"},
+		{"dash before name and command", []string{"uvx", "pkg"}, 0, "", nil, "exactly one server name"},
+		// A name that starts with a dash can only be passed behind `--`; that
+		// form must keep working for --env / --header patches.
+		{"dash-leading name behind --", []string{"-sqlite"}, 0, "-sqlite", nil, ""},
 		{"dash with nothing after", []string{"sqlite"}, 1, "", nil, "a command is required after --"},
 		{"blank name", []string{"  "}, -1, "", nil, "server name is required"},
 	}

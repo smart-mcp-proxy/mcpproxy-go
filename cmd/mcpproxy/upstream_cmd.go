@@ -2697,9 +2697,17 @@ type upstreamPatchInput struct {
 
 // splitUpstreamPatchArgs separates the server name from the optional command
 // line after `--`. dash is cobra's ArgsLenAtDash: -1 when `--` was not used.
+//
+// A server name may start with a dash, and the only way to pass one is behind
+// `--` (`upstream patch --env A=b -- -name`). That form predates the command
+// line and keeps its meaning: a single argument after a leading `--` is the
+// name, never a command.
 func splitUpstreamPatchArgs(args []string, dash int) (name string, commandLine []string, err error) {
 	before := args
-	if dash >= 0 {
+	switch {
+	case dash == 0 && len(args) == 1:
+		// `-- <name>`: the name alone.
+	case dash >= 0:
 		before = args[:dash]
 		commandLine = args[dash:]
 	}
@@ -2710,7 +2718,7 @@ func splitUpstreamPatchArgs(args []string, dash int) (name string, commandLine [
 	if name == "" {
 		return "", nil, fmt.Errorf("server name is required")
 	}
-	if dash >= 0 && len(commandLine) == 0 {
+	if dash > 0 && len(commandLine) == 0 {
 		return "", nil, fmt.Errorf("a command is required after --")
 	}
 	return name, commandLine, nil
@@ -2745,8 +2753,9 @@ func buildUpstreamPatchBody(in upstreamPatchInput) (body map[string]interface{},
 		if in.CommandSet || len(in.Args) > 0 || in.ClearArgs {
 			return nil, nil, fmt.Errorf("`-- command args...` cannot be combined with --command, --arg or --clear-args; use one form")
 		}
-		command := strings.TrimSpace(in.CommandLine[0])
-		if command == "" {
+		// The command is stored as given: a path is not ours to trim.
+		command := in.CommandLine[0]
+		if strings.TrimSpace(command) == "" {
 			return nil, nil, fmt.Errorf("command after -- must not be empty")
 		}
 		rest := append([]string{}, in.CommandLine[1:]...)
@@ -2760,11 +2769,10 @@ func buildUpstreamPatchBody(in upstreamPatchInput) (body map[string]interface{},
 		}
 	default:
 		if in.CommandSet {
-			command := strings.TrimSpace(in.Command)
-			if command == "" {
+			if strings.TrimSpace(in.Command) == "" {
 				return nil, nil, fmt.Errorf("--command must not be empty")
 			}
-			body["command"] = command
+			body["command"] = in.Command
 			summary = append(summary, "command set")
 		}
 		if len(in.Args) > 0 && in.ClearArgs {

@@ -29,6 +29,16 @@ vi.mock('@/services/api', () => {
               command: serverCommand,
               ...(serverArgs === undefined ? {} : { args: serverArgs }),
             },
+            {
+              name: 'other',
+              protocol: 'stdio',
+              enabled: true,
+              connected: true,
+              quarantined: false,
+              tool_count: 1,
+              command: 'node',
+              args: ['other.js'],
+            },
           ],
         })
       ),
@@ -190,6 +200,77 @@ describe('ServerDetail — edit command and arguments (issue #2008)', () => {
     await commandInput(wrapper).setValue('node')
     await save(wrapper)
     expect(wrapper.find('[data-test="server-process-error"]').text()).toBe("server 'sqlite' not found")
+  })
+
+  it('names the text-box line of a refused argument, counting blank lines', async () => {
+    patchResponse = { success: false, error: 'args[1] is a redaction placeholder, not an argument value' }
+    const { wrapper } = await mountDetail()
+    await openEditor(wrapper)
+    await argsInput(wrapper).setValue('--api-key\n\n••••••••')
+    await save(wrapper)
+    expect(wrapper.find('[data-test="server-process-error"]').text()).toContain('Argument line 3 is a masked credential')
+  })
+
+  it('does not rewrite arguments it cannot show one per line', async () => {
+    for (const args of [['--prefix', ' padded '], ['--suffix', '']]) {
+      serverArgs = args
+      const { wrapper, api } = await mountDetail()
+      await openEditor(wrapper)
+      expect(argsInput(wrapper).attributes('disabled')).toBeDefined()
+      expect(wrapper.find('[data-test="server-args-multiline-note"]').exists()).toBe(true)
+      await save(wrapper)
+      expect(api.patchServer).not.toHaveBeenCalled()
+      await openEditor(wrapper)
+      await commandInput(wrapper).setValue('node')
+      await save(wrapper)
+      expect(api.patchServer).toHaveBeenCalledWith('sqlite', { command: 'node' })
+      vi.clearAllMocks()
+      wrapper.unmount()
+    }
+  })
+
+  it('keeps a stored command with surrounding space when the field was not touched', async () => {
+    serverCommand = '/opt/mcp/server '
+    const { wrapper, api } = await mountDetail()
+    await openEditor(wrapper)
+    await argsInput(wrapper).setValue('--verbose')
+    await save(wrapper)
+    expect(api.patchServer).toHaveBeenCalledWith('sqlite', { args: ['--verbose'] })
+  })
+
+  it('refuses to save over a command line that changed elsewhere while editing', async () => {
+    const { wrapper, api } = await mountDetail()
+    await openEditor(wrapper)
+    await commandInput(wrapper).setValue('node')
+
+    // Another client changes the arguments; the store refreshes underneath.
+    serverArgs = ['mcp-server-sqlite', '--db-path', '/data/new.db']
+    const { useServersStore } = await import('@/stores/servers')
+    await useServersStore((wrapper.vm as any).$pinia).fetchServers(true)
+    await flushPromises()
+
+    await save(wrapper)
+    expect(api.patchServer).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-test="server-process-form"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="server-process-error"]').text()).toContain('changed somewhere else')
+
+    // Reopening starts from the newer value.
+    await wrapper.find('[data-test="server-process-cancel"]').trigger('click')
+    await openEditor(wrapper)
+    expect((argsInput(wrapper).element as HTMLTextAreaElement).value).toContain('/data/new.db')
+  })
+
+  it('drops the draft when the view moves to another server', async () => {
+    const { wrapper, api } = await mountDetail()
+    await openEditor(wrapper)
+    await commandInput(wrapper).setValue('rm')
+    await wrapper.setProps({ serverName: 'other' })
+    await flushPromises()
+    expect(wrapper.find('[data-test="server-process-form"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="server-process-card"]').text()).toContain('other.js')
+    await openEditor(wrapper)
+    expect((commandInput(wrapper).element as HTMLInputElement).value).toBe('node')
+    expect(api.patchServer).not.toHaveBeenCalled()
   })
 
   it('cancel discards the draft', async () => {

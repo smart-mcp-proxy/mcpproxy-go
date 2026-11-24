@@ -1021,8 +1021,8 @@
                     ></textarea>
                   </label>
                   <p v-if="argsNotLineEditable" class="text-base-content/60 text-xs" data-test="server-args-multiline-note">
-                    An argument of this server contains a line break, so the arguments cannot be edited here.
-                    Use <code>mcpproxy upstream patch</code> to change them.
+                    An argument of this server is empty, contains a line break, or starts or ends with a space,
+                    so the arguments cannot be edited one per line. Use <code>mcpproxy upstream patch</code> to change them.
                   </p>
                   <p v-if="processDraftError" class="text-error text-xs" role="alert" data-test="server-process-error">{{ processDraftError }}</p>
                   <p v-else class="text-base-content/60 text-xs">
@@ -2487,6 +2487,8 @@ watch(
   () => props.serverName,
   (next, prev) => {
     if (next === prev) return
+    // Issue #2008: a command draft belongs to the server it was opened for.
+    resetProcessEditor()
     serverTools.value = []
     toolsIncarnation.value = undefined
     approvalsIncarnation.value = undefined
@@ -3718,13 +3720,20 @@ async function deleteKv(scope: 'header' | 'env', k: string) {
 }
 
 // --- Process editing (issue #2008) ----------------------------------------
-// The command and its arguments of a stdio server. Two rules shape the save:
+// The command and its arguments of a stdio server. The rules that shape a save:
 //
-//  * Only what the user changed is sent. The read path masks credential-shaped
-//    command and argv tokens, and the backend refuses a mask echoed back at a
-//    write (an argv slot has no key to bind the stored secret to). Leaving an
-//    untouched field out of the PATCH keeps its stored value, masks included.
-//  * `args` replaces the whole vector, so a changed list is sent complete.
+//  * Only what the user changed is sent, judged against a snapshot taken when
+//    the editor opened — not against the live server object, which SSE keeps
+//    refreshing underneath an open editor. The read path masks
+//    credential-shaped command and argv tokens, and the backend refuses a mask
+//    echoed back at a write (an argv slot has no key to bind the stored secret
+//    to). A field left out of the PATCH keeps its stored value, masks included.
+//  * `args` replaces the whole vector, so a changed list is sent complete —
+//    and a list the user did not touch is never re-parsed and sent.
+//  * If the stored command line changed elsewhere while the editor was open,
+//    the save is refused rather than writing over the newer value.
+//  * The draft belongs to one server: it is dropped when the view moves to
+//    another one.
 //
 // A backend refusal is shown beside the fields and the editor stays open, so
 // the user can fix the value instead of retyping everything.
@@ -3735,76 +3744,128 @@ const processDraftError = ref('')
 const processSaving = ref(false)
 const commandInputRef = ref<HTMLInputElement | null>(null)
 
-// One argument per line cannot represent an argument that itself contains a
-// line break; such a vector is left to the CLI rather than silently split.
-const argsNotLineEditable = computed(() =>
-  (server.value?.args ?? []).some((a) => /[\r\n]/.test(a))
-)
+interface ProcessSnapshot {
+  name: string
+  command: string
+  args: string[]
+  argsText: string
+}
+let processSnapshot: ProcessSnapshot | null = null
 
-function parseArgsDraft(text: string): string[] {
-  return text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line !== '')
+// One trimmed argument per line cannot represent an argument that contains a
+// line break, is empty, or starts or ends with white space. Such a vector is
+// left to the CLI rather than silently rewritten.
+function argsLineEditable(args: string[]): boolean {
+  return args.every((a) => a !== '' && a === a.trim() && !/[\r\n]/.test(a))
+}
+const argsNotLineEditable = computed(() => !argsLineEditable(server.value?.args ?? []))
+
+// parseArgsDraft returns the arguments and, for each, the 1-based line of the
+// text box it came from (blank lines are skipped, so the two differ).
+function parseArgsDraft(text: string): { args: string[]; lines: number[] } {
+  const args: string[] = []
+  const lines: number[] = []
+  text.split('\n').forEach((line, i) => {
+    const value = line.trim()
+    if (value === '') return
+    args.push(value)
+    lines.push(i + 1)
+  })
+  return { args, lines }
+}
+
+function sameArgs(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((v, i) => v === b[i])
 }
 
 // The backend names a refused masked argument by its zero-based index and in
 // REST terms ("omit args"). Here the arguments are lines of a text box, so say
 // which line and what to do with it.
-function describeProcessSaveError(error: string | undefined): string {
+function describeProcessSaveError(error: string | undefined, argLines: number[]): string {
   if (!error) return 'The command could not be saved'
   if (error.includes('redaction placeholder')) {
-    const index = /\bargs\[(\d+)\]/.exec(error)
-    const where = index ? `Argument line ${Number(index[1]) + 1}` : 'One of the values'
+    const match = /\bargs\[(\d+)\]/.exec(error)
+    const line = match ? argLines[Number(match[1])] : undefined
+    const where = line !== undefined ? `Argument line ${line}` : 'One of the values'
     return `${where} is a masked credential, not its real value. Type the real value there, then save.`
   }
   return error
 }
 
 function startEditProcess() {
-  commandDraft.value = server.value?.command ?? ''
-  argsDraft.value = (server.value?.args ?? []).join('\n')
+  if (!server.value) return
+  const args = [...(server.value.args ?? [])]
+  processSnapshot = {
+    name: server.value.name,
+    command: server.value.command ?? '',
+    args,
+    argsText: args.join('\n'),
+  }
+  commandDraft.value = processSnapshot.command
+  argsDraft.value = processSnapshot.argsText
   processDraftError.value = ''
   editingProcess.value = true
   void nextTick(() => commandInputRef.value?.focus())
 }
 
-function cancelEditProcess() {
-  if (processSaving.value) return
+function resetProcessEditor() {
   editingProcess.value = false
   processDraftError.value = ''
+  processSnapshot = null
+}
+
+function cancelEditProcess() {
+  if (processSaving.value) return
+  resetProcessEditor()
 }
 
 async function saveProcess() {
-  if (!server.value || processSaving.value) return
-  const command = commandDraft.value.trim()
-  if (!command) {
-    processDraftError.value = 'Enter a command'
+  const snapshot = processSnapshot
+  if (!server.value || !snapshot || processSaving.value) return
+  if (server.value.name !== snapshot.name) {
+    resetProcessEditor()
     return
   }
+  if ((server.value.command ?? '') !== snapshot.command || !sameArgs(server.value.args ?? [], snapshot.args)) {
+    processDraftError.value =
+      'The command of this server was changed somewhere else while you were editing. Cancel and open the editor again.'
+    return
+  }
+
   const patch: Record<string, unknown> = {}
-  if (command !== (server.value.command ?? '')) patch.command = command
-  if (!argsNotLineEditable.value) {
-    const nextArgs = parseArgsDraft(argsDraft.value)
-    const currentArgs = server.value.args ?? []
-    const same = nextArgs.length === currentArgs.length && nextArgs.every((a, i) => a === currentArgs[i])
-    if (!same) patch.args = nextArgs
+  let argLines: number[] = []
+  if (commandDraft.value !== snapshot.command) {
+    const command = commandDraft.value.trim()
+    if (!command) {
+      processDraftError.value = 'Enter a command'
+      return
+    }
+    if (command !== snapshot.command) patch.command = command
+  }
+  if (argsLineEditable(snapshot.args) && argsDraft.value !== snapshot.argsText) {
+    const parsed = parseArgsDraft(argsDraft.value)
+    argLines = parsed.lines
+    if (!sameArgs(parsed.args, snapshot.args)) patch.args = parsed.args
   }
   if (Object.keys(patch).length === 0) {
-    cancelEditProcess()
+    resetProcessEditor()
     return
   }
+
   processDraftError.value = ''
   processSaving.value = true
   try {
-    const resp = await api.patchServer(server.value.name, patch)
+    const resp = await api.patchServer(snapshot.name, patch)
     if (!resp.success) {
-      processDraftError.value = describeProcessSaveError(resp.error)
+      processDraftError.value = describeProcessSaveError(resp.error, argLines)
       return
     }
     await serversStore.fetchServers(true)
     systemStore.addToast({ type: 'success', title: 'Updated command', message: '' })
-    editingProcess.value = false
+    // Only close the editor this save belongs to: the view may have moved to
+    // another server, with its own draft, while the request was in flight.
+    if (processSnapshot !== snapshot) return
+    resetProcessEditor()
     await loadServerDetails()
   } catch (e: any) {
     processDraftError.value = e?.message || String(e)

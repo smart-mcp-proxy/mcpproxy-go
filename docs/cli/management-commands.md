@@ -173,8 +173,12 @@ mcpproxy upstream patch sqlite --clear-args
   `--clear-args`. It can be combined with `--env` and `--header` flags,
   which must come before the `--`.
 - The server restarts with the new command line.
-- `mcpproxy upstream list` and `inspect` mask credential-shaped
-  arguments. A masked value is refused on write: type the real value.
+- `mcpproxy upstream list -o json` and the Web UI show the current
+  command line with credential-shaped arguments masked. A masked value
+  is refused on write: type the real value.
+- A server whose name starts with a dash is named behind `--`
+  (`mcpproxy upstream patch --env A=b -- -name`); to change its command
+  use `--command` / `--arg`.
 - The same change is available in the Web UI: **Servers → (server) →
   Configuration → Process → Edit**.
 
