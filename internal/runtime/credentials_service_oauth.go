@@ -121,6 +121,28 @@ func (s *CredentialsService) listOAuth(f CredentialFilter, out []CredentialView,
 	return out, nil
 }
 
+// ClientLogins returns one client's browser logins, newest approval first;
+// nil while the feature was never used or the client has none.
+func (s *CredentialsService) ClientLogins(clientID string) ([]CredentialView, error) {
+	if s == nil || s.clients == nil {
+		return nil, nil
+	}
+	st, err := s.clients.loadOAuthState()
+	if err != nil || !st.active {
+		return nil, err
+	}
+	var bp *storage.OAuthClientBinding
+	if b, ok := st.bindings[clientID]; ok {
+		bp = &b
+	}
+	gs := st.grants[clientID]
+	out := make([]CredentialView, 0, len(gs))
+	for i := range gs {
+		out = append(out, s.grantView(&gs[i], st, bp))
+	}
+	return out, nil
+}
+
 // getOAuthOnlyClient answers Get(client) for a client with browser logins and
 // no API-key record; nil when it has none.
 func (s *CredentialsService) getOAuthOnlyClient(clientID string) (*CredentialView, error) {

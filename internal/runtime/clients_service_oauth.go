@@ -224,7 +224,7 @@ func (st oauthClientsState) decorate(v *ClientCredentialView, rec *auth.AgentTok
 		})
 	}
 	v.Credentials = creds
-	disabled := st.disabled && len(grants) > 0
+	disabled := st.disabled // install-wide: only whether the switch is off right now
 	v.BrowserLoginDisabled = &disabled
 }
 

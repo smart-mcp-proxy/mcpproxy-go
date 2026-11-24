@@ -33,4 +33,9 @@ func (s *Server) registerClientRoutes(r chi.Router) {
 	r.Post("/clients/{client}/rotate", admin(s.handleRotateClient))
 	r.Post("/clients/{client}/rotate/finalize", admin(s.handleFinalizeClientRotation))
 	r.Delete("/clients/{client}", admin(s.handleForgetClient))
+	// exempt: a revoke only removes access (Spec 132); both work while browser
+	// login is on and while it is off after use.
+	r.Delete("/clients/{client}/logins/{grant_id}", admin(s.handleRevokeClientLogin))
+	r.Delete("/clients/{client}/api-key", admin(s.handleRevokeClientAPIKey))
+	s.registerOAuthLoginAdminRoutes(r)
 }

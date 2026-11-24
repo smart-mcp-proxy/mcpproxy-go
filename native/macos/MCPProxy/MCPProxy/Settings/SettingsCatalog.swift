@@ -31,6 +31,7 @@ struct ConfigField: Identifiable {
     // never nudged (F13).
     var step: Double? = nil
     var restart: Bool = false
+    var badge: String? = nil        // short label beside the name, e.g. "Experimental"
     var docs: String? = nil         // doc path on docs.mcpproxy.app
     var valueKind: ConfigValueKind? = nil
     var optional: Bool = false
@@ -87,6 +88,13 @@ enum SettingsCatalog {
             label: "Require API key for MCP clients",
             help: "When on, AI clients connecting to the /mcp endpoint must send the API key above (as an \"Authorization: Bearer <key>\" header). Use \u{201C}Connect a client\u{201D} to configure this automatically. When off, any local client can connect without a key.",
             control: .toggle
+        ),
+        ConfigField(
+            key: "mcp_oauth_enabled",
+            label: "Browser login for MCP clients",
+            help: "Lets an MCP client that supports it sign in through your browser: you approve each request on a consent page in this UI, and the approval can be revoked later. Off by default; turning it on or off needs no restart, and existing logins stay listed either way.",
+            control: .toggle,
+            badge: "Experimental"
         ),
         ConfigField(
             key: "quarantine_enabled",

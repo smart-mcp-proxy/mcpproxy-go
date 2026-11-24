@@ -21,7 +21,7 @@ import (
 // installer stamp on the core they spawn:
 //   - native/macos/.../CoreProcessManager.swift  → tray
 //   - cmd/mcpproxy-tray/main.go                  → tray
-//   - packaging/macos/postinstall.sh             → installer
+//   - scripts/postinstall.sh (macOS PKG)         → installer
 const EnvLaunchedBy = "MCPPROXY_LAUNCHED_BY"
 
 // Canonical provenance values. Anything else — including an unset,

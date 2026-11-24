@@ -156,6 +156,9 @@ func (s *Service) preconditionToken(clientID, cfgPath, requestedName string, fil
 // for a keyless connect), so proxy-side drift invalidates a preview without
 // the real secret ever entering the digest.
 func (s *Service) pendingEntry(clientID string, intent CredentialIntent) map[string]interface{} {
+	if oauth, err := s.planAuth(clientID, intent); err == nil && oauth {
+		return buildServerEntry(clientID, s.entryParamsFor(clientID, true, ""))
+	}
 	credential := ""
 	if mint, err := s.planCredential(intent); err == nil && mint {
 		credential = pendingCredential
@@ -168,6 +171,9 @@ func (s *Service) pendingEntry(clientID string, intent CredentialIntent) map[str
 func (s *Service) intentState(intent CredentialIntent) map[string]interface{} {
 	_, _, requireAuth := s.resolveConfig()
 	state := map[string]interface{}{"keyless": intent.Keyless, "require_mcp_auth": requireAuth}
+	if intent.Auth == AuthOAuth {
+		state["auth"] = AuthOAuth
+	}
 	if intent.Profile != nil {
 		state["profile"] = *intent.Profile
 	}

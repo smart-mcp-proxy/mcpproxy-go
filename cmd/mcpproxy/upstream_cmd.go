@@ -132,17 +132,34 @@ Examples:
 	}
 
 	upstreamPatchCmd = &cobra.Command{
-		Use:   "patch <name>",
-		Short: "Update headers / env on an existing upstream server",
-		Long: `Update HTTP headers and stdio environment variables on an existing upstream server.
+		Use:   "patch <name> [-- command args...]",
+		Short: "Update command, args, headers or env on an existing upstream server",
+		Long: `Update the command and arguments of a stdio server, HTTP headers, and
+environment variables on an existing upstream server.
 
-The PATCH endpoint uses JSON Merge Patch semantics: keys you specify are
-upserted, keys you delete with -remove flags are explicitly removed, and
-every other key on the stored config is preserved. So you can safely
-rotate a single header without seeing or touching the rest — including
+The PATCH endpoint uses JSON Merge Patch semantics for headers and env: keys
+you specify are upserted, keys you delete with -remove flags are explicitly
+removed, and every other key on the stored config is preserved. So you can
+safely rotate a single header without seeing or touching the rest — including
 sensitive values the backend redacts from list / inspect responses.
 
+The command is replaced as a single value. Arguments are replaced as a whole
+list: give every argument you want to keep. Changing either restarts the
+server with the new command line.
+
 Examples:
+  # replace the whole command line of a stdio server
+  mcpproxy upstream patch sqlite -- uvx mcp-server-sqlite --db-path /data/new.db
+
+  # change only the program, keep the stored arguments
+  mcpproxy upstream patch sqlite --command /usr/local/bin/uvx
+
+  # replace only the arguments (repeat --arg, in order)
+  mcpproxy upstream patch sqlite --arg mcp-server-sqlite --arg=--db-path --arg /data/new.db
+
+  # remove all arguments
+  mcpproxy upstream patch sqlite --clear-args
+
   # rotate the Authorization header on the synapbus server
   mcpproxy upstream patch synapbus --header "Authorization: Bearer new-token"
 
@@ -160,7 +177,10 @@ Examples:
 
 Flags are repeatable. The corresponding null in the JSON Merge Patch body
 is constructed automatically — you never have to think about wire format.`,
-		Args: cobra.ExactArgs(1),
+		Args: func(cmd *cobra.Command, args []string) error {
+			_, _, err := splitUpstreamPatchArgs(args, cmd.ArgsLenAtDash())
+			return err
+		},
 		RunE: runUpstreamPatch,
 	}
 
@@ -310,6 +330,9 @@ Examples:
 	upstreamPatchEnvs         []string
 	upstreamPatchEnvRemove    []string
 	upstreamPatchInitTimeout  string
+	upstreamPatchCommand      string
+	upstreamPatchArgs         []string
+	upstreamPatchClearArgs    bool
 
 	// Import command flags
 	upstreamImportServer       string
@@ -392,6 +415,9 @@ func init() {
 	upstreamPatchCmd.Flags().StringArrayVar(&upstreamPatchHeaderRemove, "header-remove", nil, "HTTP header name to delete (repeatable)")
 	upstreamPatchCmd.Flags().StringArrayVar(&upstreamPatchEnvs, "env", nil, "Environment variable to upsert in KEY=value format (repeatable)")
 	upstreamPatchCmd.Flags().StringArrayVar(&upstreamPatchEnvRemove, "env-remove", nil, "Environment variable name to delete (repeatable)")
+	upstreamPatchCmd.Flags().StringVar(&upstreamPatchCommand, "command", "", "New command for a stdio server (the program to start); arguments are kept unless --arg / --clear-args is given")
+	upstreamPatchCmd.Flags().StringArrayVar(&upstreamPatchArgs, "arg", nil, "Argument for a stdio server's command (repeatable, in order); REPLACES all stored arguments. Use --arg=--flag for values that start with a dash")
+	upstreamPatchCmd.Flags().BoolVar(&upstreamPatchClearArgs, "clear-args", false, "Remove all arguments from a stdio server's command")
 	upstreamPatchCmd.Flags().StringVar(&upstreamPatchInitTimeout, "init-timeout", "", "MCP initialize handshake deadline as a duration (e.g. '120s', '3m'); raise for upstreams that warm up before responding to initialize")
 
 	// Inspect command flags
@@ -2648,75 +2674,167 @@ func applyImportedServersConfigMode(imported []*configimport.ImportedServer, glo
 // {"headers": {"X-Stale": null}}. Both shapes go through encoding/json
 // (`map[string]*string`) where a nil pointer renders as the literal
 // `null` token — verified by the backend's PATCH tests.
-func runUpstreamPatch(_ *cobra.Command, args []string) error {
-	serverName := strings.TrimSpace(args[0])
-	if serverName == "" {
-		return fmt.Errorf("server name is required")
-	}
+// upstreamPatchInput is everything `upstream patch` reads from the command
+// line, kept apart from the cobra globals so the body can be built and tested
+// without a daemon.
+type upstreamPatchInput struct {
+	Headers      []string
+	HeaderRemove []string
+	Envs         []string
+	EnvRemove    []string
+	InitTimeout  string
+	// Command is --command; CommandSet tells an explicit empty value (an
+	// error) from an omitted flag.
+	Command    string
+	CommandSet bool
+	// Args is --arg (repeatable); ClearArgs is --clear-args.
+	Args      []string
+	ClearArgs bool
+	// CommandLine is everything after `--`: the new command and its arguments.
+	CommandLine []string
+}
 
-	initTimeout := strings.TrimSpace(upstreamPatchInitTimeout)
-	if len(upstreamPatchHeaders) == 0 && len(upstreamPatchHeaderRemove) == 0 &&
-		len(upstreamPatchEnvs) == 0 && len(upstreamPatchEnvRemove) == 0 && initTimeout == "" {
-		return fmt.Errorf("at least one of --header / --header-remove / --env / --env-remove / --init-timeout must be specified")
+// splitUpstreamPatchArgs separates the server name from the optional command
+// line after `--`. dash is cobra's ArgsLenAtDash: -1 when `--` was not used.
+//
+// A server name may start with a dash, and the only way to pass one is behind
+// `--` (`upstream patch --env A=b -- -name`). That form predates the command
+// line and keeps its meaning: a single argument after a leading `--` is the
+// name, never a command.
+func splitUpstreamPatchArgs(args []string, dash int) (name string, commandLine []string, err error) {
+	before := args
+	switch {
+	case dash == 0 && len(args) == 1:
+		// `-- <name>`: the name alone.
+	case dash >= 0:
+		before = args[:dash]
+		commandLine = args[dash:]
+	}
+	if len(before) != 1 {
+		return "", nil, fmt.Errorf("exactly one server name is required before any `--` (got %d)", len(before))
+	}
+	name = strings.TrimSpace(before[0])
+	if name == "" {
+		return "", nil, fmt.Errorf("server name is required")
+	}
+	if dash > 0 && len(commandLine) == 0 {
+		return "", nil, fmt.Errorf("a command is required after --")
+	}
+	return name, commandLine, nil
+}
+
+// buildUpstreamPatchBody turns the flags into the PATCH /api/v1/servers/{id}
+// body and a short summary of what it changes. The summary never repeats a
+// value: headers, env values and arguments can all carry credentials.
+func buildUpstreamPatchBody(in upstreamPatchInput) (body map[string]interface{}, summary []string, err error) {
+	initTimeout := strings.TrimSpace(in.InitTimeout)
+	if len(in.Headers) == 0 && len(in.HeaderRemove) == 0 &&
+		len(in.Envs) == 0 && len(in.EnvRemove) == 0 && initTimeout == "" &&
+		!in.CommandSet && len(in.Args) == 0 && !in.ClearArgs && len(in.CommandLine) == 0 {
+		return nil, nil, fmt.Errorf("at least one of --command / --arg / --clear-args / `-- command args...` / --header / --header-remove / --env / --env-remove / --init-timeout must be specified")
 	}
 
 	// Validate --init-timeout locally so we fail fast with a clear message
 	// before hitting the daemon (the backend re-validates the bounds).
 	if initTimeout != "" {
 		if _, perr := time.ParseDuration(initTimeout); perr != nil {
-			return fmt.Errorf("invalid --init-timeout %q: %v (expected a duration like '120s' or '3m')", initTimeout, perr)
+			return nil, nil, fmt.Errorf("invalid --init-timeout %q: %v (expected a duration like '120s' or '3m')", initTimeout, perr)
+		}
+	}
+
+	body = map[string]interface{}{}
+
+	// Command and arguments (issue #2008). `args` REPLACES the stored vector,
+	// so it is sent only when the caller asked for it; an explicit empty array
+	// clears it, while an omitted key leaves it alone.
+	switch {
+	case len(in.CommandLine) > 0:
+		if in.CommandSet || len(in.Args) > 0 || in.ClearArgs {
+			return nil, nil, fmt.Errorf("`-- command args...` cannot be combined with --command, --arg or --clear-args; use one form")
+		}
+		// The command is stored as given: a path is not ours to trim.
+		command := in.CommandLine[0]
+		if strings.TrimSpace(command) == "" {
+			return nil, nil, fmt.Errorf("command after -- must not be empty")
+		}
+		rest := append([]string{}, in.CommandLine[1:]...)
+		body["command"] = command
+		body["args"] = rest
+		summary = append(summary, "command set")
+		if len(rest) > 0 {
+			summary = append(summary, fmt.Sprintf("%d arg(s) set", len(rest)))
+		} else {
+			summary = append(summary, "args cleared")
+		}
+	default:
+		if in.CommandSet {
+			if strings.TrimSpace(in.Command) == "" {
+				return nil, nil, fmt.Errorf("--command must not be empty")
+			}
+			body["command"] = in.Command
+			summary = append(summary, "command set")
+		}
+		if len(in.Args) > 0 && in.ClearArgs {
+			return nil, nil, fmt.Errorf("--arg and --clear-args conflict; pick one")
+		}
+		if len(in.Args) > 0 {
+			body["args"] = append([]string{}, in.Args...)
+			summary = append(summary, fmt.Sprintf("%d arg(s) set", len(in.Args)))
+		}
+		if in.ClearArgs {
+			body["args"] = []string{}
+			summary = append(summary, "args cleared")
 		}
 	}
 
 	headers := map[string]*string{}
-	for _, h := range upstreamPatchHeaders {
+	for _, h := range in.Headers {
 		parts := strings.SplitN(h, ":", 2)
 		if len(parts) != 2 {
-			return fmt.Errorf("invalid --header format: %q (expected 'Name: value')", h)
+			return nil, nil, fmt.Errorf("invalid --header format: %q (expected 'Name: value')", h)
 		}
 		key := strings.TrimSpace(parts[0])
 		val := strings.TrimSpace(parts[1])
 		if key == "" {
-			return fmt.Errorf("invalid --header: empty header name in %q", h)
+			return nil, nil, fmt.Errorf("invalid --header: empty header name in %q", h)
 		}
 		headers[key] = &val
 	}
-	for _, k := range upstreamPatchHeaderRemove {
+	for _, k := range in.HeaderRemove {
 		key := strings.TrimSpace(k)
 		if key == "" {
-			return fmt.Errorf("invalid --header-remove: empty name")
+			return nil, nil, fmt.Errorf("invalid --header-remove: empty name")
 		}
 		if _, dupe := headers[key]; dupe {
-			return fmt.Errorf("--header and --header-remove for %q conflict; pick one", key)
+			return nil, nil, fmt.Errorf("--header and --header-remove for %q conflict; pick one", key)
 		}
 		headers[key] = nil // JSON Merge Patch: null = delete
 	}
 
 	envs := map[string]*string{}
-	for _, e := range upstreamPatchEnvs {
+	for _, e := range in.Envs {
 		parts := strings.SplitN(e, "=", 2)
 		if len(parts) != 2 {
-			return fmt.Errorf("invalid --env format: %q (expected 'KEY=value')", e)
+			return nil, nil, fmt.Errorf("invalid --env format: %q (expected 'KEY=value')", e)
 		}
 		key := strings.TrimSpace(parts[0])
 		val := parts[1]
 		if key == "" {
-			return fmt.Errorf("invalid --env: empty key in %q", e)
+			return nil, nil, fmt.Errorf("invalid --env: empty key in %q", e)
 		}
 		envs[key] = &val
 	}
-	for _, k := range upstreamPatchEnvRemove {
+	for _, k := range in.EnvRemove {
 		key := strings.TrimSpace(k)
 		if key == "" {
-			return fmt.Errorf("invalid --env-remove: empty name")
+			return nil, nil, fmt.Errorf("invalid --env-remove: empty name")
 		}
 		if _, dupe := envs[key]; dupe {
-			return fmt.Errorf("--env and --env-remove for %q conflict; pick one", key)
+			return nil, nil, fmt.Errorf("--env and --env-remove for %q conflict; pick one", key)
 		}
 		envs[key] = nil
 	}
 
-	body := map[string]interface{}{}
 	if len(headers) > 0 {
 		body["headers"] = headers
 	}
@@ -2725,6 +2843,46 @@ func runUpstreamPatch(_ *cobra.Command, args []string) error {
 	}
 	if initTimeout != "" {
 		body["init_timeout"] = initTimeout
+	}
+
+	if n := len(in.Headers); n > 0 {
+		summary = append(summary, fmt.Sprintf("%d header(s) set", n))
+	}
+	if n := len(in.HeaderRemove); n > 0 {
+		summary = append(summary, fmt.Sprintf("%d header(s) removed", n))
+	}
+	if n := len(in.Envs); n > 0 {
+		summary = append(summary, fmt.Sprintf("%d env var(s) set", n))
+	}
+	if n := len(in.EnvRemove); n > 0 {
+		summary = append(summary, fmt.Sprintf("%d env var(s) removed", n))
+	}
+	if initTimeout != "" {
+		summary = append(summary, fmt.Sprintf("init_timeout=%s", initTimeout))
+	}
+	return body, summary, nil
+}
+
+func runUpstreamPatch(cmd *cobra.Command, args []string) error {
+	serverName, commandLine, err := splitUpstreamPatchArgs(args, cmd.ArgsLenAtDash())
+	if err != nil {
+		return err
+	}
+
+	body, summary, err := buildUpstreamPatchBody(upstreamPatchInput{
+		Headers:      upstreamPatchHeaders,
+		HeaderRemove: upstreamPatchHeaderRemove,
+		Envs:         upstreamPatchEnvs,
+		EnvRemove:    upstreamPatchEnvRemove,
+		InitTimeout:  upstreamPatchInitTimeout,
+		Command:      upstreamPatchCommand,
+		CommandSet:   cmd.Flags().Changed("command"),
+		Args:         upstreamPatchArgs,
+		ClearArgs:    upstreamPatchClearArgs,
+		CommandLine:  commandLine,
+	})
+	if err != nil {
+		return err
 	}
 
 	bodyBytes, err := json.Marshal(body)
@@ -2753,24 +2911,8 @@ func runUpstreamPatch(_ *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("✅ Patched %s", serverName)
-	parts := []string{}
-	if n := len(upstreamPatchHeaders); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d header(s) set", n))
-	}
-	if n := len(upstreamPatchHeaderRemove); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d header(s) removed", n))
-	}
-	if n := len(upstreamPatchEnvs); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d env var(s) set", n))
-	}
-	if n := len(upstreamPatchEnvRemove); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d env var(s) removed", n))
-	}
-	if initTimeout != "" {
-		parts = append(parts, fmt.Sprintf("init_timeout=%s", initTimeout))
-	}
-	if len(parts) > 0 {
-		fmt.Printf(": %s", strings.Join(parts, ", "))
+	if len(summary) > 0 {
+		fmt.Printf(": %s", strings.Join(summary, ", "))
 	}
 	fmt.Println()
 	return nil

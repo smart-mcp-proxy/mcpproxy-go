@@ -820,6 +820,13 @@ func NewMCPProxyServer(
 			sessionStore.SetSessionTokenPrefix(sessionID, ac.TokenPrefix)
 			if ac.GrantID != "" {
 				sessionStore.SetSessionGrantID(sessionID, ac.GrantID)
+				// Spec 132 R14: the name the client sends here is stored on its
+				// login, off the request path, to flag a mismatch advisorily.
+				if mainServer != nil && mainServer.runtime != nil {
+					if svc := mainServer.runtime.OAuthLoginService(); svc != nil {
+						svc.Touch(ac.GrantID, clientName)
+					}
+				}
 			}
 		}
 		sessionStore.SetSessionServer(sessionID, mcpserver.ServerFromContext(ctx))
