@@ -1001,6 +1001,7 @@
                       v-model="commandDraft"
                       type="text"
                       class="input input-bordered input-sm font-mono w-full"
+                      :disabled="processSaving"
                       autocomplete="off"
                       autocapitalize="off"
                       spellcheck="false"
@@ -1013,7 +1014,7 @@
                       v-model="argsDraft"
                       class="textarea textarea-bordered textarea-sm font-mono w-full leading-snug"
                       :rows="Math.min(Math.max(argsDraft.split('\n').length, 3), 12)"
-                      :disabled="argsNotLineEditable"
+                      :disabled="argsNotLineEditable || processSaving"
                       autocomplete="off"
                       autocapitalize="off"
                       spellcheck="false"
@@ -3856,19 +3857,25 @@ async function saveProcess() {
   processSaving.value = true
   try {
     const resp = await api.patchServer(snapshot.name, patch)
+    // The view may have moved to another server, with its own draft, while
+    // the request was in flight. Only the editor this save belongs to is
+    // closed or shown the error; elsewhere the outcome becomes a toast.
+    const mine = () => processSnapshot === snapshot
     if (!resp.success) {
-      processDraftError.value = describeProcessSaveError(resp.error, argLines)
+      const message = describeProcessSaveError(resp.error, argLines)
+      if (mine()) processDraftError.value = message
+      else systemStore.addToast({ type: 'error', title: `Updating the command of ${snapshot.name} failed`, message })
       return
     }
     await serversStore.fetchServers(true)
     systemStore.addToast({ type: 'success', title: 'Updated command', message: '' })
-    // Only close the editor this save belongs to: the view may have moved to
-    // another server, with its own draft, while the request was in flight.
-    if (processSnapshot !== snapshot) return
+    if (!mine()) return
     resetProcessEditor()
     await loadServerDetails()
   } catch (e: any) {
-    processDraftError.value = e?.message || String(e)
+    const message = e?.message || String(e)
+    if (processSnapshot === snapshot) processDraftError.value = message
+    else systemStore.addToast({ type: 'error', title: `Updating the command of ${snapshot.name} failed`, message })
   } finally {
     processSaving.value = false
   }

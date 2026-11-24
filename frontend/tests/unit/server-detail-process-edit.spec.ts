@@ -273,6 +273,39 @@ describe('ServerDetail — edit command and arguments (issue #2008)', () => {
     expect(api.patchServer).not.toHaveBeenCalled()
   })
 
+  it('locks the fields while a save is in flight', async () => {
+    const { wrapper, api } = await mountDetail()
+    let finish: (v: unknown) => void = () => {}
+    ;(api.patchServer as any).mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)))
+    await openEditor(wrapper)
+    await commandInput(wrapper).setValue('node')
+    await save(wrapper)
+    expect(commandInput(wrapper).attributes('disabled')).toBeDefined()
+    expect(argsInput(wrapper).attributes('disabled')).toBeDefined()
+    finish({ success: true, data: {} })
+    await flushPromises()
+    expect(wrapper.find('[data-test="server-process-form"]').exists()).toBe(false)
+  })
+
+  it('does not show a failed save of one server in the editor of another', async () => {
+    const { wrapper, api } = await mountDetail()
+    let finish: (v: unknown) => void = () => {}
+    ;(api.patchServer as any).mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)))
+    await openEditor(wrapper)
+    await commandInput(wrapper).setValue('node')
+    await save(wrapper)
+
+    await wrapper.setProps({ serverName: 'other' })
+    await flushPromises()
+    await openEditor(wrapper)
+    finish({ success: false, error: 'boom' })
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="server-process-form"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="server-process-error"]').exists()).toBe(false)
+    expect((commandInput(wrapper).element as HTMLInputElement).value).toBe('node')
+  })
+
   it('cancel discards the draft', async () => {
     const { wrapper, api } = await mountDetail()
     await openEditor(wrapper)
