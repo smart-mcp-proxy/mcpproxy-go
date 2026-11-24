@@ -152,7 +152,8 @@ final class FakeConnectSource: ConnectClientDataSource, @unchecked Sendable {
         note: String? = nil,
         checkedPaths: [String]? = nil,
         displayPath: String? = nil,
-        reloadHint: String? = nil
+        reloadHint: String? = nil,
+        browserLoginAvailable: Bool? = nil
     ) -> APIClient.ClientStatus {
         let json: [String: Any?] = [
             "id": id,
@@ -169,7 +170,8 @@ final class FakeConnectSource: ConnectClientDataSource, @unchecked Sendable {
             "note": note,
             "checked_paths": checkedPaths,
             "display_path": displayPath,
-            "reload_hint": reloadHint
+            "reload_hint": reloadHint,
+            "browser_login_available": browserLoginAvailable
         ]
         let data = try! JSONSerialization.data(
             withJSONObject: json.compactMapValues { $0 })

@@ -75,6 +75,17 @@ type ConnectResult struct {
 	// the credential is still active and `mcpproxy client forget <id>`
 	// retries the revoke.
 	CredentialRevokeError string `json:"credential_revoke_error,omitempty" yaml:"credential_revoke_error,omitempty"`
+	// CleanupError is set when a disconnect removed the entry but could not list
+	// the config's directory to remove the undo records of a browser-login
+	// connect (Spec 132). The disconnect still succeeded.
+	CleanupError string `json:"cleanup_error,omitempty" yaml:"cleanup_error,omitempty"`
+
+	// Auth is "oauth" when the entry holds the per-client browser login
+	// address and no credential (Spec 132). Empty for an API-key entry.
+	Auth string `json:"auth,omitempty" yaml:"auth,omitempty"`
+	// AuthNote says what Connect left alone: an oauth write does not revoke the
+	// client's existing API key.
+	AuthNote string `json:"auth_note,omitempty" yaml:"auth_note,omitempty"`
 }
 
 // ClientStatus describes the current state of a client's configuration
@@ -144,6 +155,21 @@ type ClientStatus struct {
 	//   "unknown" — the entry has no comparable endpoint (e.g. a stdio command)
 	// Empty when Connected is false or nothing was read.
 	EndpointMatch string `json:"endpoint_match,omitempty" yaml:"endpoint_match,omitempty"`
+
+	// SupportsBrowserLogin is true for a client that passed a real-client check
+	// of the browser login flow and may be given the per-client sign-in address
+	// (Spec 132). It is emitted only while browser login is available (feature
+	// on, personal edition, loopback listener), so a feature-off payload is
+	// exactly what it was before; the registry fact itself stays internal
+	// (ClientDef.SupportsBrowserLogin).
+	SupportsBrowserLogin bool `json:"supports_browser_login,omitempty" yaml:"supports_browser_login,omitempty"`
+	// BrowserLoginAvailable is true when Connect would accept auth=oauth for this
+	// client right now: SupportsBrowserLogin, mcp_oauth_enabled on, personal
+	// edition. A UI offers the choice only when this is true.
+	BrowserLoginAvailable bool `json:"browser_login_available,omitempty" yaml:"browser_login_available,omitempty"`
+	// Auth is "oauth" when the client's existing entry holds a browser login
+	// address. Resolved only by GetStatus; empty for an API-key entry.
+	Auth string `json:"auth,omitempty" yaml:"auth,omitempty"`
 }
 
 // EndpointMatch values for ClientStatus.EndpointMatch.
@@ -197,6 +223,11 @@ type Service struct {
 	// (ErrNoCredentialMinter) while it is on — it NEVER falls back to the
 	// admin API key, which has no remaining write path (plan D10).
 	minter CredentialMinter
+
+	// mcpOAuthEnabled reports the live mcp_oauth_enabled switch (Spec 132). Nil
+	// counts as off, so a service nobody wired never offers browser login.
+	mcpOAuthEnabled func() bool
+	tlsEnabled      func() bool
 }
 
 // WithRequireMCPAuth sets whether the /mcp endpoint requires authentication,
@@ -419,6 +450,9 @@ func (s *Service) GetAllStatus() []ClientStatus {
 			ReloadHint:   c.ReloadHint,
 			AccessState:  accessUnknown,
 			ProxyURL:     proxyURL,
+
+			SupportsBrowserLogin:  s.browserLoginAvailable(&c),
+			BrowserLoginAvailable: s.browserLoginAvailable(&c),
 		}
 
 		// Metadata-only existence check (no content read).
@@ -469,6 +503,9 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 		ReloadHint:   c.ReloadHint,
 		AccessState:  accessUnknown,
 		ProxyURL:     s.baseURL(),
+
+		SupportsBrowserLogin:  s.browserLoginAvailable(c),
+		BrowserLoginAvailable: s.browserLoginAvailable(c),
 	}
 
 	if _, err := s.stat(cfgPath); err == nil {
@@ -499,6 +536,9 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 		status.ServerName = loc.Name
 		status.RegisteredURL = loc.Endpoint
 		status.EndpointMatch = classifyEndpointMatch(loc)
+		if s.entryIsOAuth(loc.Entry, c.ID) {
+			status.Auth = AuthOAuth
+		}
 		// What the entry carries, from the same single read. The secret itself
 		// is classified and dropped here; it is never stored on the status.
 		secret, _ := extractEntryCredential(c.ID, loc.Entry)
@@ -545,6 +585,9 @@ type ConnectOptions struct {
 	Force             bool
 	PreconditionToken string
 	Intent            CredentialIntent
+	// Auth is AuthKey (default, "") or AuthOAuth (Spec 132): the browser login
+	// address with no credential. When set it overrides Intent.Auth.
+	Auth string
 }
 
 // ConnectWithPrecondition is ConnectWithOptions with the default credential
@@ -576,6 +619,9 @@ func (s *Service) ConnectWithPrecondition(clientID, serverName string, force boo
 // back and the old secret keeps working, FR-021a).
 func (s *Service) ConnectWithOptions(clientID, serverName string, opts ConnectOptions) (res *ConnectResult, err error) {
 	force, preconditionToken := opts.Force, opts.PreconditionToken
+	if opts.Auth != "" {
+		opts.Intent.Auth = opts.Auth
+	}
 	client := FindClient(clientID)
 
 	// FR-037/FR-042: every ConnectResult this call produces — success,
@@ -606,9 +652,16 @@ func (s *Service) ConnectWithOptions(clientID, serverName string, opts ConnectOp
 	}
 	// Pure input validation (no I/O): keyless with auth on or with a profile,
 	// or auth on with no minter, is refused before anything is read or written.
-	mint, err := s.planCredential(opts.Intent)
+	oauth, err := s.planAuth(clientID, opts.Intent)
 	if err != nil {
 		return nil, err
+	}
+	mint := false
+	if !oauth {
+		mint, err = s.planCredential(opts.Intent)
+		if err != nil {
+			return nil, err
+		}
 	}
 	// Resolve the pre-write state ONCE for the whole operation. The token
 	// check and the write must cover the SAME read — re-resolving per step is
@@ -682,7 +735,7 @@ func (s *Service) ConnectWithOptions(clientID, serverName string, opts ConnectOp
 	// res/err are the function's named returns — deliberately NOT re-declared
 	// with `var` here, which would shadow them and leave the deferred
 	// DisplayPath/ReloadHint fill-in above looking at a permanently-nil res.
-	cred := &credentialHandle{svc: s, clientID: clientID, intent: opts.Intent, mint: mint}
+	cred := &credentialHandle{svc: s, clientID: clientID, intent: opts.Intent, mint: mint, oauth: oauth}
 	if client.Format == "toml" {
 		res, err = s.connectTOML(client, cfgPath, serverName, force, pre, cred)
 	} else {
@@ -709,7 +762,9 @@ type credentialHandle struct {
 	clientID string
 	intent   CredentialIntent
 	mint     bool
-	issued   *IssuedCredential
+	// oauth: the write holds the browser login address and no credential.
+	oauth  bool
+	issued *IssuedCredential
 	// wrote is set once the config write itself succeeded. A failure after
 	// that point (a verification re-read) is ambiguous — the file may hold the
 	// new secret — so it must NOT abort the mint: a fresh credential is left
@@ -726,7 +781,7 @@ func (h *credentialHandle) secret() (string, error) {
 	if !h.mint {
 		// A keyless write mints nothing but still rewrites the client's config:
 		// refuse while another connect holds the in-flight claim (FR-021a).
-		if h.intent.Keyless && h.svc.minter != nil {
+		if (h.intent.Keyless || h.oauth) && h.svc.minter != nil {
 			if err := h.svc.minter.CheckIdle(h.clientID); err != nil {
 				return "", err
 			}
@@ -770,6 +825,12 @@ func (h *credentialHandle) settle(res *ConnectResult, writeErr error) error {
 // describe fills the credential fields of a successful result: the masked
 // credential, token name, binding and rotation outcome — never the secret.
 func (h *credentialHandle) describe(res *ConnectResult, intent CredentialIntent) {
+	if h.oauth {
+		res.Auth = AuthOAuth
+		res.AuthNote = authNote(true)
+		res.Message = fmt.Sprintf("MCPProxy registered in %s as %q with its browser sign-in address", displayClientName(res.Client), res.ServerName)
+		return
+	}
 	if h.issued == nil {
 		if !h.mint {
 			res.Keyless = true
@@ -845,15 +906,13 @@ func (s *Service) Disconnect(clientID, serverName string) (res *ConnectResult, e
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
 
-	if client.Format == "toml" {
-		res, err = s.disconnectTOML(client, cfgPath, serverName)
-	} else {
-		res, err = s.disconnectJSON(client, cfgPath, serverName)
-	}
+	res, err = s.disconnectOne(client, cfgPath, serverName)
 	// OpenCode candidate drift (#922): if the entry was written to opencode.json
 	// and OpenCode later bootstrapped opencode.jsonc, the resolver now targets
 	// the .jsonc — but the entry still lives in the .json. When the resolved
-	// file has no entry, retry the other existing candidate before giving up.
+	// file has no entry, retry the other existing candidate before giving up. Each
+	// candidate runs the same lock, transaction and cleanup as the first, under
+	// its own lock, and the first one's lock is released before the next is taken.
 	if err == nil && res != nil && !res.Success && res.Action == "not_found" && clientID == "opencode" {
 		for _, alt := range opencodeConfigCandidates(s.homeDir) {
 			if alt == cfgPath {
@@ -862,7 +921,7 @@ func (s *Service) Disconnect(clientID, serverName string) (res *ConnectResult, e
 			if _, statErr := os.Stat(alt); statErr != nil {
 				continue
 			}
-			altRes, altErr := s.disconnectJSON(client, alt, serverName)
+			altRes, altErr := s.disconnectOne(client, alt, serverName)
 			if altErr != nil {
 				// An unreadable/malformed/comment-guarded alternate is a real
 				// failure — surfacing "not_found" would wrongly claim the entry
@@ -875,6 +934,60 @@ func (s *Service) Disconnect(clientID, serverName string) (res *ConnectResult, e
 		}
 	}
 	return res, s.asAccessError(client, cfgPath, err)
+}
+
+// disconnectOne removes serverName's entry from one config file under that
+// file's lock, moving its undo state and removing its undo records the way every
+// writer of it does (see undo_state.go). The undo state of a config that holds
+// browser-login state is moved on by any write of it; with no state file this
+// writes nothing new.
+func (s *Service) disconnectOne(client *ClientDef, cfgPath, serverName string) (res *ConnectResult, err error) {
+	unlock, lockErr := lockConfig(cfgPath)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
+	tx, txErr := beginConfigTx(cfgPath, false)
+	if txErr != nil {
+		return nil, txErr
+	}
+	if client.Format == "toml" {
+		res, err = s.disconnectTOML(client, cfgPath, serverName)
+	} else {
+		res, err = s.disconnectJSON(client, cfgPath, serverName)
+	}
+	if tx != nil && (err != nil || res == nil || !res.Success) {
+		// Nothing was written: the state is put back as it was.
+		if rb := tx.rollback(); rb != nil {
+			if err != nil {
+				err = fmt.Errorf("%w (and the undo state could not be restored: %v)", err, rb)
+			} else if res != nil {
+				res.CleanupError = "undo state could not be restored, Undo will refuse older records: " + rb.Error()
+			}
+		}
+		tx = nil
+	}
+	if err == nil && res != nil && res.Success {
+		var notes []string
+		if cerr := removeUndoRecords(res.ConfigPath, client.ID, serverName); cerr != nil {
+			// The entry is gone; only the cleanup of its undo records failed.
+			notes = append(notes, cerr.Error())
+		}
+		if tx == nil {
+			// A state file that appeared during the write is advanced too.
+			var lerr error
+			if tx, lerr = beginConfigTx(res.ConfigPath, false); lerr != nil {
+				notes = append(notes, "undo state: "+lerr.Error())
+			}
+		}
+		if ferr := tx.finishAfterRemoval(); ferr != nil {
+			notes = append(notes, "undo state not finished, Undo will refuse older records: "+ferr.Error())
+		}
+		if len(notes) > 0 {
+			res.CleanupError = strings.Join(notes, "; ")
+		}
+	}
+	return res, err
 }
 
 // ---------- JSON helpers ----------
@@ -1083,15 +1196,30 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 		return nil, err
 	}
 
+	// The undo state's transitions of one config never interleave, in the process
+	// or (on Unix) across processes (see undo_state.go).
+	unlock, lockErr := lockConfig(cfgPath)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
+
 	// Create backup before modifying
-	backupPath, err := backupFile(cfgPath)
+	// A browser-login connect must be able to see the directory's undo records
+	// before it writes anything.
+	if cred.oauth {
+		if _, err := recordFilesWithPrefix(cfgPath, undoNewPrefix); err != nil {
+			return nil, fmt.Errorf("undo records: %w", err)
+		}
+	}
+	backupPath, err := backupFileAvoiding(cfgPath, backupNameTaken(cfgPath, client.ID, serverName, cred.oauth))
 	if err != nil {
 		return nil, fmt.Errorf("backup failed: %w", err)
 	}
 
 	// Build the entry with the per-client credential (empty for a keyless
 	// entry). The admin API key is never a credential source.
-	entry := buildServerEntry(client.ID, s.entryParams(secret))
+	entry := buildServerEntry(client.ID, s.entryParamsFor(client.ID, cred.oauth, secret))
 	serversMap[serverName] = entry
 	setServersMap(client, data, serversMap)
 
@@ -1113,16 +1241,43 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	// gap open, per round 5. The permission bits also come from currentPerm's
 	// fresh re-stat rather than the mode captured all the way back in
 	// parseOrCreateJSON, for the same reason (see currentPerm's doc comment).
+	// Only a browser-login connect records its write (see undo_record.go): a key
+	// connect writes exactly the files it always wrote. The record is staged now
+	// and published, with the retirement of the older ones, only after the config
+	// write succeeded, so a connect that fails changes no record.
+	var staged *stagedRecord
+	gen := ""
+	if cred.oauth {
+		var recErr error
+		if gen, recErr = newGeneration(); recErr != nil {
+			return nil, recErr
+		}
+		if staged, recErr = stageUndoRecord(cfgPath, backupPath, client.ID, serverName, gen, encoded, currentPerm(cfgPath, perm)); recErr != nil {
+			return nil, recErr
+		}
+	}
+	// The undo state goes pending before the write (created by a browser-login
+	// connect, only updated by any other write if it already exists).
+	tx, txErr := beginConfigTx(cfgPath, cred.oauth)
+	if txErr != nil {
+		staged.discard()
+		return nil, txErr
+	}
 	if err := atomicWriteFile(cfgPath, encoded, currentPerm(cfgPath, perm), func() error {
 		return s.refuseIfServersSectionRaced(client, cfgPath)
 	}); err != nil {
+		staged.discard()
+		if rbErr := tx.rollback(); rbErr != nil {
+			return nil, fmt.Errorf("write config: %w (and the undo state could not be restored: %v; Undo refuses until the next successful write)", err, rbErr)
+		}
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 	cred.markWritten()
+	recordNote := finishUndoRecords(staged, tx, gen, cfgPath, backupPath, client.ID, serverName, cred.oauth)
 
 	// Verify by re-reading
 	if err := s.verifyJSONEntry(client, cfgPath, serverName); err != nil {
-		return nil, fmt.Errorf("verification failed: %w", err)
+		return nil, verifyFailure(err, cred.oauth, backupPath, recordNote)
 	}
 
 	return &ConnectResult{
@@ -1133,6 +1288,9 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 		ServerName: serverName,
 		Action:     action,
 		Message:    fmt.Sprintf("MCPProxy registered in %s as %q", client.Name, serverName),
+		// A problem publishing or retiring undo records after the write (the
+		// connect itself succeeded): reported, never failing the connect.
+		CleanupError: recordNote,
 	}, nil
 }
 
@@ -1277,15 +1435,28 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 		return nil, err
 	}
 
+	// The undo state's transitions of one config never interleave, in the process
+	// or (on Unix) across processes (see undo_state.go).
+	unlock, lockErr := lockConfig(cfgPath)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
+
 	// Backup
-	backupPath, err := backupFile(cfgPath)
+	if cred.oauth {
+		if _, err := recordFilesWithPrefix(cfgPath, undoNewPrefix); err != nil {
+			return nil, fmt.Errorf("undo records: %w", err)
+		}
+	}
+	backupPath, err := backupFileAvoiding(cfgPath, backupNameTaken(cfgPath, client.ID, serverName, cred.oauth))
 	if err != nil {
 		return nil, fmt.Errorf("backup failed: %w", err)
 	}
 
 	// Build Codex entry via the shared constructor so what connect writes is
 	// exactly what preview renders (Spec 078 FR-002).
-	entry := buildServerEntry(client.ID, s.entryParams(secret))
+	entry := buildServerEntry(client.ID, s.entryParamsFor(client.ID, cred.oauth, secret))
 	serversMap[serverName] = entry
 	setServersMap(client, data, serversMap)
 
@@ -1301,12 +1472,39 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 	// than a call from here, and why the permission bits come from
 	// currentPerm's fresh re-stat rather than the mode parseOrCreateTOML
 	// captured earlier.
+	// Only a browser-login connect records its write (see undo_record.go): a key
+	// connect writes exactly the files it always wrote. The record is staged now
+	// and published, with the retirement of the older ones, only after the config
+	// write succeeded, so a connect that fails changes no record.
+	var staged *stagedRecord
+	gen := ""
+	if cred.oauth {
+		var recErr error
+		if gen, recErr = newGeneration(); recErr != nil {
+			return nil, recErr
+		}
+		if staged, recErr = stageUndoRecord(cfgPath, backupPath, client.ID, serverName, gen, buf.Bytes(), currentPerm(cfgPath, perm)); recErr != nil {
+			return nil, recErr
+		}
+	}
+	// The undo state goes pending before the write (created by a browser-login
+	// connect, only updated by any other write if it already exists).
+	tx, txErr := beginConfigTx(cfgPath, cred.oauth)
+	if txErr != nil {
+		staged.discard()
+		return nil, txErr
+	}
 	if err := atomicWriteFile(cfgPath, buf.Bytes(), currentPerm(cfgPath, perm), func() error {
 		return s.refuseIfServersSectionRaced(client, cfgPath)
 	}); err != nil {
+		staged.discard()
+		if rbErr := tx.rollback(); rbErr != nil {
+			return nil, fmt.Errorf("write config: %w (and the undo state could not be restored: %v; Undo refuses until the next successful write)", err, rbErr)
+		}
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 	cred.markWritten()
+	recordNote := finishUndoRecords(staged, tx, gen, cfgPath, backupPath, client.ID, serverName, cred.oauth)
 
 	return &ConnectResult{
 		Success:    true,
@@ -1316,6 +1514,9 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 		ServerName: serverName,
 		Action:     action,
 		Message:    fmt.Sprintf("MCPProxy registered in %s as %q", client.Name, serverName),
+		// A problem publishing or retiring undo records after the write (the
+		// connect itself succeeded): reported, never failing the connect.
+		CleanupError: recordNote,
 	}, nil
 }
 
@@ -1604,7 +1805,7 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLoc
 		// Check various URL fields used by different clients
 		for _, field := range []string{"url", "serverUrl", "httpUrl"} {
 			if u, ok := entry[field].(string); ok {
-				if u == baseURL || strings.HasPrefix(u, baseURL+"?") {
+				if s.urlPointsHere(u, baseURL, client.ID) {
 					return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}, true, true
 				}
 			}
@@ -1869,7 +2070,7 @@ func (s *Service) findEntryTOMLBytes(raw []byte) (loc entryLocation, found, pars
 			continue
 		}
 		if u, ok := entry["url"].(string); ok {
-			if u == baseURL || strings.HasPrefix(u, baseURL+"?") {
+			if s.urlPointsHere(u, baseURL, "") {
 				return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}, true, true
 			}
 		}

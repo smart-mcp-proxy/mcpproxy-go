@@ -1379,6 +1379,15 @@ profile; `409 binding_bypassable_without_auth` (`bindings`, `fixes`) when the
 binding would be bypassable while `require_mcp_auth` is off; `409` with
 `conflicting_token` when `client-<id>` is held by a regular agent token.
 
+**Browser login (Spec 132).** The body also accepts `auth`: `"key"` (default) or
+`"oauth"`. `"oauth"` writes only the client's sign-in address
+(`http://127.0.0.1:8080/mcp/oauth/<client>`), no header and no credential, and never calls the
+credential store; the result carries `auth: "oauth"` and an `auth_note` saying the client's
+existing API key is not revoked. Refused with `400` and nothing written while `mcp_oauth_enabled`
+is off, for a client without `supports_browser_login`, in the server edition, with an unknown
+value, and together with `keyless`, `profile` or `mode`. See
+[Browser Login for MCP Clients](../features/client-oauth-login.md#connecting-a-client-to-browser-login).
+
 #### PUT /api/v1/clients/{client}/binding
 
 Reassigns a client's profile and/or mode (personal edition, administrator
@@ -1410,6 +1419,13 @@ an overwrite of a same-named entry. Reads the config on demand to classify creat
 so on macOS this may raise an App-Data prompt; a denial returns `403` +
 remediation. Optional `?server_name=` mirrors the name a subsequent connect
 would use.
+
+`?auth=oauth` previews the browser-login entry (Spec 132): `auth: "oauth"`, no `credential`,
+`auth_note`, and `browser_login_available`; the same refusals as the write answer `400`. The
+`precondition_token` binds the choice. `GET /api/v1/connect` and `GET /api/v1/connect/{client}`
+carry `supports_browser_login` and `browser_login_available` (the client passed a real-client
+check and the feature is available: on, personal edition, loopback or wildcard listener); the per-client read adds
+`auth: "oauth"` when the entry holds the sign-in address. All three are omitted when false.
 
 Spec 091 adds three response fields:
 
@@ -1446,8 +1462,44 @@ component and cannot escape the config dir (defense against path injection).
 Safety semantics:
 
 - Undo **refuses with `409 Conflict`** when the config changed since the
-  connect (it verifies the current file is byte-identical to what that connect
-  wrote) — it never clobbers later edits. Fall back to
+  connect (a browser-login connect records the SHA-256 of the file it wrote in a
+  small sidecar `<config>.undo.<timestamp>`, or `<config>.undo.new.<random>` when
+  it created the file, beside the backup. Two browser-login connects that race
+  to create the same file each keep their own record and the file is untouched
+  if it matches either, never otherwise: connect takes no lock across read,
+  backup and write, so a racing pair is resolved fail-closed, not serialised; the file counts as untouched only if its
+  digest still equals it, and the sidecar is removed when the undo succeeds or
+  the entry is disconnected) — it never clobbers later edits. A record that is
+  malformed, unreadable or bound to another client, entry or backup is also a
+  conflict. A browser-login connect stages its record, marks the config's undo state
+  pending, writes the config, then commits a new generation, publishes the record
+  and retires the older records of that entry. The state lives in
+  `<config>.undo.state` (`current` generation id, `pending` flag); a created-file
+  record authorises an Undo only while the state is readable, not pending and
+  names the generation the record carries (and is strictly well formed), so a
+  record that outlives its retirement, or a crash mid-write, can never authorise
+  a replaced file (Undo answers conflict). Every writer of one config (connect,
+  disconnect and undo; each OpenCode candidate file under its own lock) holds a
+  process-wide mutex keyed by the symlink-resolved path and, on Unix, an
+  exclusive advisory lock on the config's directory (no file is created; a
+  writer waits at most about 10 seconds and then fails with nothing written), so
+  no two writers interleave their state steps. On Windows only the in-process
+  mutex applies. A pending state carries its writer's owner token as defence in
+  depth: a commit or rollback that finds another owner changes nothing (a writer
+  that already wrote the config then leaves the state pending), and a pending
+  state found at the start of a write is a crashed writer's and is taken over.
+  The state is parsed strictly (exact fields and types, a single JSON value). The
+  state and record files are fsynced before their rename and the directory after
+  it. A failure before the write restores the previous state
+  exactly. An API-key connect, a disconnect or an undo moves the state along only
+  if the file already exists; an install that never used browser login gets no
+  new file. A problem after a successful write is reported as `cleanup_error`; a
+  post-write verification error names the backup and the record note. A connect that cannot list the config's directory (a browser-login connect refuses before writing
+  anything; an API-key connect proceeds as before) or an Undo that cannot (it answers conflict)
+  fails closed; a disconnect reports `cleanup_error` and still succeeds. A backup name that
+  already has another entry's or client's record is skipped, like a name that exists.
+  An API-key connect writes no sidecar and, like a backup that has
+  none, is checked by replaying the key-path write, exactly as before. Fall back to
   `DELETE /connect/{client}` for a surgical entry removal.
 - A vanished backup returns `404`; a `backup_name` that is a path (contains a
   directory separator) or does not match `<config>.bak.*` for that client

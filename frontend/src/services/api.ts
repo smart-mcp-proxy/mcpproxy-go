@@ -1578,12 +1578,13 @@ class APIService {
   // masked. Like getConnectClientStatus this reads the config on demand (to
   // classify create-vs-overwrite), so on macOS it may raise an App-Data prompt;
   // a denial returns 403 with remediation (surfaced as success:false + error).
-  async getConnectPreview(clientId: string, opts: Pick<ConnectOptions, 'profile' | 'mode' | 'keyless'> = {}): Promise<APIResponse<ConnectPreview>> {
+  async getConnectPreview(clientId: string, opts: Pick<ConnectOptions, 'profile' | 'mode' | 'keyless' | 'auth'> = {}): Promise<APIResponse<ConnectPreview>> {
     // `profile: ''` is an explicit All servers, so the empty string is sent.
     const q = new URLSearchParams()
     if (opts.profile !== undefined) q.set('profile', opts.profile)
     if (opts.mode) q.set('mode', opts.mode)
     if (opts.keyless) q.set('keyless', 'true')
+    if (opts.auth) q.set('auth', opts.auth)
     const text = q.toString()
     return this.requestRaw<ConnectPreview>(`/api/v1/connect/${encodeURIComponent(clientId)}/preview${text ? `?${text}` : ''}`)
   }
@@ -1596,6 +1597,7 @@ class APIService {
     if (opts.profile !== undefined) body.profile = opts.profile
     if (opts.mode) body.mode = opts.mode
     if (opts.keyless) body.keyless = true
+    if (opts.auth) body.auth = opts.auth
     if (opts.precondition_token) body.precondition_token = opts.precondition_token
     return this.requestRaw<ConnectResult>(`/api/v1/connect/${encodeURIComponent(clientId)}`, {
       method: 'POST',

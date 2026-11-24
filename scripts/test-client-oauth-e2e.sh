@@ -17,6 +17,8 @@
 #   9. guard refusal          -> named profile with require_mcp_auth off is refused
 #  10. off after use          -> 404 on OAuth paths, API key /mcp still works
 #  11. on again               -> the surviving login works again
+#  12. connect --auth oauth   -> writes only the address (no header, no mcp_cli_/mcp_oat_) into a
+#                                scratch HOME; refused for an unsupported client and with the feature off
 #
 # Usage: ./scripts/test-client-oauth-e2e.sh   (needs ./mcpproxy or go, curl, jq, openssl)
 #   PORT=19561      listen port of the scratch core
@@ -589,7 +591,69 @@ eq "browser_login_disabled false again" false "$(printf %s "$BODY" | jq -r .data
 stop_proxy
 
 #############################################################################
-step "12. isolation and control"
+step "12. connect --auth oauth (scratch HOME only)"
+# The CLI runs offline (the core is stopped) against the scratch config and the
+# scratch HOME: the real ~/.claude.json and every other client config stay
+# untouched, and the script checks that.
+case "$HOME_DIR" in "$WORK"/*) ;; *) echo "refusing to run: scratch HOME $HOME_DIR is not under $WORK"; exit 2 ;; esac
+REAL_CLAUDE="$HOME/.claude.json" # this script never changes its own HOME, only its children's
+REAL_SUM_BEFORE="$(shasum "$REAL_CLAUDE" 2>/dev/null | awk '{print $1}')"
+write_config true
+CLAUDE_CFG="$HOME_DIR/.claude.json"
+CURSOR_CFG="$HOME_DIR/.cursor/mcp.json"
+mkdir -p "$HOME_DIR/.cursor"
+printf '{}\n' > "$CLAUDE_CFG"
+printf '{}\n' > "$CURSOR_CFG"
+# connect_cli OAUTH_ENV args... -> sets CODE (exit status) and OUT (stdout+stderr)
+connect_cli() {
+	local oauth="$1"
+	shift
+	OUT="$(env HOME="$HOME_DIR" USERPROFILE="$HOME_DIR" MCPPROXY_TELEMETRY=false MCPPROXY_MCP_OAUTH_ENABLED="$oauth" \
+		"$BIN" connect --config "$WORK/config.json" "$@" 2>&1 < /dev/null)"
+	CODE=$?
+}
+connect_cli true claude-code --auth oauth
+eq "connect claude-code --auth oauth exits 0" 0 "$CODE"
+CLAUDE_BODY="$(cat "$CLAUDE_CFG")"
+has "the written config holds the per-client address" "$CLAUDE_BODY" "http://127.0.0.1:$PORT/mcp/oauth/claude-code"
+hasnt "no X-API-Key in the written config" "$CLAUDE_BODY" "X-API-Key"
+hasnt "no headers in the written config" "$CLAUDE_BODY" "headers"
+hasnt "no mcp_cli_ in the written config" "$CLAUDE_BODY" "mcp_cli_"
+hasnt "no mcp_oat_ in the written config" "$CLAUDE_BODY" "mcp_oat_"
+hasnt "the admin API key is not in the written config" "$CLAUDE_BODY" "$API_KEY"
+hasnt "no credential line in the output" "$OUT" "Credential:"
+has "the output says it is a browser sign-in" "$OUT" "Sign-in: browser"
+has "the output says the API key is not revoked" "$OUT" "does not revoke"
+# an oauth connect leaves one undo record beside the backup; nothing else is new
+UNDO_N="$(ls "$CLAUDE_CFG".undo.* 2>/dev/null | grep -v '\.undo\.state$' | wc -l | tr -d ' ')"
+eq "an oauth connect writes one undo record" 1 "$UNDO_N"
+[ -f "$CLAUDE_CFG.undo.state" ] && ok "...and the per-config undo state" || bad "no undo state file"
+# an unsupported client is refused and its config is left alone
+connect_cli true cursor --auth oauth
+[ "$CODE" -ne 0 ] && ok "connect cursor --auth oauth is refused (exit $CODE)" || bad "connect cursor --auth oauth exited 0"
+has "...saying the client is not supported" "$OUT" "does not support browser login"
+eq "the cursor config is untouched" "{}" "$(tr -d ' \n' < "$CURSOR_CFG")"
+# with the feature off the same command is refused and writes nothing
+printf '{}\n' > "$CLAUDE_CFG"
+connect_cli false claude-code --auth oauth
+[ "$CODE" -ne 0 ] && ok "connect --auth oauth with the feature off is refused (exit $CODE)" || bad "connect --auth oauth with the feature off exited 0"
+has "...naming the switch" "$OUT" "mcp_oauth_enabled"
+eq "the claude-code config is untouched" "{}" "$(tr -d ' \n' < "$CLAUDE_CFG")"
+# disconnect still recognises and removes an entry written this way
+connect_cli true claude-code --auth oauth
+env HOME="$HOME_DIR" USERPROFILE="$HOME_DIR" MCPPROXY_TELEMETRY=false "$BIN" disconnect claude-code --config "$WORK/config.json" >"$WORK/disconnect.out" 2>&1 < /dev/null
+eq "disconnect exits 0" 0 "$?"
+hasnt "the entry is gone after disconnect" "$(cat "$CLAUDE_CFG")" "/mcp/oauth"
+eq "disconnect leaves no undo record behind" 0 "$(ls "$CLAUDE_CFG".undo.* 2>/dev/null | wc -l | tr -d ' ')"
+# a key connect writes exactly the files it always wrote: no undo record
+connect_cli true cursor
+eq "connect cursor (API key) exits 0" 0 "$CODE"
+eq "a key connect leaves no undo record" 0 "$(ls "$CURSOR_CFG".undo.* 2>/dev/null | wc -l | tr -d ' ')"
+REAL_SUM_AFTER="$(shasum "$REAL_CLAUDE" 2>/dev/null | awk '{print $1}')"
+eq "the real ~/.claude.json was not touched" "$REAL_SUM_BEFORE" "$REAL_SUM_AFTER"
+
+#############################################################################
+step "13. isolation and control"
 # control for the phase-1 scan: after real use the same scan must find the buckets
 for bucket in oauth_registrations oauth_grants oauth_client_bindings oauth_login_ever_used; do
 	if grep -a -q -F "$bucket" "$DATA/config.db"; then ok "$bucket present after use (the phase-1 scan can see buckets)"; else bad "$bucket missing after use"; fi

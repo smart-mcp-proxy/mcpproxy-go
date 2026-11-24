@@ -85,6 +85,10 @@ enum ConnectClientAccessibility {
     static let managementNotice = "connect-mgmt-notice"
     static let resultCredential = "connect-client-result-credential"
     static let guardRefusal = "connect-client-guard-refusal"
+    /// Spec 132 PR-3: the "API key" / "Sign in with browser" choice and the line
+    /// saying what the write leaves alone.
+    static let authChoice = "connect-client-auth-choice"
+    static let authNote = "connect-client-auth-note"
 
     /// Identifier of one client row.
     static func row(_ clientId: String) -> String { "connect-client-row-\(clientId)" }
@@ -96,7 +100,7 @@ enum ConnectClientAccessibility {
         connectButton, undoButton, disconnectButton, disconnectConfirm,
         closeButton, status, waiting, transportNotice, reloadHint, resultConfigPath,
         profilePicker, lockToggle, keylessToggle, credentialLine, managementNotice,
-        resultCredential, guardRefusal
+        resultCredential, guardRefusal, authChoice, authNote
     ]
 }
 
@@ -289,7 +293,14 @@ struct ConnectClientView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     detailSection
-                    bindingSection
+                    // Spec 132: only while the core offers it for this client;
+                    // otherwise the pane is what it always was.
+                    if model.browserLoginOffered {
+                        authSection
+                    }
+                    if model.showsBindingControls {
+                        bindingSection
+                    }
                     previewSection
                     advancedSection
                     statusSection
@@ -379,6 +390,14 @@ struct ConnectClientView: View {
                         .accessibilityIdentifier(ConnectClientAccessibility.credentialNotice)
                 }
 
+                // Spec 132: a browser login leaves the client's API key alone.
+                if let note = preview.authNote, preview.isBrowserLogin {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(ConnectClientAccessibility.authNote)
+                }
+
                 // D5: a client credential cannot reach management tools unless
                 // its profile enables them.
                 if model.showsManagementNotice {
@@ -444,6 +463,23 @@ struct ConnectClientView: View {
     /// Spec 108-k K21: which profile the client's credential binds to, and
     /// whether it is locked to it. Untouched, nothing is sent: a reconnect keeps
     /// its binding and a new credential starts on All servers.
+    /// Spec 132: how the client signs in. The diff and the backup notice are
+    /// the preview section below, and the Connect button is in the action bar,
+    /// so the choice is always shown before the write.
+    @ViewBuilder
+    private var authSection: some View {
+        Picker("How this client signs in", selection: Binding(
+            get: { model.authChoice },
+            set: { model.chooseAuth($0) })) {
+            Text("API key").tag(ConnectClientModel.AuthChoice.key)
+            Text("Sign in with browser").tag(ConnectClientModel.AuthChoice.oauth)
+        }
+        .pickerStyle(.radioGroup)
+        .disabled(model.isBusy)
+        .accessibilityIdentifier(ConnectClientAccessibility.authChoice)
+        .onChange(of: model.authChoice) { _ in Task { await model.refreshPreview() } }
+    }
+
     @ViewBuilder
     private var bindingSection: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -479,7 +515,7 @@ struct ConnectClientView: View {
     private var advancedSection: some View {
         DisclosureGroup("Advanced", isExpanded: $showAdvanced) {
             VStack(alignment: .leading, spacing: 4) {
-                if model.keylessAvailable {
+                if model.keylessAvailable && model.showsBindingControls {
                     Toggle("Connect without a credential (authentication is off)", isOn: Binding(
                         get: { model.keyless }, set: { model.setKeyless($0) }))
                         .disabled(model.isBusy)

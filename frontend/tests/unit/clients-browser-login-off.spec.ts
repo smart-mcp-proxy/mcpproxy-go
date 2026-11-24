@@ -98,6 +98,7 @@ describe('browser login is mentioned only where the spec allows it', () => {
   const root = resolve(__dirname, '../../src')
   const allowed = new Set([
     'components/clients/ClientCredentials.vue', // hidden until the payload carries credentials
+    'components/ClientConnectList.vue', // the Connect choice, drawn only while the core says browser_login_available (connect-auth-choice.spec.ts)
     'views/AuthorizeRequest.vue', // the consent page
     'views/settings/fields.ts', // the one Settings switch
     'router/index.ts', // the consent route
