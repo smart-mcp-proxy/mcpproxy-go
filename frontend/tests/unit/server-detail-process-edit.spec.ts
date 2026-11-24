@@ -115,6 +115,8 @@ describe('ServerDetail — edit command and arguments (issue #2008)', () => {
     expect((argsInput(wrapper).element as HTMLTextAreaElement).value).toBe(
       'mcp-server-sqlite\n--db-path\n/data/old.db'
     )
+    // The one-per-line box drops blank lines and surrounding spaces; say so.
+    expect(wrapper.find('[data-test="server-process-hint"]').text()).toContain('Blank lines and spaces around a line are ignored')
   })
 
   it('sends only the command when only the command changed', async () => {

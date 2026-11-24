@@ -1026,9 +1026,11 @@
                     so the arguments cannot be edited one per line. Use <code>mcpproxy upstream patch</code> to change them.
                   </p>
                   <p v-if="processDraftError" class="text-error text-xs" role="alert" data-test="server-process-error">{{ processDraftError }}</p>
-                  <p v-else class="text-base-content/60 text-xs">
-                    Saving restarts the server with the new command line. A value shown masked is a hidden
-                    credential: if you change the arguments, type its real value again.
+                  <p v-else class="text-base-content/60 text-xs" data-test="server-process-hint">
+                    Blank lines and spaces around a line are ignored; for an empty argument or one that starts or
+                    ends with a space, use <code>mcpproxy upstream patch</code>. Saving restarts the server with
+                    the new command line. A value shown masked is a hidden credential: if you change the
+                    arguments, type its real value again.
                   </p>
                   <div class="flex gap-2">
                     <button
