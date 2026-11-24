@@ -14,6 +14,12 @@ import (
 // rootsChangedTimeout bounds sending notifications/roots/list_changed upstream.
 const rootsChangedTimeout = 10 * time.Second
 
+// rootsChangedGateWait bounds waiting for a session re-initialize (and the
+// calls it waits for) before sending notifications/roots/list_changed. It is
+// longer than a tool call may run, so the notification is not dropped while a
+// re-initialize waits behind one.
+const rootsChangedGateWait = 5 * time.Minute
+
 // relayFeatures returns which of the calling MCP client's features this server
 // may use. A change to client_features or the quarantine builds a new Client,
 // so the answer holds for this one's lifetime.
@@ -106,18 +112,26 @@ func (c *Client) notifyRootsChanged() {
 		return
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), rootsChangedTimeout)
-		defer cancel()
 		// A session re-initialize rewrites mcp-go's client state, the declared
 		// capabilities included: read them, and send, only between two.
-		release, err := c.sessionGate.acquireShared(ctx)
+		gateCtx, cancelGate := context.WithTimeout(context.Background(), rootsChangedGateWait)
+		release, err := c.sessionGate.acquireShared(gateCtx)
+		cancelGate()
 		if err != nil {
+			c.logger.Debug("Not sending roots/list_changed upstream: session busy",
+				zap.String("server", c.config.Name), zap.Error(err))
 			return
 		}
 		defer release()
 		if cl.GetClientCapabilities().Roots == nil {
 			return
 		}
+		sendTimeout := rootsChangedTimeout
+		if c.rootsChangedSendTimeout > 0 {
+			sendTimeout = c.rootsChangedSendTimeout
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+		defer cancel()
 		if err := cl.RootListChanges(ctx); err != nil {
 			c.logger.Debug("Sending roots/list_changed upstream failed",
 				zap.String("server", c.config.Name), zap.Error(err))

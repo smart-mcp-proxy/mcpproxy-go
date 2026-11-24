@@ -131,6 +131,8 @@ type Client struct {
 	calls inflightCalls
 	// relayInFlight limits the upstream requests being answered at a time.
 	relayInFlight clientrelay.InFlight
+	// rootsChangedSendTimeout overrides rootsChangedTimeout (tests only).
+	rootsChangedSendTimeout time.Duration
 	// urlElicitations routes the upstream's URL elicitation completions.
 	urlElicitations clientrelay.URLElicitations
 	// requestObserver records every relayed request (activity log).
