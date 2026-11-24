@@ -143,7 +143,7 @@ Row keys: actor_kind, actor_name (omitted if empty for stampActor rows, but "" p
 |---|---|---|---|---|
 | POST /servers/{id}/skills/approve | skills_approval.go:126 (:1211) | controller.ApproveSkillsReviewedAt skills_approval.go(runtime):74 -> mutateSkillsAt :166; emit loop :221 | skill_quarantine_change (BUS; admin-only type storage/activity_models.go:108) | Y (ctx; approved_by="api" skills_approval.go(httpapi):29) |
 | POST /servers/{id}/skills/block, /unblock | skills_approval.go:194 / 215 (:1212/1213) -> handleSetSkillsBlocked :220 | Runtime.SetSkillsBlockedAt skills_approval.go(runtime):121 -> mutateSkillsAt -> :221 | skill_quarantine_change (BUS) | Y |
-| POST /servers/{id}/skills/refresh | skills.go:267 (:1209) | Runtime.RefreshServerSkills skills_catalog.go:291 ; transitions via emitSkillTransition skills_catalog.go:686 (context.WithoutCancel(ctx)) | skill_quarantine_change for status transitions (BUS). Comment says "refresh has no caller: actor_kind system" but WithoutCancel keeps ctx values, so an API-triggered refresh may still carry the REST actor (UNCONFIRMED) | system or Y |
+| POST /servers/{id}/skills/refresh | skills.go:267 (:1209) | Runtime.RefreshServerSkills skills_catalog.go:291 ; transitions via emitSkillTransition skills_catalog.go:686 (context.WithoutCancel(ctx)) | skill_quarantine_change for status transitions (BUS). The refresh is a shared flight on the runtime context (skills_catalog.go:282-345), so `WithoutCancel` there cannot recover the starting request's id; Spec 133 hands the starter's metadata to the flight explicitly | system |
 
 ### 1.6 TPA bundle / scanners
 | Door | Handler | Funnel | Row today | Actor? |
