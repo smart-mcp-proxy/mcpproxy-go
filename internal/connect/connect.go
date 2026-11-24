@@ -906,34 +906,13 @@ func (s *Service) Disconnect(clientID, serverName string) (res *ConnectResult, e
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
 
-	// A config that holds browser-login undo state has that state moved on by any
-	// write of it, a disconnect included (see undo_state.go); with no state file
-	// this is a no-op and nothing new is written.
-	defer lockConfig(cfgPath)()
-	tx, txErr := beginConfigTx(cfgPath, false)
-	if txErr != nil {
-		return nil, txErr
-	}
-	if client.Format == "toml" {
-		res, err = s.disconnectTOML(client, cfgPath, serverName)
-	} else {
-		res, err = s.disconnectJSON(client, cfgPath, serverName)
-	}
-	if tx != nil && (err != nil || res == nil || !res.Success) {
-		// Nothing was written: the state is put back exactly as it was.
-		if rb := tx.rollback(); rb != nil {
-			if err != nil {
-				err = fmt.Errorf("%w (and the undo state could not be restored: %v)", err, rb)
-			} else if res != nil {
-				res.CleanupError = "undo state could not be restored, Undo will refuse older records: " + rb.Error()
-			}
-		}
-		tx = nil
-	}
+	res, err = s.disconnectOne(client, cfgPath, serverName)
 	// OpenCode candidate drift (#922): if the entry was written to opencode.json
 	// and OpenCode later bootstrapped opencode.jsonc, the resolver now targets
 	// the .jsonc — but the entry still lives in the .json. When the resolved
-	// file has no entry, retry the other existing candidate before giving up.
+	// file has no entry, retry the other existing candidate before giving up. Each
+	// candidate runs the same lock, transaction and cleanup as the first, under
+	// its own lock, and the first one's lock is released before the next is taken.
 	if err == nil && res != nil && !res.Success && res.Action == "not_found" && clientID == "opencode" {
 		for _, alt := range opencodeConfigCandidates(s.homeDir) {
 			if alt == cfgPath {
@@ -942,7 +921,7 @@ func (s *Service) Disconnect(clientID, serverName string) (res *ConnectResult, e
 			if _, statErr := os.Stat(alt); statErr != nil {
 				continue
 			}
-			altRes, altErr := s.disconnectJSON(client, alt, serverName)
+			altRes, altErr := s.disconnectOne(client, alt, serverName)
 			if altErr != nil {
 				// An unreadable/malformed/comment-guarded alternate is a real
 				// failure — surfacing "not_found" would wrongly claim the entry
@@ -954,9 +933,43 @@ func (s *Service) Disconnect(clientID, serverName string) (res *ConnectResult, e
 			}
 		}
 	}
+	return res, s.asAccessError(client, cfgPath, err)
+}
+
+// disconnectOne removes serverName's entry from one config file under that
+// file's lock, moving its undo state and removing its undo records the way every
+// writer of it does (see undo_state.go). The undo state of a config that holds
+// browser-login state is moved on by any write of it; with no state file this
+// writes nothing new.
+func (s *Service) disconnectOne(client *ClientDef, cfgPath, serverName string) (res *ConnectResult, err error) {
+	unlock, lockErr := lockConfig(cfgPath)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
+	tx, txErr := beginConfigTx(cfgPath, false)
+	if txErr != nil {
+		return nil, txErr
+	}
+	if client.Format == "toml" {
+		res, err = s.disconnectTOML(client, cfgPath, serverName)
+	} else {
+		res, err = s.disconnectJSON(client, cfgPath, serverName)
+	}
+	if tx != nil && (err != nil || res == nil || !res.Success) {
+		// Nothing was written: the state is put back as it was.
+		if rb := tx.rollback(); rb != nil {
+			if err != nil {
+				err = fmt.Errorf("%w (and the undo state could not be restored: %v)", err, rb)
+			} else if res != nil {
+				res.CleanupError = "undo state could not be restored, Undo will refuse older records: " + rb.Error()
+			}
+		}
+		tx = nil
+	}
 	if err == nil && res != nil && res.Success {
 		var notes []string
-		if cerr := removeUndoRecords(res.ConfigPath, clientID, serverName); cerr != nil {
+		if cerr := removeUndoRecords(res.ConfigPath, client.ID, serverName); cerr != nil {
 			// The entry is gone; only the cleanup of its undo records failed.
 			notes = append(notes, cerr.Error())
 		}
@@ -974,7 +987,7 @@ func (s *Service) Disconnect(clientID, serverName string) (res *ConnectResult, e
 			res.CleanupError = strings.Join(notes, "; ")
 		}
 	}
-	return res, s.asAccessError(client, cfgPath, err)
+	return res, err
 }
 
 // ---------- JSON helpers ----------
@@ -1183,9 +1196,13 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 		return nil, err
 	}
 
-	// The undo state's transitions of one config never interleave within the
-	// process (see undo_state.go).
-	defer lockConfig(cfgPath)()
+	// The undo state's transitions of one config never interleave, in the process
+	// or (on Unix) across processes (see undo_state.go).
+	unlock, lockErr := lockConfig(cfgPath)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
 
 	// Create backup before modifying
 	// A browser-login connect must be able to see the directory's undo records
@@ -1418,9 +1435,13 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 		return nil, err
 	}
 
-	// The undo state's transitions of one config never interleave within the
-	// process (see undo_state.go).
-	defer lockConfig(cfgPath)()
+	// The undo state's transitions of one config never interleave, in the process
+	// or (on Unix) across processes (see undo_state.go).
+	unlock, lockErr := lockConfig(cfgPath)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
 
 	// Backup
 	if cred.oauth {

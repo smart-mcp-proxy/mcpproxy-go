@@ -208,6 +208,9 @@ func TestStateParsing_IsStrict(t *testing.T) {
 		"settled with owner":  fmt.Sprintf(`{"version":1,"current":%q,"pending":false,"pending_owner":%q}`, cur, gen(1)),
 		"pending without own": fmt.Sprintf(`{"version":1,"current":%q,"pending":true}`, cur),
 		"trailing garbage":    string(good) + `{}`,
+		"trailing bracket":    string(good) + `]`,
+		"trailing brace":      string(good) + `}`,
+		"trailing value":      string(good) + ` 1`,
 		"not an object":       `[]`,
 	}
 	for name, content := range bad {
@@ -263,5 +266,27 @@ func TestPendingStepSyncFailure_StopsTheConnectBeforeTheConfigWrite(t *testing.T
 			}
 		}
 		stateSync, dirSync = syncFile, syncDirectory
+	}
+}
+
+func TestStateParsing_TrailingWhitespaceIsFineAndRecordsAreStrictToo(t *testing.T) {
+	_, _, cfg, _, _ := reconnectFixture(t)
+	good, _ := os.ReadFile(cfg + undoStateSuffix)
+	if _, ok := parseUndoState([]byte(string(good) + "\n \t\n")); !ok {
+		t.Fatal("trailing whitespace is not trailing data")
+	}
+	for _, tail := range []string{"]", "}", "{}", "1"} {
+		if _, ok := parseUndoState([]byte(string(good) + tail)); ok {
+			t.Fatalf("trailing %q must be refused", tail)
+		}
+	}
+	// the record parser (json.Unmarshal) refuses trailing data on its own
+	recName := recordFilesIn(t, cfg)[0]
+	raw, _ := os.ReadFile(filepath.Join(filepath.Dir(cfg), recName))
+	var rec undoRecord
+	for _, tail := range []string{"]", "}", "{}"} {
+		if json.Unmarshal([]byte(string(raw)+tail), &rec) == nil {
+			t.Fatalf("a record with trailing %q must not parse", tail)
+		}
 	}
 }

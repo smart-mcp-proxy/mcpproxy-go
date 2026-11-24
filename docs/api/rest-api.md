@@ -1478,10 +1478,17 @@ Safety semantics:
   record authorises an Undo only while the state is readable, not pending and
   names the generation the record carries (and is strictly well formed), so a
   record that outlives its retirement, or a crash mid-write, can never authorise
-  a replaced file (Undo answers conflict). Within a process the writers of one
-  config are serialised; across processes a pending state carries its writer's
-  owner token, and a commit or rollback that finds another owner changes nothing
-  (a writer that already wrote the config then leaves the state pending). The
+  a replaced file (Undo answers conflict). Every writer of one config (connect,
+  disconnect and undo; each OpenCode candidate file under its own lock) holds a
+  process-wide mutex keyed by the symlink-resolved path and, on Unix, an
+  exclusive advisory lock on the config's directory (no file is created; a
+  writer waits at most about 10 seconds and then fails with nothing written), so
+  no two writers interleave their state steps. On Windows only the in-process
+  mutex applies. A pending state carries its writer's owner token as defence in
+  depth: a commit or rollback that finds another owner changes nothing (a writer
+  that already wrote the config then leaves the state pending), and a pending
+  state found at the start of a write is a crashed writer's and is taken over.
+  The state is parsed strictly (exact fields and types, a single JSON value). The
   state and record files are fsynced before their rename and the directory after
   it. A failure before the write restores the previous state
   exactly. An API-key connect, a disconnect or an undo moves the state along only

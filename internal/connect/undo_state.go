@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // Per-config undo state (Spec 132 PR-3).
@@ -39,30 +41,38 @@ import (
 // byte. A crash, or a failed commit, leaves the state pending, so Undo fails
 // closed until the next successful write sets a new generation.
 //
-// Concurrency. Within a process every write of one config (connect of either
-// auth mode, disconnect, undo) runs under a package-level mutex keyed by the
-// config path (lockConfig), so the state transitions of two writers never
-// interleave; it writes no file. Across processes there is no lock, so the state
-// carries the owner token: commit and rollback re-read the state first and write
-// only if it is still pending with the writer's own token. A writer that finds
-// the state pending by someone else (a crashed writer, or a concurrent one)
-// still proceeds with its config write but takes the ownership over, so the old
-// owner's later commit or rollback is refused. A writer whose commit is refused
-// after it already wrote the config leaves the state pending (it cannot know
-// which generation describes the file), and a refused rollback changes nothing
-// (it wrote no config). An API-key, disconnect or undo writer that saw no state
-// file before its write looks again afterwards and advances a file that has
-// appeared. What remains across processes is the window between a writer's
-// re-read and its rename: a writer that loses it can overwrite the other's state
-// with its own, but every resulting state is either pending or names a
-// generation whose record describes that writer's own write, and a record only
-// authorises a file whose whole-file digest it holds, so the outcomes are
-// conflict, never a changed file accepted. The one residue is a file replaced
-// by a cross-process writer inside that window and then edited back, byte for
-// byte, to an older record's content before any later write: it needs two
-// processes writing the same config within microseconds and a manual revert; the
-// result is a refused or accepted Undo of that exact older content. No lock is
-// invented for it.
+// Concurrency. Every writer of one config (connect of either auth mode,
+// disconnect, undo, each OpenCode candidate under its own path) holds lockConfig
+// for the whole transaction: a package-level mutex keyed by the config's
+// symlink-resolved path, then, on Unix, an exclusive flock on the config's
+// directory (its nearest existing ancestor while it does not exist), taken
+// without creating any file and waited for at most dirLockWait before the writer
+// fails with nothing written. With both held:
+//
+//   - two writers never interleave their state steps, in one process or across
+//     processes on Unix; a pending state found at begin is therefore a dead
+//     writer's (a crash residue) and is taken over;
+//   - a rollback restores the snapshot taken under the lock, which is either the
+//     last settled state or, after a crash, that residue itself (still pending,
+//     still failing closed until a later successful write clears it). No writer
+//     can restore another live writer's pending bytes, so no untouched file is
+//     stranded without a crash.
+//
+// On Windows there is no cross-process directory lock (LockFileEx does not lock
+// a directory handle cleanly): only the in-process mutex and the owner token
+// guard it. The owner token is kept on every platform as defence in depth:
+// commit and rollback re-read the state first and write only while it is still
+// pending under the writer's own token; a refused rollback changes nothing, a
+// refused commit after the config was written leaves the state pending. An
+// API-key, disconnect or undo writer that saw no state file before its write
+// looks again afterwards and advances one that appeared. What remains, only
+// where the directory lock does not apply (Windows, or a filesystem that cannot
+// flock), is the window between a writer's re-read and its rename; the resulting
+// states are pending or name a generation whose record describes that writer's
+// own write, and a record only authorises a file whose whole-file digest it
+// holds. The one residue is a file replaced by another process inside that
+// window and then reverted byte for byte to an older record's content before any
+// later write.
 //
 // The config file itself is still written by atomicWriteFile, which does not
 // fsync (unchanged: it is the path every connect already used). A crash that
@@ -108,20 +118,79 @@ func isGeneration(s string) bool {
 // configLocks serialises the writers of one config within the process.
 var configLocks sync.Map
 
-// lockConfig takes the process-wide lock of cfgPath and returns its release. It
-// is not reentrant: no path that holds it calls another that takes it. It nests
-// outside the credential minter's own locks (Undo's credential revocation runs
-// under it) and nothing holding a minter lock ever waits for it (the minter only
-// reads configs, which takes no lock).
-func lockConfig(cfgPath string) func() {
-	key := filepath.Clean(cfgPath)
-	if abs, err := filepath.Abs(key); err == nil {
-		key = abs
+// dirLockWait bounds how long a writer waits for another process's directory
+// lock before failing, before it has written anything. A seam for tests.
+var dirLockWait = 10 * time.Second
+
+// lockKey names the config for the in-process mutex: the absolute path with the
+// symlinks of its longest existing prefix resolved and the not-yet-existing
+// suffix kept, so two aliases of one directory share one mutex. It is a key
+// only; the file is always written through the path the caller gave.
+func lockKey(cfgPath string) string {
+	p := filepath.Clean(cfgPath)
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
 	}
-	m, _ := configLocks.LoadOrStore(key, &sync.Mutex{})
+	suffix := ""
+	for cur := p; ; {
+		if _, err := os.Lstat(cur); err == nil {
+			if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+				return filepath.Join(resolved, suffix)
+			}
+			break
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			break
+		}
+		suffix = filepath.Join(filepath.Base(cur), suffix)
+		cur = parent
+	}
+	return p
+}
+
+// lockTarget is the directory the cross-process lock is taken on: the config's
+// directory, or, while that does not exist yet, its nearest existing ancestor.
+// Nothing is created for the lock, so a connect that fails before writing still
+// leaves no new directory behind.
+func lockTarget(cfgPath string) string {
+	dir := filepath.Dir(filepath.Clean(cfgPath))
+	for {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return dir
+		}
+		dir = parent
+	}
+}
+
+// lockConfig takes the locks a writer of cfgPath holds for its whole undo-state
+// transaction (state pending -> config write -> commit -> record publish ->
+// retire), always in this order: the in-process mutex, then an exclusive advisory
+// lock on the config's directory (see acquireDirLock; Unix only). It returns the
+// release, or an error, before the caller has written anything, if another
+// process holds the directory lock past dirLockWait.
+//
+// Lock order with the rest of the package: this lock nests outside the credential
+// minter's locks (Undo's revocation runs under it); nothing holding a minter lock
+// waits for it. It is not reentrant, and a caller that needs another config's
+// lock releases this one first (the OpenCode alternate config).
+func lockConfig(cfgPath string) (func(), error) {
+	m, _ := configLocks.LoadOrStore(lockKey(cfgPath), &sync.Mutex{})
 	mu := m.(*sync.Mutex)
 	mu.Lock()
-	return mu.Unlock
+	release, err := acquireDirLock(lockTarget(cfgPath), dirLockWait)
+	if err != nil {
+		mu.Unlock()
+		return nil, err
+	}
+	return func() {
+		release()
+		mu.Unlock()
+	}, nil
 }
 
 // readUndoStateRaw returns the state file's bytes. Only "does not exist" is
@@ -150,7 +219,12 @@ func parseUndoState(raw []byte) (undoState, bool) {
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
-	if dec.Decode(&r) != nil || dec.More() {
+	if dec.Decode(&r) != nil {
+		return undoState{}, false
+	}
+	// Exactly one value: a second Decode must hit the end of the input (More()
+	// would accept a stray closing bracket).
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
 		return undoState{}, false
 	}
 	if r.Version == nil || *r.Version != undoStateVersion || r.Current == nil || r.Pending == nil {

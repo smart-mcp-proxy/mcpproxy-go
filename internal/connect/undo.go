@@ -126,7 +126,11 @@ func (s *Service) UndoWithIntent(clientID, serverName, backupName string, intent
 }
 
 func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string, intent CredentialIntent) (*ConnectResult, error) {
-	defer lockConfig(cfgPath)()
+	unlock, lockErr := lockConfig(cfgPath)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
 	// Load the pre-connect content (empty when connect created the file).
 	var backupRaw []byte
 	if backupPath != "" {
