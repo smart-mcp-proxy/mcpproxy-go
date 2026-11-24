@@ -123,8 +123,24 @@ func TestDenyPathsAtRead_EmptyDirsCostBudget(t *testing.T) {
 	var paths []string
 	var queue []denyWalkLevel
 	for i := 0; i < maxDenyWalkEntries+100 && budget > 0; i++ {
-		budget = walkDenyDir(denyWalkLevel{filepath.Join(dataDir, fmt.Sprintf("d%05d", i)), 2}, budget, &paths, &queue)
+		budget = walkDenyDir(denyWalkLevel{filepath.Join(dataDir, fmt.Sprintf("d%05d", i)), 2, false}, budget, &paths, &queue)
 	}
 	require.Equal(t, 0, budget)
 	_ = p
+}
+
+// A large state directory already covered by pass 1 must not use up the
+// budget meant for nested directories.
+func TestDenyPathsAtRead_CoveredDirsDoNotChargeBudget(t *testing.T) {
+	dataDir := t.TempDir()
+	idx := filepath.Join(dataDir, "index.bleve")
+	require.NoError(t, os.Mkdir(idx, 0o700))
+	for i := 0; i < maxDenyWalkEntries+10; i++ {
+		require.NoError(t, os.WriteFile(filepath.Join(idx, fmt.Sprintf("s%05d", i)), nil, 0o600))
+	}
+	nested := filepath.Join(dataDir, "zz", "deep")
+	require.NoError(t, os.MkdirAll(nested, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(nested, "state.db"), nil, 0o600))
+	p := &FilePolicy{Scope: ScopeUpstream, Deny: DenyPaths{DataDir: dataDir}}
+	require.Contains(t, p.denyPathsAtRead(), filepath.Join(nested, "state.db"))
 }

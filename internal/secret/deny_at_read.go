@@ -61,7 +61,13 @@ func (p *FilePolicy) denyPathsAtRead() []string {
 			paths = append(paths, full)
 			continue
 		}
-		queue = append(queue, denyWalkLevel{full, 2})
+		covered := false
+		for _, sub := range dataDirStateSubdirs {
+			if name == sub {
+				covered = true
+			}
+		}
+		queue = append(queue, denyWalkLevel{full, 2, covered})
 		for _, sub := range dataDirStateSubdirs {
 			if name != sub {
 				continue
@@ -91,6 +97,9 @@ func (p *FilePolicy) denyPathsAtRead() []string {
 type denyWalkLevel struct {
 	dir   string
 	depth int
+	// covered: the direct files of this directory were collected in pass 1, so
+	// pass 2 neither re-lists nor charges for them (only its subdirectories).
+	covered bool
 }
 
 // walkDenyDir reads up to budget entries of one directory in batches and
@@ -115,13 +124,16 @@ func walkDenyDir(cur denyWalkLevel, budget int, paths *[]string, queue *[]denyWa
 		}
 		entries, err := d.ReadDir(batch)
 		for _, e := range entries {
+			if cur.covered && e.Type().IsRegular() {
+				continue
+			}
 			budget--
 			full := filepath.Join(cur.dir, e.Name())
 			switch {
 			case e.Type().IsRegular():
 				*paths = append(*paths, full)
 			case e.IsDir() && cur.depth < maxDenyWalkDepth:
-				*queue = append(*queue, denyWalkLevel{full, cur.depth + 1})
+				*queue = append(*queue, denyWalkLevel{full, cur.depth + 1, false})
 			}
 		}
 		if err != nil || len(entries) == 0 {
