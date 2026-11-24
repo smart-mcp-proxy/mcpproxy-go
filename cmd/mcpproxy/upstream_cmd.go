@@ -2005,6 +2005,9 @@ func parseAddJSONRequest(serverName, jsonStr string) (*cliclient.AddServerReques
 	if err := jsonConfig.OAuth.Validate(); err != nil {
 		return nil, err
 	}
+	if err := jsonConfig.OAuth.ValidateRefreshReplay(); err != nil {
+		return nil, err
+	}
 
 	return &cliclient.AddServerRequest{
 		Name:       serverName,

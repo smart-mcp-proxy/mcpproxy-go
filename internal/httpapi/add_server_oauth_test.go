@@ -76,3 +76,41 @@ func TestHandlePatchServer_RefusesOAuth(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "oauth cannot be changed with PATCH")
 	assert.Nil(t, mockCtrl.capturedUpdates)
 }
+
+// TestHandleAddServer_OAuthMaskedSecretRefused: a client_secret that is a
+// redaction placeholder copied out of a read payload must be refused on create
+// (never persisted) and the response must not echo the value.
+func TestHandleAddServer_OAuthMaskedSecretRefused(t *testing.T) {
+	mockCtrl := &mockAddServerController{apiKey: "test-key"}
+	const masked = "••••ab (12 chars)"
+	w := serveJSON(t, NewServer(mockCtrl, zap.NewNop().Sugar(), nil), http.MethodPost, "/api/v1/servers", map[string]any{
+		"name": "ha",
+		"url":  "https://ha.example.com/api/mcp",
+		"oauth": map[string]any{
+			"client_id":     "example-client",
+			"client_secret": masked,
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
+	assert.Nil(t, mockCtrl.captured, "a masked secret must never reach AddServer")
+	assert.Contains(t, w.Body.String(), "oauth.client_secret")
+	assert.NotContains(t, w.Body.String(), masked)
+}
+
+// TestHandleAddServer_OAuthRefreshReplayNeedsTokenEndpoint: the MCP
+// upstream_servers door refuses refresh_replay_enabled without an explicit
+// token_endpoint; the REST create door must not persist a block that
+// config validation rejects on the next load.
+func TestHandleAddServer_OAuthRefreshReplayNeedsTokenEndpoint(t *testing.T) {
+	mockCtrl := &mockAddServerController{apiKey: "test-key"}
+	w := serveJSON(t, NewServer(mockCtrl, zap.NewNop().Sugar(), nil), http.MethodPost, "/api/v1/servers", map[string]any{
+		"name": "ha",
+		"url":  "https://ha.example.com/api/mcp",
+		"oauth": map[string]any{
+			"client_id":              "example-client",
+			"refresh_replay_enabled": true,
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
+	assert.Nil(t, mockCtrl.captured)
+}

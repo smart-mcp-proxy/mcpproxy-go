@@ -2580,6 +2580,12 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Same check the MCP upstream_servers door runs: refresh_replay_enabled
+	// without an explicit token_endpoint fails config validation on next load.
+	if err := req.OAuth.ValidateRefreshReplay(); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Auto-detect protocol if not specified
 	protocol := req.Protocol

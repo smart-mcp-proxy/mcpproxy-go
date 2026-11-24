@@ -97,6 +97,12 @@ func TestParseAddJSONOAuthAndUnknownKeys(t *testing.T) {
 		require.Error(t, err)
 	})
 
+	t.Run("refresh replay without token endpoint refused", func(t *testing.T) {
+		_, err := parseAddJSONRequest("srv", `{"url":"https://example.com/mcp","oauth":{"client_id":"x","refresh_replay_enabled":true}}`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "token_endpoint")
+	})
+
 	t.Run("unknown top-level keys refused and all listed", func(t *testing.T) {
 		_, err := parseAddJSONRequest("srv", `{"url":"https://example.com/mcp","enabled":true,"isolation":{}}`)
 		require.Error(t, err)
