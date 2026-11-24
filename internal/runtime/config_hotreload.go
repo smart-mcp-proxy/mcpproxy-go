@@ -611,7 +611,7 @@ func (r *ConfigApplyResult) FormatChangedFields() string {
 // adopted into the live config, and reported by its JSON key.
 var undiffedHotConfigFields = []string{
 	"EnableTray", "TopK", "MaxResultSizeChars", "InitTimeout", "ForwardProxyEnv",
-	"RequireMCPAuth", "MCPRejectQueryAPIKey", "CheckServerRepo", "DockerRecovery",
+	"RequireMCPAuth", "MCPRejectQueryAPIKey", "MCPOAuthEnabled", "CheckServerRepo", "DockerRecovery",
 	"RegistriesLocked", "AllowPrivateRegistryFetch", "Features",
 	"ToolResponseSessionRiskWarning", "OAuthExpiryWarningHours",
 	"ActivityRetentionDays", "ActivityMaxRecords", "ActivityMaxSizeMB",

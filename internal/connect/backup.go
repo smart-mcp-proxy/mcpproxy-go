@@ -28,6 +28,15 @@ var backupNow = time.Now
 // classified into a typed *AccessError by the Connect/Disconnect boundary
 // (Spec 075 FR-004, see Service.asAccessError).
 func backupFile(path string) (string, error) {
+	return backupFileAvoiding(path, nil)
+}
+
+// backupFileAvoiding is backupFile, except that a candidate name for which
+// taken returns true is skipped like a name that already exists (the numeric
+// suffix scheme is the same, so names are unchanged unless there is a
+// collision). Connect uses it so that a backup never takes the name of a
+// backup that has a foreign undo record.
+func backupFileAvoiding(path string, taken func(backupPath string) bool) (string, error) {
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		return "", nil // nothing to back up
@@ -48,12 +57,19 @@ func backupFile(path string) (string, error) {
 	backupPath := fmt.Sprintf("%s.bak.%s", path, ts)
 	var dst *os.File
 	for n := 1; ; n++ {
-		dst, err = os.OpenFile(backupPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode())
-		if err == nil {
-			break
+		if taken != nil && taken(backupPath) {
+			err = fs.ErrExist
+		} else {
+			dst, err = os.OpenFile(backupPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode())
+			if err == nil {
+				break
+			}
 		}
 		if !errors.Is(err, fs.ErrExist) {
 			return "", fmt.Errorf("create backup file: %w", err)
+		}
+		if n > 10000 {
+			return "", fmt.Errorf("create backup file: no free backup name for %s", path)
 		}
 		backupPath = fmt.Sprintf("%s.bak.%s-%d", path, ts, n)
 	}

@@ -869,6 +869,9 @@ export const ProfileChangeRotate = 'rotate' as const;
 export const ProfileChangeAnonymous = 'anonymous' as const;
 export const ProfileChangeIssue = 'issue' as const;
 export const ProfileChangeRevoke = 'revoke' as const;
+export const ProfileChangeApprove = 'approve' as const;
+export const ProfileChangeDeny = 'deny' as const;
+export const ProfileChangeReplayRevoke = 'replay_revoke' as const;
 export type ProfileChangeKind =
   | typeof ProfileChangeCreate
   | typeof ProfileChangeUpdate
@@ -882,7 +885,10 @@ export type ProfileChangeKind =
   | typeof ProfileChangeRotate
   | typeof ProfileChangeAnonymous
   | typeof ProfileChangeIssue
-  | typeof ProfileChangeRevoke;
+  | typeof ProfileChangeRevoke
+  | typeof ProfileChangeApprove
+  | typeof ProfileChangeDeny
+  | typeof ProfileChangeReplayRevoke;
 
 export const RotationFinalized = 'finalized' as const;
 export const RotationRolledBack = 'rolled_back' as const;

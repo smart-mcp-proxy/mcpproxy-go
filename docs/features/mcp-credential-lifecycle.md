@@ -46,11 +46,15 @@ Reassigning a worker is the existing `profiles assign client=<id> profile=<other
 
 | Operation | Arguments | Result |
 |---|---|---|
-| `list` | `kind?` (`client`, `token`, `all`), `profile?`, `state?` (`active`, `expired`, `revoked`, `all`) | `{credentials: [...], total}` |
-| `get` | exactly one of `client` or `token` | `{credential, links}` |
+| `list` | `kind?` (`client`, `token`, `browser_login`, `all`), `profile?`, `state?` (`active`, `expired`, `lapsed`, `revoked`, `all`) | `{credentials: [...], total}` |
+| `get` | exactly one of `client` or `token` | `{credential, links, logins?}` |
 | `create_client` | `client`, `profile`, `expires_in`, `mode?` (`locked` default, `switchable`), `display_name?`, `purpose?` | one-time delivery (below) |
 | `create_token` | `name`, `profile`, `expires_in`, `purpose?` | one-time delivery (below) |
-| `revoke` | exactly one of `client` or `token` | `{credential, changed, client_config_untouched?}` |
+| `revoke` | exactly one of `client` or `token`; `grant?` with `client` | `{credential, changed, client_config_untouched?}` |
+
+### Browser logins
+
+When [browser login](./client-oauth-login.md) is in use, `list` also returns each login as a row with `kind: browser_login`, `id` = the grant id, `client`, `state` (`active`, `lapsed` when the refresh token expired, or `revoked`), `reported_name`, `redirect_host`, `observed_name` and `name_mismatch`; never a token or hash. `get client=<id>` adds the client's logins under `logins` when it has any. `revoke client=<id> grant=<grant_id>` revokes that one login (`identity_not_found` for an unknown grant or one that belongs to another client); `grant` needs `client`, and `revoke client=<id>` alone still revokes everything under the client. The tool never creates a login: `create_client` and `create_token` issue API-key credentials only, and a login exists only after a person approves it on the consent page. `reported_name` and the other client-supplied strings are untrusted text.
 
 Every credential the tool issues:
 

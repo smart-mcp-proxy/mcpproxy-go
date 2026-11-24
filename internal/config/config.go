@@ -405,6 +405,11 @@ type Config struct {
 	// MCP endpoints: the Web UI and its SSE stream (/events) still use the
 	// query form. Live, no restart needed.
 	MCPRejectQueryAPIKey bool `json:"mcp_reject_query_apikey,omitempty" mapstructure:"mcp-reject-query-apikey"`
+	// MCPOAuthEnabled turns on browser login (OAuth 2.1 + PKCE) for MCP
+	// clients on the loopback listener (Spec 132). Experimental, default false:
+	// with it off nothing changes. Env override MCPPROXY_MCP_OAUTH_ENABLED is
+	// process-only and never persisted. Live, no restart needed.
+	MCPOAuthEnabled bool `json:"mcp_oauth_enabled,omitempty" mapstructure:"mcp-oauth-enabled"`
 	// TrustedHosts lists non-loopback Host header values accepted on loopback
 	// listeners (GH #898). DNS-rebinding protection rejects requests whose Host
 	// header is not a loopback address when mcpproxy listens on loopback; a
@@ -2787,6 +2792,11 @@ func NormalizeForwardHeaders(cfg *Config) []ForwardHeaderNormalization {
 	}
 	return out
 }
+
+// EnvMCPOAuthEnabled is the process-only environment override for
+// Config.MCPOAuthEnabled (Spec 132). Accepts true|1 / false|0; anything else
+// is ignored. Never persisted.
+const EnvMCPOAuthEnabled = "MCPPROXY_MCP_OAUTH_ENABLED"
 
 // EnvForwardClientHeaders is the environment kill switch for client header
 // forwarding (Spec 112 FR-003): false|0|off disables it for the process.

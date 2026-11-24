@@ -539,6 +539,11 @@ struct ConfigFieldRow: View {
             HStack(spacing: 6) {
                 Text(field.label).fontWeight(.medium)
                 if dirty { Circle().fill(Color.orange).frame(width: 6, height: 6) }
+                if let badge = field.badge {
+                    Text(badge).font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
+                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.5)))
+                        .accessibilityIdentifier("setting-badge-\(field.key)")
+                }
                 if field.restart {
                     Text("restart").font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
                         .background(Color.orange.opacity(0.25)).cornerRadius(4)

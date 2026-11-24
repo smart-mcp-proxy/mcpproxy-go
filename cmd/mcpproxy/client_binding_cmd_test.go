@@ -432,7 +432,7 @@ func TestClientForget_DisconnectAndError(t *testing.T) {
 
 func TestClientCommands_NoDaemonExit1(t *testing.T) {
 	withNoDaemon(t)
-	for _, args := range [][]string{{"list"}, {"show", "x"}, {"set-profile", "x", "p"}, {"lock", "x"}, {"add", "x"}, {"rotate", "x"}, {"upgrade-admin-key-holders"}, {"forget", "x"}} {
+	for _, args := range [][]string{{"list"}, {"show", "x"}, {"set-profile", "x", "p"}, {"lock", "x"}, {"add", "x"}, {"rotate", "x"}, {"upgrade-admin-key-holders"}, {"forget", "x"}, {"revoke-login", "x", "g"}} {
 		_, _, err := runCLI(t, GetClientCommand, "table", args...)
 		require.Error(t, err, args)
 		require.Equal(t, ExitCodeGeneralError, classifyError(err))

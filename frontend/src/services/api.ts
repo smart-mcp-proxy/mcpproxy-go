@@ -1,5 +1,5 @@
 import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, StatusResponse, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, CatalogSearchResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivityRecord, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, AttentionResponse, ReviewQueueResponse, ServerReviewResponse } from '@/types'
-import type { ProfileConfig, ProfileList, ProfileView, ProfileWriteResult, ProfileRenameResult, ProfileDeleteResult, EffectiveToolsResult, TryProfileResponse, AccessExplanation, ExplainSubjectQuery, ClientView, ClientsResponse, BulkAssignResponse, CustomClientResponse, RotateResponse, UpgradePreview, UpgradeApplyResult, ForgetClientResponse, ConnectOptions, SkillsListResponse, SkillContentResponse, SkillCopy, SkillsResponse } from '@/types/api'
+import type { ProfileConfig, ProfileList, ProfileView, ProfileWriteResult, ProfileRenameResult, ProfileDeleteResult, EffectiveToolsResult, TryProfileResponse, AccessExplanation, ExplainSubjectQuery, ClientView, ClientsResponse, BulkAssignResponse, CustomClientResponse, RotateResponse, UpgradePreview, UpgradeApplyResult, ForgetClientResponse, RevokeCredentialResponse, ConnectOptions, OAuthAuthorization, OAuthApprovalBody, OAuthPreview, OAuthDecision, SkillsListResponse, SkillContentResponse, SkillCopy, SkillsResponse } from '@/types/api'
 
 import { joinHoldEvidence, type HoldEvidenceSource } from '@/utils/holdEvidence'
 
@@ -1530,6 +1530,34 @@ class APIService {
     return this.data<ForgetClientResponse>(`/api/v1/clients/${encodeURIComponent(id)}${queryString({ disconnect: opts.disconnect ? 'true' : undefined })}`, { method: 'DELETE' })
   }
 
+  // Spec 132: revoke one browser login, or the API key alone (the client's logins
+  // and binding stay). Administrator only.
+  revokeClientLogin(id: string, grantId: string): Promise<RevokeCredentialResponse> {
+    return this.data<RevokeCredentialResponse>(`/api/v1/clients/${encodeURIComponent(id)}/logins/${encodeURIComponent(grantId)}`, { method: 'DELETE' })
+  }
+
+  revokeClientAPIKey(id: string): Promise<RevokeCredentialResponse> {
+    return this.data<RevokeCredentialResponse>(`/api/v1/clients/${encodeURIComponent(id)}/api-key`, { method: 'DELETE' })
+  }
+
+  // Spec 132 sign-in requests (administrator only). All throw an ApiError whose
+  // `status` and `code` the consent page branches on.
+  getOAuthAuthorization(id: string): Promise<OAuthAuthorization> {
+    return this.data<OAuthAuthorization>(`/api/v1/oauth/authorizations/${encodeURIComponent(id)}`)
+  }
+
+  previewOAuthAuthorization(id: string, body: OAuthApprovalBody): Promise<OAuthPreview> {
+    return this.data<OAuthPreview>(`/api/v1/oauth/authorizations/${encodeURIComponent(id)}/preview`, { method: 'POST', body: JSON.stringify(body) })
+  }
+
+  approveOAuthAuthorization(id: string, body: OAuthApprovalBody): Promise<OAuthDecision> {
+    return this.data<OAuthDecision>(`/api/v1/oauth/authorizations/${encodeURIComponent(id)}/approve`, { method: 'POST', body: JSON.stringify(body) })
+  }
+
+  denyOAuthAuthorization(id: string): Promise<OAuthDecision> {
+    return this.data<OAuthDecision>(`/api/v1/oauth/authorizations/${encodeURIComponent(id)}/deny`, { method: 'POST', body: '{}' })
+  }
+
   upgradeAdminKeyHolders(body: { profile?: string; mode?: 'locked' | 'switchable'; apply?: boolean; precondition_token?: string } = {}): Promise<UpgradePreview & UpgradeApplyResult> {
     return this.data('/api/v1/clients/upgrade-admin-key-holders', { method: 'POST', body: JSON.stringify(body) })
   }
@@ -1550,12 +1578,13 @@ class APIService {
   // masked. Like getConnectClientStatus this reads the config on demand (to
   // classify create-vs-overwrite), so on macOS it may raise an App-Data prompt;
   // a denial returns 403 with remediation (surfaced as success:false + error).
-  async getConnectPreview(clientId: string, opts: Pick<ConnectOptions, 'profile' | 'mode' | 'keyless'> = {}): Promise<APIResponse<ConnectPreview>> {
+  async getConnectPreview(clientId: string, opts: Pick<ConnectOptions, 'profile' | 'mode' | 'keyless' | 'auth'> = {}): Promise<APIResponse<ConnectPreview>> {
     // `profile: ''` is an explicit All servers, so the empty string is sent.
     const q = new URLSearchParams()
     if (opts.profile !== undefined) q.set('profile', opts.profile)
     if (opts.mode) q.set('mode', opts.mode)
     if (opts.keyless) q.set('keyless', 'true')
+    if (opts.auth) q.set('auth', opts.auth)
     const text = q.toString()
     return this.requestRaw<ConnectPreview>(`/api/v1/connect/${encodeURIComponent(clientId)}/preview${text ? `?${text}` : ''}`)
   }
@@ -1568,6 +1597,7 @@ class APIService {
     if (opts.profile !== undefined) body.profile = opts.profile
     if (opts.mode) body.mode = opts.mode
     if (opts.keyless) body.keyless = true
+    if (opts.auth) body.auth = opts.auth
     if (opts.precondition_token) body.precondition_token = opts.precondition_token
     return this.requestRaw<ConnectResult>(`/api/v1/connect/${encodeURIComponent(clientId)}`, {
       method: 'POST',

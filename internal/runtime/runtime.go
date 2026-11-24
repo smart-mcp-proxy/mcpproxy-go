@@ -448,6 +448,9 @@ type Runtime struct {
 	// credentialsService is Spec 115's issuance/revocation facade over both
 	// credential kinds; it shares bindingWriteMu with clientsService.
 	credentialsService *CredentialsService
+	// oauthLoginService is Spec 132's browser-login service; it shares
+	// bindingWriteMu with the two services above.
+	oauthLoginService *OAuthLoginService
 	// profilesService is Spec 108-f's single profiles service; the evaluator
 	// and session hook are installed by the server.
 	profilesService    *ProfilesService
@@ -775,6 +778,27 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		Mu:       &rt.bindingWriteMu,
 		Logger:   logger,
 	})
+
+	// Spec 132: the browser-login service. Same mutex as the two services
+	// above (the one lock order is documented on OAuthLoginService); revoking
+	// or forgetting a client cancels that client's pending sign-in requests
+	// through it.
+	rt.oauthLoginService = NewOAuthLoginService(OAuthLoginDeps{
+		Store: storageManager,
+		HMACKey: func() ([]byte, error) {
+			return auth.GetOrCreateHMACKey(rt.Config().DataDir)
+		},
+		Config:           rt.Config,
+		Guard:            rt.BindingGuard,
+		Activity:         storageManager.SaveActivity,
+		Publish:          rt.publishEvent,
+		Mu:               &rt.bindingWriteMu,
+		Logger:           logger,
+		ConfigCommitLock: &rt.configCommitMu,
+	})
+	rt.clientsService.SetLoginCanceler(func(clientID string) { rt.oauthLoginService.CancelForClient(clientID) })
+	rt.credentialsService.SetOAuthLogin(rt.oauthLoginService)
+	rt.repairOAuthBindings()
 
 	rt.profilesService = newProfilesService(rt)
 

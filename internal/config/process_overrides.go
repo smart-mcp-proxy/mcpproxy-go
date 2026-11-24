@@ -85,6 +85,7 @@ var (
 	FieldHTTPReadTimeout          = scalar("http_read_timeout", func(c *Config) **Duration { return &c.HTTPReadTimeout })
 	FieldHTTPWriteTimeout         = scalar("http_write_timeout", func(c *Config) **Duration { return &c.HTTPWriteTimeout })
 	FieldHTTPIdleTimeout          = scalar("http_idle_timeout", func(c *Config) **Duration { return &c.HTTPIdleTimeout })
+	FieldMCPOAuthEnabled          = scalar("mcp_oauth_enabled", func(c *Config) *bool { return &c.MCPOAuthEnabled })
 	FieldForwardClientHeaders     = scalar("forward_client_headers", func(c *Config) **bool { return &c.ForwardClientHeaders })
 
 	FieldLogLevel = Field[string]{

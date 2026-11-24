@@ -66,11 +66,16 @@
           "description": "create_client, create_token: required lifetime such as 30m, 4h or 7d; at most 365d. At most 24h is shown as a task lease.",
           "type": "string"
         },
+        "grant": {
+          "description": "revoke: with client, revoke only this browser login (a login id from list or get). A login is created only by the user on the consent page.",
+          "type": "string"
+        },
         "kind": {
           "description": "list: credential kind; omitted = all.",
           "enum": [
             "client",
             "token",
+            "browser_login",
             "all"
           ],
           "type": "string"
@@ -107,10 +112,11 @@
           "type": "string"
         },
         "state": {
-          "description": "list: credential state; omitted = all.",
+          "description": "list: credential state (lapsed = browser login past its refresh expiry); omitted = all.",
           "enum": [
             "active",
             "expired",
+            "lapsed",
             "revoked",
             "all"
           ],

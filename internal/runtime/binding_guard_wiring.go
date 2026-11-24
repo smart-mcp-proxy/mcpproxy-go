@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"time"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 )
 
@@ -52,4 +54,15 @@ func (r *Runtime) guardedBindingSnapshot() ([]auth.AgentToken, error) {
 		return nil, err
 	}
 	return guardedOnly(all), nil
+}
+
+// oauthBindingSnapshot returns the browser-login bindings every FR-008a path
+// evaluates next to the token records (Spec 132 R5). A read error is returned,
+// never swallowed: the guard fails closed.
+func (r *Runtime) oauthBindingSnapshot() ([]OAuthBinding, error) {
+	sm := r.StorageManager()
+	if sm == nil {
+		return nil, nil
+	}
+	return LoadOAuthBindings(sm, time.Now())
 }

@@ -19,6 +19,7 @@
           title="Open documentation"
           @click.stop
         >docs ↗</a>
+        <span v-if="field.badge" class="badge badge-outline badge-xs" :data-test="`setting-badge-${field.key}`">{{ field.badge }}</span>
         <span v-if="field.restart" class="badge badge-warning badge-xs gap-1" title="Requires restart">
           restart
         </span>

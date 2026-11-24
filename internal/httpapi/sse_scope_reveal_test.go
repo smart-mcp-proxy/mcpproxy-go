@@ -599,6 +599,8 @@ func TestSSE_EveryRuntimeEventTypeIsClassified(t *testing.T) {
 		"client.binding_changed":           "administrator-only client -> profile binding change (Spec 108 FR-026); dropped for scoped callers",
 		"profiles.changed":                 "administrator-only profile change invalidation (Spec 108-f FR-038): names profiles a scoped caller may not reach; dropped for scoped callers",
 		"credentials.changed":              "administrator-only credential lifecycle invalidation (Spec 115 FR-024): names identities and profiles; dropped for scoped callers",
+		"oauth.authorization_pending":      "administrator-only browser-login request (Spec 132): names a client and its sanitised label; dropped for scoped callers",
+		"oauth.authorization_decided":      "administrator-only browser-login decision (Spec 132): request id and status; dropped for scoped callers",
 		"skills.changed":                   "administrator-only skills catalog invalidation (Spec 125 FR-019a): carries per-state skill counts; dropped for scoped callers",
 		"activity.skill_quarantine_change": "administrator-only skill approval row (Spec 125 FR-019a): names skills that may be unapproved, even on a visible server; dropped for scoped callers",
 		"activity.skill_access":            "administrator-only skill access row (Spec 125 FR-019a): names the id its caller asked for, which may be a held skill on a visible server; dropped for scoped callers",
