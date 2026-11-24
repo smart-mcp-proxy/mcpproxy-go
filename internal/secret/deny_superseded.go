@@ -37,8 +37,17 @@ var (
 // entries). Upstream reads refuse every identity recorded here for the life of
 // the process. The identity is captured now (device and inode, or volume
 // serial and file index read from a handle on Windows), never from a retained
-// FileInfo. A path that does not exist records nothing and is not an error
-// (the first save creates the file).
+// FileInfo, together with the file's modification time from the same stat
+// (see supersededStamp). A path that does not exist records nothing and is
+// not an error (the first save creates the file).
+//
+// A write to the replaced file through a hardlink, or setting its times,
+// changes that time and ends the refusal; either needs ownership of or write
+// access (FILE_WRITE_ATTRIBUTES on Windows) to the proxy's own 0600 config,
+// which only its owner has, and the owner can read it anyway. On a filesystem
+// with coarse timestamps a new file at a reused identity can still share the
+// time and be refused: the rare residue of the false refusal this avoids, and
+// it fails closed.
 //
 // Any other failure to read the identity is returned, and nothing is
 // recorded: the caller should warn, since a hardlink to the replaced file will
