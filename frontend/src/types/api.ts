@@ -1584,6 +1584,8 @@ export interface ProfileConfig {
   code_execution?: boolean
   management_tools?: boolean
   switchable_to?: string[]
+  /** Response limit in characters for calls under the profile; absent = inherit the global limit, 0 = no limit. */
+  tool_response_limit?: number
 }
 
 export type ProfileMoved = { clients: string[]; tokens: string[] }

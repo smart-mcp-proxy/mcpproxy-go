@@ -109,6 +109,7 @@ const sidebars = {
         'features/profiles',
         'features/mcp-credential-lifecycle',
         'features/connect-clients',
+        'features/clients-that-defer-tools',
         'features/skills',
         'features/agent-instructions',
         'features/config-import',

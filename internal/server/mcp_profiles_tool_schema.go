@@ -64,16 +64,17 @@ var profilesOpArgs = []struct {
 // profileConfigDescriptions are the one-line descriptions of the ProfileConfig
 // properties. A field without an entry still appears, with a generic line.
 var profileConfigDescriptions = map[string]string{
-	"name":             "get, create, update, delete, rename, classify, effective_tools: the profile name (update replaces the profile with this name).",
-	"servers":          "create, update: servers the profile reaches (all servers when empty).",
-	"title":            "create, update: display title, at most 80 characters.",
-	"description":      "create, update: description, at most 500 characters.",
-	"max_tier":         "create, update: highest tool tier the profile allows; omitted = no cap.",
-	"unannotated":      "create, update: handling of tools with no tier hint; omitted = deny under a read/write cap.",
-	"tools":            "create, update: tool rules: allow/deny are server:tool globs (deny wins), classify maps an exact server:tool to a tier.",
-	"code_execution":   "create, update: false turns code_execution off for the profile; omitted inherits.",
-	"management_tools": "create, update: true makes the management tools (upstream_servers, quarantine_security, profiles) visible under it; omitted inherits.",
-	"switchable_to":    "create, update: profile names a session may set_profile into; [] = none, omitted = unset.",
+	"name":                "get, create, update, delete, rename, classify, effective_tools: the profile name (update replaces the profile with this name).",
+	"servers":             "create, update: servers the profile reaches (all servers when empty).",
+	"title":               "create, update: display title, at most 80 characters.",
+	"description":         "create, update: description, at most 500 characters.",
+	"max_tier":            "create, update: highest tool tier the profile allows; omitted = no cap.",
+	"unannotated":         "create, update: handling of tools with no tier hint; omitted = deny under a read/write cap.",
+	"tools":               "create, update: tool rules: allow/deny are server:tool globs (deny wins), classify maps an exact server:tool to a tier.",
+	"code_execution":      "create, update: false turns code_execution off for the profile; omitted inherits.",
+	"management_tools":    "create, update: true makes the management tools (upstream_servers, quarantine_security, profiles) visible under it; omitted inherits.",
+	"switchable_to":       "create, update: profile names a session may set_profile into; [] = none, omitted = unset.",
+	"tool_response_limit": "create, update: response limit in characters for calls under the profile, replacing the global tool_response_limit; 0 = no limit, omitted inherits.",
 }
 
 // profileConfigSchemaOverrides pin the enumerations the Go types cannot carry.

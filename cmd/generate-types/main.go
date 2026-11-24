@@ -1046,6 +1046,7 @@ export interface ProfileView {
   code_execution?: boolean;
   management_tools?: boolean;
   switchable_to?: string[];
+  tool_response_limit?: number;
   effective_servers: string[];
   effective_unannotated: string;
   effective_code_execution: boolean;

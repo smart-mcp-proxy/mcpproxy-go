@@ -318,6 +318,7 @@ func renderProfileBlock(v runtime.ProfileView) string {
 	fmt.Fprintf(&b, "Unannotated: %s\n", unannotatedLabel(v))
 	fmt.Fprintf(&b, "Code execution: %s\n", codeExecutionLabel(v))
 	fmt.Fprintf(&b, "Management tools: %s\n", managementToolsLabel(v))
+	fmt.Fprintf(&b, "Tool response limit: %s\n", responseLimitLabel(v))
 	switch {
 	case v.SwitchableTo == nil:
 		b.WriteString("Switchable to: unset (legacy)\n")
@@ -399,6 +400,17 @@ func managementToolsLabel(v runtime.ProfileView) string {
 		return onOff(*v.ManagementTools)
 	}
 	return "inherited"
+}
+
+func responseLimitLabel(v runtime.ProfileView) string {
+	switch {
+	case v.ToolResponseLimit == nil:
+		return "inherited"
+	case *v.ToolResponseLimit == 0:
+		return "none (whole responses)"
+	default:
+		return fmt.Sprintf("%d characters", *v.ToolResponseLimit)
+	}
 }
 
 // --- create / update ---------------------------------------------------------
@@ -687,7 +699,7 @@ exist yet) with --set overrides applied; nothing is persisted.
 
 --set keys are the REST field names: servers, title, description, max_tier,
 unannotated, tools.allow, tools.deny, tools.classify.<server:tool>,
-code_execution, management_tools, switchable_to. Lists are comma-separated;
+code_execution, management_tools, switchable_to, tool_response_limit. Lists are comma-separated;
 code_execution=inherit clears the field.
 
 Examples:
