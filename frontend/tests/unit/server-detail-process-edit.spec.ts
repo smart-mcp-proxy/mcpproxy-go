@@ -10,6 +10,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 let serverCommand: string
 let serverArgs: string[] | undefined
+let serverGeneration: number | undefined
 let patchResponse: { success: boolean; data?: unknown; error?: string }
 
 vi.mock('@/services/api', () => {
@@ -28,6 +29,7 @@ vi.mock('@/services/api', () => {
               tool_count: 1,
               command: serverCommand,
               ...(serverArgs === undefined ? {} : { args: serverArgs }),
+              ...(serverGeneration === undefined ? {} : { generation: serverGeneration, incarnation: 1 }),
             },
             {
               name: 'other',
@@ -91,6 +93,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   serverCommand = 'uvx'
   serverArgs = ['mcp-server-sqlite', '--db-path', '/data/old.db']
+  serverGeneration = undefined
   patchResponse = { success: true, data: { message: 'ok' } }
 })
 
@@ -258,6 +261,34 @@ describe('ServerDetail — edit command and arguments (issue #2008)', () => {
     await wrapper.find('[data-test="server-process-cancel"]').trigger('click')
     await openEditor(wrapper)
     expect((argsInput(wrapper).element as HTMLTextAreaElement).value).toContain('/data/new.db')
+  })
+
+  it('refuses to save when the config generation moved, even if the masked values look the same', async () => {
+    // A credential rotated elsewhere renders as the same mask, so only the
+    // committed generation can tell that the stored arguments are newer.
+    serverArgs = ['--password', '••••', '--verbose']
+    serverGeneration = 7
+    const { wrapper, api } = await mountDetail()
+    await openEditor(wrapper)
+    await argsInput(wrapper).setValue('--password\nabc')
+
+    serverGeneration = 8
+    const { useServersStore } = await import('@/stores/servers')
+    await useServersStore((wrapper.vm as any).$pinia).fetchServers(true)
+    await flushPromises()
+
+    await save(wrapper)
+    expect(api.patchServer).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-test="server-process-error"]').text()).toContain('changed somewhere else')
+  })
+
+  it('saves when the generation is unchanged', async () => {
+    serverGeneration = 7
+    const { wrapper, api } = await mountDetail()
+    await openEditor(wrapper)
+    await commandInput(wrapper).setValue('node')
+    await save(wrapper)
+    expect(api.patchServer).toHaveBeenCalledWith('sqlite', { command: 'node' })
   })
 
   it('drops the draft when the view moves to another server', async () => {

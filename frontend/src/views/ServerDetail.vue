@@ -3731,8 +3731,8 @@ async function deleteKv(scope: 'header' | 'env', k: string) {
 //    to). A field left out of the PATCH keeps its stored value, masks included.
 //  * `args` replaces the whole vector, so a changed list is sent complete —
 //    and a list the user did not touch is never re-parsed and sent.
-//  * If the stored command line changed elsewhere while the editor was open,
-//    the save is refused rather than writing over the newer value.
+//  * If the server's configuration changed elsewhere while the editor was
+//    open, the save is refused rather than writing over the newer value.
 //  * The draft belongs to one server: it is dropped when the view moves to
 //    another one.
 //
@@ -3750,6 +3750,10 @@ interface ProcessSnapshot {
   command: string
   args: string[]
   argsText: string
+  // Committed config generation and incarnation of the server when the editor
+  // opened (Spec 116 FR-017); undefined when the core does not report them.
+  generation?: number
+  incarnation?: number
 }
 let processSnapshot: ProcessSnapshot | null = null
 
@@ -3801,6 +3805,8 @@ function startEditProcess() {
     command: server.value.command ?? '',
     args,
     argsText: args.join('\n'),
+    generation: server.value.generation,
+    incarnation: server.value.incarnation,
   }
   commandDraft.value = processSnapshot.command
   argsDraft.value = processSnapshot.argsText
@@ -3827,9 +3833,18 @@ async function saveProcess() {
     resetProcessEditor()
     return
   }
-  if ((server.value.command ?? '') !== snapshot.command || !sameArgs(server.value.args ?? [], snapshot.args)) {
+  // The displayed values alone cannot tell that the server changed: two
+  // different credentials render as the same mask. The committed generation
+  // can, so it decides when the core reports it; the values still cover a core
+  // that does not.
+  const changedElsewhere =
+    server.value.generation !== snapshot.generation ||
+    server.value.incarnation !== snapshot.incarnation ||
+    (server.value.command ?? '') !== snapshot.command ||
+    !sameArgs(server.value.args ?? [], snapshot.args)
+  if (changedElsewhere) {
     processDraftError.value =
-      'The command of this server was changed somewhere else while you were editing. Cancel and open the editor again.'
+      'The configuration of this server was changed somewhere else while you were editing. Cancel and open the editor again.'
     return
   }
 
