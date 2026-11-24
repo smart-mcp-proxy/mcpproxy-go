@@ -190,7 +190,7 @@ Server-edition handlers write **no activity rows** except credential_broker; the
 | POST /admin/users/{id}/tokens/revoke, /tokens/{name}/revoke | api/admin_tokens.go:66 / :55 (routes :111-112,:129-130) | agentTokens.RevokeAgentTokenForOwner | **NO RECORD** (zap "admin revoked agent token" with actor_user_id/target_user_id) |
 | POST /admin/servers/{name}/shared | api/admin_handlers.go:561 toggleSharedServer | sharingUpdater or config.SaveConfig | **NO RECORD** |
 | POST /admin/servers/{name}/enable, /disable | :695 / :728 | managementSvc.EnableServer(r.Context(), ...) -> Runtime.EnableServerCtx -> config_change server_enabled/disabled (BUS) | config_change; actor from RequestActor(AuthContext) if no middleware stamp (UNCONFIRMED) |
-| POST /admin/servers/{name}/restart | :761 | managementSvc.RestartServer | **NO RECORD** |
+| POST /admin/servers/{name}/restart | :761 | managementSvc.RestartServer (shared restart funnel, management/service.go:747-758) | config_change server_enabled when it restarts a disabled server (lifecycle.go:2707-2711); otherwise **NO RECORD** |
 Other server-edition notes: internal/serveredition/multiuser/activity.go is a read filter; internal/audit (Spec 107) JSONL lines are a separate sink (attempt + auth_event), not the activity log.
 
 ---
