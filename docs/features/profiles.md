@@ -65,6 +65,7 @@ See [Profile and client commands](../cli/profile-commands.md) for every command,
 | `code_execution` | `true`, `false` | inherit | Whether the `code_execution` tool exists for the profile |
 | `management_tools` | `true`, `false` | inherit | Whether `upstream_servers` and `quarantine_security` are visible under the profile |
 | `switchable_to` | list of profile names | none | The profiles a client bound to this profile (or a confined anonymous caller) may switch to with `set_profile` |
+| `tool_response_limit` | `0` or a positive number of characters | inherit | The response limit for calls served under the profile, in place of the global `tool_response_limit`. `0` means no limit. See [Response limit per profile](#response-limit-per-profile) |
 
 The field names are identical in the config file, REST, the CLI (as kebab-case flags, `--max-tier`), the MCP `profiles` tool and the UIs. Enum values are spelled the same everywhere (`as_write`, `as_read`).
 
@@ -142,6 +143,36 @@ It lists the bindings concerned and two fixes: turn `require_mcp_auth` on, or se
 ## Management tools
 
 `management_tools` decides whether `upstream_servers` and `quarantine_security` are visible under a profile: `false` hides and refuses them, `true` shows them, unset keeps the pre-profile behaviour. It never widens a credential: an agent token or client credential, and a confined anonymous caller, can only `list` and `tail_log` servers inside their scope, and `quarantine_security` stays administrator-only; adding, changing, restarting or removing servers remains an operator action. The `profiles` tool is separate: it is listed only for an administrator session (API key or socket), and only when the session's effective profile is none or sets `management_tools: true`. The `credentials` tool, which issues, lists and revokes the locked client credentials and profile-pinned agent tokens a profile is used through, follows exactly the same rule; see [Credential lifecycle over MCP](./mcp-credential-lifecycle.md).
+
+## Response limit per profile
+
+The global [`tool_response_limit`](../configuration/config-file.md) bounds every tool response, `structuredContent` included, so that one large answer does not fill an agent's context. A program that parses the JSON itself needs the opposite: the whole result, with every field in place. `read_cache` cannot rebuild it, because it pages one array of records and leaves out the fields beside it.
+
+Set `tool_response_limit` on a profile to give the callers of that profile their own limit:
+
+```json
+{
+  "tool_response_limit": 20000,
+  "profiles": [
+    { "name": "script", "servers": ["workiq", "tickets"], "max_tier": "read", "tool_response_limit": 0 }
+  ]
+}
+```
+
+```bash
+mcpproxy profile create script --servers workiq,tickets --max-tier read --tool-response-limit 0
+```
+
+The script connects to `/mcp/p/script` (or uses a client credential or agent token bound to `script`) and receives whole answers. Chats on other profiles, or on none, keep the global limit.
+
+- Unset: the profile inherits the global limit. `0`: no limit. A positive number: that many characters, which may be larger or smaller than the global limit.
+- It applies wherever the global limit does for a call under the profile: `call_tool_read`, `call_tool_write`, `call_tool_destructive`, the direct tools, `retrieve_tools` and `read_cache`.
+- It changes only how much of a response is delivered. It is not an access rule: it does not change which tools the profile admits, and setting it alone leaves a profile "legacy".
+- [Output sanitisation](./output-sanitisation.md) reads text blocks. While it is set to block, redact or strip, a structured result larger than the **global** limit is still turned into a text block so that it is sanitised, exactly as without the profile; the profile's limit then delivers that text whole instead of cutting it. The JSON is complete and parseable, but it arrives in `content`, not in `structuredContent`. With sanitisation in its default mode the result stays in `structuredContent`.
+- The profile that applies is the one [resolved for the request](#which-profile-applies). When no profile applies, or the name no longer exists, the global limit is used.
+- Any caller that can select the profile gets its limit, so give a "no limit" profile only the servers the script needs.
+
+The CLI flag is `--tool-response-limit <n|inherit>` on `profile create` and `profile update` (`--clear-tool-response-limit` returns to inherit); the Web UI and macOS profile editors have the same three choices: Inherit, No limit, Custom.
 
 ## Managing profiles from every surface
 

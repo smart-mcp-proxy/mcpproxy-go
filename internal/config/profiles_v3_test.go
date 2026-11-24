@@ -368,6 +368,8 @@ func TestFieldSet_ProfileConfig(t *testing.T) {
 		"code_execution":   true,
 		"management_tools": true,
 		"switchable_to":    true,
+		// Issue #2027: a delivery setting, edition-neutral like the rest.
+		"tool_response_limit": true,
 	}
 
 	typ := reflect.TypeOf(ProfileConfig{})

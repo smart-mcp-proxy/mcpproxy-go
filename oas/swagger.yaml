@@ -940,6 +940,14 @@ components:
         title:
           description: display only, <= 80 chars (FR-001)
           type: string
+        tool_response_limit:
+          description: |-
+            ToolResponseLimit overrides the global tool_response_limit for calls
+            served under this profile (issue #2027): nil = inherit, 0 = no limit, a
+            positive value = that many characters. A pointer so an explicit 0
+            survives omitempty. It is a delivery setting, not policy: it does not
+            make a profile non-legacy (IsLegacy) and it changes no access decision.
+          type: integer
         tools:
           $ref: '#/components/schemas/config.ProfileToolRules'
         unannotated:
@@ -5393,6 +5401,11 @@ components:
           type: integer
         tool_counts:
           $ref: '#/components/schemas/runtime.ToolCounts'
+        tool_response_limit:
+          description: |-
+            ToolResponseLimit is the profile's own response limit (issue #2027):
+            absent = inherits the global tool_response_limit, 0 = no limit.
+          type: integer
         tools:
           $ref: '#/components/schemas/config.ProfileToolRules'
         unannotated:
@@ -6101,6 +6114,11 @@ components:
           type: integer
         tool_counts:
           $ref: '#/components/schemas/runtime.ToolCounts'
+        tool_response_limit:
+          description: |-
+            ToolResponseLimit is the profile's own response limit (issue #2027):
+            absent = inherits the global tool_response_limit, 0 = no limit.
+          type: integer
         tools:
           $ref: '#/components/schemas/config.ProfileToolRules'
         unannotated:

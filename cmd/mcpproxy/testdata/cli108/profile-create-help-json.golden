@@ -60,6 +60,11 @@
       "type": "string"
     },
     {
+      "name": "tool-response-limit",
+      "description": "Response limit in characters for calls under the profile, replacing the global tool_response_limit: a number, 0 for no limit, or inherit",
+      "type": "string"
+    },
+    {
       "name": "unannotated",
       "description": "Handling of tools with no tier hint: deny, as_write or as_read (as-write and as-read are accepted)",
       "type": "string"

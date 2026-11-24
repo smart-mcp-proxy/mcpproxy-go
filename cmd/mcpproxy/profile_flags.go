@@ -6,6 +6,7 @@ package main
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -25,6 +26,7 @@ type profileFlags struct {
 	codeExecution   string
 	managementTools string
 	switchableTo    []string
+	responseLimit   string
 
 	// update only
 	addServers    []string
@@ -39,7 +41,7 @@ type profileFlags struct {
 // profileClearFields are the --clear-<field> flags of `profile update`.
 var profileClearFields = []string{
 	"title", "description", "max-tier", "unannotated", "allow", "deny", "classify",
-	"code-execution", "management-tools", "switchable-to",
+	"code-execution", "management-tools", "switchable-to", "tool-response-limit",
 }
 
 func (f *profileFlags) register(cmd *cobra.Command, update bool) {
@@ -54,6 +56,7 @@ func (f *profileFlags) register(cmd *cobra.Command, update bool) {
 	fl.StringVar(&f.codeExecution, "code-execution", "", "Code execution: on, off or inherit (inherit clears the field)")
 	fl.StringVar(&f.managementTools, "management-tools", "", "Management tools (upstream_servers, quarantine_security): on, off or inherit")
 	fl.StringSliceVar(&f.switchableTo, "switchable-to", nil, "Comma-separated profiles a session may switch into; an empty value means none")
+	fl.StringVar(&f.responseLimit, "tool-response-limit", "", "Response limit in characters for calls under the profile, replacing the global tool_response_limit: a number, 0 for no limit, or inherit")
 	if !update {
 		return
 	}
@@ -84,6 +87,21 @@ func parseTriState(flag, value string) (*bool, error) {
 		return nil, nil
 	}
 	return nil, newFlagValidationError("--%s must be on, off or inherit (got %q)", flag, value)
+}
+
+// parseResponseLimit reads a profile tool_response_limit: a whole number of
+// characters (0 = no limit) or inherit, which yields nil (the field is
+// omitted). The range is left to the one REST validator.
+func parseResponseLimit(flag, value string) (*int, error) {
+	v := strings.ToLower(strings.TrimSpace(value))
+	if v == "inherit" || v == "" {
+		return nil, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return nil, newFlagValidationError("--%s must be a number of characters, 0 for no limit, or inherit (got %q)", flag, value)
+	}
+	return &n, nil
 }
 
 // canonicalUnannotated maps the kebab input aliases to the wire spelling. Any
@@ -164,6 +182,13 @@ func (f *profileFlags) apply(cmd *cobra.Command, p *config.ProfileConfig, update
 		list := append([]string{}, f.switchableTo...)
 		p.SwitchableTo = &list
 	}
+	if changed("tool-response-limit") {
+		v, err := parseResponseLimit("tool-response-limit", f.responseLimit)
+		if err != nil {
+			return err
+		}
+		p.ToolResponseLimit = v
+	}
 	if !update {
 		normalizeTools(p)
 		return nil
@@ -209,6 +234,9 @@ func (f *profileFlags) apply(cmd *cobra.Command, p *config.ProfileConfig, update
 	}
 	if clear("switchable-to") {
 		p.SwitchableTo = nil
+	}
+	if clear("tool-response-limit") {
+		p.ToolResponseLimit = nil
 	}
 	normalizeTools(p)
 	return nil
@@ -263,7 +291,7 @@ func removeItems(list, remove []string) []string {
 var draftFields = []string{
 	"servers", "title", "description", "max_tier", "unannotated",
 	"tools.allow", "tools.deny", "tools.classify.<server:tool>",
-	"code_execution", "management_tools", "switchable_to",
+	"code_execution", "management_tools", "switchable_to", "tool_response_limit",
 }
 
 // applyDraftSet applies one `--set key=value` override to a draft profile. Keys
@@ -327,6 +355,12 @@ func applyDraftSet(p *config.ProfileConfig, kv string) error {
 	case key == "switchable_to":
 		l := list()
 		p.SwitchableTo = &l
+	case key == "tool_response_limit":
+		v, err := parseResponseLimit("set tool_response_limit", value)
+		if err != nil {
+			return err
+		}
+		p.ToolResponseLimit = v
 	default:
 		return newFlagValidationError("unknown draft field %q; valid: %s", key, strings.Join(draftFields, ", "))
 	}

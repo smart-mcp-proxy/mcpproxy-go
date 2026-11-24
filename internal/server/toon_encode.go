@@ -12,6 +12,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toonenc"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
 )
 
 // toonEncodeBlock is the per-block encode seam. A package variable (not a
@@ -51,6 +52,13 @@ var toonEncodeBlock = toonenc.EncodeBlock
 //     counted here (FR-006); EncodeBlock itself is pure. Non-JSON blocks are
 //     ordinary passthrough-not-tabular traffic and are never logged.
 func (p *MCPProxyServer) encodeToonBlocks(serverName, toolName, contentTrust string, args map[string]interface{}, result *mcp.CallToolResult) (string, []toonenc.Decision) {
+	return p.encodeToonBlocksWith(serverName, toolName, contentTrust, args, result, p.currentTruncator())
+}
+
+// encodeToonBlocksWith is encodeToonBlocks under an explicit truncator: the
+// one the caller resolved for this call (the effective profile may carry its
+// own tool_response_limit, issue #2027).
+func (p *MCPProxyServer) encodeToonBlocksWith(serverName, toolName, contentTrust string, args map[string]interface{}, result *mcp.CallToolResult, truncator *truncate.Truncator) (string, []toonenc.Decision) {
 	cfg := p.liveToonConfig()
 	if cfg == nil {
 		return "", nil
@@ -69,9 +77,9 @@ func (p *MCPProxyServer) encodeToonBlocks(serverName, toolName, contentTrust str
 	if pct < 1 || pct > 90 {
 		pct = 15 // validated range is 1-90; 0/unset resolves to the default
 	}
-	// Snapshot the live truncator once for this encode so budget derivation and
+	// The caller resolves the truncator once for the call (the live global one,
+	// or the effective profile's, issue #2027), so budget derivation and
 	// detection-rendering use one consistent limit (#861).
-	truncator := p.currentTruncator()
 	retainedBudget := 0
 	if truncator != nil {
 		retainedBudget = truncator.SimpleTruncateBudget()
