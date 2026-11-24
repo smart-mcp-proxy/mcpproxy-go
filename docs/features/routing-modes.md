@@ -23,6 +23,8 @@ To serve **one** upstream server at its own URL, under its own tool names and wi
 
 > The configured mode is served on the default `/mcp` endpoint. Each mode also has a dedicated endpoint (`/mcp/call`, `/mcp/all`, `/mcp/code`) — see [Dedicated Endpoints](#dedicated-endpoints) below.
 
+> Clients that defer MCP tools behind their own search can hide `retrieve_tools`; see [Clients that defer MCP tools](/features/clients-that-defer-tools) for the per-client pin.
+
 ## Configuration
 
 Set the routing mode in your config file (`~/.mcpproxy/mcp_config.json`):

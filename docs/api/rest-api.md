@@ -1658,7 +1658,7 @@ binding_bypassable_without_auth` (personal edition) and writes nothing.
 `{profiles: ProfileView[], anonymous_profile?}`. A `ProfileView` has the config
 fields as stored (`name`, `title`, `description`, `servers`, `max_tier`,
 `unannotated`, `tools {allow, deny, classify}`, `code_execution`,
-`management_tools`, `switchable_to`), the derived `effective_servers`,
+`management_tools`, `switchable_to`, `tool_response_limit`), the derived `effective_servers`,
 `effective_unannotated`, `effective_code_execution`, `is_legacy`,
 `tool_counts {read, write, destructive, unannotated_hidden}` (visible tools by
 the tier the profile gives them), the deprecated v2 `tool_count`, `calls_24h`,
