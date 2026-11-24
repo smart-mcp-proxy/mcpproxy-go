@@ -92,6 +92,17 @@ describe('Profile editor tool response limit', () => {
     expect('tool_response_limit' in (await save(wrapper))).toBe(false)
   })
 
+  it('an emptied Custom value on a stored "no limit" profile stays dirty and is refused', async () => {
+    const wrapper = await mountEditor(makeProfile('script', { servers: ['github'], effective_servers: ['github'], tool_response_limit: 0 }))
+    await wrapper.get('[data-test="profile-response-limit-custom"]').setValue(true)
+    await wrapper.get('[data-test="profile-response-limit-value"]').setValue('')
+    expect(wrapper.get('[data-test="profile-editor-save"]').attributes('disabled')).toBeUndefined()
+    await wrapper.get('[data-test="profile-form"]').trigger('submit')
+    await flushPromises()
+    expect(api.updateProfile).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-test="profile-response-limit"]').text()).toContain('Enter a whole number')
+  })
+
   it('refuses an empty custom limit instead of saving it as "no limit"', async () => {
     const wrapper = await mountEditor(makeProfile('script', { servers: ['github'], effective_servers: ['github'] }))
     await wrapper.get('[data-test="profile-response-limit-custom"]').setValue(true)

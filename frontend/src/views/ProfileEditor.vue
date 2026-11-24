@@ -296,6 +296,14 @@ function draftFrom(view: ProfileView): Draft {
   }
 }
 
+// A custom response limit is a whole number of characters, 1 or more. An
+// empty or invalid entry must never read as 0 ("no limit"): toConfig sends -1
+// for it, which differs from every stored value (so the draft stays dirty) and
+// which the server refuses.
+function validResponseLimit(value: unknown): boolean {
+  return value !== '' && value !== null && Number.isInteger(Number(value)) && Number(value) >= 1
+}
+
 // The PUT body. Omission semantics are the contract: code_execution and
 // management_tools "Inherit" leave the key out; switchable_to "Not set" leaves
 // it out and "None" sends []; tool_response_limit "Inherit" leaves the key out
@@ -318,7 +326,7 @@ function toConfig(d: Draft): ProfileConfig {
   if (d.switch_mode === 'none') cfg.switchable_to = []
   else if (d.switch_mode === 'list') cfg.switchable_to = [...d.switchable_to]
   if (d.response_limit_mode === 'none') cfg.tool_response_limit = 0
-  else if (d.response_limit_mode === 'custom') cfg.tool_response_limit = Number(d.response_limit)
+  else if (d.response_limit_mode === 'custom') cfg.tool_response_limit = validResponseLimit(d.response_limit) ? Number(d.response_limit) : -1
   return cfg
 }
 
@@ -468,7 +476,7 @@ async function save() {
   savedNote.value = ''
   // An empty or non-positive custom limit would otherwise be sent as 0, which
   // means "no limit": refuse it here instead of widening the profile silently.
-  if (draft.response_limit_mode === 'custom' && !(Number.isInteger(Number(draft.response_limit)) && Number(draft.response_limit) >= 1)) {
+  if (draft.response_limit_mode === 'custom' && !validResponseLimit(draft.response_limit)) {
     fieldErrors.tool_response_limit = 'Enter a whole number of characters, 1 or more'
     return
   }
