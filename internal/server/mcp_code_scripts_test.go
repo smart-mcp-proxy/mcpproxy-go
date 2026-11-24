@@ -72,7 +72,7 @@ func newStoredScriptProxyCfg(t *testing.T, configure func(*config.Config), opts 
 		configure(cfg)
 	}
 
-	um := newTestUpstreamManager(t, logger, cfg, sm.GetBoltDB(), secret.NewResolver(), sm)
+	um := newTestUpstreamManager(t, logger, cfg, sm.GetBoltDB(), secret.NewTestWildcardResolver(), sm)
 
 	cm, err := cache.NewManager(sm.GetDB(), logger)
 	require.NoError(t, err)

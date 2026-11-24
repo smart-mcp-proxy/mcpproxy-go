@@ -260,6 +260,14 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 		// Decided on the resolved copy, exactly as Connect decides.
 		overHTTP := proxytransport.DetermineTransportType(resolvedServerConfig) != proxytransport.TransportStdio
 		for _, e := range errs {
+			if secret.IsPolicyDenial(e.Err) {
+				pe := policyExpansionError(serverConfig.Name, e)
+				logger.Warn("Secret policy refused upstream configuration",
+					zap.String("server", serverConfig.Name),
+					zap.String("field", e.FieldPath),
+					zap.String("reason", pe.Public))
+				return nil, pe
+			}
 			// Log the references only, never the field's value (release QA
 			// F9): the value may hold literal credentials around them.
 			var refNames []string

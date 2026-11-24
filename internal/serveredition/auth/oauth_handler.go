@@ -21,7 +21,6 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/users"
 )
 
@@ -234,8 +233,8 @@ func NewOAuthHandler(
 				// failure here (the env var was unset in between) is
 				// treated as "not configured" rather than sending the
 				// literal placeholder text to the IdP.
-				resolvedID, idErr := secret.NewResolver().ExpandSecretRefs(context.Background(), h.oauthCfg.ClientID)
-				resolvedSecret, secretErr := secret.NewResolver().ExpandSecretRefs(context.Background(), h.oauthCfg.ClientSecret)
+				resolvedID, idErr := config.ResolveOAuthSecretRef(h.oauthCfg.ClientID)
+				resolvedSecret, secretErr := config.ResolveOAuthSecretRef(h.oauthCfg.ClientSecret)
 				if idErr != nil || secretErr != nil || resolvedID == "" || resolvedSecret == "" {
 					if logger != nil {
 						logger.Errorw("server_edition.oauth.client_id/client_secret failed to resolve at handler construction",

@@ -285,11 +285,17 @@ func ValidatePublicURL(raw string) error {
 // private, never-persisted config clone to get the actual value for the
 // token endpoint. An empty input resolves to "" with no error (client_id and
 // client_secret share the same "is required" check for the empty case).
-func resolveOAuthSecretRef(raw string) (string, error) {
+// ResolveOAuthSecretRef resolves proxy-own OAuth fields with a proxy-scoped
+// resolver (MCPPROXY_* env names are allowed).
+func ResolveOAuthSecretRef(raw string) (string, error) {
 	if raw == "" {
 		return "", nil
 	}
-	return secret.NewResolver().ExpandSecretRefs(context.Background(), raw)
+	r := secret.NewResolverWithOptions(secret.ResolverOptions{
+		Scope:      secret.ScopeProxy,
+		FilePolicy: secret.NewWildcardFilePolicy(secret.ScopeProxy),
+	})
+	return r.ExpandSecretRefs(context.Background(), raw)
 }
 
 // PublicURLIsHTTPS reports whether the configured public_url uses https.
@@ -445,10 +451,10 @@ func (c *ServerEditionConfig) Validate() error {
 	// runtime resolution now happens once, at the one place that needs the
 	// live secret for the token endpoint: auth.NewOAuthHandler, on its own
 	// private, never-persisted config clone.
-	if _, err := resolveOAuthSecretRef(c.OAuth.ClientID); err != nil || c.OAuth.ClientID == "" {
+	if _, err := ResolveOAuthSecretRef(c.OAuth.ClientID); err != nil || c.OAuth.ClientID == "" {
 		return fmt.Errorf("server_edition.oauth.client_id is required")
 	}
-	if _, err := resolveOAuthSecretRef(c.OAuth.ClientSecret); err != nil || c.OAuth.ClientSecret == "" {
+	if _, err := ResolveOAuthSecretRef(c.OAuth.ClientSecret); err != nil || c.OAuth.ClientSecret == "" {
 		return fmt.Errorf("server_edition.oauth.client_secret is required")
 	}
 	if err := c.OAuth.validateOIDC(); err != nil {

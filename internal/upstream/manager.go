@@ -141,6 +141,9 @@ type Manager struct {
 	storage         *storage.BoltDB
 	notificationMgr *NotificationManager
 	secretResolver  *secret.Resolver
+	// secretResolverMu guards secretResolver, which SetSecretResolver swaps on
+	// a secret_file_dirs hot reload while connects read it.
+	secretResolverMu sync.RWMutex
 
 	// lastSweptAt tracks, per server name, the last time the periodic
 	// tool-discovery sweep listed that server's tools. Used to honor per-server
@@ -271,6 +274,24 @@ func cloneServerConfig(cfg *config.ServerConfig) *config.ServerConfig {
 	}
 
 	return &clone
+}
+
+// SetSecretResolver replaces the resolver used when expanding upstream server
+// secrets (hot-reloaded secret_file_dirs).
+func (m *Manager) SetSecretResolver(secretResolver *secret.Resolver) {
+	if m == nil {
+		return
+	}
+	m.secretResolverMu.Lock()
+	m.secretResolver = secretResolver
+	m.secretResolverMu.Unlock()
+}
+
+// currentSecretResolver returns the resolver new clients are built with.
+func (m *Manager) currentSecretResolver() *secret.Resolver {
+	m.secretResolverMu.RLock()
+	defer m.secretResolverMu.RUnlock()
+	return m.secretResolver
 }
 
 // NewManager creates a new upstream manager
@@ -3008,7 +3029,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 	}
 
 	// Create a transient core client that uses the daemon's storage
-	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
+	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.currentSecretResolver())
 	if err == nil {
 		// Spec 116 PR4 (FR-024): the login runs behind the registered
 		// instance's gate, so retiring the instance (removal, replacement,
@@ -3045,7 +3066,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 			noAuthTransport := transport.DetermineTransportType(&cpy)
 			if noAuthTransport == "http" || noAuthTransport == "streamable-http" || noAuthTransport == "sse" {
 				m.logger.Info("Running preflight no-auth initialize to check OAuth requirement", zap.String("server", cfg.Name))
-				testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
+				testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.currentSecretResolver())
 				if err2 == nil {
 					testClient.SetGate(client.Gate())
 					testClient.SetCredentialBinding(client.CredentialBinding())
@@ -3104,7 +3125,7 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 	}
 
 	// Create a transient core client that uses the daemon's storage
-	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
+	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.currentSecretResolver())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create core client for OAuth: %w", err)
 	}
@@ -3223,7 +3244,7 @@ func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core
 	}
 
 	// Create a transient core client that uses the daemon's storage
-	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
+	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.currentSecretResolver())
 	if err == nil {
 		// Spec 116 PR4 (FR-024): the login runs behind the registered
 		// instance's gate, so retiring the instance (removal, replacement,
@@ -3252,7 +3273,7 @@ func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core
 		noAuthTransport := transport.DetermineTransportType(&cpy)
 		if noAuthTransport == "http" || noAuthTransport == "streamable-http" || noAuthTransport == "sse" {
 			m.logger.Info("Running preflight no-auth initialize to check OAuth requirement", zap.String("server", cfg.Name))
-			testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
+			testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.currentSecretResolver())
 			if err2 == nil {
 				testClient.SetGate(client.Gate())
 				testClient.SetCredentialBinding(client.CredentialBinding())

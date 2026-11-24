@@ -118,7 +118,7 @@ func newFwdClient(t *testing.T, u *fwdUpstream, mutate func(*config.ServerConfig
 		mutate(cfg)
 	}
 	obsCore, logs := observer.New(zapcore.DebugLevel)
-	c, err := NewClient("fwd", cfg, zap.New(obsCore), nil, nil, nil, secret.NewResolver())
+	c, err := NewClient("fwd", cfg, zap.New(obsCore), nil, nil, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

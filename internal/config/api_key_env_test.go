@@ -27,9 +27,10 @@ func writeKeyFile(t *testing.T, content string) string {
 func writeAPIKeyConfig(t *testing.T, apiKey string) string {
 	t.Helper()
 	raw, err := json.Marshal(map[string]any{
-		"listen":     "127.0.0.1:8080",
-		"api_key":    apiKey,
-		"mcpServers": []any{},
+		"listen":           "127.0.0.1:8080",
+		"api_key":          apiKey,
+		"secret_file_dirs": []string{"*"},
+		"mcpServers":       []any{},
 	})
 	require.NoError(t, err)
 	return writeOverrideTestFile(t, string(raw))
@@ -443,7 +444,7 @@ func TestServerConfig_FileReferencesExpandOnACopy(t *testing.T) {
 	}
 
 	resolved := CopyServerConfig(orig)
-	errs := secret.NewResolver().ExpandStructSecretsCollectErrors(context.Background(), resolved)
+	errs := secret.NewTestWildcardResolver().ExpandStructSecretsCollectErrors(context.Background(), resolved)
 	require.Empty(t, errs)
 
 	assert.Equal(t, "Bearer upstream-token", resolved.Headers["Authorization"])

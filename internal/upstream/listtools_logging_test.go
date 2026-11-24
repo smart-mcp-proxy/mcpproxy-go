@@ -29,7 +29,7 @@ func newObservedManager(t *testing.T) (*Manager, *observer.ObservedLogs) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = storageManager.Close() })
 
-	m := NewManager(zap.New(core), cfg, storageManager, secret.NewResolver(), nil)
+	m := NewManager(zap.New(core), cfg, storageManager, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { m.DisconnectAll() })
 	return m, logs
 }
