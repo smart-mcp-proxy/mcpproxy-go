@@ -71,3 +71,13 @@ func TestPersistableConfig_UndecodableFileKeyDetection(t *testing.T) {
 		assert.ErrorIs(t, err, ErrSecretFileDirsUnverified, name)
 	}
 }
+
+func TestPersistableConfig_EscapedKeyInMalformedFileRefuses(t *testing.T) {
+	ResetProcessOverrides()
+	t.Cleanup(ResetProcessOverrides)
+	dir := t.TempDir()
+	path := filepath.Join(dir, ConfigFileName)
+	require.NoError(t, os.WriteFile(path, []byte(`{"secret_file_dirs": [],}`), 0o600))
+	_, err := persistableConfigWithEdits(&Config{DataDir: dir, Listen: "127.0.0.1:8080"}, nil, path)
+	assert.ErrorIs(t, err, ErrSecretFileDirsUnverified)
+}

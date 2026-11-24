@@ -33,6 +33,7 @@ func TestReadFileWithPolicy_DeepDataDirFileRefusedByIdentity(t *testing.T) {
 				Wildcard: wildcard, AllowedRoots: []string{other}, Scope: ScopeUpstream,
 				Deny: DenyPaths{DataDir: dataDir, DataSecretsDir: filepath.Join(dataDir, "secrets")},
 			}
+			_ = os.Remove(target) // a previous subtest left a symlink here
 			require.NoError(t, os.WriteFile(target, []byte("ok\n"), 0o600))
 			SetBeforeSecretOpenHookForTest(func() {
 				require.NoError(t, os.Remove(target))
@@ -108,4 +109,22 @@ func TestDenyPathsAtRead_DeepPassIgnoresSymlinks(t *testing.T) {
 	require.NoError(t, os.Symlink(filepath.Join(allowed, "k"), link))
 	p := &FilePolicy{Scope: ScopeUpstream, Deny: DenyPaths{DataDir: dataDir}}
 	require.NotContains(t, p.denyPathsAtRead(), link)
+}
+
+// Empty directories are not free: each visit costs budget, so thousands of
+// them cannot force unbounded opens on every read.
+func TestDenyPathsAtRead_EmptyDirsCostBudget(t *testing.T) {
+	dataDir := t.TempDir()
+	for i := 0; i < maxDenyWalkEntries+100; i++ {
+		require.NoError(t, os.Mkdir(filepath.Join(dataDir, fmt.Sprintf("d%05d", i)), 0o700))
+	}
+	p := &FilePolicy{Scope: ScopeUpstream, Deny: DenyPaths{DataDir: dataDir}}
+	budget := maxDenyWalkEntries
+	var paths []string
+	var queue []denyWalkLevel
+	for i := 0; i < maxDenyWalkEntries+100 && budget > 0; i++ {
+		budget = walkDenyDir(denyWalkLevel{filepath.Join(dataDir, fmt.Sprintf("d%05d", i)), 2}, budget, &paths, &queue)
+	}
+	require.Equal(t, 0, budget)
+	_ = p
 }

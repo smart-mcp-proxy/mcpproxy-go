@@ -533,7 +533,9 @@ func fileMayHoldSecretFileDirs(path string) bool {
 	// Not a JSON object (a trailing comma after the setting, say): the loader
 	// cannot read it either, but the text may still hold the key. Fail closed
 	// when the quoted key appears anywhere in it.
-	return bytes.Contains(bytes.ToLower(data), []byte(`"secret_file_dirs"`))
+	// A JSON escape can spell the key (\u005f for "_"), so any escape counts.
+	lower := bytes.ToLower(data)
+	return bytes.Contains(lower, []byte(`"secret_file_dirs"`)) || bytes.Contains(lower, []byte(`\u`))
 }
 
 // persistableConfigWithEdits is PersistableConfigWithEdits for the save path:

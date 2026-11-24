@@ -96,6 +96,7 @@ type denyWalkLevel struct {
 // walkDenyDir reads up to budget entries of one directory in batches and
 // returns the budget left.
 func walkDenyDir(cur denyWalkLevel, budget int, paths *[]string, queue *[]denyWalkLevel) int {
+	budget-- // an empty or unreadable directory still costs its open
 	d, err := os.Open(cur.dir)
 	if err != nil {
 		return budget

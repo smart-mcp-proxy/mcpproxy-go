@@ -233,6 +233,13 @@ func UnusableSecretFileDirRoots(cfg *Config) []string {
 			continue // rejected by validation
 		}
 		fi, err := os.Stat(root)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			// A long symlink chain makes Stat fail with ELOOP while the
+			// resolved path works, and the read policy resolves first.
+			if resolved, rerr := filepath.EvalSymlinks(root); rerr == nil {
+				fi, err = os.Stat(resolved)
+			}
+		}
 		switch {
 		case err != nil && errors.Is(err, fs.ErrNotExist):
 			continue

@@ -66,11 +66,13 @@ var loadWarningStderr io.Writer = os.Stderr
 // recorder it also prints one line to stderr. The warning is still queued, so
 // a core that installs its recorder later logs it too.
 func emitLoadWarningVisible(message, key, value string) {
-	loadWarnMu.RLock()
-	noRecorder := loadWarnRecorder == nil
-	loadWarnMu.RUnlock()
-	if noRecorder {
-		fmt.Fprintf(loadWarningStderr, "warning: %s (%s=%s)\n", message, key, value)
+	loadWarnMu.Lock()
+	defer loadWarnMu.Unlock()
+	if loadWarnRecorder != nil {
+		loadWarnRecorder(message, key, value)
+		return
 	}
-	emitLoadWarning(message, key, value)
+	// %q: the value can be a file name, which may carry control characters.
+	fmt.Fprintf(loadWarningStderr, "warning: %s (%s=%q)\n", message, key, value)
+	pendingLoadWarnings = append(pendingLoadWarnings, pendingWarning{message, key, value})
 }
