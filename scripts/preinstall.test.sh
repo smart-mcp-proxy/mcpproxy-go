@@ -38,8 +38,12 @@ pass=0; fail=0
 ok()  { echo "ok   - $1"; pass=$((pass+1)); }
 bad() { echo "FAIL - $1"; fail=$((fail+1)); }
 
+# The temp path goes into pgrep/pkill patterns, which are regular expressions:
+# unescaped, the "." in "tmp.Ab12" would also match some other directory.
+re_escape() { printf '%s' "$1" | sed 's/[][\\.*^$(){}?+|]/\\&/g'; }
+
 cleanup() {
-    pkill -9 -f "$TMP/" >/dev/null 2>&1 || true
+    pkill -9 -f "^$(re_escape "$TMP")/" >/dev/null 2>&1 || true
     rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -62,10 +66,14 @@ spawn() { ( exec -a "$1" sleep 600 >/dev/null 2>&1 & ); }
 spawn_stubborn() { ( trap '' TERM; exec -a "$1" sleep 600 >/dev/null 2>&1 & ); }
 
 # spawn_with_arg <name> <argument> — a process whose ARGUMENT is some path.
-# The trailing `:` keeps bash from exec'ing sleep and dropping the arguments.
-spawn_with_arg() { ( exec -a "$1" bash -c 'sleep 600; :' viewer "$2" >/dev/null 2>&1 & ); }
+# cat(1) blocks opening a FIFO nobody writes to, so it never reads <argument>
+# and has no child process to leak.
+spawn_with_arg() {
+    [ -p "$TMP/never-written" ] || mkfifo "$TMP/never-written"
+    ( exec -a "$1" cat "$TMP/never-written" "$2" >/dev/null 2>&1 & )
+}
 
-alive() { pgrep -f "^$1" >/dev/null 2>&1; }
+alive() { pgrep -f "^$(re_escape "$1")" >/dev/null 2>&1; }
 
 wait_alive() {
     local n=0
@@ -88,7 +96,7 @@ run_quit() {
     (
         # shellcheck disable=SC1090
         source "$SUT"
-        APP_ROOT_PATTERN="$scope/"
+        APP_ROOT_PATTERN="$(re_escape "$scope")/"
         PGREP_SCOPE="-U $(id -u)"
         SIGTERM_TENTHS=30
         SIGKILL_TENTHS=30
