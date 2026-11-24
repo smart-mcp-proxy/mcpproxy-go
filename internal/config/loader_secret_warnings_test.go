@@ -82,3 +82,12 @@ func TestLoad_WarnsUnresolvableSecretFileDirRoot(t *testing.T) {
 	assert.True(t, hasLoadWarning(rec, MsgSecretFileDirsRootUnusable, notDir), "a file is not a directory")
 	assert.True(t, hasLoadWarning(rec, MsgSecretFileDirsRootUnusable, loopA), "a symlink loop cannot be resolved")
 }
+
+func TestEmitSecretFileDirsWarnings_SharedByBothLoaders(t *testing.T) {
+	var rec []LoadWarning
+	SetLoadWarningRecorder(func(m, k, v string) { rec = append(rec, LoadWarning{m, k, v}) })
+	t.Cleanup(func() { SetLoadWarningRecorder(nil) })
+	missing := filepath.Join(t.TempDir(), "nope")
+	emitSecretFileDirsWarnings(&Config{SecretFileDirs: &SecretFileDirs{missing}})
+	assert.True(t, hasLoadWarning(rec, "secret_file_dirs root does not exist yet", missing))
+}

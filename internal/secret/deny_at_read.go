@@ -97,6 +97,12 @@ type denyWalkLevel struct {
 // returns the budget left.
 func walkDenyDir(cur denyWalkLevel, budget int, paths *[]string, queue *[]denyWalkLevel) int {
 	budget-- // an empty or unreadable directory still costs its open
+	// Never open something that is no longer a directory (a FIFO would block
+	// the open); the window between this check and the open needs write access
+	// to the data dir, which already allows replacing the config itself.
+	if fi, err := os.Lstat(cur.dir); err != nil || !fi.IsDir() {
+		return budget
+	}
 	d, err := os.Open(cur.dir)
 	if err != nil {
 		return budget

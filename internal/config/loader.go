@@ -63,15 +63,7 @@ func LoadFromFile(configPath string) (*Config, error) {
 
 	// Expand secret/env refs in DataDir before creating it
 	expandDataDir(cfg, configPath)
-	for _, root := range WarnMissingSecretFileDirRoots(cfg) {
-		emitLoadWarning("secret_file_dirs root does not exist yet", "secret_file_dirs", root)
-	}
-	for _, root := range UnusableSecretFileDirRoots(cfg) {
-		emitLoadWarning(MsgSecretFileDirsRootUnusable, "secret_file_dirs", root)
-	}
-	if cfg.SecretFileDirs != nil && SecretFileDirsWildcard([]string(*cfg.SecretFileDirs)) {
-		emitLoadWarning("secret_file_dirs is wildcard compatibility mode", "secret_file_dirs", "*")
-	}
+	emitSecretFileDirsWarnings(cfg)
 	// server_edition.oauth.client_id/client_secret are deliberately NOT
 	// expanded here (cross-review round 6, chunk 3 P2, superseding round 1's
 	// in-place expansion): this cfg is what becomes r.cfg/r.desiredCfg and is
@@ -233,6 +225,7 @@ func LoadWithPath() (*Config, string, error) {
 
 	// Expand secret/env refs in DataDir before creating it
 	expandDataDir(cfg, configPath)
+	emitSecretFileDirsWarnings(cfg)
 	// server_edition.oauth.client_id/client_secret are deliberately NOT
 	// expanded here — see the matching comment in LoadFromFile (cross-review
 	// round 6, chunk 3 P2).
@@ -1143,3 +1136,19 @@ func envNonNegativeDuration(name, want string) (bool, *Duration) {
 }
 
 func derefBool(p *bool) bool { return p != nil && *p }
+
+// emitSecretFileDirsWarnings emits the secret_file_dirs load warnings: roots
+// that do not exist yet, roots that cannot serve as a directory, and the
+// wildcard notice. Both loaders (LoadFromFile and LoadWithPath) call it, so a
+// daemon started without --config warns too.
+func emitSecretFileDirsWarnings(cfg *Config) {
+	for _, root := range WarnMissingSecretFileDirRoots(cfg) {
+		emitLoadWarning("secret_file_dirs root does not exist yet", "secret_file_dirs", root)
+	}
+	for _, root := range UnusableSecretFileDirRoots(cfg) {
+		emitLoadWarning(MsgSecretFileDirsRootUnusable, "secret_file_dirs", root)
+	}
+	if cfg.SecretFileDirs != nil && SecretFileDirsWildcard([]string(*cfg.SecretFileDirs)) {
+		emitLoadWarning("secret_file_dirs is wildcard compatibility mode", "secret_file_dirs", "*")
+	}
+}
