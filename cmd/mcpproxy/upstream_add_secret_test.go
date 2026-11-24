@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 )
 
@@ -62,7 +63,7 @@ func (f *fakeKeyringProvider) List(_ context.Context) ([]secret.Ref, error) {
 func (f *fakeKeyringProvider) IsAvailable() bool { return f.available }
 
 func newTestSecretResolver(fake *fakeKeyringProvider) *secret.Resolver {
-	r := secret.NewResolver()
+	r := config.BuildSecretResolverForKeyringCLI()
 	r.RegisterProvider("keyring", fake)
 	return r
 }

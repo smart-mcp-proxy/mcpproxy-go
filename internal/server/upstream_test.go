@@ -46,7 +46,7 @@ func TestUpstreamServersHandlerPerformance(t *testing.T) {
 	defer indexManager.Close()
 
 	// Create upstream manager
-	upstreamManager := newTestUpstreamManager(t, zap.NewNop(), cfg, nil, secret.NewResolver(), nil)
+	upstreamManager := newTestUpstreamManager(t, zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
 
 	// Create cache manager
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), zap.NewNop())
@@ -142,7 +142,7 @@ func TestUpstreamServersListOperation(t *testing.T) {
 	defer indexManager.Close()
 
 	// Create upstream manager
-	upstreamManager := newTestUpstreamManager(t, zap.NewNop(), cfg, nil, secret.NewResolver(), nil)
+	upstreamManager := newTestUpstreamManager(t, zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
 
 	// Create cache manager
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), zap.NewNop())

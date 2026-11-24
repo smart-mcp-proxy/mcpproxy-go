@@ -250,7 +250,7 @@ func TestAggregatedPrompt_ScopeUsesCanonicalOwner(t *testing.T) {
 	qOff := false
 	proxy.config.QuarantineEnabled = &qOff
 
-	um := newTestUpstreamManager(t, zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	um := newTestUpstreamManager(t, zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
 	for _, name := range []string{"a", "a__b"} {
 		testServer := servertest.NewTestStreamableHTTPServer(newTestRefreshPromptsUpstream(t))
 		t.Cleanup(func() { closeHTTPFixture(testServer) })
@@ -372,7 +372,7 @@ func TestAggregatedPrompt_LateEnableStillFiltered(t *testing.T) {
 	qOff := false
 	proxy.config.QuarantineEnabled = &qOff
 
-	um := newTestUpstreamManager(t, zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	um := newTestUpstreamManager(t, zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
 	for _, name := range []string{"a", "hidden"} {
 		testServer := servertest.NewTestStreamableHTTPServer(newTestRefreshPromptsUpstream(t))
 		t.Cleanup(func() { closeHTTPFixture(testServer) })

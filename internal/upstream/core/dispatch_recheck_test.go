@@ -59,7 +59,7 @@ func countingCallClient(t *testing.T) (*Client, *atomic.Int32, *observer.Observe
 
 	cfg := &config.ServerConfig{Name: "cnt", Protocol: "streamable-http", URL: srv.URL, Enabled: true}
 	obsCore, logs := observer.New(zapcore.DebugLevel)
-	c, err := NewClient("cnt", cfg, zap.New(obsCore), nil, &config.Config{}, nil, secret.NewResolver())
+	c, err := NewClient("cnt", cfg, zap.New(obsCore), nil, &config.Config{}, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

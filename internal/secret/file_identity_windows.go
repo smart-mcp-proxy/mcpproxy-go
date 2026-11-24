@@ -1,0 +1,103 @@
+//go:build windows
+
+package secret
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"syscall"
+)
+
+// fileIdentity is a file's volume serial number and file index, read from an
+// open handle. os.Stat on Windows fills the file ID lazily, by path, on the
+// first os.SameFile, so a retained FileInfo would name whatever file sits at
+// the path by then (the new config after a rename); this is captured eagerly.
+type fileIdentity struct {
+	vol uint32
+	idx uint64
+}
+
+var errIdentityNotRegular = errors.New("not a regular file")
+
+// identityShareMode lets the identity open coexist with any other handle:
+// os.Open omits FILE_SHARE_DELETE, so it fails with a sharing violation while
+// another process holds the file open with DELETE access.
+const identityShareMode = syscall.FILE_SHARE_READ | syscall.FILE_SHARE_WRITE | syscall.FILE_SHARE_DELETE
+
+// fileReadAttributes is FILE_READ_ATTRIBUTES, the only access
+// GetFileInformationByHandle needs.
+const fileReadAttributes = 0x0080
+
+func identityFromHandle(h syscall.Handle) (fileIdentity, error) {
+	st, err := stampFromHandle(h)
+	return st.id, err
+}
+
+// stampFromHandle reads the identity and last-write time from one
+// GetFileInformationByHandle call.
+func stampFromHandle(h syscall.Handle) (supersededStamp, error) {
+	var d syscall.ByHandleFileInformation
+	if err := syscall.GetFileInformationByHandle(h, &d); err != nil {
+		return supersededStamp{}, err
+	}
+	if d.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY != 0 {
+		return supersededStamp{}, errIdentityNotRegular
+	}
+	return supersededStamp{
+		id:    fileIdentity{vol: d.VolumeSerialNumber, idx: uint64(d.FileIndexHigh)<<32 | uint64(d.FileIndexLow)},
+		mtime: d.LastWriteTime.Nanoseconds(),
+	}, nil
+}
+
+// identityOfPathErr opens path (following links) with attribute-only access
+// and every share flag, and reads its identity from the handle. A missing
+// file reports an error matching fs.ErrNotExist. The path is made absolute
+// and given the \\?\ prefix first: syscall.CreateFile, unlike the os package,
+// does not do that itself, so a path longer than MAX_PATH would fail.
+func identityOfPathErr(path string) (fileIdentity, error) {
+	st, err := stampOfPathErr(path)
+	return st.id, err
+}
+
+// stampOfPathErr is identityOfPathErr plus the last-write time, both read
+// from the one attribute handle.
+func stampOfPathErr(path string) (supersededStamp, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return supersededStamp{}, &os.PathError{Op: "abs", Path: path, Err: err}
+	}
+	p, err := syscall.UTF16PtrFromString(windowsExtendedLengthPath(abs))
+	if err != nil {
+		return supersededStamp{}, err
+	}
+	h, err := syscall.CreateFile(p, fileReadAttributes, identityShareMode, nil, syscall.OPEN_EXISTING, syscall.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		return supersededStamp{}, &os.PathError{Op: "CreateFile", Path: path, Err: err}
+	}
+	defer syscall.CloseHandle(h) //nolint:errcheck // read-only attribute handle
+	return stampFromHandle(h)
+}
+
+func identityOfPath(path string) (fileIdentity, bool) {
+	id, err := identityOfPathErr(path)
+	return id, err == nil
+}
+
+// identityOfHandle returns the identity of an opened file.
+func identityOfHandle(f *os.File, _ os.FileInfo) (fileIdentity, bool) {
+	if f == nil {
+		return fileIdentity{}, false
+	}
+	id, err := identityFromHandle(syscall.Handle(f.Fd()))
+	return id, err == nil
+}
+
+// stampOfHandle returns an opened file's identity and last-write time.
+func stampOfHandle(f *os.File, _ os.FileInfo) (supersededStamp, bool) {
+	if f == nil {
+		return supersededStamp{}, false
+	}
+	st, err := stampFromHandle(syscall.Handle(f.Fd()))
+	return st, err == nil
+}

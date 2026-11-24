@@ -144,7 +144,7 @@ func TestCoreSessionSnapshotAndReinitialize(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &config.ServerConfig{Name: "sess", Protocol: "streamable-http", URL: srv.URL, Enabled: true}
-	c, err := NewClient("sess", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	c, err := NewClient("sess", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
