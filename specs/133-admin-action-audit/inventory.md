@@ -72,7 +72,7 @@ Row keys: actor_kind, actor_name (omitted if empty for stampActor rows, but "" p
 | PUT /clients/{client}/binding | client_bindings.go:90 | ClientsService.SetBinding clients_service.go:554 -> writeChange :605 | profile_change assign/unassign/mode change (SYNC) | Y |
 | POST /clients/bulk-assign | client_bindings.go:499 | ClientsService.BulkAssign :625 (per client via writeChange) | profile_change per client (SYNC) | Y |
 | POST /clients/upgrade-admin-key-holders | client_bindings.go:570 | ClientsService.ApplyAdminKeyUpgrade clients_service_upgrade.go:306 -> connect minter -> recordMint clients_service.go:971 (via clients_service_connect.go:340) | profile_change assign per mint (SYNC) | Y (actorOf(intent); ctx is context.Background() so request_id absent, clients_service_connect.go:333) |
-| POST /clients/{client}/rotate | client_bindings.go:275 | ClientsService.Rotate clients_service.go:836 (only StageClientCredentialRotation) | **NO RECORD at stage time**; the single `rotate` row is written on finalize/rollback | n/a |
+| POST /clients/{client}/rotate | client_bindings.go:275 | ClientsService.Rotate clients_service.go:836 (StageClientCredentialRotation); for a Connect-supported client the handler goes through Connect instead (client_bindings.go:307-344), which reconciles first and can commit before a later 409 | **NO RECORD at stage time**; the single `rotate` row is written on finalize/rollback | n/a |
 | POST /clients/{client}/rotate/finalize | client_bindings.go:376 | FinalizeRotation :866 -> writeChange :897 | profile_change rotate outcome=finalized (SYNC) | Y |
 | (rollback of rotation) | via rollbackLocked clients_service.go:907 -> writeChange :921 | | profile_change rotate outcome=rolled_back | Y |
 | DELETE /clients/{client} | client_bindings.go:417 | ClientsService.Forget :730 -> writeChange :817 | profile_change forget (SYNC) | Y |
@@ -81,7 +81,7 @@ Row keys: actor_kind, actor_name (omitted if empty for stampActor rows, but "" p
 | POST /secrets (set keyring) | server.go:5183 handleSetSecret (route :1264) | resolver.Store + controller.NotifySecretsChanged runtime.go:1541 -> emitSecretsChanged event_bus.go:423 (SSE event only) | **NO RECORD** | n/a |
 | DELETE /secrets/{name} | server.go:5274 (:1265) | resolver.Delete (server.go:5319) + NotifySecretsChanged | **NO RECORD** | n/a |
 | POST /secrets/migrate | server.go:5094 (:1263) | analysis only, always `dry_run: true` (server.go:5113-5127) | not a writer (exempt) | n/a |
-| POST /servers/{id}/config-to-secret | server.go:3219 (:1193) | resolver.Store :3303 then controller.UpdateServer :3346 (server.go:2524) -> emit server_updated :2587 | config_change action=server_updated (BUS) + secrets.changed SSE only; keyring write itself unrecorded | Y (ctx) |
+| POST /servers/{id}/config-to-secret | server.go:3219 (:1193) | resolver.Store :3303 then controller.PatchServer (server.go:3338-3347) -> emit server_updated | config_change action=server_updated (BUS) + secrets.changed SSE only; keyring write itself unrecorded | Y (ctx) |
 
 ### 1.2 Server approval, tool approval, quarantine
 | Door | Handler | Funnel | Row today | Actor? |
@@ -120,7 +120,7 @@ Row keys: actor_kind, actor_name (omitted if empty for stampActor rows, but "" p
 | POST /registries/{id}/servers/{serverId}/add | server.go:6804 (:1340); AddServerFromRegistryRef add_from_registry.go:150 | AddServerFromRegistry :88 -> s.AddServer(ctx) :134 | config_change server_added (BUS) | Y |
 | POST /onboarding/mark | onboarding.go:181 (:1385) | controller.UpdateOnboardingState runtime.go:4999 | **NO RECORD** | n/a |
 | POST /telemetry/update-failure | update_failure.go:50 (:1283) | controller.RecordUpdateFailure (counter) | **NO RECORD** (telemetry counter, not a settings change) | n/a |
-| POST /diagnostics/fix | diagnostics_fix.go:59 (:1274) | diagnostics.InvokeFixer; only RecordFixAttempt counter (:137-141) | **NO RECORD** (the fixer's own side effects: UNCONFIRMED per fixer) | n/a |
+| POST /diagnostics/fix | diagnostics_fix.go:59 (:1274) | diagnostics.InvokeFixer; only RecordFixAttempt counter (:137-141); two registered fixers: log tail (read-only) and upstream OAuth re-auth (diagnostics_fixers.go:69-86,164-168) | **NO RECORD** | n/a |
 | POST /feedback | feedback.go:31 (:1370) | outbound feedback submit | **NO RECORD** (not a rules change) | n/a |
 | Telemetry / sensitive-data settings | only reachable via /config/apply, PATCH /config (above) or CLI `telemetry enable/disable` (section 3) | | **NO RECORD** | n/a |
 
@@ -230,7 +230,8 @@ Registration: upstream_servers mcp.go:1786, quarantine_security :1863, set_profi
 | create / update / delete / rename / classify | ProfilesService.Create/Update/Delete/Rename/Classify (mcp_profiles_tool.go:288/297/311/321/341) -> MutateConfig -> writeProfileChanges | profile_change (SYNC) + internal_tool_call | Y (profilesActor, surface=mcp) |
 | assign (single client) | ClientsService.SetBinding mcp_profiles_tool.go:450 | profile_change | Y |
 | assign (bulk from_profile/to_profile) | ClientsService.BulkAssign :465 | profile_change per client | Y |
-| list, get, list_clients, effective_tools, suggest | read-only | n/a | n/a |
+| list, get, effective_tools, suggest | read-only | n/a | n/a |
+| list_clients | shares the REST list path, which can reconcile client rotations (mcp_profiles_tool.go:493-505, clients.go:139-145) | profile_change rotate when it reconciles | Y |
 
 ### 3.4 credentials (handler mcp_credentials_tool.go:159; admin only; secret-shaped input screened -> screenedSummary :221)
 | Operation | Funnel | Row | Actor? |
