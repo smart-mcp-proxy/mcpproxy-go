@@ -280,6 +280,23 @@ actor NotificationService {
         markDelivered(key: key)
     }
 
+    /// Notify that an MCP client asks to sign in through the browser (Spec 132).
+    /// `clientLabel` must already be cleaned (`SignInPresentation.sanitizedLabel`).
+    /// The notification only points at the tray menu; approval is on the Web UI page.
+    func sendSignInRequest(requestId: String, clientLabel: String) async {
+        let key = "signin:\(requestId)"
+        guard shouldDeliver(key: key) else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Sign-in request"
+        content.body = "\(clientLabel) wants to sign in. Choose \"Approve sign-in\u{2026}\" in the MCPProxy menu."
+        content.sound = .default
+        content.userInfo = ["requestId": requestId]
+
+        await deliver(content: content, identifier: "signin-\(requestId)")
+        markDelivered(key: key)
+    }
+
     // MARK: - Rate Limiting
 
     /// Check whether a notification with the given key should be delivered,

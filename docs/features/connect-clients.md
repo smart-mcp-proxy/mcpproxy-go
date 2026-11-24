@@ -132,6 +132,7 @@ touched and its live sessions are notified.
 |----|-----------------|-----|
 | Connect a client to a profile | Connect sheet: choose a profile and Locked or Switchable | `mcpproxy connect cursor --profile work-readonly --lock` |
 | Connect without a credential (only while `require_mcp_auth` is off) | "Keyless" in the advanced options | `mcpproxy connect cursor --keyless` |
+| Connect with a browser sign-in instead of a key (experimental; Claude Code only so far) | Connect sheet: "Sign in with browser", shown only while browser login is on | `mcpproxy connect claude-code --auth oauth`; see [Browser Login](./client-oauth-login.md#connecting-a-client-to-browser-login) |
 | Move a client to another profile, or lock it | The profile chip on the client's row, the lock switch; the macOS tray Clients submenu | `mcpproxy client set-profile cursor work-full`, `client lock`, `client unlock` |
 | Move every client of one profile to another | Bulk move on the Clients page | `mcpproxy client set-profile --from-profile X --to-profile Y` |
 | Add a client that has no config file (a script, a CI job) | "Other client": the credential and a header snippet are shown once | `mcpproxy client add ci-bot --profile work-readonly` |

@@ -131,8 +131,11 @@ echo "📖 Get started: mcpproxy --help"
 # the first telemetry heartbeat reports launch_source=installer. The flag is
 # one-shot (cleared after the first heartbeat) and lives in the BBolt
 # activation bucket, so a crash between install and heartbeat is recovered
-# from on next startup. See packaging/macos/postinstall.sh for the standalone
-# version of this step.
+# from on next startup.
+#
+# A tray that was running before the upgrade has already been quit by
+# scripts/preinstall.sh, so this `open` is a real launch of the new version
+# and not a re-activation of the old one (#957, #2016).
 #
 # Critical: launch via `launchctl asuser <uid> env -i …` so the tray app
 # (and its core child) start in the user's GUI bootstrap context with a

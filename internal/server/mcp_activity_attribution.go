@@ -69,6 +69,9 @@ func (p *MCPProxyServer) activityAttribution(ctx context.Context, sessionID stri
 		if attr.ClientID == "" && ac.IsClientCredential() {
 			attr.ClientID = ac.ClientID
 		}
+		if attr.GrantID == "" {
+			attr.GrantID = ac.GrantID
+		}
 	}
 
 	if sessionID == "" {
@@ -98,6 +101,9 @@ func (p *MCPProxyServer) activityAttribution(ctx context.Context, sessionID stri
 			}
 			if attr.ClientID == "" && sessionCredential {
 				attr.ClientID = info.ClientID
+			}
+			if attr.GrantID == "" && sessionCredential {
+				attr.GrantID = info.GrantID
 			}
 			if attr.ProfileSource == "" {
 				attr.Profile = info.Profile

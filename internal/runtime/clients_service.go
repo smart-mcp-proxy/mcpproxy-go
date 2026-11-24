@@ -43,6 +43,10 @@ type ClientsService struct {
 	notifier BindingNotifier
 	reader   ClientConfigReader
 
+	// cancelLogins cancels a client's pending and approved browser sign-in
+	// requests (Spec 132). Called under mu after a revoke or forget.
+	cancelLogins func(clientID string)
+
 	// upgrade is the connect port behind the admin-key upgrade, observe the
 	// sink for on-demand credential classifications (Spec 108-f).
 	upgrade AdminKeyUpgradePort
@@ -139,6 +143,10 @@ type ClientCredentialView struct {
 	ExpiresAt       *time.Time              `json:"expires_at,omitempty"`
 	ConnectedAt     *time.Time              `json:"connected_at,omitempty"`
 	RotationPending bool                    `json:"rotation_pending,omitempty"`
+	// Credentials and BrowserLoginDisabled exist only once browser login was
+	// used (Spec 132); until then a view is exactly what it always was.
+	Credentials          []ClientCredentialEntry `json:"credentials,omitempty"`
+	BrowserLoginDisabled *bool                   `json:"browser_login_disabled,omitempty"`
 }
 
 // ValidationError is a 400 {error, field} refusal.
@@ -385,8 +393,18 @@ func guardedOnly(all []auth.AgentToken) []auth.AgentToken {
 
 func (s *ClientsService) checkGuard(all []auth.AgentToken, clientID string, next *auth.AgentToken) error {
 	cfg := s.cfg()
-	current := GuardState{Config: cfg, Tokens: guardedOnly(all)}
-	candidate := GuardState{Config: cfg, Tokens: candidateTokens(all, clientID, next)}
+	// Spec 132 R5: the browser-login bindings are part of both states. A read
+	// error refuses the change (fail closed).
+	oauth, err := s.loadOAuthBindings()
+	if err != nil {
+		return err
+	}
+	candOAuth := oauth
+	if next != nil {
+		candOAuth = repinOAuthClient(oauth, clientID, next.ProfilePin, next.ProfileMode)
+	}
+	current := GuardState{Config: cfg, Tokens: guardedOnly(all), OAuthBindings: oauth}
+	candidate := GuardState{Config: cfg, Tokens: candidateTokens(all, clientID, next), OAuthBindings: candOAuth}
 	return CheckBindingGuard(s.guard(), current, candidate)
 }
 
@@ -421,6 +439,10 @@ type changeRecord struct {
 	clientID        string
 	tokenName       string
 	diff            map[string]interface{}
+	// meta is merged into the record's metadata after the fixed keys (it never
+	// replaces one): the Spec 132 rows carry request_id, grant_id, trigger and
+	// approved_by this way.
+	meta map[string]interface{}
 }
 
 func surfaceSource(s profile.Surface) storage.ActivitySource {
@@ -457,6 +479,11 @@ func writeChangeRecord(ctx context.Context, activity func(*storage.ActivityRecor
 	}
 	if len(c.diff) > 0 {
 		meta["diff"] = c.diff
+	}
+	for k, v := range c.meta {
+		if _, fixed := meta[k]; !fixed {
+			meta[k] = v
+		}
 	}
 	rec := &storage.ActivityRecord{
 		Type:      storage.ActivityTypeProfileChange,
@@ -545,6 +572,11 @@ func (s *ClientsService) setBindingLocked(ctx context.Context, a Actor, clientID
 	// The credential precondition (409) comes before request validation (400)
 	// so a client without an active credential always gets no_client_credential.
 	if state := s.stateOf(rec); state != profile.CredentialStateClient {
+		// Spec 132: a client with browser logins and no active API key is
+		// still a client; its binding changes through the one binding writer.
+		if v, handled, err := s.setOAuthBindingLocked(ctx, a, all, rec, clientID, profileName, modeArg); handled {
+			return v, err
+		}
 		return nil, &NoClientCredentialError{ClientID: clientID, State: state}
 	}
 	if profileName != "" && !s.profileExists(s.cfg(), profileName) {
@@ -604,6 +636,7 @@ func (s *ClientsService) BulkAssign(ctx context.Context, a Actor, from, to strin
 			ids = append(ids, t.ClientID)
 		}
 	}
+	ids = append(ids, s.oauthOnlyBindingClients(all, from)...)
 	sort.Strings(ids)
 	for _, id := range ids {
 		if s.connectInFlight(id) {
@@ -644,11 +677,25 @@ func (s *ClientsService) List() ([]ClientCredentialView, error) {
 	if err != nil {
 		return nil, err
 	}
+	st, err := s.loadOAuthState()
+	if err != nil {
+		return nil, err
+	}
 	var out []ClientCredentialView
 	for i := range all {
 		if all[i].Kind == auth.KindClient {
-			out = append(out, *s.view(&all[i]))
+			v := s.view(&all[i])
+			st.decorate(v, &all[i], s.now())
+			out = append(out, *v)
 		}
+	}
+	for id, b := range st.bindings {
+		if rec := clientRecord(all, id); rec != nil && rec.Kind == auth.KindClient {
+			continue
+		}
+		v := s.oauthOnlyView(id, b)
+		st.decorate(v, nil, s.now())
+		out = append(out, *v)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
@@ -661,10 +708,21 @@ func (s *ClientsService) Get(clientID string) (*ClientCredentialView, error) {
 		return nil, err
 	}
 	rec := clientRecord(all, clientID)
+	st, err := s.loadOAuthState()
+	if err != nil {
+		return nil, err
+	}
 	if rec == nil || rec.Kind != auth.KindClient {
+		if b, ok := st.bindings[clientID]; ok {
+			v := s.oauthOnlyView(clientID, b)
+			st.decorate(v, nil, s.now())
+			return v, nil
+		}
 		return nil, nil
 	}
-	return s.view(rec), nil
+	v := s.view(rec)
+	st.decorate(v, rec, s.now())
+	return v, nil
 }
 
 // Forget revokes a client's credential (change=forget). disconnected records
@@ -707,9 +765,34 @@ func (s *ClientsService) forgetLockedChange(ctx context.Context, a Actor, client
 // forgetRecordLocked is forgetLockedChange returning the committed revoked
 // record, so the credentials service projects its view without a re-read.
 func (s *ClientsService) forgetRecordLocked(ctx context.Context, a Actor, clientID string, diff map[string]interface{}, restorePrior bool, change profile.ChangeKind) (*auth.AgentToken, error) {
+	// Cancel the client's pending and approved sign-in requests FIRST, under the
+	// mutex the token exchange commits under, and whatever the storage call
+	// below answers: a client with nothing stored yet (no_client_credential)
+	// must not keep an approved first login alive (Spec 132 R15).
+	s.cancelLoginRequests(clientID)
 	forget := s.store.ForgetClientCredential
 	if restorePrior {
 		forget = s.store.ForgetClientCredentialRestoringPrior
+		// A connect undone for a client with live logins must not restore a
+		// binding the guard now refuses: revoke the key only and say so.
+		if reason := s.restoreSkipReason(clientID); reason != "" {
+			forget = s.revokeKeyKeepingBinding
+			nd := map[string]interface{}{"restore_skipped": reason}
+			for k, v := range diff {
+				nd[k] = v
+			}
+			diff = nd
+		}
+	} else if o := s.oauthStore(); o != nil {
+		hasLogins, herr := s.hasLoginRecords(o, clientID)
+		if herr != nil {
+			return nil, herr // fail closed: never leave live logins behind
+		}
+		if hasLogins {
+			// Spec 132: forget deletes the client's browser logins, revoke
+			// marks them revoked; both cover the API key exactly as before.
+			forget = s.oauthForgetFunc(o, change)
+		}
 	}
 	// The restore path rewrites the revoked record's binding, so capture the
 	// binding it held when revoked for the audit record.
@@ -735,6 +818,8 @@ func (s *ClientsService) forgetRecordLocked(ctx context.Context, a Actor, client
 		change: change, profile: heldPin, previousProfile: heldPin,
 		clientID: clientID, tokenName: revoked.Name, diff: diff,
 	})
+	// Live MCP sessions and streams are not terminated here: a revoked login is
+	// refused on its next request, which the HTTP layer enforces per request.
 	if s.publish != nil {
 		s.publish(newEvent(EventTypeCredentialsChanged, map[string]any{
 			"kind": CredentialKindClient, "id": clientID, "token_name": revoked.Name,

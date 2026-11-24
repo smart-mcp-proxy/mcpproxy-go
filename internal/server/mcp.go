@@ -406,8 +406,9 @@ type MCPProxyServer struct {
 	// the agent then RELAXED a blamed filter. In-memory only, never persisted,
 	// and it holds no query text or tool identities — only the filter keys the
 	// block already named plus a timestamp. See preflight_telemetry.go.
-	filterDiagMu    sync.Mutex
-	filterDiagNotes map[string]filterDiagNote
+	filterDiagMu         sync.Mutex
+	filterDiagNotes      map[string]filterDiagNote
+	filterDiagRequestSeq uint64 // protected by filterDiagMu; assigned at handler entry
 
 	// configFilePath is the ACTIVE configuration FILE this server belongs to,
 	// handed in at construction (Spec 097). It is the authority for anything
@@ -817,6 +818,16 @@ func NewMCPProxyServer(
 		if ac := auth.AuthContextFromContext(ctx); ac != nil && ac.AgentName != "" {
 			sessionStore.SetSessionIdentity(sessionID, ac.AgentName, ac.ClientID)
 			sessionStore.SetSessionTokenPrefix(sessionID, ac.TokenPrefix)
+			if ac.GrantID != "" {
+				sessionStore.SetSessionGrantID(sessionID, ac.GrantID)
+				// Spec 132 R14: the name the client sends here is stored on its
+				// login, off the request path, to flag a mismatch advisorily.
+				if mainServer != nil && mainServer.runtime != nil {
+					if svc := mainServer.runtime.OAuthLoginService(); svc != nil {
+						svc.Touch(ac.GrantID, clientName)
+					}
+				}
+			}
 		}
 		sessionStore.SetSessionServer(sessionID, mcpserver.ServerFromContext(ctx))
 		// Spec 108-f F10: a session that presented no credential has
@@ -2315,6 +2326,8 @@ func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.Ca
 
 // handleRetrieveToolsWithMode implements the retrieve_tools functionality with mode-aware instructions.
 func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, request mcp.CallToolRequest, routingMode string) (*mcp.CallToolResult, error) {
+	filterDiagRequestSeq := p.beginFilterDiagRequest()
+
 	// Spec 042: telemetry counters.
 	p.recordMCPSurface()
 	p.recordBuiltinTool("retrieve_tools")
@@ -2393,7 +2406,7 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// counter store, whose write shares the cost profile of the activation
 	// counters this handler already bumps unconditionally above.
 	if p.consumeFilterDiagFollowUp(sessionID,
-		activeFilterKeys(readOnlyOnly, excludeDestructive, excludeOpenWorld), startTime) {
+		activeFilterKeys(readOnlyOnly, excludeDestructive, excludeOpenWorld), startTime, filterDiagRequestSeq) {
 		p.recordFilterDiagnosticsFollowed()
 	}
 

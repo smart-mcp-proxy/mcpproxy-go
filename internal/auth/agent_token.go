@@ -7,8 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -340,29 +338,96 @@ func (t *AgentToken) AuthContext() *AuthContext {
 	if t == nil {
 		return nil
 	}
-	return &AuthContext{
-		Type:            AuthTypeAgent,
+	return ClientAuthContext(ClientIdentity{
 		AgentName:       t.Name,
+		TokenKind:       normalizeKind(t.Kind),
+		ClientID:        t.ClientID,
+		ProfilePin:      t.ProfilePin,
+		ProfileMode:     t.ProfileMode,
+		CredentialKind:  CredentialKindAgentToken,
 		TokenPrefix:     t.authenticatedPrefix(),
 		TokenGeneration: t.MatchedGeneration,
 		AllowedServers:  t.AllowedServers,
 		Permissions:     t.Permissions,
-		ProfilePin:      t.ProfilePin,
-		Email:           t.OwnerEmail,
-		Provider:        t.OwnerProvider,
-		Role:            t.OwnerRole,
-		CredentialKind:  CredentialKindAgentToken,
-		TokenKind:       normalizeKind(t.Kind),
-		ClientID:        t.ClientID,
-		ProfileMode:     t.ProfileMode,
-		RateLimit:       t.RateLimit.clone(),
+		RateLimit:       t.RateLimit,
 		// UserID carries the owning tenant (server edition). Without it an
 		// agent-token request had no tenant identity at all, so its activity
 		// could not be attributed or scoped. It does NOT confer the user tier:
 		// Type stays AuthTypeAgent, so IsUser()/IsAdmin() remain false, and
 		// every per-user surface must gate on IsUser() rather than on a
 		// non-empty UserID.
-		UserID: t.UserID,
+		UserID:   t.UserID,
+		Email:    t.OwnerEmail,
+		Provider: t.OwnerProvider,
+		Role:     t.OwnerRole,
+	})
+}
+
+// ClientIdentity is everything the one AuthContext builder needs. Both the
+// stored-token path ((*AgentToken).AuthContext) and a browser login (Spec 132)
+// fill it, so no path can silently drop a field.
+type ClientIdentity struct {
+	// AgentName is the context's AgentName. Empty means ClientTokenName(ClientID)
+	// (what a client credential's record is named, so activity and filters match).
+	AgentName string
+	// TokenKind is KindAgent or KindClient. Empty means KindClient.
+	TokenKind string
+	// ClientID, ProfilePin and ProfileMode are the client binding.
+	ClientID, ProfilePin, ProfileMode string
+	// CredentialKind is the source credential (agent_token or oauth).
+	CredentialKind CredentialKind
+	// GrantID is the browser-login grant id (oauth only).
+	GrantID string
+	// TokenPrefix is the display prefix; TokenGeneration identifies the
+	// authenticated secret (a browser login uses its grant id).
+	TokenPrefix, TokenGeneration string
+	// AllowedServers and Permissions are the token's own scope. For a browser
+	// login (CredentialKindOAuth) nil means "*" and all three tiers: its
+	// reach comes from the client's profile binding only.
+	AllowedServers, Permissions []string
+	// RateLimit is the credential's own call budget (copied, never aliased).
+	RateLimit *TokenRateLimit
+	// UserID, Email, Provider and Role are the owning tenant (server edition).
+	UserID, Email, Provider, Role string
+}
+
+// ClientAuthContext is the single builder of the agent-tier AuthContext.
+func ClientAuthContext(id ClientIdentity) *AuthContext {
+	kind := id.TokenKind
+	if kind == "" {
+		kind = KindClient
+	}
+	name := id.AgentName
+	if name == "" && id.ClientID != "" {
+		name = ClientTokenName(id.ClientID)
+	}
+	servers, perms := id.AllowedServers, id.Permissions
+	if id.CredentialKind == CredentialKindOAuth {
+		if servers == nil {
+			servers = []string{"*"}
+		}
+		if perms == nil {
+			perms = []string{PermRead, PermWrite, PermDestructive}
+		}
+	}
+	return &AuthContext{
+		Type:            AuthTypeAgent,
+		AgentName:       name,
+		TokenPrefix:     id.TokenPrefix,
+		TokenGeneration: id.TokenGeneration,
+		AllowedServers:  servers,
+		Permissions:     perms,
+		ProfilePin:      id.ProfilePin,
+		Email:           id.Email,
+		Provider:        id.Provider,
+		Role:            id.Role,
+		CredentialKind:  id.CredentialKind,
+		GrantID:         id.GrantID,
+		TokenKind:       kind,
+		ClientID:        id.ClientID,
+		ProfileMode:     id.ProfileMode,
+		RateLimit:       id.RateLimit.clone(),
+		UserID:          id.UserID,
 	}
 }
 
@@ -573,37 +638,6 @@ func TokenPrefix(token string) string {
 
 // hmacKeyFile is the filename for the persisted HMAC key.
 const hmacKeyFile = ".token_key"
-
-// GetOrCreateHMACKey reads the HMAC key from <dataDir>/.token_key.
-// If the file does not exist, it generates a 32-byte random key,
-// writes it with 0600 permissions, and returns it.
-func GetOrCreateHMACKey(dataDir string) ([]byte, error) {
-	keyPath := filepath.Join(dataDir, hmacKeyFile)
-
-	// Try to read existing key
-	data, err := os.ReadFile(keyPath)
-	if err == nil && len(data) == 32 {
-		return data, nil
-	}
-
-	// Generate new key
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		return nil, fmt.Errorf("failed to generate HMAC key: %w", err)
-	}
-
-	// Ensure directory exists
-	if err := os.MkdirAll(dataDir, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create data directory: %w", err)
-	}
-
-	// Write key file with restrictive permissions
-	if err := os.WriteFile(keyPath, key, 0600); err != nil {
-		return nil, fmt.Errorf("failed to write HMAC key file: %w", err)
-	}
-
-	return key, nil
-}
 
 // ValidatePermissions checks that the given permissions list is valid.
 // It must contain "read" and only contain valid permission values.

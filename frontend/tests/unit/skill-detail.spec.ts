@@ -19,10 +19,73 @@ describe('SkillDetail', () => {
   it('lists files and offers a viewer for text files only', async () => {
     const w = mountDetail(makeSkill('a', { files: [skillFile('SKILL.md'), skillFile('bin/x.png', 'sha256:b', 9, false)] }))
     expect(w.find('[data-test="skill-file-SKILL.md"]').exists()).toBe(true)
-    expect(w.find('[data-test="skill-view-SKILL.md"]').exists()).toBe(true)
+    expect(w.get('[data-test="skill-view-SKILL.md"]').text()).toBe('Read SKILL.md')
+    expect(w.get('[data-test="skill-file-SKILL.md"]').find('button').exists()).toBe(false)
     expect(w.find('[data-test="skill-file-bin/x.png"]').exists()).toBe(true)
     expect(w.find('[data-test="skill-view-bin/x.png"]').exists()).toBe(false)
     expect(w.get('[data-test="skill-file-bin/x.png"]').text()).toMatch(/binary/i)
+  })
+
+  it.each([
+    { description: 'missing', files: [skillFile('notes.md')] },
+    { description: 'binary', files: [skillFile('SKILL.md', D, 9, false)] },
+  ])('omits the SKILL.md shortcut when the file is $description', ({ files }) => {
+    const w = mountDetail(makeSkill('a', { files }))
+    expect(w.find('[data-test="skill-view-SKILL.md"]').exists()).toBe(false)
+    expect(api.getSkillContent).not.toHaveBeenCalled()
+  })
+
+  it('opens the instructions in one action and restores focus on Close', async () => {
+    m(api.getSkillContent).mockResolvedValue(ok({ text: 'Instructions', offset: 0, size: 12, digest: D }))
+    const w = mount(SkillDetail, { attachTo: document.body, props: { serverName: 'srv', skill: makeSkill('a') } })
+    try {
+      const shortcut = w.get('[data-test="skill-view-SKILL.md"]')
+      expect(api.getSkillContent).not.toHaveBeenCalled()
+      await shortcut.trigger('click'); await flushPromises()
+      expect(w.get('[data-test="skill-viewer-text"]').text()).toBe('Instructions')
+      expect(document.activeElement).toBe(w.get('[data-test="skill-viewer-heading"]').element)
+      await w.get('[data-test="skill-viewer-close"]').trigger('click'); await flushPromises()
+      expect(w.find('[data-test="skill-viewer"]').exists()).toBe(false)
+      expect(document.activeElement).toBe(shortcut.element)
+    } finally {
+      w.unmount()
+    }
+  })
+
+  it('places the full digest in a closed disclosure outside the file inventory', () => {
+    const w = mountDetail()
+    const hashes = w.get('[data-test="skill-file-hashes"]')
+    expect(hashes.element.tagName).toBe('DETAILS')
+    expect(hashes.attributes('open')).toBeUndefined()
+    expect(hashes.get('[data-test="skill-hash-SKILL.md"]').text()).toBe(D)
+    expect(w.get('[data-test="skill-file-SKILL.md"]').text()).not.toContain(D)
+  })
+
+  it('closes metadata disclosures when a different skill snapshot replaces the card', async () => {
+    const approved = (name: string) => makeSkill(name, { approved_files: [skillFile('SKILL.md')] })
+    const w = mountDetail(approved('a'))
+    const selectors = ['[data-test="skill-file-hashes"]', '[data-test="skill-unchanged-files"]']
+    for (const selector of selectors) (w.get(selector).element as HTMLDetailsElement).open = true
+    await w.setProps({ skill: approved('b') })
+    for (const selector of selectors) expect((w.get(selector).element as HTMLDetailsElement).open).toBe(false)
+  })
+
+  it.each([
+    { copy: 'current', selector: 'skill-view-notes.md', files: [skillFile('SKILL.md'), skillFile('notes.md')], approvedFiles: undefined },
+    { copy: 'approved', selector: 'skill-view-approved-notes.md', files: [skillFile('SKILL.md')], approvedFiles: [skillFile('SKILL.md'), skillFile('notes.md')] },
+  ])('focuses the viewer and returns to a supporting $copy copy action', async ({ copy, selector, files, approvedFiles }) => {
+    m(api.getSkillContent).mockResolvedValue(ok({ text: 'Notes', offset: 0, size: 5, digest: 'sha256:notes.md' }))
+    const w = mount(SkillDetail, { attachTo: document.body, props: { serverName: 'srv', skill: makeSkill('a', { files, approved_files: approvedFiles }) } })
+    try {
+      const open = w.get(`[data-test="${selector}"]`)
+      await open.trigger('click'); await flushPromises()
+      expect(api.getSkillContent).toHaveBeenCalledWith('srv', { skill: 'a', file: 'notes.md', copy, offset: 0 })
+      expect(document.activeElement).toBe(w.get('[data-test="skill-viewer-heading"]').element)
+      await w.get('[data-test="skill-viewer-close"]').trigger('click'); await flushPromises()
+      expect(document.activeElement).toBe(open.element)
+    } finally {
+      w.unmount()
+    }
   })
 
   it('views a file and pages it with Load more, joining the parts', async () => {
@@ -62,6 +125,10 @@ describe('SkillDetail', () => {
     }))
     const state = (p: string) => w.get(`[data-test="skill-diff-${p}"]`).attributes('data-state')
     expect([state('SKILL.md'), state('gone.txt'), state('new.txt'), state('same.md')]).toEqual(['changed', 'removed', 'added', 'same'])
+    const unchanged = w.get('[data-test="skill-unchanged-files"]')
+    expect(unchanged.attributes('open')).toBeUndefined()
+    expect(unchanged.get('[data-test="skill-diff-same.md"]').text()).toBe('same.md')
+    expect(unchanged.find('[data-test="skill-diff-gone.txt"]').exists()).toBe(false)
   })
 
   it('shows no diff section without an approved copy', () => {
@@ -96,12 +163,37 @@ describe('SkillDetail', () => {
       findings: [{ file: 'SKILL.md', offset: 12, rule: 'phrase.injection', severity: 'high', evidence: 'ignore previous' }],
     } }))
     const scan = w.get('[data-test="skill-scan"]').text()
-    expect(scan).toContain('dangerous')
+    expect(scan).toContain('Dangerous scan findings')
     expect(scan).toMatch(/incomplete/i)
     expect(scan).toContain('size_cap')
     const f = w.get('[data-test="skill-finding"]').text()
     expect(f).toContain('SKILL.md'); expect(f).toContain('phrase.injection'); expect(f).toContain('high'); expect(f).toContain('ignore previous')
     expect(w.get('[data-test="skill-findings-truncated"]').exists()).toBe(true)
+    const approve = w.get('[data-test="skill-approve"]').element
+    expect(w.get('[data-test="skill-scan"]').element.compareDocumentPosition(approve) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('labels a clean but incomplete scan as incomplete before Approve changes', () => {
+    const skill = makeSkill('a', { status: 'changed' })
+    skill.scan = { ...skill.scan, complete: false, incomplete: 'coverage' }
+    const w = mountDetail(skill)
+    const scan = w.get('[data-test="skill-scan"]')
+    expect(scan.text()).toContain('Scan incomplete')
+    expect(scan.text()).toContain('coverage')
+    expect(scan.text()).not.toContain('Scan clean')
+    const approve = w.get('[data-test="skill-approve"]')
+    expect(approve.text()).toBe('Approve changes')
+    expect(scan.element.compareDocumentPosition(approve.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('preserves unrecognized verdicts and omits timestamps without a verdict', async () => {
+    const skill = makeSkill('a')
+    const scan = { ...skill.scan, scanned_at: '2026-11-21T14:00:00Z' }
+    const w = mountDetail({ ...skill, scan: { ...scan, verdict: 'other-verdict' } })
+    const result = w.get('[data-test="skill-scan"]')
+    expect(result.text()).toContain('other-verdict')
+    await w.setProps({ skill: { ...skill, scan: { ...scan, verdict: '' } } })
+    expect(result.text()).toBe('Not scanned')
   })
 
   it('emits approve, block and unblock for the skill and disables them while busy', async () => {
@@ -275,7 +367,7 @@ describe('SkillDetail', () => {
     const s = makeSkill('a') as any
     delete s.scan
     const w = mountDetail(s)
-    expect(w.get('[data-test="skill-scan"]').text()).toContain('not scanned')
+    expect(w.get('[data-test="skill-scan"]').text()).toContain('Not scanned')
   })
 
   it('disables Approve while the review is stale', () => {

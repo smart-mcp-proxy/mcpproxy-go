@@ -1286,7 +1286,27 @@ export interface ClientSessionPresence { id: string; work_session_id?: string; s
 // Spec 108-f: a Clients row is Spec 109's presence fields plus the credential
 // and binding fields. The 108 fields are optional here so code written against
 // the 109 shape (and its fixtures) keeps compiling.
+// Spec 132: one credential of a client. A browser login carries what the client
+// reported about itself, so every string in it is untrusted text.
+export interface ClientCredential {
+  kind: 'api_key' | 'browser_login'
+  prefix?: string
+  grant_id?: string
+  state: string // api_key: active|expired|revoked; browser_login: active|lapsed|revoked
+  expires_at?: string | null
+  approved_at?: string | null
+  last_used_at?: string | null
+  reported_name?: string
+  redirect_host?: string
+  observed_name?: string
+  name_mismatch?: boolean
+}
+export interface RevokeCredentialResponse { changed: boolean }
+
 export type ClientPresence = Omit<ClientView, 'credential_state' | 'blocked_24h' | 'last_seen'> & {
+  // Spec 132: present only once browser login was used on this install.
+  credentials?: ClientCredential[]
+  browser_login_disabled?: boolean
   last_seen?: string | null
   credential_state?: CredentialState
   blocked_24h?: number
@@ -1334,6 +1354,14 @@ export interface ClientStatus {
   // This instance's own MCP endpoint. Config-derived, so it is present on both
   // the stat-only listing and the on-demand per-client read.
   proxy_url?: string
+  // Spec 132: the client passed a real-client check of the browser login flow
+  // (registry property), and whether Connect would accept auth=oauth right now
+  // (supported AND mcp_oauth_enabled on AND personal edition). A UI offers the
+  // choice only for `browser_login_available`. `auth` is 'oauth' when the
+  // client's existing entry holds the sign-in address.
+  supports_browser_login?: boolean
+  browser_login_available?: boolean
+  auth?: 'oauth'
   // The endpoint the client's existing entry actually points at, projected
   // through the same sanitizer as a connect preview's entry summary: scheme,
   // host and path only (query — the ?apikey= carrier — userinfo and fragment
@@ -1355,6 +1383,9 @@ export interface ConnectOptions {
   profile?: string
   mode?: 'locked' | 'switchable'
   keyless?: boolean
+  // Spec 132: 'oauth' writes only the client's browser sign-in address. Omitted
+  // (never 'key') for the default, so an API-key connect sends what it always sent.
+  auth?: 'oauth'
   precondition_token?: string
 }
 
@@ -1380,6 +1411,8 @@ export interface ConnectResult {
   profile?: string
   mode?: 'locked' | 'switchable'
   keyless?: boolean
+  auth?: 'oauth'
+  auth_note?: string
   rotation?: string
   credential_revoked?: string
   credential_revoke_error?: string
@@ -1411,6 +1444,11 @@ export interface ConnectPreview {
   precondition_token?: string
   bridge?: boolean
   access_state?: AccessState
+  // Spec 132: 'oauth' when this preview shows the browser sign-in address (no
+  // credential); `auth_note` says what the write leaves alone (an existing API key).
+  auth?: 'oauth'
+  auth_note?: string
+  browser_login_available?: boolean
 }
 
 // Onboarding wizard types (Spec 046)
@@ -1568,6 +1606,63 @@ export interface TryProfileResponse {
 export interface BindingRef { client_id: string; token_name: string; profile: string; mode: string }
 /** One fix of a binding-guard refusal (`require_mcp_auth` | `set_anonymous_profile`). */
 export interface GuardFix { kind: string; target?: string }
+
+// --- Spec 132: browser login for MCP clients (consent page) ----------------------
+// Everything named by the app (`reported_name`, `suggested_new_client`) is
+// untrusted text: render it with mustaches, never as HTML.
+
+export interface OAuthBindingView { profile: string; mode: string; revision: string }
+
+export interface OAuthAuthorizationClient {
+  id: string
+  display_name: string
+  exists: boolean
+  has_api_key: boolean
+  logins: number
+  binding?: OAuthBindingView
+}
+
+export interface OAuthExistingClient { id: string; display_name: string; binding?: OAuthBindingView }
+
+export interface OAuthGuardVerdict { code: string; bindings: BindingRef[]; fixes: GuardFix[] }
+
+export interface OAuthAuthorization {
+  id: string
+  status: string
+  expires_at: string
+  reported_name: string
+  redirect_uri: string
+  resource: string
+  address_kind: 'client' | 'generic'
+  client?: OAuthAuthorizationClient
+  existing_clients?: OAuthExistingClient[]
+  suggested_new_client?: { id: string; display_name: string }
+  /** Advice only; present on the generic address when the reported name equals exactly one existing client. */
+  suggested_client?: { id: string; matched: 'id' | 'display_name' | 'known_name' }
+  profiles: Array<{ name: string }>
+  profile_required: boolean
+  previous_login?: { grant_id: string; client_id: string; approved_at: string }
+  /** The newest live login of this registration under each client. */
+  previous_logins?: Array<{ grant_id: string; client_id: string; approved_at: string }>
+  guard: OAuthGuardVerdict | null
+}
+
+export interface OAuthApprovalBody {
+  client?: { id?: string; new?: { id: string; display_name?: string } }
+  /** Omitted = not chosen; '' = All servers. */
+  profile?: string
+  mode?: 'locked' | 'switchable'
+  binding_revision?: string
+  replace_grant?: string
+}
+
+export interface OAuthPreview {
+  complete: boolean
+  access?: { client: string; profile: string; mode: string; same_access_as_existing_client: boolean }
+  guard: OAuthGuardVerdict | null
+}
+
+export interface OAuthDecision { redirect_url: string }
 
 export interface BulkAssignResponse {
   moved: string[]

@@ -360,14 +360,47 @@ final class ConnectClientModel: ObservableObject {
 
     var keylessAvailable: Bool { requireMCPAuth == false }
 
+    // MARK: Browser login (Spec 132 PR-3, T068)
+
+    /// How the client signs in: today's API-key entry (the default) or only its
+    /// browser sign-in address.
+    enum AuthChoice: Equatable { case key, oauth }
+
+    @Published private(set) var authChoice: AuthChoice = .key
+
+    /// The selected client's status as last read: the on-demand detail when
+    /// there is one, else the stat-only list row.
+    private var selectedStatus: APIClient.ClientStatus? {
+        guard let selection else { return nil }
+        if let resolved = resolvedDetails[selection] { return resolved }
+        if case .loaded(let clients) = list { return clients.first { $0.clientId == selection } }
+        return nil
+    }
+
+    /// The choice exists only when the core says it would accept it for this
+    /// client right now (browser login on, client checked, personal edition).
+    var browserLoginOffered: Bool { selectedStatus?.browserLoginAvailable == true }
+
+    /// The profile and lock controls apply to an API-key entry only: a browser
+    /// login's access is chosen on the consent page.
+    var showsBindingControls: Bool { authChoice == .key }
+
+    func chooseAuth(_ choice: AuthChoice) {
+        guard choice == .key || browserLoginOffered, authChoice != choice else { return }
+        authChoice = choice
+        invalidatePreview()
+    }
+
     /// What the preview and the write send.
     var binding: ConnectBinding {
+        if authChoice == .oauth { return ConnectBinding(oauth: true) }
         if keyless { return ConnectBinding(keyless: true) }
         if bindingTouched { return ConnectBinding(profile: profile, mode: mode) }
         return .unspecified
     }
 
     func chooseProfile(_ name: String) {
+        guard authChoice == .key else { return }
         guard profile != name || !bindingTouched || keyless else { return }
         profile = name
         lockedChoice = true
@@ -377,7 +410,7 @@ final class ConnectClientModel: ObservableObject {
     }
 
     func setLocked(_ locked: Bool) {
-        guard !profile.isEmpty, lockedChoice != locked else { return }
+        guard authChoice == .key, !profile.isEmpty, lockedChoice != locked else { return }
         lockedChoice = locked
         bindingTouched = true
         invalidatePreview()
@@ -385,7 +418,7 @@ final class ConnectClientModel: ObservableObject {
 
     /// Keyless carries no profile or mode (the core refuses the combination).
     func setKeyless(_ on: Bool) {
-        guard keylessAvailable || !on, keyless != on else { return }
+        guard authChoice == .key, keylessAvailable || !on, keyless != on else { return }
         keyless = on
         if on {
             profile = ""
@@ -396,6 +429,7 @@ final class ConnectClientModel: ObservableObject {
     }
 
     private func resetBinding() {
+        authChoice = .key
         profile = ""
         lockedChoice = true
         keyless = false

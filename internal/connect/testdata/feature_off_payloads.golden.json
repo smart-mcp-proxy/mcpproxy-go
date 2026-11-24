@@ -1,0 +1,253 @@
+{
+  "claude_preview": {
+    "client": "claude-code",
+    "config_path": "<HOME>/.claude.json",
+    "display_path": "~/.claude.json",
+    "format": "json",
+    "server_key": "mcpServers",
+    "server_name": "mcpproxy",
+    "entry": {
+      "type": "http",
+      "url": "http://127.0.0.1:8080/mcp"
+    },
+    "entry_text": "{\n  \"mcpproxy\": {\n    \"type\": \"http\",\n    \"url\": \"http://127.0.0.1:8080/mcp\"\n  }\n}\n",
+    "entry_exists": true,
+    "contains_api_key": false,
+    "profile": "",
+    "mode": "switchable",
+    "keyless": false,
+    "access_state": "accessible",
+    "existing_entry_summary": {
+      "entry_name": "mcpproxy",
+      "type": "http",
+      "endpoint": "http://127.0.0.1:8080/mcp",
+      "header_names": [],
+      "env_names": []
+    },
+    "precondition_token": "\u003ctoken\u003e"
+  },
+  "claude_status": {
+    "id": "claude-code",
+    "name": "Claude Code",
+    "config_path": "<HOME>/.claude.json",
+    "exists": true,
+    "connected": true,
+    "supported": true,
+    "icon": "claude-code",
+    "server_name": "mcpproxy",
+    "credential_state": "none",
+    "display_path": "~/.claude.json",
+    "reload_hint": "Run /mcp in Claude Code (or restart it) to load MCPProxy",
+    "access_state": "accessible",
+    "checked_paths": [
+      "<HOME>/.claude.json"
+    ],
+    "proxy_url": "http://127.0.0.1:8080/mcp",
+    "registered_url": "http://127.0.0.1:8080/mcp",
+    "endpoint_match": "this"
+  },
+  "cursor_preview": {
+    "client": "cursor",
+    "config_path": "<HOME>/.cursor/mcp.json",
+    "display_path": "~/.cursor/mcp.json",
+    "format": "json",
+    "server_key": "mcpServers",
+    "server_name": "mcpproxy",
+    "entry": {
+      "type": "sse",
+      "url": "http://127.0.0.1:8080/mcp"
+    },
+    "entry_text": "{\n  \"mcpproxy\": {\n    \"type\": \"sse\",\n    \"url\": \"http://127.0.0.1:8080/mcp\"\n  }\n}\n",
+    "entry_exists": false,
+    "contains_api_key": false,
+    "profile": "",
+    "mode": "switchable",
+    "keyless": false,
+    "access_state": "accessible",
+    "precondition_token": "\u003ctoken\u003e"
+  },
+  "cursor_status": {
+    "id": "cursor",
+    "name": "Cursor",
+    "config_path": "<HOME>/.cursor/mcp.json",
+    "exists": true,
+    "connected": false,
+    "supported": true,
+    "icon": "cursor",
+    "display_path": "~/.cursor/mcp.json",
+    "reload_hint": "Reload the Cursor window (or restart Cursor) to load MCPProxy",
+    "access_state": "accessible",
+    "checked_paths": [
+      "<HOME>/.cursor/mcp.json"
+    ],
+    "proxy_url": "http://127.0.0.1:8080/mcp"
+  },
+  "list": [
+    {
+      "id": "claude-code",
+      "name": "Claude Code",
+      "config_path": "<HOME>/.claude.json",
+      "exists": true,
+      "connected": false,
+      "supported": true,
+      "icon": "claude-code",
+      "credential_state": "unknown",
+      "display_path": "~/.claude.json",
+      "reload_hint": "Run /mcp in Claude Code (or restart it) to load MCPProxy",
+      "access_state": "unknown",
+      "checked_paths": [
+        "<HOME>/.claude.json"
+      ],
+      "proxy_url": "http://127.0.0.1:8080/mcp"
+    },
+    {
+      "id": "claude-desktop",
+      "name": "Claude Desktop",
+      "config_path": "<HOME>/Library/Application Support/Claude/claude_desktop_config.json",
+      "exists": false,
+      "connected": false,
+      "supported": true,
+      "note": "Connects via an mcp-remote stdio bridge (npx -y mcp-remote). Requires Node.js.",
+      "bridge": true,
+      "icon": "claude-desktop",
+      "display_path": "~/Library/Application Support/Claude/claude_desktop_config.json",
+      "reload_hint": "Restart Claude Desktop to load MCPProxy",
+      "access_state": "unknown",
+      "checked_paths": [
+        "<HOME>/Library/Application Support/Claude/claude_desktop_config.json"
+      ],
+      "proxy_url": "http://127.0.0.1:8080/mcp"
+    },
+    {
+      "id": "cursor",
+      "name": "Cursor",
+      "config_path": "<HOME>/.cursor/mcp.json",
+      "exists": true,
+      "connected": false,
+      "supported": true,
+      "icon": "cursor",
+      "credential_state": "unknown",
+      "display_path": "~/.cursor/mcp.json",
+      "reload_hint": "Reload the Cursor window (or restart Cursor) to load MCPProxy",
+      "access_state": "unknown",
+      "checked_paths": [
+        "<HOME>/.cursor/mcp.json"
+      ],
+      "proxy_url": "http://127.0.0.1:8080/mcp"
+    },
+    {
+      "id": "windsurf",
+      "name": "Windsurf",
+      "config_path": "<HOME>/.codeium/windsurf/mcp_config.json",
+      "exists": false,
+      "connected": false,
+      "supported": true,
+      "icon": "windsurf",
+      "display_path": "~/.codeium/windsurf/mcp_config.json",
+      "reload_hint": "Reload the Windsurf window (or restart Windsurf) to load MCPProxy",
+      "access_state": "unknown",
+      "checked_paths": [
+        "<HOME>/.codeium/windsurf/mcp_config.json"
+      ],
+      "proxy_url": "http://127.0.0.1:8080/mcp"
+    },
+    {
+      "id": "vscode",
+      "name": "VS Code",
+      "config_path": "<HOME>/Library/Application Support/Code/User/mcp.json",
+      "exists": false,
+      "connected": false,
+      "supported": true,
+      "icon": "vscode",
+      "display_path": "~/Library/Application Support/Code/User/mcp.json",
+      "reload_hint": "Run \"MCP: List Servers\" → Restart (or reload the window) in VS Code to load MCPProxy",
+      "access_state": "unknown",
+      "checked_paths": [
+        "<HOME>/Library/Application Support/Code/User/mcp.json"
+      ],
+      "proxy_url": "http://127.0.0.1:8080/mcp"
+    },
+    {
+      "id": "copilot",
+      "name": "GitHub Copilot (VS Code, Copilot CLI)",
+      "config_path": "<HOME>/.copilot/mcp-config.json",
+      "exists": false,
+      "connected": false,
+      "supported": true,
+      "icon": "vscode",
+      "display_path": "~/.copilot/mcp-config.json",
+      "reload_hint": "Reload the VS Code window (or restart Copilot CLI) to load MCPProxy",
+      "access_state": "unknown",
+      "checked_paths": [
+        "<HOME>/.copilot/mcp-config.json"
+      ],
+      "proxy_url": "http://127.0.0.1:8080/mcp"
+    },
+    {
+      "id": "codex",
+      "name": "Codex CLI",
+      "config_path": "<HOME>/.codex/config.toml",
+      "exists": false,
+      "connected": false,
+      "supported": true,
+      "icon": "codex",
+      "display_path": "~/.codex/config.toml",
+      "reload_hint": "Restart Codex CLI to load MCPProxy",
+      "access_state": "unknown",
+      "checked_paths": [
+        "<HOME>/.codex/config.toml"
+      ],
+      "proxy_url": "http://127.0.0.1:8080/mcp"
+    },
+    {
+      "id": "gemini",
+      "name": "Gemini CLI",
+      "config_path": "<HOME>/.gemini/settings.json",
+      "exists": false,
+      "connected": false,
+      "supported": true,
+      "icon": "gemini",
+      "display_path": "~/.gemini/settings.json",
+      "reload_hint": "Restart Gemini CLI to load MCPProxy",
+      "access_state": "unknown",
+      "checked_paths": [
+        "<HOME>/.gemini/settings.json"
+      ],
+      "proxy_url": "http://127.0.0.1:8080/mcp"
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "config_path": "<HOME>/.config/opencode/opencode.json",
+      "exists": false,
+      "connected": false,
+      "supported": true,
+      "icon": "opencode",
+      "display_path": "~/.config/opencode/opencode.json",
+      "reload_hint": "Restart OpenCode to load MCPProxy",
+      "access_state": "unknown",
+      "checked_paths": [
+        "<HOME>/.config/opencode/opencode.jsonc",
+        "<HOME>/.config/opencode/opencode.json"
+      ],
+      "proxy_url": "http://127.0.0.1:8080/mcp"
+    },
+    {
+      "id": "zcode",
+      "name": "ZCode",
+      "config_path": "<HOME>/.zcode/cli/config.json",
+      "exists": false,
+      "connected": false,
+      "supported": true,
+      "note": "If your MCP servers are defined in ~/.agents/mcp.json, they will stop loading in ZCode while this entry is present in ~/.zcode/cli/config.json.",
+      "icon": "zcode",
+      "display_path": "~/.zcode/cli/config.json",
+      "reload_hint": "Restart ZCode to load MCPProxy",
+      "access_state": "unknown",
+      "checked_paths": [
+        "<HOME>/.zcode/cli/config.json"
+      ],
+      "proxy_url": "http://127.0.0.1:8080/mcp"
+    }
+  ]
+}

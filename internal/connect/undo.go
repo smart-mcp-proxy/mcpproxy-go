@@ -126,6 +126,11 @@ func (s *Service) UndoWithIntent(clientID, serverName, backupName string, intent
 }
 
 func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string, intent CredentialIntent) (*ConnectResult, error) {
+	unlock, lockErr := lockConfig(cfgPath)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
 	// Load the pre-connect content (empty when connect created the file).
 	var backupRaw []byte
 	if backupPath != "" {
@@ -172,14 +177,21 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 	currentSecret, _ := entryCredentialFromRaw(client, currentRaw, serverName)
 	credentialOK := currentSecret == "" ||
 		(s.minter != nil && s.minter.HeldByRecord(client.ID, currentSecret))
-	var expected []byte
-	if credentialOK {
-		expected, err = s.replayConnectWrite(client, serverName, backupRaw, currentSecret)
+	// Write provenance first: a connect records the digest of the file it wrote,
+	// and the file is untouched iff it still has that digest (no replay, so the
+	// auth mode of the connect cannot be confused). A backup from before records
+	// existed can only be a key connect and keeps the original key-path replay.
+	verdict, recAuth, recPath := checkUndoRecord(cfgPath, backupPath, client.ID, serverName, currentRaw)
+	oauthEntry := verdict == undoUntouched && recAuth == AuthOAuth
+	matched := verdict == undoUntouched
+	if verdict == undoLegacy && credentialOK {
+		expected, err := s.replayConnectWrite(client, serverName, backupRaw, currentSecret)
 		if err != nil {
 			return nil, err
 		}
+		matched = bytes.Equal(currentRaw, expected)
 	}
-	if !credentialOK || !bytes.Equal(currentRaw, expected) {
+	if !credentialOK || !matched {
 		return &ConnectResult{
 			Success:    false,
 			Client:     client.ID,
@@ -197,19 +209,45 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 		return nil, fmt.Errorf("safety backup failed: %w", err)
 	}
 
+	// Undo writes the config too: with browser-login undo state present, that
+	// state moves on with it (see undo_state.go); otherwise this is a no-op.
+	tx, txErr := beginConfigTx(cfgPath, false)
+	if txErr != nil {
+		return nil, txErr
+	}
+	failed := func(err error) error {
+		if rb := tx.rollback(); rb != nil {
+			return fmt.Errorf("%w (and the undo state could not be restored: %v)", err, rb)
+		}
+		return err
+	}
+
 	if backupPath == "" {
 		// Connect created this file; pre-connect state is "no file".
 		if err := os.Remove(cfgPath); err != nil {
-			return nil, fmt.Errorf("remove created config: %w", err)
+			return nil, failed(fmt.Errorf("remove created config: %w", err))
+		}
+		removeUndoRecord(recPath)
+		_ = removeCreatedFileRecords(cfgPath, client.ID, serverName, "")
+		stateNote := ""
+		if tx == nil {
+			tx, _ = beginConfigTx(cfgPath, false) // a state file that appeared during the write
+		}
+		if ferr := tx.finishAfterRemoval(); ferr != nil {
+			stateNote = "undo state not finished, Undo will refuse older records: " + ferr.Error()
 		}
 		res := &ConnectResult{
-			Success:    true,
-			Client:     client.ID,
-			ConfigPath: cfgPath,
-			BackupPath: safetyPath,
-			ServerName: serverName,
-			Action:     "deleted",
-			Message:    fmt.Sprintf("Removed %s — it did not exist before mcpproxy connected (a safety copy was saved to %s)", cfgPath, safetyPath),
+			Success:      true,
+			Client:       client.ID,
+			ConfigPath:   cfgPath,
+			BackupPath:   safetyPath,
+			ServerName:   serverName,
+			Action:       "deleted",
+			Message:      fmt.Sprintf("Removed %s — it did not exist before mcpproxy connected (a safety copy was saved to %s)", cfgPath, safetyPath),
+			CleanupError: stateNote,
+		}
+		if oauthEntry {
+			return res, nil // minted nothing, so there is nothing to revoke
 		}
 		return res, s.revokeUnheld(client.ID, "", intent, res)
 	}
@@ -219,17 +257,30 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 		perm = info.Mode()
 	}
 	if err := atomicWriteFile(cfgPath, backupRaw, perm, nil); err != nil {
-		return nil, fmt.Errorf("restore from backup: %w", err)
+		return nil, failed(fmt.Errorf("restore from backup: %w", err))
+	}
+	removeUndoRecord(recPath)
+	_ = removeCreatedFileRecords(cfgPath, client.ID, serverName, "")
+	stateNote := ""
+	if tx == nil {
+		tx, _ = beginConfigTx(cfgPath, false) // a state file that appeared during the write
+	}
+	if ferr := tx.finishAfterRemoval(); ferr != nil {
+		stateNote = "undo state not finished, Undo will refuse older records: " + ferr.Error()
 	}
 
 	res := &ConnectResult{
-		Success:    true,
-		Client:     client.ID,
-		ConfigPath: cfgPath,
-		BackupPath: safetyPath,
-		ServerName: serverName,
-		Action:     "restored",
-		Message:    fmt.Sprintf("Restored %s from backup %s", cfgPath, backupPath),
+		Success:      true,
+		Client:       client.ID,
+		ConfigPath:   cfgPath,
+		BackupPath:   safetyPath,
+		ServerName:   serverName,
+		Action:       "restored",
+		Message:      fmt.Sprintf("Restored %s from backup %s", cfgPath, backupPath),
+		CleanupError: stateNote,
+	}
+	if oauthEntry {
+		return res, nil // an oauth connect minted nothing; the API key is left alone
 	}
 	restoredSecret, _ := entryCredentialFromRaw(client, backupRaw, serverName)
 	return res, s.revokeUnheld(client.ID, restoredSecret, intent, res)
@@ -280,6 +331,7 @@ func entryCredentialFromRaw(client *ClientDef, raw []byte, serverName string) (s
 // current file that has not been touched since is byte-identical to this
 // reconstruction.
 func (s *Service) replayConnectWrite(client *ClientDef, serverName string, backupRaw []byte, credential string) ([]byte, error) {
+	params := s.entryParams(credential)
 	data := make(map[string]interface{})
 	if client.Format == "toml" {
 		if len(backupRaw) > 0 {
@@ -291,7 +343,7 @@ func (s *Service) replayConnectWrite(client *ClientDef, serverName string, backu
 		if serversMap == nil {
 			serversMap = make(map[string]interface{})
 		}
-		serversMap[serverName] = buildServerEntry(client.ID, s.entryParams(credential))
+		serversMap[serverName] = buildServerEntry(client.ID, params)
 		data["mcp_servers"] = serversMap
 		var buf bytes.Buffer
 		if err := toml.NewEncoder(&buf).Encode(data); err != nil {
@@ -321,7 +373,7 @@ func (s *Service) replayConnectWrite(client *ClientDef, serverName string, backu
 			delete(serversMap, adoptedName)
 		}
 	}
-	serversMap[serverName] = buildServerEntry(client.ID, s.entryParams(credential))
+	serversMap[serverName] = buildServerEntry(client.ID, params)
 	setServersMap(client, data, serversMap)
 	return marshalJSONIndent(data)
 }

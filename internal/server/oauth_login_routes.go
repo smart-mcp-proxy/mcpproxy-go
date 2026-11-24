@@ -1,0 +1,110 @@
+package server
+
+import (
+	"net/http"
+	"net/netip"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpx"
+)
+
+// Spec 132: opt-in browser login for MCP clients. This file holds only the
+// routing switch. With mcp_oauth_enabled off (the default) and the feature
+// never used, every pattern below answers exactly as it did before the
+// patterns were registered (the previous handler is called). The gate decides
+// per request from the live config; nothing is cached.
+
+// oauthLoginExactPatterns and oauthLoginSubtreePatterns are the ONLY patterns
+// registered for browser login. `/oauth/` and `/.well-known/` subtrees are
+// deliberately not registered: ServeMux would add trailing-slash redirects
+// that do not exist today.
+var (
+	// oauthLoginMCPPatterns fall back to the /mcp/ catch-all chain when off.
+	oauthLoginMCPPatterns = []string{"/mcp/oauth", "/mcp/oauth/"}
+	// oauthLoginRootPatterns fall back to the root handler when off.
+	oauthLoginRootPatterns = []string{
+		"/oauth/register",
+		"/oauth/authorize",
+		"/oauth/token",
+		"/.well-known/oauth-authorization-server",
+		"/.well-known/oauth-protected-resource/mcp/oauth",
+		"/.well-known/oauth-protected-resource/mcp/oauth/",
+	}
+)
+
+// peerIsLoopback reports whether the TCP peer of r is a loopback address.
+// Unix-socket / named-pipe peers, empty and malformed addresses are not.
+func peerIsLoopback(r *http.Request) bool {
+	ap, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	return ap.Addr().Unmap().IsLoopback()
+}
+
+// hasProxyHeaders reports whether the request carries a header a reverse
+// proxy or tunnel adds. A proxy on the same host presents as a loopback peer,
+// so such a request is not a local one and the OAuth routes answer 404.
+func hasProxyHeaders(r *http.Request) bool {
+	for _, h := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Real-IP"} {
+		if _, ok := r.Header[http.CanonicalHeaderKey(h)]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// oauthLoginEverUsedNow reports whether browser login has ever been used on
+// this install: the storage marker `oauth_login_ever_used`, read through the
+// service (only a positive answer is cached; a read never writes). It is
+// injectable for tests.
+func (s *Server) oauthLoginEverUsedNow() bool {
+	if s.oauthLoginEverUsed != nil {
+		return s.oauthLoginEverUsed()
+	}
+	if svc := s.oauthLoginSvc(); svc != nil {
+		return svc.EverUsed()
+	}
+	return false
+}
+
+// oauthLoginGate wraps the browser-login handler `served`. prev is the handler
+// that answered the same path before this change.
+//
+//	off, never used -> prev
+//	off, used       -> 404
+//	on              -> served, only for a loopback peer, a loopback Host and
+//	                   the personal edition; otherwise 404
+func (s *Server) oauthLoginGate(prev, served http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg := s.liveConfig()
+		if cfg == nil || !cfg.MCPOAuthEnabled {
+			if s.oauthLoginEverUsedNow() {
+				http.NotFound(w, r)
+				return
+			}
+			prev.ServeHTTP(w, r)
+			return
+		}
+		if !peerIsLoopback(r) || !httpx.IsLoopbackHost(r.Host) || !oauthLoginEditionSupported || hasProxyHeaders(r) {
+			http.NotFound(w, r)
+			return
+		}
+		served.ServeHTTP(w, r)
+	})
+}
+
+// registerOAuthLoginRoutes registers the browser-login patterns on mux.
+// mcpHandler is the existing /mcp/ catch-all chain, rootHandler the existing
+// "/" handler; each is the off-state fallback of its patterns. oauthMCP is the
+// MCP chain served on /mcp/oauth* while the feature is on (it authenticates
+// mcp_oat_ access tokens itself, see oauthResourceAuth).
+func (s *Server) registerOAuthLoginRoutes(mux *http.ServeMux, mcpHandler, rootHandler, oauthMCP http.Handler) {
+	mcpGate := s.oauthLoginGate(mcpHandler, oauthMCP)
+	for _, p := range oauthLoginMCPPatterns {
+		mux.Handle(p, mcpGate)
+	}
+	rootGate := s.oauthLoginGate(rootHandler, s.oauthLoginPublicHandler())
+	for _, p := range oauthLoginRootPatterns {
+		mux.Handle(p, rootGate)
+	}
+}

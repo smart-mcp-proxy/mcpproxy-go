@@ -240,6 +240,9 @@ func (s *ProfilesService) usedByAll(cfg *config.Config) (map[string]*UsedBy, err
 			u.Tokens = append(u.Tokens, t.Name)
 		}
 	}
+	if err := s.addOAuthUsers(tokens, func(pin string) *UsedBy { return out[pin] }); err != nil {
+		return nil, err
+	}
 	for _, u := range out {
 		sortUsedBy(u)
 	}
@@ -280,6 +283,14 @@ func (s *ProfilesService) UsedBy(name string) (UsedBy, error) {
 		} else {
 			u.Tokens = append(u.Tokens, t.Name)
 		}
+	}
+	if err := s.addOAuthUsers(tokens, func(pin string) *UsedBy {
+		if pin == name {
+			return &u
+		}
+		return nil
+	}); err != nil {
+		return u, err
 	}
 	sortUsedBy(&u)
 	if cfg := s.rt.Config(); cfg != nil {

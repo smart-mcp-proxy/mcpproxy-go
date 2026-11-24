@@ -28,6 +28,7 @@
               <router-link class="link" :data-test="`clients-row-link-tools-${client.id}`" :aria-label="`Tools it sees for ${client.display_name}`" :to="scopeQuery.linkTo('tools', { client: client.id })">Tools it sees</router-link>
               <router-link class="link" :data-test="`clients-row-link-usage-${client.id}`" :aria-label="`Usage for ${client.display_name}`" :to="scopeQuery.linkTo('usage', { client: client.id, token: '' })">Usage</router-link>
             </div>
+            <ClientCredentials class="mb-3" :client="client" @changed="refreshSilently" />
             <ClientBindingControls class="mb-3" :client="client" @changed="refreshSilently" @forget="forgetTarget = $event" @credential="showCredential" />
             <p v-if="!client.sessions?.length" class="text-sm opacity-60">No sessions recorded.</p>
             <router-link v-for="session in client.sessions" :key="session.id" :to="`/activity?view=sessions&session=${encodeURIComponent(session.work_session_id || session.id)}`" class="link block text-sm">Session {{ session.work_session_id || session.id }}</router-link>
@@ -62,6 +63,7 @@ import { useAuthStore } from '@/stores/auth'
 import ClientConnectList from '@/components/ClientConnectList.vue'
 import ProfileChip from '@/components/ProfileChip.vue'
 import ClientBindingControls from '@/components/ClientBindingControls.vue'
+import ClientCredentials from '@/components/clients/ClientCredentials.vue'
 import GuardRefusal from '@/components/GuardRefusal.vue'
 import ClientsWarningsBanner from '@/components/clients/ClientsWarningsBanner.vue'
 import CustomClientDialog from '@/components/clients/CustomClientDialog.vue'

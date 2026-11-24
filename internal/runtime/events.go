@@ -54,6 +54,15 @@ const (
 	// prefix, purpose or expiry: subscribers refetch. It names identities and
 	// profiles, so it is administrator-only on SSE.
 	EventTypeCredentialsChanged EventType = "credentials.changed"
+	// EventTypeOAuthAuthorizationPending is emitted (Spec 132) when a browser
+	// sign-in request waits for an administrator. Payload: {request_id,
+	// client_id, client_label}; the label is the sanitised, unverified name the
+	// client reported. It names a client, so it is administrator-only on SSE.
+	EventTypeOAuthAuthorizationPending EventType = "oauth.authorization_pending"
+	// EventTypeOAuthAuthorizationDecided is emitted (Spec 132) when a sign-in
+	// request leaves the pending state. Payload: {request_id, status} with
+	// status approved, denied or cancelled. Administrator-only on SSE.
+	EventTypeOAuthAuthorizationDecided EventType = "oauth.authorization_decided"
 
 	// Activity logging events (RFC-003)
 	// EventTypeActivityToolCallStarted is emitted when a tool execution begins.

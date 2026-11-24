@@ -106,6 +106,37 @@ describe('ServerDetail Skills tab (Spec 125)', () => {
     expect(wrapper.find('[data-test="skills-panel"]').exists()).toBe(true)
   })
 
+  it('reads Needs review from the URL and updates only its filter parameter', async () => {
+    ;(api.getServerSkills as any).mockResolvedValue({ success: true, data: makeListing([makeSkill('new'), makeSkill('approved', { status: 'approved' })]) })
+    const { wrapper, router } = await mountServerDetail('/servers/alpha?tab=skills&state=needs-review&focus=x')
+    const all = wrapper.get('[data-test="skills-filter-all"]')
+    const needsReview = wrapper.get('[data-test="skills-filter-needs-review"]')
+    expect(needsReview.attributes('aria-pressed')).toBe('true')
+    expect(wrapper.find('[data-test="skill-row-approved"]').exists()).toBe(false)
+    await all.trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query).toEqual({ tab: 'skills', focus: 'x' })
+    expect(all.attributes('aria-pressed')).toBe('true')
+    expect(wrapper.find('[data-test="skill-row-approved"]').exists()).toBe(true)
+    await needsReview.trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query).toEqual({ tab: 'skills', state: 'needs-review', focus: 'x' })
+    await wrapper.findAll('button.tab').find(tab => tab.text().startsWith('Tools ('))!.trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query).toEqual({ tab: 'tools', focus: 'x' })
+    await wrapper.get('[data-test="skills-tab"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="skills-filter-all"]').attributes('aria-pressed')).toBe('true')
+    wrapper.unmount()
+  })
+
+  it('treats an unknown Skills filter as All skills', async () => {
+    const { wrapper } = await mountServerDetail('/servers/alpha?tab=skills&state=unknown')
+    expect(wrapper.get('[data-test="skills-filter-all"]').attributes('aria-pressed')).toBe('true')
+    expect(wrapper.find('[data-test="skill-row-hf"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it('re-checks the tab for the next server on an in-place serverName change', async () => {
     const { wrapper } = await mountServerDetail('/servers/alpha')
     expect(wrapper.find('[data-test="skills-tab"]').exists()).toBe(true)

@@ -301,7 +301,11 @@ fi
 
 if [ "$CREATE_PRODUCT_PKG" = "true" ]; then
 
-# Copy postinstall script
+# Copy the install scripts. preinstall quits a running tray before its bundle
+# is replaced (#2016); postinstall sets up the CLI and launches the new tray.
+# These are the ONLY scripts the package runs.
+cp "scripts/preinstall.sh" "$PKG_SCRIPTS/preinstall"
+chmod +x "$PKG_SCRIPTS/preinstall"
 cp "scripts/postinstall.sh" "$PKG_SCRIPTS/postinstall"
 chmod +x "$PKG_SCRIPTS/postinstall"
 

@@ -749,7 +749,12 @@
         <!-- Rendered only once the check says the tab is offered: until then a
              ?tab=skills link waits, and a tab that is not offered falls back to Tools. -->
         <div v-if="activeTab === 'skills' && !isTenant && skillsTabVisible">
-          <SkillsPanel :server-name="server.name" />
+          <SkillsPanel
+            :server-name="server.name"
+            :needs-review="route.query.state === 'needs-review'"
+            :server-reviewable="server.enabled && !server.quarantined"
+            @filter="setSkillsFilter"
+          />
         </div>
         <div v-else-if="activeTab === 'skills' && !skillsTabChecked" class="text-center py-8" data-test="skills-tab-checking">
           <span class="loading loading-spinner"></span>
@@ -967,11 +972,83 @@
               </div>
             </div>
 
-            <!-- Process (stdio) -->
-            <div v-if="server.command" class="card bg-base-100 shadow-sm">
+            <!-- Process (stdio). Issue #2008: the command and its arguments are
+                 editable here; before, changing them meant a REST call or a
+                 hand-edited config file. -->
+            <div v-if="server.command" class="card bg-base-100 shadow-sm" data-test="server-process-card">
               <div class="card-body py-4">
-                <h3 class="card-title text-base">Process</h3>
-                <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
+                <div class="flex items-center justify-between gap-2">
+                  <h3 class="card-title text-base">Process</h3>
+                  <button
+                    v-if="!editingProcess"
+                    type="button"
+                    class="btn btn-ghost btn-xs"
+                    data-test="server-process-edit"
+                    @click="startEditProcess"
+                  >Edit</button>
+                </div>
+                <form
+                  v-if="editingProcess"
+                  class="mt-2 space-y-3 text-sm"
+                  data-test="server-process-form"
+                  @submit.prevent="saveProcess"
+                  @keyup.escape="cancelEditProcess"
+                >
+                  <label class="form-control w-full max-w-xl">
+                    <span class="label-text text-base-content/60 mb-1">Command</span>
+                    <input
+                      ref="commandInputRef"
+                      v-model="commandDraft"
+                      type="text"
+                      class="input input-bordered input-sm font-mono w-full"
+                      :disabled="processSaving"
+                      autocomplete="off"
+                      autocapitalize="off"
+                      spellcheck="false"
+                      data-test="server-command-input"
+                    />
+                  </label>
+                  <label class="form-control w-full max-w-xl">
+                    <span class="label-text text-base-content/60 mb-1">Arguments, one per line</span>
+                    <textarea
+                      v-model="argsDraft"
+                      class="textarea textarea-bordered textarea-sm font-mono w-full leading-snug"
+                      :rows="Math.min(Math.max(argsDraft.split('\n').length, 3), 12)"
+                      :disabled="argsNotLineEditable || processSaving"
+                      autocomplete="off"
+                      autocapitalize="off"
+                      spellcheck="false"
+                      data-test="server-args-input"
+                    ></textarea>
+                  </label>
+                  <p v-if="argsNotLineEditable" class="text-base-content/60 text-xs" data-test="server-args-multiline-note">
+                    An argument of this server is empty, contains a line break, or starts or ends with a space,
+                    so the arguments cannot be edited one per line. Use <code>mcpproxy upstream patch</code> to change them.
+                  </p>
+                  <p v-if="processDraftError" class="text-error text-xs" role="alert" data-test="server-process-error">{{ processDraftError }}</p>
+                  <p v-else class="text-base-content/60 text-xs" data-test="server-process-hint">
+                    Blank lines and spaces around a line are ignored; for an empty argument or one that starts or
+                    ends with a space, use <code>mcpproxy upstream patch</code>. Saving restarts the server with
+                    the new command line. A value shown masked is a hidden credential: if you change the
+                    arguments, type its real value again.
+                  </p>
+                  <div class="flex gap-2">
+                    <button
+                      type="submit"
+                      class="btn btn-primary btn-sm"
+                      :disabled="processSaving || !commandDraft.trim()"
+                      data-test="server-process-save"
+                    >Save</button>
+                    <button
+                      type="button"
+                      class="btn btn-ghost btn-sm"
+                      :disabled="processSaving"
+                      data-test="server-process-cancel"
+                      @click="cancelEditProcess"
+                    >Cancel</button>
+                  </div>
+                </form>
+                <dl v-else class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
                   <dt class="text-base-content/60">Command</dt>
                   <dd><code class="bg-base-200 px-1.5 py-0.5 rounded text-xs">{{ server.command }}</code></dd>
                   <template v-if="server.args && server.args.length">
@@ -1720,12 +1797,23 @@ let viewMounted = true
 function urlIsThisView(): boolean {
   return viewMounted && route.params.serverName === props.serverName
 }
+function setSkillsFilter(needsReview: boolean) {
+  if (!urlIsThisView()) return
+  void router.replace({ query: { ...route.query, state: needsReview ? 'needs-review' : undefined } })
+}
+function writeTabToQuery(tab: typeof activeTab.value) {
+  if (!urlIsThisView()) return
+  const query = { ...route.query }
+  query.tab = tab
+  if (tab !== 'skills' && query.state === 'needs-review') delete query.state
+  void router.replace({ query })
+}
 function leaveSkillsTabIfNotOffered() {
   if (!skillsTabRefused()) return
   if (activeTab.value === 'skills') activeTab.value = 'tools'
   // activeTab may already read 'tools' (readTabFromQuery set it in the same
   // tick), in which case the watch does not fire: write the URL here.
-  else if (route.query.tab === 'skills' && urlIsThisView()) void router.replace({ query: { ...route.query, tab: 'tools' } })
+  else if (route.query.tab === 'skills') writeTabToQuery('tools')
 }
 async function checkSkillsTab(reset = true) {
   // A failed background re-check (reset=false, after skills.changed) never
@@ -1766,12 +1854,10 @@ async function checkSkillsTab(reset = true) {
 }
 // Spec 109 FR-016: every tab change (click, or a programmatic jump such as
 // the auto-approve flow landing on Security) is reflected in `?tab=`, keeping
-// every other query param, so the active tab survives a reload or a shared
-// link. The initial value is read from `?tab=` in onMounted below; this watch
-// only ever writes forward from there.
+// unrelated query params, so the active tab survives reloads and shared links.
+// Leaving Skills clears its queue filter so an ordinary tab click opens All skills.
 watch(activeTab, (tab) => {
-  if (route.query.tab === tab || !urlIsThisView()) return
-  void router.replace({ query: { ...route.query, tab } })
+  if (route.query.tab !== tab) writeTabToQuery(tab)
 })
 // Sets activeTab from `?tab=` (or resets it to the default when absent),
 // shared by onMounted and the props.serverName watch below. App.vue's
@@ -2404,6 +2490,8 @@ watch(
   () => props.serverName,
   (next, prev) => {
     if (next === prev) return
+    // Issue #2008: a command draft belongs to the server it was opened for.
+    resetProcessEditor()
     serverTools.value = []
     toolsIncarnation.value = undefined
     approvalsIncarnation.value = undefined
@@ -3632,6 +3720,182 @@ async function saveEdit(scope: 'header' | 'env', k: string, val: string) {
 async function deleteKv(scope: 'header' | 'env', k: string) {
   if (!confirm(`Delete ${scope === 'header' ? 'header' : 'env variable'} "${k}"?`)) return
   await patchServerDiff({ [scopeKey(scope)]: { [k]: null } }, `Deleted ${k}`)
+}
+
+// --- Process editing (issue #2008) ----------------------------------------
+// The command and its arguments of a stdio server. The rules that shape a save:
+//
+//  * Only what the user changed is sent, judged against a snapshot taken when
+//    the editor opened — not against the live server object, which SSE keeps
+//    refreshing underneath an open editor. The read path masks
+//    credential-shaped command and argv tokens, and the backend refuses a mask
+//    echoed back at a write (an argv slot has no key to bind the stored secret
+//    to). A field left out of the PATCH keeps its stored value, masks included.
+//  * `args` replaces the whole vector, so a changed list is sent complete —
+//    and a list the user did not touch is never re-parsed and sent.
+//  * If the server's configuration changed elsewhere while the editor was
+//    open, the save is refused rather than writing over the newer value.
+//  * The draft belongs to one server: it is dropped when the view moves to
+//    another one.
+//
+// A backend refusal is shown beside the fields and the editor stays open, so
+// the user can fix the value instead of retyping everything.
+const editingProcess = ref(false)
+const commandDraft = ref('')
+const argsDraft = ref('')
+const processDraftError = ref('')
+const processSaving = ref(false)
+const commandInputRef = ref<HTMLInputElement | null>(null)
+
+interface ProcessSnapshot {
+  name: string
+  command: string
+  args: string[]
+  argsText: string
+  // Committed config generation and incarnation of the server when the editor
+  // opened (Spec 116 FR-017); undefined when the core does not report them.
+  generation?: number
+  incarnation?: number
+}
+let processSnapshot: ProcessSnapshot | null = null
+
+// One trimmed argument per line cannot represent an argument that contains a
+// line break, is empty, or starts or ends with white space. Such a vector is
+// left to the CLI rather than silently rewritten.
+function argsLineEditable(args: string[]): boolean {
+  return args.every((a) => a !== '' && a === a.trim() && !/[\r\n]/.test(a))
+}
+const argsNotLineEditable = computed(() => !argsLineEditable(server.value?.args ?? []))
+
+// parseArgsDraft returns the arguments and, for each, the 1-based line of the
+// text box it came from (blank lines are skipped, so the two differ).
+function parseArgsDraft(text: string): { args: string[]; lines: number[] } {
+  const args: string[] = []
+  const lines: number[] = []
+  text.split('\n').forEach((line, i) => {
+    const value = line.trim()
+    if (value === '') return
+    args.push(value)
+    lines.push(i + 1)
+  })
+  return { args, lines }
+}
+
+function sameArgs(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((v, i) => v === b[i])
+}
+
+// The backend names a refused masked argument by its zero-based index and in
+// REST terms ("omit args"). Here the arguments are lines of a text box, so say
+// which line and what to do with it.
+function describeProcessSaveError(error: string | undefined, argLines: number[]): string {
+  if (!error) return 'The command could not be saved'
+  if (error.includes('redaction placeholder')) {
+    const match = /\bargs\[(\d+)\]/.exec(error)
+    const line = match ? argLines[Number(match[1])] : undefined
+    const where = line !== undefined ? `Argument line ${line}` : 'One of the values'
+    return `${where} is a masked credential, not its real value. Type the real value there, then save.`
+  }
+  return error
+}
+
+function startEditProcess() {
+  if (!server.value) return
+  const args = [...(server.value.args ?? [])]
+  processSnapshot = {
+    name: server.value.name,
+    command: server.value.command ?? '',
+    args,
+    argsText: args.join('\n'),
+    generation: server.value.generation,
+    incarnation: server.value.incarnation,
+  }
+  commandDraft.value = processSnapshot.command
+  argsDraft.value = processSnapshot.argsText
+  processDraftError.value = ''
+  editingProcess.value = true
+  void nextTick(() => commandInputRef.value?.focus())
+}
+
+function resetProcessEditor() {
+  editingProcess.value = false
+  processDraftError.value = ''
+  processSnapshot = null
+}
+
+function cancelEditProcess() {
+  if (processSaving.value) return
+  resetProcessEditor()
+}
+
+async function saveProcess() {
+  const snapshot = processSnapshot
+  if (!server.value || !snapshot || processSaving.value) return
+  if (server.value.name !== snapshot.name) {
+    resetProcessEditor()
+    return
+  }
+  // The displayed values alone cannot tell that the server changed: two
+  // different credentials render as the same mask. The committed generation
+  // can, so it decides when the core reports it; the values still cover a core
+  // that does not.
+  const changedElsewhere =
+    server.value.generation !== snapshot.generation ||
+    server.value.incarnation !== snapshot.incarnation ||
+    (server.value.command ?? '') !== snapshot.command ||
+    !sameArgs(server.value.args ?? [], snapshot.args)
+  if (changedElsewhere) {
+    processDraftError.value =
+      'The configuration of this server was changed somewhere else while you were editing. Cancel and open the editor again.'
+    return
+  }
+
+  const patch: Record<string, unknown> = {}
+  let argLines: number[] = []
+  if (commandDraft.value !== snapshot.command) {
+    const command = commandDraft.value.trim()
+    if (!command) {
+      processDraftError.value = 'Enter a command'
+      return
+    }
+    if (command !== snapshot.command) patch.command = command
+  }
+  if (argsLineEditable(snapshot.args) && argsDraft.value !== snapshot.argsText) {
+    const parsed = parseArgsDraft(argsDraft.value)
+    argLines = parsed.lines
+    if (!sameArgs(parsed.args, snapshot.args)) patch.args = parsed.args
+  }
+  if (Object.keys(patch).length === 0) {
+    resetProcessEditor()
+    return
+  }
+
+  processDraftError.value = ''
+  processSaving.value = true
+  try {
+    const resp = await api.patchServer(snapshot.name, patch)
+    // The view may have moved to another server, with its own draft, while
+    // the request was in flight. Only the editor this save belongs to is
+    // closed or shown the error; elsewhere the outcome becomes a toast.
+    const mine = () => processSnapshot === snapshot
+    if (!resp.success) {
+      const message = describeProcessSaveError(resp.error, argLines)
+      if (mine()) processDraftError.value = message
+      else systemStore.addToast({ type: 'error', title: `Updating the command of ${snapshot.name} failed`, message })
+      return
+    }
+    await serversStore.fetchServers(true)
+    systemStore.addToast({ type: 'success', title: 'Updated command', message: '' })
+    if (!mine()) return
+    resetProcessEditor()
+    await loadServerDetails()
+  } catch (e: any) {
+    const message = e?.message || String(e)
+    if (processSnapshot === snapshot) processDraftError.value = message
+    else systemStore.addToast({ type: 'error', title: `Updating the command of ${snapshot.name} failed`, message })
+  } finally {
+    processSaving.value = false
+  }
 }
 
 async function commitNewHeader() {

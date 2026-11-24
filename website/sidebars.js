@@ -150,6 +150,7 @@ const sidebars = {
           items: [
             'features/oauth-authentication',
             'features/oauth-token-encryption',
+            'features/client-oauth-login',
             'features/auth-broker',
             'features/idp-token-storage',
           ],
