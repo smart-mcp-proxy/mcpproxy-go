@@ -80,7 +80,7 @@ Row keys: actor_kind, actor_name (omitted if empty for stampActor rows, but "" p
 | DELETE /clients/{client}/logins/{grant_id} | oauth_login.go:269 | OAuthLoginService.RevokeGrant oauth_login_tokens.go:224 -> :253 | profile_change revoke (SYNC) | Y (RequestActor) |
 | POST /secrets (set keyring) | server.go:5183 handleSetSecret (route :1264) | resolver.Store + controller.NotifySecretsChanged runtime.go:1541 -> emitSecretsChanged event_bus.go:423 (SSE event only) | **NO RECORD** | n/a |
 | DELETE /secrets/{name} | server.go:5274 (:1265) | resolver.Delete (server.go:5319) + NotifySecretsChanged | **NO RECORD** | n/a |
-| POST /secrets/migrate | server.go:5094 (:1263) | resolver.Store per secret + config patch | **NO RECORD** (any server field edit it makes is not routed through UpdateServer/emit; UNCONFIRMED whether it calls UpdateServer) | n/a |
+| POST /secrets/migrate | server.go:5094 (:1263) | analysis only, always `dry_run: true` (server.go:5113-5127) | not a writer (exempt) | n/a |
 | POST /servers/{id}/config-to-secret | server.go:3219 (:1193) | resolver.Store :3303 then controller.UpdateServer :3346 (server.go:2524) -> emit server_updated :2587 | config_change action=server_updated (BUS) + secrets.changed SSE only; keyring write itself unrecorded | Y (ctx) |
 
 ### 1.2 Server approval, tool approval, quarantine
@@ -103,7 +103,7 @@ Row keys: actor_kind, actor_name (omitted if empty for stampActor rows, but "" p
 |---|---|---|---|---|
 | POST /servers | server.go:2553 handleAddServer (:1162); calls controller.AddServer server.go:2735 | Server.AddServer server.go:2350 -> createServerCommitted config_cow.go:80; emit server.go:2379 | config_change action=server_added, new_values via serverAddedValues (BUS) | Y |
 | POST /servers/import, /import/json, /import/path | import.go:337 / 410 / 258 (:1163,1164,1167); runImport import.go:459 -> controller.AddServer import.go:615 per server | same as above | config_change server_added per imported server (BUS). Preview = no write | Y |
-| PATCH /servers/{id} | server.go:3104 (:1191); controller.UpdateServer server.go:3162 | Server.UpdateServer server.go:2524; emit :2587 only when changedFields non-empty | config_change server_updated with redacted previous/new values (BUS) | Y |
+| PATCH /servers/{id} | server.go:3104 (:1191); controller.PatchServer (server.go:3147-3162) | PatchServer → commit; delta computed and emitted after Commit returns (server.go:2543-2588) only when changedFields non-empty | config_change server_updated with redacted previous/new values (BUS) | Y |
 | DELETE /servers/{id} | server.go:2773 (:1192); controller.RemoveServer :2783 | Server.RemoveServer server.go:2606; emit :2621 | config_change server_removed + metadata.purged (BUS) | Y |
 | POST /servers/{id}/enable, /disable | server.go:3381 / 3446 (:1194/1195); mgmtSvc.EnableServer management/service.go:720 (fallback s.enableServer surface.go:105) | Runtime.EnableServerCtx lifecycle.go:2418; emit :2437 | config_change server_enabled / server_disabled (BUS) | Y |
 | POST /servers/enable_all, /disable_all | server.go:3570 / 3600 (:1171/1172); mgmt EnableAll service.go:885 / DisableAll :979 | Runtime.BulkEnableServers lifecycle.go:2567 (one Commit "bulk_enable_toggle") | **NO RECORD** (no per-server config_change) | n/a |
@@ -116,7 +116,7 @@ Row keys: actor_kind, actor_name (omitted if empty for stampActor rows, but "" p
 | POST /registries | server.go:6882 (:1335) | Server.AddRegistrySourceRef add_registry_source.go:193 -> Commit "registry_source_add" :135 | **NO RECORD** | n/a |
 | PUT /registries/{id} | server.go:6962 (:1336) | EditRegistrySourceRef edit_registry_source.go:144 -> Commit :104 | **NO RECORD** | n/a |
 | DELETE /registries/{id} | server.go:6923 (:1337) | RemoveRegistrySourceRef remove_registry_source.go:79 -> Commit :49 | **NO RECORD** | n/a |
-| POST /registries/{id}/refresh | server.go:7001 (:1339) | RefreshRegistryCache server.go:4978 | **NO RECORD** (cache only) | n/a |
+| POST /registries/{id}/refresh | server.go:7001 (:1339) | RefreshRegistryCache server.go:4978 | **NO RECORD** (cache only — exempt, bookkeeping) | n/a |
 | POST /registries/{id}/servers/{serverId}/add | server.go:6804 (:1340); AddServerFromRegistryRef add_from_registry.go:150 | AddServerFromRegistry :88 -> s.AddServer(ctx) :134 | config_change server_added (BUS) | Y |
 | POST /onboarding/mark | onboarding.go:181 (:1385) | controller.UpdateOnboardingState runtime.go:4999 | **NO RECORD** | n/a |
 | POST /telemetry/update-failure | update_failure.go:50 (:1283) | controller.RecordUpdateFailure (counter) | **NO RECORD** (telemetry counter, not a settings change) | n/a |
@@ -170,7 +170,7 @@ POST /tools/call (server.go:6520), POST /code/exec (:1314), POST /preflight (pre
 
 ## 2. Server-edition-only routes (//go:build server) -- internal/serveredition
 Core httpapi differences: registerClientRoutes is a no-op (internal/httpapi/clients_routes_server.go:12), so /clients* and /oauth/authorizations* do not exist; browser login is off (internal/server/oauth_login_edition_server.go:6). Everything else in section 1 still applies.
-Server-edition handlers write **no activity rows** except credential_broker; they log via zap only. Whether these routers sit under httpapi's actorContextMiddleware is UNCONFIRMED (setup.go mounts them itself); if not, handlers that call runtime funnels with r.Context() fall back to RequestActor's AuthContext derivation (surface "api").
+Server-edition handlers write **no activity rows** except credential_broker; they log via zap only. They are **not** under httpapi's `TagRequestMeta`/`actorContextMiddleware`: setup.go mounts a sibling chi group with its own auth middleware (setup.go:343-350), and the SSO callback sits on a public route outside it (setup.go:275-286). Handlers that call runtime funnels with r.Context() fall back to RequestActor's AuthContext derivation (surface "api").
 | Door | Handler | Funnel | Row today |
 |---|---|---|---|
 | POST /auth/token (+prefix) | api/auth_endpoints.go:156 generateToken (routes :47/:53) | teamsauth.GenerateBearerToken | **NO RECORD** (zap only :44). JWT mint |
@@ -271,6 +271,7 @@ REST-backed (go through section 1; actor = whatever the API key/socket yields, s
 | Skill refresh transitions (scheduled/startup) | skills_catalog.go:671/686 | skill_quarantine_change (BUS); actor_kind=system when ctx has no caller |
 | Tool discovery / auto-approve sweeps | tool_quarantine.go:1219,1264,1468,2514,2645,2650; tool_quarantine_scan_approve.go:120 | tool_quarantine_change tool_discovered/tool_auto_approved/tool_description_changed (BUS, no actor) |
 | Telemetry startup outcome | server.go:1744 -> Runtime.UpdateTelemetry runtime.go:1060 | **NO RECORD** |
+| `serve` generating and persisting an API key when none is configured | cmd/mcpproxy/main.go:567-594 | **NO RECORD** (mapped: `config.update`, `internal`/`startup`, `api_key` withheld) |
 | Server auto-quarantine by scanner verdict | EmitActivityQuarantineChange (no ctx) callers: config_load_admission_gate.go:265 only (others are Ctx variants) | see above |
 | System start/stop | server.go:1494/3945 EmitActivitySystemStart, :1601 Stop | system_start / system_stop (BUS) |
 
