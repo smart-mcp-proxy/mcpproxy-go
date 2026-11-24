@@ -1425,8 +1425,8 @@ actor CoreProcessManager {
         // parent is this app (not launchd, so not login_item) and it has no TTY
         // (so not cli), leaving launch_source "unknown".
         //
-        // The DMG installer launches this app with MCPPROXY_LAUNCHED_BY=installer
-        // (packaging/macos/postinstall.sh); that first-run attribution outranks
+        // The PKG installer launches this app with MCPPROXY_LAUNCHED_BY=installer
+        // (scripts/postinstall.sh); that first-run attribution outranks
         // "tray", so do not overwrite it.
         if env["MCPPROXY_LAUNCHED_BY"] != "installer" {
             env["MCPPROXY_LAUNCHED_BY"] = "tray"
