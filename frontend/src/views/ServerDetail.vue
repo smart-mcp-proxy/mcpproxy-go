@@ -972,11 +972,80 @@
               </div>
             </div>
 
-            <!-- Process (stdio) -->
-            <div v-if="server.command" class="card bg-base-100 shadow-sm">
+            <!-- Process (stdio). Issue #2008: the command and its arguments are
+                 editable here; before, changing them meant a REST call or a
+                 hand-edited config file. -->
+            <div v-if="server.command" class="card bg-base-100 shadow-sm" data-test="server-process-card">
               <div class="card-body py-4">
-                <h3 class="card-title text-base">Process</h3>
-                <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
+                <div class="flex items-center justify-between gap-2">
+                  <h3 class="card-title text-base">Process</h3>
+                  <button
+                    v-if="!editingProcess"
+                    type="button"
+                    class="btn btn-ghost btn-xs"
+                    data-test="server-process-edit"
+                    @click="startEditProcess"
+                  >Edit</button>
+                </div>
+                <form
+                  v-if="editingProcess"
+                  class="mt-2 space-y-3 text-sm"
+                  data-test="server-process-form"
+                  @submit.prevent="saveProcess"
+                  @keyup.escape="cancelEditProcess"
+                >
+                  <label class="form-control w-full max-w-xl">
+                    <span class="label-text text-base-content/60 mb-1">Command</span>
+                    <input
+                      ref="commandInputRef"
+                      v-model="commandDraft"
+                      type="text"
+                      class="input input-bordered input-sm font-mono w-full"
+                      autocomplete="off"
+                      autocapitalize="off"
+                      spellcheck="false"
+                      data-test="server-command-input"
+                    />
+                  </label>
+                  <label class="form-control w-full max-w-xl">
+                    <span class="label-text text-base-content/60 mb-1">Arguments, one per line</span>
+                    <textarea
+                      v-model="argsDraft"
+                      class="textarea textarea-bordered textarea-sm font-mono w-full leading-snug"
+                      :rows="Math.min(Math.max(argsDraft.split('\n').length, 3), 12)"
+                      :disabled="argsNotLineEditable"
+                      autocomplete="off"
+                      autocapitalize="off"
+                      spellcheck="false"
+                      data-test="server-args-input"
+                    ></textarea>
+                  </label>
+                  <p v-if="argsNotLineEditable" class="text-base-content/60 text-xs" data-test="server-args-multiline-note">
+                    An argument of this server contains a line break, so the arguments cannot be edited here.
+                    Use <code>mcpproxy upstream patch</code> to change them.
+                  </p>
+                  <p v-if="processDraftError" class="text-error text-xs" role="alert" data-test="server-process-error">{{ processDraftError }}</p>
+                  <p v-else class="text-base-content/60 text-xs">
+                    Saving restarts the server with the new command line. A value shown masked is a hidden
+                    credential: if you change the arguments, type its real value again.
+                  </p>
+                  <div class="flex gap-2">
+                    <button
+                      type="submit"
+                      class="btn btn-primary btn-sm"
+                      :disabled="processSaving || !commandDraft.trim()"
+                      data-test="server-process-save"
+                    >Save</button>
+                    <button
+                      type="button"
+                      class="btn btn-ghost btn-sm"
+                      :disabled="processSaving"
+                      data-test="server-process-cancel"
+                      @click="cancelEditProcess"
+                    >Cancel</button>
+                  </div>
+                </form>
+                <dl v-else class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
                   <dt class="text-base-content/60">Command</dt>
                   <dd><code class="bg-base-200 px-1.5 py-0.5 rounded text-xs">{{ server.command }}</code></dd>
                   <template v-if="server.args && server.args.length">
@@ -3646,6 +3715,102 @@ async function saveEdit(scope: 'header' | 'env', k: string, val: string) {
 async function deleteKv(scope: 'header' | 'env', k: string) {
   if (!confirm(`Delete ${scope === 'header' ? 'header' : 'env variable'} "${k}"?`)) return
   await patchServerDiff({ [scopeKey(scope)]: { [k]: null } }, `Deleted ${k}`)
+}
+
+// --- Process editing (issue #2008) ----------------------------------------
+// The command and its arguments of a stdio server. Two rules shape the save:
+//
+//  * Only what the user changed is sent. The read path masks credential-shaped
+//    command and argv tokens, and the backend refuses a mask echoed back at a
+//    write (an argv slot has no key to bind the stored secret to). Leaving an
+//    untouched field out of the PATCH keeps its stored value, masks included.
+//  * `args` replaces the whole vector, so a changed list is sent complete.
+//
+// A backend refusal is shown beside the fields and the editor stays open, so
+// the user can fix the value instead of retyping everything.
+const editingProcess = ref(false)
+const commandDraft = ref('')
+const argsDraft = ref('')
+const processDraftError = ref('')
+const processSaving = ref(false)
+const commandInputRef = ref<HTMLInputElement | null>(null)
+
+// One argument per line cannot represent an argument that itself contains a
+// line break; such a vector is left to the CLI rather than silently split.
+const argsNotLineEditable = computed(() =>
+  (server.value?.args ?? []).some((a) => /[\r\n]/.test(a))
+)
+
+function parseArgsDraft(text: string): string[] {
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+}
+
+// The backend names a refused masked argument by its zero-based index and in
+// REST terms ("omit args"). Here the arguments are lines of a text box, so say
+// which line and what to do with it.
+function describeProcessSaveError(error: string | undefined): string {
+  if (!error) return 'The command could not be saved'
+  if (error.includes('redaction placeholder')) {
+    const index = /\bargs\[(\d+)\]/.exec(error)
+    const where = index ? `Argument line ${Number(index[1]) + 1}` : 'One of the values'
+    return `${where} is a masked credential, not its real value. Type the real value there, then save.`
+  }
+  return error
+}
+
+function startEditProcess() {
+  commandDraft.value = server.value?.command ?? ''
+  argsDraft.value = (server.value?.args ?? []).join('\n')
+  processDraftError.value = ''
+  editingProcess.value = true
+  void nextTick(() => commandInputRef.value?.focus())
+}
+
+function cancelEditProcess() {
+  if (processSaving.value) return
+  editingProcess.value = false
+  processDraftError.value = ''
+}
+
+async function saveProcess() {
+  if (!server.value || processSaving.value) return
+  const command = commandDraft.value.trim()
+  if (!command) {
+    processDraftError.value = 'Enter a command'
+    return
+  }
+  const patch: Record<string, unknown> = {}
+  if (command !== (server.value.command ?? '')) patch.command = command
+  if (!argsNotLineEditable.value) {
+    const nextArgs = parseArgsDraft(argsDraft.value)
+    const currentArgs = server.value.args ?? []
+    const same = nextArgs.length === currentArgs.length && nextArgs.every((a, i) => a === currentArgs[i])
+    if (!same) patch.args = nextArgs
+  }
+  if (Object.keys(patch).length === 0) {
+    cancelEditProcess()
+    return
+  }
+  processDraftError.value = ''
+  processSaving.value = true
+  try {
+    const resp = await api.patchServer(server.value.name, patch)
+    if (!resp.success) {
+      processDraftError.value = describeProcessSaveError(resp.error)
+      return
+    }
+    await serversStore.fetchServers(true)
+    systemStore.addToast({ type: 'success', title: 'Updated command', message: '' })
+    editingProcess.value = false
+    await loadServerDetails()
+  } catch (e: any) {
+    processDraftError.value = e?.message || String(e)
+  } finally {
+    processSaving.value = false
+  }
 }
 
 async function commitNewHeader() {

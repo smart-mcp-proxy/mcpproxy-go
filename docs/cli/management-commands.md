@@ -139,6 +139,45 @@ mcpproxy upstream enable server-name
 mcpproxy upstream disable server-name
 ```
 
+### Change Command / Args
+
+`mcpproxy upstream patch` also changes the program and the arguments of a
+stdio server, so you do not have to remove and re-add it.
+
+```bash
+# Replace the whole command line: everything after -- is the new command
+mcpproxy upstream patch sqlite -- uvx mcp-server-sqlite --db-path /data/new.db
+
+# Change only the program; the stored arguments are kept
+mcpproxy upstream patch sqlite --command /usr/local/bin/uvx
+
+# Replace only the arguments (repeat --arg, in order)
+mcpproxy upstream patch sqlite --arg mcp-server-sqlite --arg=--db-path --arg /data/new.db
+
+# Remove all arguments
+mcpproxy upstream patch sqlite --clear-args
+```
+
+| Flag | Semantics |
+|---|---|
+| `-- command [args...]` | Replace the command and all arguments. A bare command removes the stored arguments |
+| `--command PROGRAM` | Replace the program only |
+| `--arg VALUE` | One argument (repeatable, in order). Replaces **all** stored arguments; write `--arg=--flag` when the value starts with a dash |
+| `--clear-args` | Remove all arguments |
+
+**Notes:**
+
+- Arguments are replaced as a whole list, never merged: give every
+  argument you want to keep.
+- The `--` form cannot be combined with `--command`, `--arg` or
+  `--clear-args`. It can be combined with `--env` and `--header` flags,
+  which must come before the `--`.
+- The server restarts with the new command line.
+- `mcpproxy upstream list` and `inspect` mask credential-shaped
+  arguments. A masked value is refused on write: type the real value.
+- The same change is available in the Web UI: **Servers → (server) →
+  Configuration → Process → Edit**.
+
 ### Patch Headers / Env
 
 `mcpproxy upstream patch` updates HTTP `headers` and stdio `env` on an
