@@ -97,6 +97,32 @@ final class ProfileEditorModelTests: XCTestCase {
         XCTAssertEqual(set["management_tools"] as? Bool, true)
     }
 
+    /// Issue #2027: the profile's own response limit. nil inherits (key
+    /// omitted), 0 is an explicit "no limit" and must be sent.
+    func testToolResponseLimitIsOmittedWhenNilAndSentWhenZero() throws {
+        var payload = ProfileConfigPayload(name: "p")
+        XCTAssertNil(try payload.jsonObject()["tool_response_limit"], "inherit omits the key")
+
+        payload.toolResponseLimit = 0
+        XCTAssertEqual(try payload.jsonObject()["tool_response_limit"] as? Int, 0, "no limit is sent, not dropped")
+
+        payload.toolResponseLimit = 500_000
+        XCTAssertEqual(try payload.jsonObject()["tool_response_limit"] as? Int, 500_000)
+    }
+
+    func testToolResponseLimitSurvivesAnEditRoundTrip() throws {
+        let json = Data(#"{"name":"script","servers":["github"],"tool_response_limit":0}"#.utf8)
+        let view = try JSONDecoder().decode(ProfileView.self, from: json)
+        XCTAssertEqual(view.toolResponseLimit, 0)
+        let payload = ProfileConfigPayload(view)
+        XCTAssertEqual(try payload.jsonObject()["tool_response_limit"] as? Int, 0,
+                       "saving a profile from the editor keeps its stored limit")
+
+        let plain = try JSONDecoder().decode(ProfileView.self, from: Data(#"{"name":"p","servers":[]}"#.utf8))
+        XCTAssertNil(plain.toolResponseLimit)
+        XCTAssertNil(try ProfileConfigPayload(plain).jsonObject()["tool_response_limit"])
+    }
+
     func testSwitchableToIsATriState() throws {
         var payload = ProfileConfigPayload(name: "p")
         payload.switchableTo = .unset

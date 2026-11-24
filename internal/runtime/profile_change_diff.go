@@ -134,6 +134,7 @@ func diffProfileFields(o, n config.ProfileConfig) map[string]interface{} {
 	scalar("unannotated", o.Unannotated, n.Unannotated)
 	scalar("code_execution", boolPtr(o.CodeExecution), boolPtr(n.CodeExecution))
 	scalar("management_tools", boolPtr(o.ManagementTools), boolPtr(n.ManagementTools))
+	scalar("tool_response_limit", intPtrValue(o.ToolResponseLimit), intPtrValue(n.ToolResponseLimit))
 	list("servers", o.Servers, n.Servers)
 	list("switchable_to", derefList(o.SwitchableTo), derefList(n.SwitchableTo))
 	if (o.SwitchableTo == nil) != (n.SwitchableTo == nil) {
@@ -229,4 +230,11 @@ func (r *Runtime) writeProfileChanges(ctx context.Context, actor Actor, changes 
 			change: c.Kind, profile: c.Profile, previousProfile: c.PreviousProfile, diff: c.Diff,
 		})
 	}
+}
+
+func intPtrValue(p *int) interface{} {
+	if p == nil {
+		return nil
+	}
+	return *p
 }

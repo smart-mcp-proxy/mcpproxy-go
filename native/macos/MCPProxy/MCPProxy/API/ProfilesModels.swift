@@ -407,6 +407,9 @@ struct ProfileView: Codable, Identifiable, Equatable {
     var managementTools: Bool?
     /// nil = not set (legacy); `[]` = explicitly "none" (round-trips as `[]`).
     var switchableTo: [String]?
+    /// The profile's own response limit in characters: nil = inherits the
+    /// global `tool_response_limit`, 0 = no limit.
+    var toolResponseLimit: Int?
     var effectiveServers: [String]?
     var effectiveUnannotated: String?
     var effectiveCodeExecution: Bool?
@@ -424,6 +427,7 @@ struct ProfileView: Codable, Identifiable, Equatable {
         servers: [String] = [], maxTier: String? = nil, unannotated: String? = nil,
         tools: ProfileToolRules? = nil, codeExecution: Bool? = nil,
         managementTools: Bool? = nil, switchableTo: [String]? = nil,
+        toolResponseLimit: Int? = nil,
         effectiveServers: [String]? = nil, effectiveUnannotated: String? = nil,
         effectiveCodeExecution: Bool? = nil, isLegacy: Bool? = nil,
         toolCounts: ToolCounts? = nil, toolCount: Int = 0,
@@ -439,6 +443,7 @@ struct ProfileView: Codable, Identifiable, Equatable {
         self.codeExecution = codeExecution
         self.managementTools = managementTools
         self.switchableTo = switchableTo
+        self.toolResponseLimit = toolResponseLimit
         self.effectiveServers = effectiveServers
         self.effectiveUnannotated = effectiveUnannotated
         self.effectiveCodeExecution = effectiveCodeExecution
@@ -456,6 +461,7 @@ struct ProfileView: Codable, Identifiable, Equatable {
         case codeExecution = "code_execution"
         case managementTools = "management_tools"
         case switchableTo = "switchable_to"
+        case toolResponseLimit = "tool_response_limit"
         case effectiveServers = "effective_servers"
         case effectiveUnannotated = "effective_unannotated"
         case effectiveCodeExecution = "effective_code_execution"
@@ -479,6 +485,7 @@ struct ProfileView: Codable, Identifiable, Equatable {
         codeExecution = try c.decodeIfPresent(Bool.self, forKey: .codeExecution)
         managementTools = try c.decodeIfPresent(Bool.self, forKey: .managementTools)
         switchableTo = try c.decodeIfPresent([String].self, forKey: .switchableTo)
+        toolResponseLimit = try c.decodeIfPresent(Int.self, forKey: .toolResponseLimit)
         effectiveServers = try c.decodeIfPresent([String].self, forKey: .effectiveServers)
         effectiveUnannotated = try c.decodeIfPresent(String.self, forKey: .effectiveUnannotated)
         effectiveCodeExecution = try c.decodeIfPresent(Bool.self, forKey: .effectiveCodeExecution)
@@ -569,7 +576,9 @@ enum SwitchableTo: Equatable {
 /// A custom `Encodable` so every omission is deliberate (K4):
 /// `codeExecution`/`managementTools` are omitted when nil (inherit),
 /// `switchableTo` follows the tri-state, `tools` is omitted when all three
-/// parts are empty, `maxTier`/`unannotated` are omitted when nil or empty.
+/// parts are empty, `maxTier`/`unannotated` are omitted when nil or empty,
+/// `toolResponseLimit` is omitted when nil (inherit) and sent as 0 for "no
+/// limit".
 struct ProfileConfigPayload: Encodable, Equatable {
     var name: String
     var title: String = ""
@@ -581,6 +590,8 @@ struct ProfileConfigPayload: Encodable, Equatable {
     var codeExecution: Bool?
     var managementTools: Bool?
     var switchableTo: SwitchableTo = .unset
+    /// nil = inherit the global limit; 0 = no limit; else characters.
+    var toolResponseLimit: Int?
 
     init(name: String) { self.name = name }
 
@@ -596,6 +607,7 @@ struct ProfileConfigPayload: Encodable, Equatable {
         codeExecution = view.codeExecution
         managementTools = view.managementTools
         switchableTo = SwitchableTo(stored: view.switchableTo)
+        toolResponseLimit = view.toolResponseLimit
     }
 
     enum CodingKeys: String, CodingKey {
@@ -604,6 +616,7 @@ struct ProfileConfigPayload: Encodable, Equatable {
         case codeExecution = "code_execution"
         case managementTools = "management_tools"
         case switchableTo = "switchable_to"
+        case toolResponseLimit = "tool_response_limit"
     }
 
     func encode(to encoder: Encoder) throws {
@@ -623,6 +636,7 @@ struct ProfileConfigPayload: Encodable, Equatable {
         if let codeExecution { try c.encode(codeExecution, forKey: .codeExecution) }
         if let managementTools { try c.encode(managementTools, forKey: .managementTools) }
         if let stored = switchableTo.stored { try c.encode(stored, forKey: .switchableTo) }
+        if let toolResponseLimit { try c.encode(toolResponseLimit, forKey: .toolResponseLimit) }
     }
 
     /// The encoded JSON object, for tests and for `tryProfile`'s nested body.

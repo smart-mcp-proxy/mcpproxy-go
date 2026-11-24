@@ -3088,7 +3088,7 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			args,
 			len(mcpTools),
 			"tools",
-			p.currentTruncator(),
+			p.truncatorForProfile(profileIdx, profileName),
 			p.cacheStoreAs(producer),
 			p.logger,
 		)
@@ -4015,7 +4015,11 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// Issue #1932: tool_response_limit bounds structuredContent too. An oversize
 	// structured result becomes a text block here, before sanitisation, so it
 	// is redacted, scanned, truncated and cached like any other text block.
-	structuredWithheld := withholdOversizeStructured(result, p.currentTruncator().Limit(), p.logger, toolName)
+	// Issue #2027: the effective profile may carry its own limit; resolved
+	// once so withholding, encoding and truncation agree.
+	truncator := p.truncatorForProfile(profileIdx, profileSlug)
+	withholdLimit := structuredWithholdLimit(truncator.Limit(), p.currentTruncator().Limit(), p.outputSanitisationRewrites())
+	structuredWithheld := withholdOversizeStructured(result, withholdLimit, p.logger, toolName)
 	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, requestID, contentTrust, result); blockResult != nil {
 		// The upstream ran, so the started record is closed: history and the
 		// tool_call completion carry the block message, never the response.
@@ -4052,10 +4056,10 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	var toonDetectionText string
 	var toonDecisions []toonenc.Decision
 	if ctr, ok := result.(*mcp.CallToolResult); ok {
-		toonDetectionText, toonDecisions = p.encodeToonBlocks(serverName, actualToolName, contentTrust, args, ctr)
+		toonDetectionText, toonDecisions = p.encodeToonBlocksWith(serverName, actualToolName, contentTrust, args, ctr, truncator)
 	}
 
-	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheStoreAsForwarded(producer, fwdOut, serverName), p.logger, toolName, args)
+	forwarded, response, wasTruncated := forwardContentResult(result, truncator, p.cacheStoreAsForwarded(producer, fwdOut, serverName), p.logger, toolName, args)
 
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
@@ -4524,7 +4528,9 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// Issue #1932: tool_response_limit bounds structuredContent too. An oversize
 	// structured result becomes a text block here, before sanitisation, so it
 	// is redacted, scanned, truncated and cached like any other text block.
-	structuredWithheld := withholdOversizeStructured(result, p.currentTruncator().Limit(), p.logger, toolName)
+	truncator := p.truncatorForRequest(ctx)
+	withholdLimit := structuredWithholdLimit(truncator.Limit(), p.currentTruncator().Limit(), p.outputSanitisationRewrites())
+	structuredWithheld := withholdOversizeStructured(result, withholdLimit, p.logger, toolName)
 	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, requestID, contentTrust, result); blockResult != nil {
 		// The upstream ran: close the started record (see handleCallToolVariant).
 		blockMsg := p.recordOutputBlocked(ctx, toolCallRecord, callInc, blockResult)
@@ -4543,7 +4549,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	legacyResponseBytes := rawByteSize(upstreamSizeView(result, structuredWithheld))
 	legacyRequestBytes := rawByteSize(activityArgs)
 
-	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheStoreAsForwarded(producer, fwdOut, serverName), p.logger, toolName, args)
+	forwarded, response, wasTruncated := forwardContentResult(result, truncator, p.cacheStoreAsForwarded(producer, fwdOut, serverName), p.logger, toolName, args)
 
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
@@ -7281,7 +7287,7 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 		"read_cache",
 		args,
 		len(response.Records),
-		p.currentTruncator(),
+		p.truncatorForRequest(ctx),
 		p.cacheStoreAsChildPage(childPageProducer(response, reader), response),
 		p.logger,
 	)

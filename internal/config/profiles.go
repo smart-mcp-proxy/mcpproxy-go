@@ -47,6 +47,13 @@ type ProfileConfig struct {
 	// MarshalJSON note below, and profiles_v3_test.go's switchable_to round
 	// trip case).
 	SwitchableTo *[]string `json:"switchable_to,omitempty"`
+
+	// ToolResponseLimit overrides the global tool_response_limit for calls
+	// served under this profile (issue #2027): nil = inherit, 0 = no limit, a
+	// positive value = that many characters. A pointer so an explicit 0
+	// survives omitempty. It is a delivery setting, not policy: it does not
+	// make a profile non-legacy (IsLegacy) and it changes no access decision.
+	ToolResponseLimit *int `json:"tool_response_limit,omitempty"`
 }
 
 // ProfileToolRules is a profile's tool-level policy (FR-001, FR-004, FR-005):
@@ -87,6 +94,16 @@ func (p ProfileConfig) EffectiveUnannotated() string {
 		return ProfileUnannotatedDeny
 	}
 	return ProfileUnannotatedAsRead
+}
+
+// EffectiveToolResponseLimit returns the response limit for calls served
+// under this profile: its own tool_response_limit when set (0 = no limit),
+// else the global one passed in.
+func (p ProfileConfig) EffectiveToolResponseLimit(global int) int {
+	if p.ToolResponseLimit != nil {
+		return *p.ToolResponseLimit
+	}
+	return global
 }
 
 // EffectiveCodeExecution returns this profile's effective code_execution
@@ -241,7 +258,8 @@ func ValidateProfiles(cfg *Config) (warnings []string, err error) {
 // messages. Index is the profile's position in Config.Profiles (-1 when the
 // rule is not about one profile); Field is one of name, servers, title,
 // description, max_tier, unannotated, tools.allow, tools.deny, tools.classify,
-// code_execution, management_tools, switchable_to, anonymous_profile.
+// code_execution, management_tools, switchable_to, tool_response_limit,
+// anonymous_profile.
 type ProfileValidationError struct {
 	Index   int
 	Field   string
@@ -347,6 +365,10 @@ func ValidateProfilesDetailed(cfg *Config) (warnings []ProfileWarning, err error
 		}
 		if n := utf8.RuneCountInString(p.Description); n > 500 {
 			return warnings, profileErr(i, "description", "profiles[%d]: description too long (%d chars, max 500)", i, n)
+		}
+		// Fatal: a negative response limit (0 is the explicit "no limit").
+		if p.ToolResponseLimit != nil && *p.ToolResponseLimit < 0 {
+			return warnings, profileErr(i, "tool_response_limit", "profiles[%d]: invalid tool_response_limit %d: must be 0 (no limit) or a positive number of characters", i, *p.ToolResponseLimit)
 		}
 		// Fatal: switchable_to self-reference.
 		if p.SwitchableTo != nil {

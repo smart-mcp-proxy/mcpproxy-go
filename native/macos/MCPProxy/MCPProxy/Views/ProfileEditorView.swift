@@ -215,6 +215,7 @@ struct ProfileEditorView: View {
                         identifier: "profile-editor-code-execution")
             toggleField("Management tools", errorFields: ["management_tools"], value: $model.draft.managementTools,
                         effective: nil, identifier: "profile-editor-management-tools")
+            responseLimitField
             switchableField
 
             if !model.isNew { assignedTo }
@@ -308,6 +309,50 @@ struct ProfileEditorView: View {
             }
             .pickerStyle(.segmented).labelsHidden()
             .accessibilityIdentifier(identifier)
+        }
+    }
+
+    /// The profile's own tool response limit: inherit the global one, no
+    /// limit (whole responses), or a custom number of characters.
+    private var responseLimitField: some View {
+        field("Tool response limit", errorFields: ["tool_response_limit"]) {
+            VStack(alignment: .leading, spacing: 4) {
+                Picker("Tool response limit", selection: Binding<Int>(
+                    get: {
+                        guard let limit = model.draft.toolResponseLimit else { return 0 }
+                        return limit == 0 ? 1 : 2
+                    },
+                    set: { mode in
+                        switch mode {
+                        case 0: model.draft.toolResponseLimit = nil
+                        case 1: model.draft.toolResponseLimit = 0
+                        default:
+                            if (model.draft.toolResponseLimit ?? 0) <= 0 { model.draft.toolResponseLimit = 20000 }
+                        }
+                    })) {
+                    Text("Inherit").tag(0)
+                    Text("No limit").tag(1)
+                    Text("Custom").tag(2)
+                }
+                .pickerStyle(.segmented).labelsHidden()
+                .accessibilityIdentifier("profile-editor-response-limit")
+                if let limit = model.draft.toolResponseLimit, limit > 0 {
+                    HStack(spacing: 6) {
+                        TextField("Characters", value: Binding<Int>(
+                            get: { limit },
+                            // A cleared or non-positive entry keeps the last value:
+                            // 0 would silently mean "no limit".
+                            set: { if $0 > 0 { model.draft.toolResponseLimit = $0 } }),
+                            format: .number.grouping(.never))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 120)
+                            .accessibilityIdentifier("profile-editor-response-limit-value")
+                        Text("characters").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Text("Replaces the global limit for calls under this profile.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 

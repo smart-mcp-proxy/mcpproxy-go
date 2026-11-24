@@ -214,6 +214,10 @@ func ProfileViewFromConfig(cfg *config.Config, p *config.ProfileConfig) ProfileV
 		st := append([]string{}, (*p.SwitchableTo)...)
 		v.SwitchableTo = &st
 	}
+	if p.ToolResponseLimit != nil {
+		limit := *p.ToolResponseLimit
+		v.ToolResponseLimit = &limit
+	}
 	return v
 }
 
