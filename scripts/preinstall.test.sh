@@ -21,10 +21,18 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUT="$ROOT/scripts/preinstall.sh"
-TMP="$(mktemp -d)"
+# Everything below kills by, and finally deletes, this directory. An empty or
+# wrong value here would aim that at the caller's working directory, so a
+# failed mktemp stops the test before the cleanup trap exists.
+TMP="$(mktemp -d)" || { echo "FAIL - mktemp -d failed"; exit 1; }
+[ -n "$TMP" ] && [ -d "$TMP" ] || { echo "FAIL - mktemp -d returned no directory"; exit 1; }
 # Resolve symlinks (/tmp -> /private/tmp on macOS) so the prefix matches the
 # command line the kernel reports.
-TMP="$(cd "$TMP" && pwd -P)"
+TMP="$(cd "$TMP" && pwd -P)" || { echo "FAIL - cannot resolve temp dir"; exit 1; }
+case "$TMP" in
+    /*/*) ;;
+    *) echo "FAIL - refusing to use temp dir '$TMP'"; exit 1 ;;
+esac
 
 pass=0; fail=0
 ok()  { echo "ok   - $1"; pass=$((pass+1)); }
@@ -40,31 +48,29 @@ trap cleanup EXIT
 
 if bash -n "$SUT"; then ok "preinstall.sh parses"; else bad "preinstall.sh has a syntax error"; fi
 
-# make_exec <path> [stubborn] — a long-running fake executable. "stubborn"
-# ignores SIGTERM, like a tray whose main thread never answers.
-make_exec() {
-    mkdir -p "$(dirname "$1")"
-    {
-        echo '#!/bin/bash'
-        [ "${2:-}" = stubborn ] && echo "trap '' TERM"
-        # Signals sent before the trap line runs would kill even a stubborn
-        # fixture, so the test waits for this marker and not just for the pid.
-        echo ': > "$0.ready"'
-        echo 'while :; do sleep 0.2; done'
-    } > "$1"
-    chmod +x "$1"
-}
+# Fixtures are sleep(1) started under another name (`exec -a`), so each
+# process's command line STARTS with the fixture path, as a real tray's does.
+# A shell script would run as "/bin/bash <path>", which the anchored pattern
+# rightly ignores, and macOS kills a copied system binary on launch.
+#
+# All are started detached (reparented to init), so a killed process is reaped
+# at once and never lingers as a zombie of this shell.
+spawn() { ( exec -a "$1" sleep 600 >/dev/null 2>&1 & ); }
 
-# Start detached (reparented to init), so a killed process is reaped at once
-# and never lingers as a zombie of this shell.
-spawn() { ( "$@" >/dev/null 2>&1 & ); }
+# Ignores SIGTERM, like a tray whose main thread never answers. An ignored
+# signal stays ignored across exec.
+spawn_stubborn() { ( trap '' TERM; exec -a "$1" sleep 600 >/dev/null 2>&1 & ); }
 
-alive() { pgrep -f "$1" >/dev/null 2>&1; }
+# spawn_with_arg <name> <argument> — a process whose ARGUMENT is some path.
+# The trailing `:` keeps bash from exec'ing sleep and dropping the arguments.
+spawn_with_arg() { ( exec -a "$1" bash -c 'sleep 600; :' viewer "$2" >/dev/null 2>&1 & ); }
+
+alive() { pgrep -f "^$1" >/dev/null 2>&1; }
 
 wait_alive() {
     local n=0
     while [ "$n" -lt 50 ]; do
-        if [ -e "$1.ready" ] && alive "$1"; then return 0; fi
+        if alive "$1"; then return 0; fi
         sleep 0.1; n=$((n+1))
     done
     return 1
@@ -82,7 +88,7 @@ run_quit() {
     (
         # shellcheck disable=SC1090
         source "$SUT"
-        APP_EXEC_PATTERN="$scope/$APP_EXEC_PATTERN"
+        APP_ROOT_PATTERN="$scope/"
         PGREP_SCOPE="-U $(id -u)"
         SIGTERM_TENTHS=30
         SIGKILL_TENTHS=30
@@ -103,16 +109,19 @@ C="$TMP/shipped"
 TRAY="$C/mcpproxy.app/Contents/MacOS/MCPProxy"
 CORE="$C/mcpproxy.app/Contents/Resources/bin/mcpproxy"
 HELPER="$C/mcpproxy.app/Contents/MacOS/MCPProxyHelper"
-make_exec "$TRAY"; make_exec "$CORE"; make_exec "$HELPER"
-spawn "$TRAY" -psn_0_12345
-spawn "$CORE" serve
+# Names the tray's path only as an argument: must not be taken for the tray.
+BYSTANDER="$C/bin/viewer"
+spawn "$TRAY"
+spawn "$CORE"
 spawn "$HELPER"
-if wait_alive "$TRAY" && wait_alive "$CORE" && wait_alive "$HELPER"; then
+spawn_with_arg "$BYSTANDER" "$TRAY"
+if wait_alive "$TRAY " && wait_alive "$CORE" && wait_alive "$HELPER" && wait_alive "$BYSTANDER"; then
     out="$(run_quit "$C" 2>&1)"; rc=$?
     expect_rc0 "$rc" "shipped layout: exits 0"
     expect_dead "$TRAY " "shipped layout: tray in lowercase bundle was quit"
     expect_alive "$CORE" "shipped layout: core left for the tray to stop"
     expect_alive "$HELPER" "shipped layout: longer executable name not matched"
+    expect_alive "$BYSTANDER" "shipped layout: a process only naming the tray path is spared"
 else
     bad "shipped layout: fixtures did not start"
 fi
@@ -121,7 +130,6 @@ fi
 C="$TMP/spellings"
 UPPER="$C/MCPProxy.app/Contents/MacOS/MCPProxy"
 LEGACY="$C/legacy/mcpproxy.app/Contents/MacOS/mcpproxy"
-make_exec "$UPPER"; make_exec "$LEGACY"
 spawn "$UPPER"; spawn "$LEGACY"
 if wait_alive "$UPPER" && wait_alive "$LEGACY"; then
     run_quit "$C" >/dev/null 2>&1
@@ -135,8 +143,7 @@ fi
 # --- 4. a tray that ignores SIGTERM is killed, and the install goes on -------
 C="$TMP/stubborn"
 STUB="$C/mcpproxy.app/Contents/MacOS/MCPProxy"
-make_exec "$STUB" stubborn
-spawn "$STUB"
+spawn_stubborn "$STUB"
 if wait_alive "$STUB"; then
     out="$(run_quit "$C" 2>&1)"; rc=$?
     expect_rc0 "$rc" "stubborn tray: exits 0"

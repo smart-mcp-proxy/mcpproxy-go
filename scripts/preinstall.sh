@@ -38,8 +38,16 @@ set -euo pipefail
 #
 # Anchored on `.app/Contents/MacOS/` and on the end of the name, so it matches
 # neither the core (`…/Contents/Resources/bin/mcpproxy`), nor a longer
-# executable name, nor this script's own command line.
-APP_EXEC_PATTERN='[^/]*\.app/Contents/MacOS/mcpproxy( |$)'
+# executable name.
+APP_EXEC_PATTERN='[^/ ]*\.app/Contents/MacOS/mcpproxy( |$)'
+
+# Where that bundle may live: any absolute directory. The whole pattern is
+# anchored at the START of the command line (see app_pattern), because
+# `pgrep -f` also searches arguments: unanchored, `less /Applications/
+# mcpproxy.app/Contents/MacOS/MCPProxy` would be signalled as if it were the
+# tray. The price is that a bundle under a directory with a space in its name
+# is not matched; the package installs to /Applications.
+APP_ROOT_PATTERN='/([^ ]*/)?'
 
 # How long the tray gets after each signal, in tenths of a second. The tray
 # itself gives its polite quit 5s before letting SIGTERM take its default
@@ -54,8 +62,10 @@ PGREP_SCOPE=""
 #
 # The script runs as root, and `pgrep` / `pkill` as root match every user's
 # processes. On a shared Mac that would turn "upgrade my copy" into "quit
-# everybody's tray". `-U <uid>` restricts the match to the console user;
-# without one (CI imaging, login window) there is no other session to protect.
+# everybody's tray". `-U <uid>` restricts the match to the console user.
+# Without one (CI imaging, an install at the login window) the match is
+# unscoped on purpose: the bundle being replaced is shared, so every tray still
+# running from it is about to run on replaced files.
 resolve_console_user() {
     local user="${USER:-}" uid=""
     if [ -z "$user" ] || [ "$user" = "root" ]; then
@@ -69,14 +79,18 @@ resolve_console_user() {
     fi
 }
 
+app_pattern() {
+    printf '^%s%s' "$APP_ROOT_PATTERN" "$APP_EXEC_PATTERN"
+}
+
 # shellcheck disable=SC2086  # PGREP_SCOPE is empty or "-U <numeric uid>"
 app_is_running() {
-    pgrep $PGREP_SCOPE -i -f "$APP_EXEC_PATTERN" >/dev/null 2>&1
+    pgrep $PGREP_SCOPE -i -f "$(app_pattern)" >/dev/null 2>&1
 }
 
 # shellcheck disable=SC2086
 signal_app() {
-    pkill "$1" $PGREP_SCOPE -i -f "$APP_EXEC_PATTERN" >/dev/null 2>&1 || true
+    pkill "$1" $PGREP_SCOPE -i -f "$(app_pattern)" >/dev/null 2>&1 || true
 }
 
 # Wait up to $1 tenths of a second for the app to disappear. Returns 0 if it
