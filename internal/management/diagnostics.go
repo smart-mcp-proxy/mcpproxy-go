@@ -442,11 +442,18 @@ func getStringFromMap(m map[string]interface{}, key string) string {
 // fileRefsOutsideAllowListWarning builds the doctor line for upstream servers
 // whose ${file:} references secret_file_dirs refuses by path.
 func (s *service) fileRefsOutsideAllowListWarning(ctx context.Context) (string, bool) {
-	if s.config == nil {
+	// The live config (it changes on hot reload), when the runtime offers it.
+	cfg := s.config
+	if lc, ok := s.runtime.(interface{ Config() *config.Config }); ok {
+		if live := lc.Config(); live != nil {
+			cfg = live
+		}
+	}
+	if cfg == nil {
 		return "", false
 	}
 	var visible []string
-	for _, name := range config.UpstreamFileRefsOutsideAllowList(s.config) {
+	for _, name := range config.UpstreamFileRefsOutsideAllowList(cfg) {
 		if auth.CanEnumerateServer(ctx, name) {
 			visible = append(visible, name)
 		}
