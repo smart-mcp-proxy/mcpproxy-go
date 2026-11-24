@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/codescripts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
@@ -1511,7 +1512,8 @@ type AddServerRequest struct {
 	// Empty is omitted from the wire so the daemon applies its own default; a
 	// non-empty value is validated CLI-side before the request is built and
 	// again by the REST layer (GH #938).
-	TrustMode string `json:"trust_mode,omitempty"`
+	TrustMode string              `json:"trust_mode,omitempty"`
+	OAuth     *config.OAuthConfig `json:"oauth,omitempty"`
 }
 
 // AddServerResult represents the result of adding a server.

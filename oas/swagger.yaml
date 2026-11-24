@@ -4571,6 +4571,8 @@ components:
           type: integer
         name:
           type: string
+        oauth:
+          $ref: '#/components/schemas/config.OAuthConfig'
         protocol:
           type: string
         quarantined:
@@ -10956,7 +10958,8 @@ paths:
         Isolation: `isolation.enabled` is READ-ONLY (it reports the effective state
         on reads) and is rejected with 400; set the per-server override via `isolation.enabled_override`
         (true | false | null to clear, omit to leave unchanged). An unrecognized `isolation.mode_override`
-        is rejected with 400.'
+        is rejected with 400. `oauth` is accepted on create only and is rejected with
+        400 here.'
       parameters:
       - description: Server ID or name
         in: path
