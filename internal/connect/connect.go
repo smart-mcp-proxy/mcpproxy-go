@@ -909,6 +909,7 @@ func (s *Service) Disconnect(clientID, serverName string) (res *ConnectResult, e
 	// A config that holds browser-login undo state has that state moved on by any
 	// write of it, a disconnect included (see undo_state.go); with no state file
 	// this is a no-op and nothing new is written.
+	defer lockConfig(cfgPath)()
 	tx, txErr := beginConfigTx(cfgPath, false)
 	if txErr != nil {
 		return nil, txErr
@@ -958,6 +959,13 @@ func (s *Service) Disconnect(clientID, serverName string) (res *ConnectResult, e
 		if cerr := removeUndoRecords(res.ConfigPath, clientID, serverName); cerr != nil {
 			// The entry is gone; only the cleanup of its undo records failed.
 			notes = append(notes, cerr.Error())
+		}
+		if tx == nil {
+			// A state file that appeared during the write is advanced too.
+			var lerr error
+			if tx, lerr = beginConfigTx(res.ConfigPath, false); lerr != nil {
+				notes = append(notes, "undo state: "+lerr.Error())
+			}
 		}
 		if ferr := tx.finishAfterRemoval(); ferr != nil {
 			notes = append(notes, "undo state not finished, Undo will refuse older records: "+ferr.Error())
@@ -1174,6 +1182,10 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	if err != nil {
 		return nil, err
 	}
+
+	// The undo state's transitions of one config never interleave within the
+	// process (see undo_state.go).
+	defer lockConfig(cfgPath)()
 
 	// Create backup before modifying
 	// A browser-login connect must be able to see the directory's undo records
@@ -1405,6 +1417,10 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 	if err != nil {
 		return nil, err
 	}
+
+	// The undo state's transitions of one config never interleave within the
+	// process (see undo_state.go).
+	defer lockConfig(cfgPath)()
 
 	// Backup
 	if cred.oauth {

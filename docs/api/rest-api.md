@@ -1476,9 +1476,14 @@ Safety semantics:
   and retires the older records of that entry. The state lives in
   `<config>.undo.state` (`current` generation id, `pending` flag); a created-file
   record authorises an Undo only while the state is readable, not pending and
-  names the generation the record carries, so a record that outlives its
-  retirement, or a crash mid-write, can never authorise a replaced file (Undo
-  answers conflict). A failure before the write restores the previous state
+  names the generation the record carries (and is strictly well formed), so a
+  record that outlives its retirement, or a crash mid-write, can never authorise
+  a replaced file (Undo answers conflict). Within a process the writers of one
+  config are serialised; across processes a pending state carries its writer's
+  owner token, and a commit or rollback that finds another owner changes nothing
+  (a writer that already wrote the config then leaves the state pending). The
+  state and record files are fsynced before their rename and the directory after
+  it. A failure before the write restores the previous state
   exactly. An API-key connect, a disconnect or an undo moves the state along only
   if the file already exists; an install that never used browser login gets no
   new file. A problem after a successful write is reported as `cleanup_error`; a

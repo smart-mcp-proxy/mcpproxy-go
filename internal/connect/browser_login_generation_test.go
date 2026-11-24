@@ -239,12 +239,12 @@ func TestVerifyFailure_CarriesTheRecordNoteAndTheBackupPath(t *testing.T) {
 	svc, home := testService(t)
 	oauthOn(svc)
 	withFakeMinter(svc)
-	seedClientConfig(t, home, "claude-code")
 	cfg := ConfigPath("claude-code", home)
+	// an OAuth connect that created the config leaves a created-file record; the
+	// forced replace below must retire it, fail to, and then fail its verify read
 	if _, err := svc.ConnectWithOptions("claude-code", "", ConnectOptions{Auth: AuthOAuth}); err != nil {
 		t.Fatal(err)
 	}
-	// a later forced connect: its retirement fails and its verify read fails
 	failCreatedRecordRemoval(t)
 	svc.listenAddr = "127.0.0.1:9999"
 	svc.setReadFile(func(p string) ([]byte, error) {
@@ -258,7 +258,8 @@ func TestVerifyFailure_CarriesTheRecordNoteAndTheBackupPath(t *testing.T) {
 	if err == nil {
 		t.Fatal("a verification failure still fails the connect")
 	}
-	if !strings.Contains(err.Error(), "verification failed") || !strings.Contains(err.Error(), ".bak.") {
-		t.Fatalf("the error must carry the backup path: %v", err)
+	if !strings.Contains(err.Error(), "verification failed") || !strings.Contains(err.Error(), ".bak.") ||
+		!strings.Contains(err.Error(), "operation not permitted") {
+		t.Fatalf("the error must carry the backup path and the retirement failure: %v", err)
 	}
 }

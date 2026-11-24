@@ -126,6 +126,7 @@ func (s *Service) UndoWithIntent(clientID, serverName, backupName string, intent
 }
 
 func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string, intent CredentialIntent) (*ConnectResult, error) {
+	defer lockConfig(cfgPath)()
 	// Load the pre-connect content (empty when connect created the file).
 	var backupRaw []byte
 	if backupPath != "" {
@@ -225,6 +226,9 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 		removeUndoRecord(recPath)
 		_ = removeCreatedFileRecords(cfgPath, client.ID, serverName, "")
 		stateNote := ""
+		if tx == nil {
+			tx, _ = beginConfigTx(cfgPath, false) // a state file that appeared during the write
+		}
 		if ferr := tx.finishAfterRemoval(); ferr != nil {
 			stateNote = "undo state not finished, Undo will refuse older records: " + ferr.Error()
 		}
@@ -254,6 +258,9 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 	removeUndoRecord(recPath)
 	_ = removeCreatedFileRecords(cfgPath, client.ID, serverName, "")
 	stateNote := ""
+	if tx == nil {
+		tx, _ = beginConfigTx(cfgPath, false) // a state file that appeared during the write
+	}
 	if ferr := tx.finishAfterRemoval(); ferr != nil {
 		stateNote = "undo state not finished, Undo will refuse older records: " + ferr.Error()
 	}

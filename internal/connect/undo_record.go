@@ -109,7 +109,7 @@ func stageUndoRecord(cfgPath, backupPath, clientID, serverName, gen string, writ
 	if err := os.MkdirAll(dir, newDirPerm); err != nil {
 		return nil, fmt.Errorf("create directory for undo record: %w", err)
 	}
-	tmpName, err := stageSidecar(cfgPath, dir, raw, perm, recordWrite)
+	tmpName, err := stageSidecar(cfgPath, dir, raw, perm, recordWrite, recordSync)
 	if err != nil {
 		return nil, fmt.Errorf("write undo record: %w", err)
 	}
@@ -132,6 +132,9 @@ func (r *stagedRecord) publish() (string, error) {
 		_ = os.Remove(r.tmp)
 		return "", fmt.Errorf("publish undo record: %w", err)
 	}
+	if err := dirSync(filepath.Dir(r.final)); err != nil {
+		return r.final, fmt.Errorf("sync directory after publishing the undo record: %w", err)
+	}
 	return r.final, nil
 }
 
@@ -144,6 +147,13 @@ func (r *stagedRecord) publish() (string, error) {
 // state is pending (fail closed) or names another generation.
 func finishUndoRecords(staged *stagedRecord, tx *configTx, gen, cfgPath, backupPath, clientID, serverName string, strict bool) string {
 	var notes []string
+	if tx == nil {
+		// A state file that appeared while an API-key connect wrote is advanced too.
+		var lerr error
+		if tx, lerr = beginConfigTx(cfgPath, false); lerr != nil {
+			notes = append(notes, "undo state: "+lerr.Error())
+		}
+	}
 	var cerr error
 	if gen != "" {
 		cerr = tx.commit(gen)
