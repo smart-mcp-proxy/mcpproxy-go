@@ -5,18 +5,29 @@ import (
 	"path/filepath"
 )
 
-// The data directory is walked breadth-first for files to compare with the
-// opened handle. Cost must not depend on how large the data dir has grown
-// (the Bleve index holds many segment files), so the walk has fixed budgets:
-// at most maxDenyWalkDepth directory levels and maxDenyWalkEntries directory
-// entries per read, shallow entries first. A file beyond the budget is still
-// refused by path containment (deniedByPath) and, when it has another name,
-// by the link-count rule; only a path swapped to it after those checks goes
+// Two passes pick the files compared with the opened handle.
+//
+// Pass 1 is the original, unbudgeted coverage: every non-directory entry
+// directly in the data dir, and every non-directory entry directly in certs/,
+// index.bleve/ and tpa-lkg/. It cannot be starved by anything below.
+//
+// Pass 2 extends it deeper. Its cost must not depend on how large the data dir
+// has grown (the Bleve index holds many segment files), so it has fixed
+// budgets: at most maxDenyWalkDepth directory levels and maxDenyWalkEntries
+// directory entries per read, read in bounded batches (a huge directory is
+// never enumerated whole), shallow entries first. It lists only regular files
+// and never follows symlinks. A file beyond the budget is still refused by
+// path containment (deniedByPath) and, when it has another name, by the
+// link-count rule; only a path swapped to it after those checks goes
 // unmatched, which the budget trades for a bounded cost.
 const (
 	maxDenyWalkDepth   = 8
 	maxDenyWalkEntries = 4096
 )
+
+// dataDirStateSubdirs are data-dir children whose direct files are always
+// compared (pass 1).
+var dataDirStateSubdirs = []string{"certs", "index.bleve", "tpa-lkg"}
 
 // denyPathsAtRead returns filesystem paths to stat for handle identity checks.
 // Paths are fresh on every read so renames and new inodes are caught. The
@@ -33,38 +44,84 @@ func (p *FilePolicy) denyPathsAtRead() []string {
 	if p.Deny.DataDir == "" {
 		return uniqueAbsPaths(paths)
 	}
-	type level struct {
-		dir   string
-		depth int
+
+	// Pass 1.
+	entries, err := os.ReadDir(p.Deny.DataDir)
+	if err != nil {
+		return uniqueAbsPaths(paths)
 	}
-	queue := []level{{p.Deny.DataDir, 1}}
+	var queue []denyWalkLevel
+	for _, e := range entries {
+		name := e.Name()
+		if name == "secrets" {
+			continue
+		}
+		full := filepath.Join(p.Deny.DataDir, name)
+		if !e.IsDir() {
+			paths = append(paths, full)
+			continue
+		}
+		queue = append(queue, denyWalkLevel{full, 2})
+		for _, sub := range dataDirStateSubdirs {
+			if name != sub {
+				continue
+			}
+			if subEntries, err := os.ReadDir(full); err == nil {
+				for _, se := range subEntries {
+					if !se.IsDir() {
+						paths = append(paths, filepath.Join(full, se.Name()))
+					}
+				}
+			}
+			break
+		}
+	}
+
+	// Pass 2: breadth-first from the data dir's subdirectories (their direct
+	// children were read in pass 1 only for the three state directories).
 	budget := maxDenyWalkEntries
 	for len(queue) > 0 && budget > 0 {
 		cur := queue[0]
 		queue = queue[1:]
-		entries, err := os.ReadDir(cur.dir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if budget == 0 {
-				break
-			}
-			budget--
-			full := filepath.Join(cur.dir, e.Name())
-			if cur.depth == 1 && e.Name() == "secrets" {
-				continue
-			}
-			if !e.IsDir() {
-				paths = append(paths, full)
-				continue
-			}
-			if cur.depth < maxDenyWalkDepth {
-				queue = append(queue, level{full, cur.depth + 1})
-			}
-		}
+		budget = walkDenyDir(cur, budget, &paths, &queue)
 	}
 	return uniqueAbsPaths(paths)
+}
+
+type denyWalkLevel struct {
+	dir   string
+	depth int
+}
+
+// walkDenyDir reads up to budget entries of one directory in batches and
+// returns the budget left.
+func walkDenyDir(cur denyWalkLevel, budget int, paths *[]string, queue *[]denyWalkLevel) int {
+	d, err := os.Open(cur.dir)
+	if err != nil {
+		return budget
+	}
+	defer d.Close()
+	for budget > 0 {
+		batch := budget
+		if batch > 256 {
+			batch = 256
+		}
+		entries, err := d.ReadDir(batch)
+		for _, e := range entries {
+			budget--
+			full := filepath.Join(cur.dir, e.Name())
+			switch {
+			case e.Type().IsRegular():
+				*paths = append(*paths, full)
+			case e.IsDir() && cur.depth < maxDenyWalkDepth:
+				*queue = append(*queue, denyWalkLevel{full, cur.depth + 1})
+			}
+		}
+		if err != nil || len(entries) == 0 {
+			break
+		}
+	}
+	return budget
 }
 
 func uniqueAbsPaths(paths []string) []string {

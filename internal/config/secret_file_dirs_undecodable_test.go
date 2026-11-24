@@ -56,3 +56,18 @@ func TestRunningAPIKeyFromReference_NoEntryOrLiteralKey(t *testing.T) {
 	assert.False(t, ok, "a literal file value is not a reference")
 	assert.Empty(t, v)
 }
+
+func TestPersistableConfig_UndecodableFileKeyDetection(t *testing.T) {
+	ResetProcessOverrides()
+	t.Cleanup(ResetProcessOverrides)
+	dir := t.TempDir()
+	path := filepath.Join(dir, ConfigFileName)
+	for name, body := range map[string]string{
+		"upper-case key (decoder is case-insensitive)": `{"SECRET_FILE_DIRS": [], "listen": 5}`,
+		"trailing comma after the setting":             `{"secret_file_dirs": [], "listen": "127.0.0.1:8080",}`,
+	} {
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600), name)
+		_, err := persistableConfigWithEdits(&Config{DataDir: dir, Listen: "127.0.0.1:8080"}, nil, path)
+		assert.ErrorIs(t, err, ErrSecretFileDirsUnverified, name)
+	}
+}

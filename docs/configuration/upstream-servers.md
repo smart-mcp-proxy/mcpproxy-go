@@ -370,7 +370,7 @@ upstream-scoped read refuses:
 
 - The active config file and the active admin API key source file(s)
 - Regular files directly under `<data-dir>` (except under `<data-dir>/secrets`)
-- Regular files in the subdirectories of `<data-dir>`, except `<data-dir>/secrets`. The identity comparison walks the data directory breadth-first with a fixed budget (8 levels, 4096 directory entries per read, shallow entries first), so its cost does not grow with the data directory. A file beyond the budget is still refused by path (anything under `<data-dir>` other than `secrets/`) and by the link-count rule; only a path swapped to it after those checks goes unmatched
+- Proxy state files under `<data-dir>` (except `<data-dir>/secrets`). Files directly in `<data-dir>`, `certs`, `index.bleve` and `tpa-lkg` are always compared with the opened file. Deeper regular files are compared too, within a fixed budget (8 levels, 4096 directory entries per read, shallow first, symlinks not followed), so the cost does not grow with the data directory. A file beyond the budget is still refused by path (anything under `<data-dir>` other than `secrets/`) and by the link-count rule; only a path swapped to it after those checks goes unmatched
 - Any file with more than one hard link
 - An earlier version of the config file that this process replaced on save, when a hardlink to it was made before the save
 

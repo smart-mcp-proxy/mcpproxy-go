@@ -1,12 +1,14 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -511,19 +513,27 @@ var ErrSecretFileDirsUnverified = errors.New("config file cannot be decoded; ref
 // be decoded as a config, still shows a secret_file_dirs key (or cannot be
 // read at all, so nothing shows it does not). A save that dropped the key
 // would turn an explicit setting (for instance [] = file references off) back
-// into the platform default. A file that is not even a JSON object holds no
-// readable setting and may be overwritten, so a repair save stays possible.
+// into the platform default. A file whose text does not even mention the key
+// holds no setting and may be overwritten, so a repair save stays possible.
 func fileMayHoldSecretFileDirs(path string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return true
 	}
 	var top map[string]json.RawMessage
-	if json.Unmarshal(data, &top) != nil {
+	if json.Unmarshal(data, &top) == nil {
+		// The decoder matches keys case-insensitively, so this must too.
+		for k := range top {
+			if strings.EqualFold(k, "secret_file_dirs") {
+				return true
+			}
+		}
 		return false
 	}
-	_, ok := top["secret_file_dirs"]
-	return ok
+	// Not a JSON object (a trailing comma after the setting, say): the loader
+	// cannot read it either, but the text may still hold the key. Fail closed
+	// when the quoted key appears anywhere in it.
+	return bytes.Contains(bytes.ToLower(data), []byte(`"secret_file_dirs"`))
 }
 
 // persistableConfigWithEdits is PersistableConfigWithEdits for the save path:

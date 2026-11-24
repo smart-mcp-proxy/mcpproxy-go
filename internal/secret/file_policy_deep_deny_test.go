@@ -78,3 +78,34 @@ func TestReadFileWithPolicy_WildcardSwapToConfigRefused(t *testing.T) {
 	_, err := ReadFileWithPolicy(target, policy)
 	require.ErrorIs(t, err, ErrSecretFileDenied)
 }
+
+// A large early-sorting directory must not use up the budget before the
+// state directories that were always compared (certs, index.bleve, tpa-lkg).
+func TestDenyPathsAtRead_StateDirsNotStarvedByBudget(t *testing.T) {
+	dataDir := t.TempDir()
+	big := filepath.Join(dataDir, "aaa-big")
+	require.NoError(t, os.Mkdir(big, 0o700))
+	for i := 0; i < maxDenyWalkEntries+50; i++ {
+		require.NoError(t, os.WriteFile(filepath.Join(big, fmt.Sprintf("f%05d", i)), nil, 0o600))
+	}
+	lkg := filepath.Join(dataDir, "tpa-lkg")
+	require.NoError(t, os.Mkdir(lkg, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(lkg, "bundle.json"), nil, 0o600))
+	p := &FilePolicy{Scope: ScopeUpstream, Deny: DenyPaths{DataDir: dataDir}}
+	require.Contains(t, p.denyPathsAtRead(), filepath.Join(lkg, "bundle.json"))
+}
+
+// The deeper pass lists regular files only: a symlink below the data dir is
+// not followed into the deny set.
+func TestDenyPathsAtRead_DeepPassIgnoresSymlinks(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	allowed := filepath.Join(root, "allowed")
+	require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "sub"), 0o700))
+	require.NoError(t, os.Mkdir(allowed, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(allowed, "k"), nil, 0o600))
+	link := filepath.Join(dataDir, "sub", "link")
+	require.NoError(t, os.Symlink(filepath.Join(allowed, "k"), link))
+	p := &FilePolicy{Scope: ScopeUpstream, Deny: DenyPaths{DataDir: dataDir}}
+	require.NotContains(t, p.denyPathsAtRead(), link)
+}
