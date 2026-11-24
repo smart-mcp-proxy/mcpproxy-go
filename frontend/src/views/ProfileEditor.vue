@@ -114,6 +114,21 @@
               <span v-if="fieldErrors.management_tools" class="text-error text-xs mt-1">{{ fieldErrors.management_tools }}</span>
             </fieldset>
 
+            <fieldset class="form-control" data-test="profile-response-limit">
+              <legend class="label-text font-medium mb-1">Tool response limit</legend>
+              <div class="flex flex-wrap gap-3">
+                <label class="label cursor-pointer gap-2 py-0"><input v-model="draft.response_limit_mode" type="radio" class="radio radio-sm" value="inherit" name="response-limit-mode" data-test="profile-response-limit-inherit" /><span class="label-text">Inherit</span></label>
+                <label class="label cursor-pointer gap-2 py-0"><input v-model="draft.response_limit_mode" type="radio" class="radio radio-sm" value="none" name="response-limit-mode" data-test="profile-response-limit-none" /><span class="label-text">No limit</span></label>
+                <label class="label cursor-pointer gap-2 py-0"><input v-model="draft.response_limit_mode" type="radio" class="radio radio-sm" value="custom" name="response-limit-mode" data-test="profile-response-limit-custom" /><span class="label-text">Custom</span></label>
+              </div>
+              <label v-if="draft.response_limit_mode === 'custom'" class="flex items-center gap-2 mt-1">
+                <input v-model.number="draft.response_limit" type="number" min="1" step="1" class="input input-bordered input-sm w-40" aria-label="Tool response limit in characters" data-test="profile-response-limit-value" />
+                <span class="text-sm opacity-70">characters</span>
+              </label>
+              <span class="text-xs opacity-70 mt-1">Replaces the global limit for calls under this profile. Use "No limit" for scripts that parse whole results.</span>
+              <span v-if="fieldErrors.tool_response_limit" class="text-error text-xs mt-1">{{ fieldErrors.tool_response_limit }}</span>
+            </fieldset>
+
             <fieldset class="form-control" data-test="profile-switchable">
               <legend class="label-text font-medium mb-1">Agent may switch to</legend>
               <div class="flex flex-wrap gap-3 mb-1">
@@ -250,7 +265,12 @@ interface Draft {
   management_tools: Tri
   switch_mode: 'unset' | 'none' | 'list'
   switchable_to: string[]
+  response_limit_mode: 'inherit' | 'none' | 'custom'
+  response_limit: number
 }
+
+// Shown when the user first picks "Custom": the built-in global default.
+const DEFAULT_RESPONSE_LIMIT = 20000
 
 function triFrom(value: boolean | undefined): Tri { return value === undefined ? 'inherit' : value ? 'on' : 'off' }
 function triTo(value: Tri): boolean | undefined { return value === 'inherit' ? undefined : value === 'on' }
@@ -270,12 +290,24 @@ function draftFrom(view: ProfileView): Draft {
     // `switchable_to` absent = legacy; present (even empty) = an explicit list.
     switch_mode: view.switchable_to === undefined ? 'unset' : view.switchable_to.length === 0 ? 'none' : 'list',
     switchable_to: [...(view.switchable_to ?? [])],
+    // `tool_response_limit` absent = inherit the global limit; 0 = no limit.
+    response_limit_mode: view.tool_response_limit === undefined ? 'inherit' : view.tool_response_limit === 0 ? 'none' : 'custom',
+    response_limit: view.tool_response_limit || DEFAULT_RESPONSE_LIMIT,
   }
+}
+
+// A custom response limit is a whole number of characters, 1 or more. An
+// empty or invalid entry must never read as 0 ("no limit"): toConfig sends -1
+// for it, which differs from every stored value (so the draft stays dirty) and
+// which the server refuses.
+function validResponseLimit(value: unknown): boolean {
+  return value !== '' && value !== null && Number.isInteger(Number(value)) && Number(value) >= 1
 }
 
 // The PUT body. Omission semantics are the contract: code_execution and
 // management_tools "Inherit" leave the key out; switchable_to "Not set" leaves
-// it out and "None" sends []; empty strings and empty rule sets are left out.
+// it out and "None" sends []; tool_response_limit "Inherit" leaves the key out
+// and "No limit" sends 0; empty strings and empty rule sets are left out.
 function toConfig(d: Draft): ProfileConfig {
   const cfg: ProfileConfig = { name: props.name, servers: [...d.servers] }
   if (d.title.trim()) cfg.title = d.title.trim()
@@ -293,6 +325,8 @@ function toConfig(d: Draft): ProfileConfig {
   if (mgmt !== undefined) cfg.management_tools = mgmt
   if (d.switch_mode === 'none') cfg.switchable_to = []
   else if (d.switch_mode === 'list') cfg.switchable_to = [...d.switchable_to]
+  if (d.response_limit_mode === 'none') cfg.tool_response_limit = 0
+  else if (d.response_limit_mode === 'custom') cfg.tool_response_limit = validResponseLimit(d.response_limit) ? Number(d.response_limit) : -1
   return cfg
 }
 
@@ -438,9 +472,15 @@ function reloadFromServer() { void load(true) }
 
 async function save() {
   if (!dirty.value || saving.value) return
-  saving.value = true
   clearErrors()
   savedNote.value = ''
+  // An empty or non-positive custom limit would otherwise be sent as 0, which
+  // means "no limit": refuse it here instead of widening the profile silently.
+  if (draft.response_limit_mode === 'custom' && !validResponseLimit(draft.response_limit)) {
+    fieldErrors.tool_response_limit = 'Enter a whole number of characters, 1 or more'
+    return
+  }
+  saving.value = true
   // The profile this save is for: if the operator navigates to another profile
   // while the PUT is in flight, its answer must not replace the new page's state.
   const name = props.name

@@ -296,6 +296,10 @@
           "description": "classify, explain: upstream tool as server:tool.",
           "type": "string"
         },
+        "tool_response_limit": {
+          "description": "create, update: response limit in characters for calls under the profile, replacing the global tool_response_limit; 0 = no limit, omitted inherits.",
+          "type": "integer"
+        },
         "tools": {
           "description": "create, update: tool rules: allow/deny are server:tool globs (deny wins), classify maps an exact server:tool to a tier.",
           "properties": {

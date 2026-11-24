@@ -566,3 +566,92 @@ func TestProfileShow_EffectiveNonAdminRowsArePolicyOnly(t *testing.T) {
 	require.NotContains(t, out, "callable")
 	require.NotContains(t, out, "tool_approval")
 }
+
+// Issue #2027: --tool-response-limit sets a profile's own response limit; 0 is
+// an explicit "no limit" and must be sent, inherit omits the field.
+func TestProfileCreate_ToolResponseLimit(t *testing.T) {
+	create := func(args ...string) (map[string]any, error) {
+		rec := newRESTRecorder(t, map[string]cannedResponse{"POST /api/v1/profiles": createdResp(`{"profile":` + mustJSON(t, fullView()) + `,"warnings":[]}`)})
+		_, _, err := runCLI(t, GetProfileCommand, "table", append([]string{"create", "script", "--servers", "github"}, args...)...)
+		if err != nil {
+			require.Empty(t, rec.all(), "a bad value must be rejected before any request")
+			return nil, err
+		}
+		return rec.only(t).jsonBody(t), nil
+	}
+
+	body, err := create("--tool-response-limit", "0")
+	require.NoError(t, err)
+	require.Equal(t, float64(0), body["tool_response_limit"], "0 (no limit) is sent, not dropped")
+
+	body, err = create("--tool-response-limit", "500000")
+	require.NoError(t, err)
+	require.Equal(t, float64(500000), body["tool_response_limit"])
+
+	body, err = create("--tool-response-limit", "inherit")
+	require.NoError(t, err)
+	require.NotContains(t, body, "tool_response_limit")
+
+	body, err = create()
+	require.NoError(t, err)
+	require.NotContains(t, body, "tool_response_limit")
+
+	_, err = create("--tool-response-limit", "lots")
+	require.Error(t, err)
+	require.Equal(t, ExitCodeGeneralError, classifyError(err))
+}
+
+func TestProfileUpdate_ToolResponseLimitKeptAndCleared(t *testing.T) {
+	stored := readonlyView()
+	zero := 0
+	stored.ToolResponseLimit = &zero
+	update := func(args ...string) map[string]any {
+		rec := newRESTRecorder(t, map[string]cannedResponse{
+			"GET /api/v1/profiles/work-ro2": okResp(mustJSON(t, stored)),
+			"PUT /api/v1/profiles/work-ro2": okResp(`{"profile":` + mustJSON(t, stored) + `,"warnings":[]}`),
+		})
+		_, _, err := runCLI(t, GetProfileCommand, "table", append([]string{"update", "work-ro2"}, args...)...)
+		require.NoError(t, err)
+		return rec.all()[1].jsonBody(t)
+	}
+
+	require.Equal(t, float64(0), update("--title", "x")["tool_response_limit"], "an unrelated update keeps the stored limit")
+	require.Equal(t, float64(9000), update("--tool-response-limit", "9000")["tool_response_limit"])
+	require.NotContains(t, update("--clear-tool-response-limit"), "tool_response_limit")
+
+	rec := newRESTRecorder(t, map[string]cannedResponse{})
+	_, _, err := runCLI(t, GetProfileCommand, "table", "update", "work-ro2", "--tool-response-limit", "5", "--clear-tool-response-limit")
+	require.Error(t, err)
+	require.Empty(t, rec.all())
+}
+
+func TestProfileShow_ToolResponseLimit(t *testing.T) {
+	zero, some := 0, 9000
+	base := runtime.ProfileView{Name: "p", Servers: []string{"github"}, EffectiveServers: []string{"github"}, EffectiveUnannotated: "as_read", EffectiveCodeExecution: true, IsLegacy: true}
+	unlimited, bounded := base, base
+	unlimited.ToolResponseLimit, bounded.ToolResponseLimit = &zero, &some
+	newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/profiles/inherit":   okResp(mustJSON(t, base)),
+		"GET /api/v1/profiles/unlimited": okResp(mustJSON(t, unlimited)),
+		"GET /api/v1/profiles/bounded":   okResp(mustJSON(t, bounded)),
+	})
+	for name, want := range map[string]string{
+		"inherit":   "Tool response limit: inherited\n",
+		"unlimited": "Tool response limit: none (whole responses)\n",
+		"bounded":   "Tool response limit: 9000 characters\n",
+	} {
+		out, _, err := runCLI(t, GetProfileCommand, "table", "show", name)
+		require.NoError(t, err)
+		require.Contains(t, out, want)
+	}
+}
+
+func TestApplyDraftSet_ToolResponseLimit(t *testing.T) {
+	p := config.ProfileConfig{Name: "p"}
+	require.NoError(t, applyDraftSet(&p, "tool_response_limit=0"))
+	require.NotNil(t, p.ToolResponseLimit)
+	require.Equal(t, 0, *p.ToolResponseLimit)
+	require.NoError(t, applyDraftSet(&p, "tool_response_limit=inherit"))
+	require.Nil(t, p.ToolResponseLimit)
+	require.Error(t, applyDraftSet(&p, "tool_response_limit=x"))
+}
