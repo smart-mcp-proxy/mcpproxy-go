@@ -120,6 +120,29 @@ handed over. Everything the app reports is shown as plain text.
 - Without the admin API key in this browser the page asks you to open the request from the
   MCPProxy tray or paste the key, and makes no request until then.
 
+### From the macOS tray
+
+The tray is the way to reach the consent page with the key in the browser. When an MCP client
+asks to sign in, the core publishes `oauth.authorization_pending`; the tray then
+
+- sends one notification ("Sign-in request") naming the app, and
+- adds a menu row **Approve sign-in for \<app\>…** per waiting request, newest first (five rows,
+  the rest in a "N more sign-in requests" submenu).
+
+The row opens `/ui/authorize?request=<id>` the way "Open Web UI in Browser" opens the Web UI (the
+API key travels in the same `?apikey=` parameter, which the page moves into local storage). The
+tray never approves or denies anything itself; the decision is made on the page.
+
+A row disappears when the request is decided (`oauth.authorization_decided`) or expires (10
+minutes). On connect, reconnect and every periodic refresh the tray reloads
+`GET /api/v1/oauth/authorizations`, so a request made while the tray was not listening still
+shows, and stale ones are dropped. While browser login is off the endpoint answers `404
+feature_disabled` and the tray shows nothing.
+
+The app name is chosen by the client, so the tray treats it as untrusted text: control and
+invisible characters are removed, white space is collapsed, it is cut to 40 characters, and it is
+only ever shown as plain text.
+
 ## Managing logins
 
 Everything here is for administrators. An agent token or a client credential cannot see
