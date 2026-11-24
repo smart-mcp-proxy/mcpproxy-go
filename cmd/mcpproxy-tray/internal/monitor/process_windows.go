@@ -223,8 +223,9 @@ func (pm *ProcessMonitor) Stop() error {
 	}
 
 	// select picks at random when both cases are ready, and with grace == 0 the timer is ready
-	// at once: look at doneCh first so an already-exited child is never force-killed (its PID
-	// may even have been reused).
+	// at once: look at doneCh first so a child the monitor has already seen exit is not
+	// force-killed. A child that exits in the instant before the monitor closes doneCh can
+	// still get a harmless taskkill (the tray holds its process handle until Wait returns).
 	select {
 	case <-pm.doneCh:
 		return exited()

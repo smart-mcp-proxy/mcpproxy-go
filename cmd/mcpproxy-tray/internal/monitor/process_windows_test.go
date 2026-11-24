@@ -82,8 +82,8 @@ func TestStopDoesNotForceKillExitedProcess(t *testing.T) {
 		case <-time.After(30 * time.Second):
 			t.Fatal("child never exited")
 		}
-		if err := pm.Stop(); err != nil && strings.Contains(err.Error(), "force killed") {
-			t.Fatalf("iteration %d: exited child was force-killed: %v", i, err)
+		if err := pm.Stop(); err != nil {
+			t.Fatalf("iteration %d: Stop() on an exited child = %v, want its clean exit", i, err)
 		}
 	}
 }
