@@ -12,7 +12,7 @@ Some MCP clients no longer put every MCP tool definition in the model's context.
 
 **What goes wrong.** The model must first find `retrieve_tools` through the client's search. That costs a round trip, can fail ("tool not found" for a name the model never searched for), and the two searches run one after the other.
 
-**The fix.** Mark the MCPProxy server as "always loaded" in the client. The few built-in tools (`retrieve_tools`, `describe_tool`, `call_tool_read`, `call_tool_write`, `call_tool_destructive`, …) then sit in context from the first turn. Your upstream servers' tools stay out of context, because MCPProxy still serves them on demand. See [Routing modes](/features/routing-modes) for what each mode exposes.
+**The fix.** Mark the MCPProxy server as "always loaded" in the client. The few built-in tools (`retrieve_tools`, `describe_tool`, `call_tool_read`, `call_tool_write`, `call_tool_destructive`, …) then sit in context from the first turn. In the default `retrieve_tools` routing mode your upstream servers' tools stay out of context, because MCPProxy serves them on demand. In `direct` mode the pinned endpoint would load every upstream tool, so pin only a `retrieve_tools` or `code_execution` endpoint (for example `/mcp/call`). See [Routing modes](/features/routing-modes).
 
 Clients that load every tool up front (for example Cursor, Windsurf or Gemini CLI) need none of this.
 
@@ -101,7 +101,7 @@ In opencode versions with Code Mode, a server's tools are reached through a sing
 }
 ```
 
-Add the API key header using the remote-server options in opencode's documentation. The snippet above only shows the Code Mode switch.
+The `mcp.servers` layout is the one in the Code Mode documentation. Older opencode releases (and the entry MCPProxy's Connect writes) use `mcp.<name>` directly; the `codemode` key sits in the same server entry either way. Add the API key header using the remote-server options in opencode's documentation.
 
 ## Codex CLI and Kiro
 
@@ -112,6 +112,6 @@ Add the API key header using the remote-server options in opencode's documentati
 
 ## Check that it worked
 
-Start a fresh session and ask the model to call `retrieve_tools` with a short query, without searching first. If it calls the tool straight away, the pin works. `mcpproxy activity list --type tool_call --from=-15m` shows the call.
+Start a fresh session and ask the model to call `retrieve_tools` with a short query, without searching first. If the client's own tool trace shows it calling `retrieve_tools` directly, with no search step first, the pin works. `mcpproxy activity list --type internal_tool_call --tool retrieve_tools --from=-15m` confirms MCPProxy received the call, but not how the client found the tool.
 
 If the client still hides the tools, see [Connect Clients](/features/connect-clients) to confirm which entry the client reads, and [Find out why an agent cannot use a tool](/guides/diagnose-unavailable-tool).
