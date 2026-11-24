@@ -109,8 +109,8 @@ PR-2, PR-3 and PR-4 can be reviewed in parallel after PR-1.
 
 - **Q1**: `auth tokens decrypt` (offline) changes how upstream OAuth tokens are stored at rest. Exempt as maintenance, or `config.update` with `field: oauth_token_storage`? The contract exempts it; a reviewer may prefer a line.
 - **Q2**: Recording refused administrative attempts (spec A4) — a separate `admin_authz` event, or `outcome: denied` on `admin_action`? Out of scope here; named so it is not lost.
-- **Q4**: `request_id` on REST is the caller's `X-Request-Id` when sent, so it is a join key, not a uniqueness guarantee. A separate proxy-minted id for admin requests would change existing REST correlation; left as is unless review asks.
 - **Q3**: Upstream OAuth login/logout (`POST /servers/{id}/login|logout`) is exempt as "not an access rule". If reviewers count an upstream credential as a rule, it is a P1-shaped `secret.*`-like action.
+- **Q4**: `request_id` on REST is the caller's `X-Request-Id` when sent, so it is a join key, not a uniqueness guarantee. A separate proxy-minted id for admin requests would change existing REST correlation; left as is unless review asks.
 
 ## Project Structure
 
