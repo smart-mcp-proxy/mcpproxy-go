@@ -102,12 +102,22 @@ func (c *Client) notifyRootsChanged() {
 	c.mu.RLock()
 	cl := c.client
 	c.mu.RUnlock()
-	if cl == nil || !c.IsConnected() || cl.GetClientCapabilities().Roots == nil {
+	if cl == nil || !c.IsConnected() {
 		return
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), rootsChangedTimeout)
 		defer cancel()
+		// A session re-initialize rewrites mcp-go's client state, the declared
+		// capabilities included: read them, and send, only between two.
+		release, err := c.sessionGate.acquireShared(ctx)
+		if err != nil {
+			return
+		}
+		defer release()
+		if cl.GetClientCapabilities().Roots == nil {
+			return
+		}
 		if err := cl.RootListChanges(ctx); err != nil {
 			c.logger.Debug("Sending roots/list_changed upstream failed",
 				zap.String("server", c.config.Name), zap.Error(err))
