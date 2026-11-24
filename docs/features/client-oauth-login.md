@@ -11,9 +11,10 @@ keywords: [oauth, browser login, mcp client, pkce, dynamic client registration, 
 
 MCPProxy can act as a small OAuth 2.1 authorization server so that an MCP client
 that supports OAuth can sign in instead of carrying an API key in its config file.
-It is **off by default** and **experimental**: in this release only the backend and
-the administrator REST exist. There is no consent page yet, so an administrator
-approves each sign-in through the REST API (see [Approving a sign-in](#approving-a-sign-in)).
+It is **off by default** and **experimental**. An administrator approves each sign-in on
+a consent page or through the REST API (see [Approving a sign-in](#approving-a-sign-in))
+and manages the logins in the Clients page, the CLI or the `credentials` MCP tool
+(see [Managing logins](#managing-logins)).
 
 What it gives you:
 
@@ -119,9 +120,39 @@ handed over. Everything the app reports is shown as plain text.
 - Without the admin API key in this browser the page asks you to open the request from the
   MCPProxy tray or paste the key, and makes no request until then.
 
-## Seeing and revoking logins
+## Managing logins
 
-`GET /api/v1/clients` and `GET /api/v1/clients/<id>` list each login under `credentials`
+Everything here is for administrators. An agent token or a client credential cannot see
+or revoke a login on any surface.
+
+**Settings.** One switch, "Browser login for MCP clients", marked Experimental, in
+Security & Access (the tray Settings window has the same switch). It takes effect without a
+restart. While it is off and was never used, no other page mentions browser login.
+
+**Clients page.** Expand a client to see its credentials: the API key and every login, each
+with its state (`active`, `lapsed` when the refresh token expired, `revoked`), when it was
+approved and last used, the name the app reported and the host it returns to. Those names
+come from the app, so they are shown as plain text. A login whose client introduces itself
+at `initialize` under a different name than the one it registered shows a "name mismatch"
+note; it is advice, never a block. "Revoke login" revokes that one login, "Revoke API key"
+revokes the key alone (the logins and the profile binding stay); both ask first. While the
+switch is off after use, the page says browser login is disabled and still lists the
+logins so they can be revoked.
+
+**CLI.**
+
+```bash
+mcpproxy client show cursor                 # lists the API key and each login
+mcpproxy client revoke-login cursor <grant-id>
+```
+
+**MCP.** The administrator `credentials` tool lists logins (`list` with `kind=browser_login`,
+and they appear under `kind=all`), `get client=<id>` includes them under `logins`, and
+`revoke client=<id> grant=<grant_id>` revokes one. `revoke client=<id>` without `grant`
+revokes everything under the client. No operation creates a login: only the person on the
+consent page can approve one. See [credential lifecycle over MCP](./mcp-credential-lifecycle.md).
+
+**REST.** `GET /api/v1/clients` and `GET /api/v1/clients/<id>` list each login under `credentials`
 (`kind: browser_login`, state `active`, `lapsed` or `revoked`, never the token). Revoke one
 with `DELETE /api/v1/clients/<id>/logins/<grant_id>`; the next request on that login,
 including on an open session, is refused. Forgetting a client removes all its logins.

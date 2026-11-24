@@ -1286,7 +1286,27 @@ export interface ClientSessionPresence { id: string; work_session_id?: string; s
 // Spec 108-f: a Clients row is Spec 109's presence fields plus the credential
 // and binding fields. The 108 fields are optional here so code written against
 // the 109 shape (and its fixtures) keeps compiling.
+// Spec 132: one credential of a client. A browser login carries what the client
+// reported about itself, so every string in it is untrusted text.
+export interface ClientCredential {
+  kind: 'api_key' | 'browser_login'
+  prefix?: string
+  grant_id?: string
+  state: string // api_key: active|expired|revoked; browser_login: active|lapsed|revoked
+  expires_at?: string | null
+  approved_at?: string | null
+  last_used_at?: string | null
+  reported_name?: string
+  redirect_host?: string
+  observed_name?: string
+  name_mismatch?: boolean
+}
+export interface RevokeCredentialResponse { changed: boolean }
+
 export type ClientPresence = Omit<ClientView, 'credential_state' | 'blocked_24h' | 'last_seen'> & {
+  // Spec 132: present only once browser login was used on this install.
+  credentials?: ClientCredential[]
+  browser_login_disabled?: boolean
   last_seen?: string | null
   credential_state?: CredentialState
   blocked_24h?: number

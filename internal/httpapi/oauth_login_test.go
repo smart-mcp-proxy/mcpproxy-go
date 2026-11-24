@@ -109,6 +109,10 @@ func TestOAuthLoginREST_AdministratorOnly(t *testing.T) {
 		{http.MethodPost, "/api/v1/oauth/authorizations/" + id + "/deny", ``},
 		{http.MethodDelete, "/api/v1/clients/cursor/logins/whatever", ``},
 		{http.MethodDelete, "/api/v1/clients/cursor/api-key", ``},
+		// Spec 132 PR-2b: the credentials list (logins, reported names, redirect
+		// hosts) is part of these reads.
+		{http.MethodGet, "/api/v1/clients", ""},
+		{http.MethodGet, "/api/v1/clients/cursor", ""},
 	} {
 		w := h.call(rt.method, rt.path, rt.body, secret)
 		assert.Equal(t, http.StatusForbidden, w.Code, rt.method+" "+rt.path)
@@ -440,4 +444,24 @@ func TestOAuthLoginREST_AccessTokenRefusedOnREST(t *testing.T) {
 	off := newOAuthHarness(t, false)
 	assert.Equal(t, http.StatusUnauthorized, status(off, "Authorization", "Bearer "+oat), "off and never used: unchanged")
 	assert.Equal(t, http.StatusUnauthorized, status(off, "X-API-Key", oat))
+}
+
+// Spec 132 PR-2b review: an empty or blank login id never falls through to a
+// client-wide revoke or to the forget-client handler.
+func TestOAuthLoginREST_EmptyLoginIDRevokesNothing(t *testing.T) {
+	h := newOAuthHarness(t, true)
+	h.mint("cursor", "ro")
+	for _, path := range []string{
+		"/api/v1/clients/cursor/logins/",
+		"/api/v1/clients/cursor/logins//",
+		"/api/v1/clients/cursor/logins/%20",
+		"/api/v1/clients/cursor/logins/%09",
+	} {
+		w := h.call(http.MethodDelete, path, "", bindingAdminKey)
+		assert.GreaterOrEqual(t, w.Code, 400, path)
+		assert.Less(t, w.Code, 500, path)
+	}
+	w := h.call(http.MethodGet, "/api/v1/clients", "", bindingAdminKey)
+	row := findRowByID(t, w, "cursor")
+	assert.Equal(t, "client", row["credential_state"], "the client's API key is untouched")
 }
