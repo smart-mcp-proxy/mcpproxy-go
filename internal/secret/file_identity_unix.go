@@ -53,3 +53,34 @@ func identityOfPath(path string) (fileIdentity, bool) {
 func identityOfHandle(_ *os.File, info os.FileInfo) (fileIdentity, bool) {
 	return identityFromInfo(info)
 }
+
+func stampFromInfo(info os.FileInfo) (supersededStamp, bool) {
+	id, ok := identityFromInfo(info)
+	if !ok {
+		return supersededStamp{}, false
+	}
+	return supersededStamp{id: id, mtime: info.ModTime().UnixNano()}, true
+}
+
+// stampOfPathErr stats path once (following symlinks) and returns its
+// identity and modification time from that one stat.
+func stampOfPathErr(path string) (supersededStamp, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return supersededStamp{}, err
+	}
+	if !fi.Mode().IsRegular() {
+		return supersededStamp{}, errIdentityNotRegular
+	}
+	st, ok := stampFromInfo(fi)
+	if !ok {
+		return supersededStamp{}, errors.New("file identity unavailable")
+	}
+	return st, nil
+}
+
+// stampOfHandle returns an opened file's identity and modification time from
+// its fstat info.
+func stampOfHandle(_ *os.File, info os.FileInfo) (supersededStamp, bool) {
+	return stampFromInfo(info)
+}

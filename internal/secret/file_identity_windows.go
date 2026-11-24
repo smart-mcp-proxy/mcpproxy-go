@@ -30,14 +30,24 @@ const identityShareMode = syscall.FILE_SHARE_READ | syscall.FILE_SHARE_WRITE | s
 const fileReadAttributes = 0x0080
 
 func identityFromHandle(h syscall.Handle) (fileIdentity, error) {
+	st, err := stampFromHandle(h)
+	return st.id, err
+}
+
+// stampFromHandle reads the identity and last-write time from one
+// GetFileInformationByHandle call.
+func stampFromHandle(h syscall.Handle) (supersededStamp, error) {
 	var d syscall.ByHandleFileInformation
 	if err := syscall.GetFileInformationByHandle(h, &d); err != nil {
-		return fileIdentity{}, err
+		return supersededStamp{}, err
 	}
 	if d.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY != 0 {
-		return fileIdentity{}, errIdentityNotRegular
+		return supersededStamp{}, errIdentityNotRegular
 	}
-	return fileIdentity{vol: d.VolumeSerialNumber, idx: uint64(d.FileIndexHigh)<<32 | uint64(d.FileIndexLow)}, nil
+	return supersededStamp{
+		id:    fileIdentity{vol: d.VolumeSerialNumber, idx: uint64(d.FileIndexHigh)<<32 | uint64(d.FileIndexLow)},
+		mtime: d.LastWriteTime.Nanoseconds(),
+	}, nil
 }
 
 // identityOfPathErr opens path (following links) with attribute-only access
@@ -46,20 +56,27 @@ func identityFromHandle(h syscall.Handle) (fileIdentity, error) {
 // and given the \\?\ prefix first: syscall.CreateFile, unlike the os package,
 // does not do that itself, so a path longer than MAX_PATH would fail.
 func identityOfPathErr(path string) (fileIdentity, error) {
+	st, err := stampOfPathErr(path)
+	return st.id, err
+}
+
+// stampOfPathErr is identityOfPathErr plus the last-write time, both read
+// from the one attribute handle.
+func stampOfPathErr(path string) (supersededStamp, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return fileIdentity{}, &os.PathError{Op: "abs", Path: path, Err: err}
+		return supersededStamp{}, &os.PathError{Op: "abs", Path: path, Err: err}
 	}
 	p, err := syscall.UTF16PtrFromString(windowsExtendedLengthPath(abs))
 	if err != nil {
-		return fileIdentity{}, err
+		return supersededStamp{}, err
 	}
 	h, err := syscall.CreateFile(p, fileReadAttributes, identityShareMode, nil, syscall.OPEN_EXISTING, syscall.FILE_ATTRIBUTE_NORMAL, 0)
 	if err != nil {
-		return fileIdentity{}, &os.PathError{Op: "CreateFile", Path: path, Err: err}
+		return supersededStamp{}, &os.PathError{Op: "CreateFile", Path: path, Err: err}
 	}
 	defer syscall.CloseHandle(h) //nolint:errcheck // read-only attribute handle
-	return identityFromHandle(h)
+	return stampFromHandle(h)
 }
 
 func identityOfPath(path string) (fileIdentity, bool) {
@@ -74,4 +91,13 @@ func identityOfHandle(f *os.File, _ os.FileInfo) (fileIdentity, bool) {
 	}
 	id, err := identityFromHandle(syscall.Handle(f.Fd()))
 	return id, err == nil
+}
+
+// stampOfHandle returns an opened file's identity and last-write time.
+func stampOfHandle(f *os.File, _ os.FileInfo) (supersededStamp, bool) {
+	if f == nil {
+		return supersededStamp{}, false
+	}
+	st, err := stampFromHandle(syscall.Handle(f.Fd()))
+	return st, err == nil
 }

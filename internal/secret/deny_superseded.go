@@ -11,10 +11,22 @@ import (
 // file identities (16 bytes each). The oldest entry is dropped first.
 const maxSupersededProxyFiles = 4096
 
+// supersededStamp is a replaced proxy file: its identity plus its last
+// modification time. Linux and Windows reuse a freed inode / file index, so
+// the identity alone would, once the replaced file is gone, refuse an
+// unrelated file that later got the same identity (for the life of the
+// process). A hardlink to the replaced file keeps its modification time
+// (unlinking and renaming change only ctime); a new file at a reused identity
+// gets its own.
+type supersededStamp struct {
+	id    fileIdentity
+	mtime int64 // nanoseconds since the epoch
+}
+
 var (
 	supersededMu    sync.Mutex
-	supersededFiles []fileIdentity
-	supersededSet   = map[fileIdentity]struct{}{}
+	supersededFiles []supersededStamp
+	supersededSet   = map[supersededStamp]struct{}{}
 )
 
 // NoteSupersededProxyFile records the identity path has now, just before a
@@ -39,37 +51,41 @@ func NoteSupersededProxyFile(path string) error {
 	if path == "" {
 		return nil
 	}
-	id, err := identityOfPathErr(path)
+	st, err := stampOfPathErr(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return err
 	}
+	recordSupersededStamp(st)
+	return nil
+}
+
+func recordSupersededStamp(st supersededStamp) {
 	supersededMu.Lock()
 	defer supersededMu.Unlock()
-	if _, known := supersededSet[id]; known {
-		return nil
+	if _, known := supersededSet[st]; known {
+		return
 	}
 	if len(supersededFiles) >= maxSupersededProxyFiles {
 		delete(supersededSet, supersededFiles[0])
 		supersededFiles = append(supersededFiles[:0:0], supersededFiles[1:]...)
 	}
-	supersededFiles = append(supersededFiles, id)
-	supersededSet[id] = struct{}{}
-	return nil
+	supersededFiles = append(supersededFiles, st)
+	supersededSet[st] = struct{}{}
 }
 
 // matchesSupersededProxyFile reports whether the opened file is one recorded
-// by NoteSupersededProxyFile. An identity that cannot be read is treated as a
+// by NoteSupersededProxyFile (same identity and modification time). An identity that cannot be read is treated as a
 // match (fail closed).
 func matchesSupersededProxyFile(f *os.File, info os.FileInfo) bool {
-	id, ok := identityOfHandle(f, info)
+	st, ok := stampOfHandle(f, info)
 	if !ok {
 		return true
 	}
 	supersededMu.Lock()
 	defer supersededMu.Unlock()
-	_, known := supersededSet[id]
+	_, known := supersededSet[st]
 	return known
 }
