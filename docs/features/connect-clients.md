@@ -15,6 +15,10 @@ talks to the proxy instead of to each upstream server directly. It is available
 from the Web UI wizard, the macOS tray ("Connect Client…"), and the
 `mcpproxy connect` CLI.
 
+:::tip Client hides `retrieve_tools`?
+Claude Code, Copilot CLI, pi, opencode and others defer MCP tools behind their own search. Pin the MCPProxy server as always loaded: [Clients that defer MCP tools](/features/clients-that-defer-tools).
+:::
+
 :::tip Agents not using your servers?
 If Claude Code or Codex reaches for `gh` or `curl` instead of the proxied tools, add the
 snippet from [Agent Instructions](/features/agent-instructions) to its `CLAUDE.md` / `AGENTS.md`.
