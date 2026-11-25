@@ -90,6 +90,24 @@ async function openConnect(page: Page) {
   await expect(t(page, 'client-connect-list')).toBeVisible()
 }
 
+// Preview every client the scratch HOME makes installable (except `skip`) and
+// assert none offers the browser-login choice. Cursor and VS Code have a config
+// in the scratch HOME, so their buttons must exist: a missing one fails here.
+async function expectNoChoiceForOtherClients(page: Page, skip: string[]) {
+  await openConnect(page)
+  const res = await fetch(`${BASE}/api/v1/clients`, { headers: { 'X-API-Key': KEY } })
+  const ids = ((await res.json()) as { data: { clients: { id: string }[] } }).data.clients.map((c) => c.id).filter((id) => !skip.includes(id))
+  for (const id of ['cursor', 'vscode']) await expect(t(page, `connect-${id}`)).toBeVisible()
+  for (const id of ids) {
+    const btn = t(page, `connect-${id}`)
+    if ((await btn.count()) === 0) continue // not installed under the scratch HOME
+    await btn.click()
+    await expect(t(page, `client-preview-${id}`)).toBeVisible()
+    await expect(t(page, `connect-auth-choice-${id}`)).toHaveCount(0)
+    await t(page, `client-preview-cancel-${id}`).click()
+  }
+}
+
 test.describe(OFF ? 'browser login off' : 'browser login on', () => {
   test('offers the choice only for Claude Code, previews, connects, undoes', async ({ page }) => {
     test.skip(OFF, 'feature-off run')
@@ -137,7 +155,12 @@ test.describe(OFF ? 'browser login off' : 'browser login on', () => {
     await expect(t(page, 'connect-disconnect-claude-code')).toBeVisible()
     const written = readFileSync(CLAUDE_JSON, 'utf8')
     // Exactly the credential-free address: no headers, no query, nothing else.
-    const entries = Object.values((JSON.parse(written) as { mcpServers: Record<string, Record<string, unknown>> }).mcpServers)
+    const parsed = JSON.parse(written) as { mcpServers: Record<string, Record<string, unknown>> }
+    // Nothing else in the file changed: everything but mcpServers equals the original.
+    const { mcpServers: _w, ...restWritten } = parsed
+    const { mcpServers: _o, ...restOriginal } = JSON.parse(original) as Record<string, unknown>
+    expect(restWritten).toEqual(restOriginal)
+    const entries = Object.values(parsed.mcpServers)
     expect(entries).toHaveLength(1)
     expect(entries[0].url).toBe(`${ORIGIN}/mcp/oauth/claude-code`)
     expect(entries[0].type).toBe('http')
@@ -157,16 +180,7 @@ test.describe(OFF ? 'browser login off' : 'browser login on', () => {
   test('a client without a real-client check never shows the choice', async ({ page }) => {
     test.skip(OFF, 'feature-off run')
     await openConnect(page)
-    for (const id of ['cursor', 'vscode']) {
-      const btn = t(page, `connect-${id}`)
-      // The scratch HOME holds an (empty) config for each, so the button exists:
-      // a missing one must fail the check, not skip it.
-      await expect(btn).toBeVisible()
-      await btn.click()
-      await expect(t(page, `client-preview-${id}`)).toBeVisible()
-      await expect(t(page, `connect-auth-choice-${id}`)).toHaveCount(0)
-      await t(page, `client-preview-cancel-${id}`).click()
-    }
+    await expectNoChoiceForOtherClients(page, ['claude-code'])
   })
 
   test('feature off: no browser-login choice anywhere', async ({ page }) => {
@@ -178,5 +192,7 @@ test.describe(OFF ? 'browser login off' : 'browser login on', () => {
     await expect(t(page, 'connect-auth-oauth-claude-code')).toHaveCount(0)
     await expect(t(page, 'client-preview-credential-claude-code')).toBeVisible()
     await shot(page, '06-feature-off')
+    await t(page, 'client-preview-cancel-claude-code').click()
+    await expectNoChoiceForOtherClients(page, [])
   })
 })
