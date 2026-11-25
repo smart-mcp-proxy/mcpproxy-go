@@ -1,0 +1,292 @@
+{
+ "v": 3,
+ "createdOnFiles": {
+  "v": 1,
+  "at": "2026-11-25T16:40:00Z"
+ },
+ "title": "MCPProxy Web UI Redesign",
+ "launch": {
+  "view": "canvas"
+ },
+ "pages": [],
+ "boards": {
+  "Main.dc.html": {
+   "x": 0,
+   "y": 0,
+   "w": 1440,
+   "h": 900,
+   "title": "Servers",
+   "expand": "fill"
+  },
+  "ServerDetail.dc.html": {
+   "x": 1520,
+   "y": 0,
+   "w": 1440,
+   "h": 900,
+   "title": "Server detail, error",
+   "expand": "fill"
+  },
+  "Review.dc.html": {
+   "x": 3040,
+   "y": 0,
+   "w": 1440,
+   "h": 900,
+   "title": "Review a server",
+   "expand": "fill"
+  },
+  "ReviewBlind.dc.html": {
+   "x": 4560,
+   "y": 0,
+   "w": 1440,
+   "h": 900,
+   "title": "Review before tools are known",
+   "expand": "fill"
+  },
+  "Home.dc.html": {
+   "x": 0,
+   "y": 1500,
+   "w": 1440,
+   "h": 900,
+   "title": "Home",
+   "expand": "fill"
+  },
+  "Activity.dc.html": {
+   "x": 1520,
+   "y": 1500,
+   "w": 1440,
+   "h": 900,
+   "title": "Activity",
+   "expand": "fill"
+  },
+  "ActivityDetail.dc.html": {
+   "x": 3040,
+   "y": 1500,
+   "w": 1440,
+   "h": 900,
+   "title": "Activity, call details",
+   "expand": "fill"
+  },
+  "Tools.dc.html": {
+   "x": 4560,
+   "y": 1500,
+   "w": 1440,
+   "h": 900,
+   "title": "Tools",
+   "expand": "fill"
+  },
+  "Clients.dc.html": {
+   "x": 0,
+   "y": 3000,
+   "w": 1440,
+   "h": 900,
+   "title": "Clients",
+   "expand": "fill"
+  },
+  "Tokens.dc.html": {
+   "x": 3040,
+   "y": 3000,
+   "w": 1440,
+   "h": 900,
+   "title": "Clients, tokens",
+   "expand": "fill"
+  },
+  "Profiles.dc.html": {
+   "x": 4560,
+   "y": 3000,
+   "w": 1440,
+   "h": 900,
+   "title": "Profiles",
+   "expand": "fill"
+  },
+  "ProfileEditor.dc.html": {
+   "x": 6080,
+   "y": 3000,
+   "w": 1440,
+   "h": 900,
+   "title": "Profile editor",
+   "expand": "fill"
+  },
+  "Secrets.dc.html": {
+   "x": 0,
+   "y": 4500,
+   "w": 1440,
+   "h": 900,
+   "title": "Secrets",
+   "expand": "fill"
+  },
+  "Usage.dc.html": {
+   "x": 1520,
+   "y": 4500,
+   "w": 1440,
+   "h": 900,
+   "title": "Usage",
+   "expand": "fill"
+  },
+  "AddServer.dc.html": {
+   "x": 3040,
+   "y": 4500,
+   "w": 1440,
+   "h": 900,
+   "title": "Add server",
+   "expand": "fill"
+  },
+  "Settings.dc.html": {
+   "x": 4560,
+   "y": 4500,
+   "w": 1440,
+   "h": 900,
+   "title": "Settings",
+   "expand": "fill"
+  },
+  "Setup.dc.html": {
+   "x": 0,
+   "y": 6000,
+   "w": 1440,
+   "h": 900,
+   "title": "Setup",
+   "expand": "fill"
+  },
+  "Palette.dc.html": {
+   "x": 1520,
+   "y": 6000,
+   "w": 1440,
+   "h": 900,
+   "title": "Search",
+   "expand": "fill"
+  },
+  "ServersDark.dc.html": {
+   "x": 3040,
+   "y": 6000,
+   "w": 1440,
+   "h": 900,
+   "title": "Servers, dark",
+   "expand": "fill"
+  },
+  "ServersPhone.dc.html": {
+   "x": 4560,
+   "y": 6000,
+   "w": 390,
+   "h": 844,
+   "title": "Servers, phone"
+  },
+  "HomePhone.dc.html": {
+   "x": 5030,
+   "y": 6000,
+   "w": 390,
+   "h": 844,
+   "title": "Home, phone"
+  },
+  "ClientManage.dc.html": {
+   "x": 1520,
+   "y": 3000,
+   "w": 1440,
+   "h": 900,
+   "title": "Clients, manage a client",
+   "expand": "fill"
+  },
+  "ReviewQueue.dc.html": {
+   "x": 0,
+   "y": 7500,
+   "w": 1440,
+   "h": 900,
+   "title": "Review queue with skills",
+   "expand": "fill"
+  },
+  "Skills.dc.html": {
+   "x": 1520,
+   "y": 7500,
+   "w": 1440,
+   "h": 900,
+   "title": "Server detail, Skills tab",
+   "expand": "fill"
+  },
+  "SkillCard.dc.html": {
+   "x": 3040,
+   "y": 7500,
+   "w": 1440,
+   "h": 900,
+   "title": "Skill review card",
+   "expand": "fill"
+  }
+ },
+ "order": [
+  "Main.dc.html",
+  "ServerDetail.dc.html",
+  "Review.dc.html",
+  "ReviewBlind.dc.html",
+  "Home.dc.html",
+  "Activity.dc.html",
+  "ActivityDetail.dc.html",
+  "Tools.dc.html",
+  "Clients.dc.html",
+  "ClientManage.dc.html",
+  "Tokens.dc.html",
+  "Profiles.dc.html",
+  "ProfileEditor.dc.html",
+  "Secrets.dc.html",
+  "Usage.dc.html",
+  "AddServer.dc.html",
+  "Settings.dc.html",
+  "Setup.dc.html",
+  "Palette.dc.html",
+  "ServersDark.dc.html",
+  "ServersPhone.dc.html",
+  "HomePhone.dc.html",
+  "ReviewQueue.dc.html",
+  "Skills.dc.html",
+  "SkillCard.dc.html"
+ ],
+ "notes": {
+  "title1": {
+   "x": 0,
+   "y": -300,
+   "text": "Servers and review",
+   "kind": "title1",
+   "maxW": 6000
+  },
+  "title2": {
+   "x": 0,
+   "y": 1200,
+   "text": "Home, Activity, Tools",
+   "kind": "title1",
+   "maxW": 6000
+  },
+  "title3": {
+   "x": 0,
+   "y": 2700,
+   "text": "Clients, tokens, profiles",
+   "kind": "title1",
+   "maxW": 6000
+  },
+  "title4": {
+   "x": 0,
+   "y": 4200,
+   "text": "Secrets, Usage, Add server, Settings",
+   "kind": "title1",
+   "maxW": 6000
+  },
+  "title5": {
+   "x": 0,
+   "y": 5700,
+   "text": "Setup, search, dark theme, phone",
+   "kind": "title1",
+   "maxW": 6000
+  },
+  "title6": {
+   "x": 0,
+   "y": 7200,
+   "text": "Skills over MCP",
+   "kind": "title1",
+   "maxW": 6000
+  }
+ },
+ "designSystems": [
+  {
+   "title": "MCPProxy Design System",
+   "namespace": "mcpproxy",
+   "artifact": "https://claude.ai/artifact/71AA18hShTq1ibDmMB5Tzt",
+   "version": "1795617401-42ca",
+   "copiedAt": "2026-11-25T16:40:00Z"
+  }
+ ]
+}

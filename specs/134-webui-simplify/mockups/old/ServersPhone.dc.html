@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Servers on a phone</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+:root{--base-100:oklch(100% 0 0);--base-200:oklch(93% 0 0);--base-content:oklch(22.389% 0.031 278.072);--muted:oklch(46% 0.031 278.072);--border:oklch(86% 0 0);--brand:oklch(55% 0.158 241.966);--on-brand:oklch(100% 0 0);--brand-text:oklch(42% 0.158 241.966);--status-ok:oklch(39% 0.194 149.214);--status-ok-soft:oklch(95% 0.05 149.214);--status-review:oklch(42% 0.14 75);--status-review-soft:oklch(95% 0.07 91.936);--status-error:oklch(46% 0.191 22.216);--status-error-soft:oklch(95% 0.035 22.216);--status-busy:oklch(41% 0.126 221.723);--status-busy-soft:oklch(95% 0.03 221.723);--font-sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;--font-mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
+body{margin:0;font-family:var(--font-sans);color:var(--base-content);background:var(--base-200)}
+a{color:var(--brand-text)}a:hover{color:var(--base-content)}
+button{font-family:inherit;cursor:pointer}
+button:focus-visible,a:focus-visible{outline:2px solid var(--brand-text);outline-offset:2px}
+</style>
+</helmet>
+<div style="width: 390px; height: 844px; box-sizing: border-box; overflow: hidden; display: flex; flex-direction: column; background: var(--base-200)">
+
+  <header style="display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--base-100); border-bottom: 1px solid var(--border)">
+    <button type="button" aria-label="Open menu" style="width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: none; color: var(--base-content)"><svg aria-hidden="true" viewBox="0 0 24 24" style="width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round"><path d="M4 7h16M4 12h16M4 17h16"></path></svg></button>
+    <img src="/_blob/a2734d90f186b038360c927d1ecb2598" alt="" style="width: 24px; height: 24px">
+    <span style="font-size: 16px; line-height: 24px; font-weight: 700">MCPProxy</span>
+    <button type="button" aria-label="Search" style="margin-left: auto; width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: none; color: var(--base-content)"><svg aria-hidden="true" viewBox="0 0 24 24" style="width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round"><circle cx="11" cy="11" r="6.5"></circle><path d="M16 16l4 4"></path></svg></button>
+    <button type="button" aria-label="Add server" style="width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: var(--brand); color: var(--on-brand)"><svg aria-hidden="true" viewBox="0 0 24 24" style="width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round"><path d="M12 5v14M5 12h14"></path></svg></button>
+  </header>
+
+  <div style="flex: 1; min-height: 0; overflow: hidden; padding: 16px; display: flex; flex-direction: column; gap: 12px">
+    <div style="display: flex; flex-direction: column; gap: 2px">
+      <h1 style="margin: 0; font-size: 26px; line-height: 32px; font-weight: 700">Servers</h1>
+      <span style="font-size: 14px; line-height: 20px; color: var(--muted)">28 of 34 online, 6 need attention</span>
+    </div>
+
+    <div style="display: flex; gap: 8px; overflow-x: auto">
+      <button type="button" aria-pressed="true" style="flex: none; min-height: 44px; padding: 0 14px; border: 1px solid var(--brand); border-radius: 4px; background: var(--brand); color: var(--on-brand); font-size: 14px; font-weight: 600">Needs attention 6</button>
+      <button type="button" style="flex: none; min-height: 44px; padding: 0 14px; border: 1px solid var(--border); border-radius: 4px; background: var(--base-100); color: var(--base-content); font-size: 14px; font-weight: 600">All 35</button>
+      <button type="button" style="flex: none; min-height: 44px; padding: 0 14px; border: 1px solid var(--border); border-radius: 4px; background: var(--base-100); color: var(--base-content); font-size: 14px; font-weight: 600">Connected 28</button>
+    </div>
+
+    <div style="display: flex; flex-direction: column; background: var(--base-100); border: 1px solid var(--border); border-radius: 4px">
+      <div style="display: flex; flex-direction: column; gap: 6px; padding: 12px; border-bottom: 1px solid var(--border)">
+        <div style="display: flex; align-items: center; gap: 8px">
+          <a href="ServerDetail.dc.html" style="flex: 1; min-width: 0; font-size: 16px; line-height: 24px; font-weight: 600; color: var(--base-content)">datadog</a>
+          <span style="display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 8px; border-radius: 4px; font-size: 13px; line-height: 20px; font-weight: 600; color: var(--status-error); background: var(--status-error-soft)"><span style="width: 8px; height: 8px; border-radius: 9999px; background: currentColor"></span>Error</span>
+        </div>
+        <span style="font-size: 14px; line-height: 20px; color: var(--muted)">Command not found: <code style="font-family: var(--font-mono); font-size: 13px; color: var(--base-content)">datadog-mcp</code></span>
+        <button type="button" style="align-self: flex-start; min-height: 44px; padding: 0 14px; border: 1px solid var(--border); border-radius: 4px; background: var(--base-100); color: var(--base-content); font-size: 14px; font-weight: 600">Edit command</button>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px; padding: 12px; border-bottom: 1px solid var(--border)">
+        <div style="display: flex; align-items: center; gap: 8px">
+          <a href="Review.dc.html" style="flex: 1; min-width: 0; font-size: 16px; line-height: 24px; font-weight: 600; color: var(--base-content)">community-weather</a>
+          <span style="display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 8px; border-radius: 4px; font-size: 13px; line-height: 20px; font-weight: 600; color: var(--status-review); background: var(--status-review-soft)"><span style="width: 8px; height: 8px; border-radius: 9999px; background: currentColor"></span>Needs review</span>
+        </div>
+        <span style="font-size: 14px; line-height: 20px; color: var(--muted)">New server, 2 tools, scan clean</span>
+        <a href="Review.dc.html" style="align-self: flex-start; display: flex; align-items: center; min-height: 44px; padding: 0 14px; border-radius: 4px; background: var(--brand); color: var(--on-brand); font-size: 14px; font-weight: 600; text-decoration: none">Review</a>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px; padding: 12px; border-bottom: 1px solid var(--border)">
+        <div style="display: flex; align-items: center; gap: 8px">
+          <a href="#" style="flex: 1; min-width: 0; font-size: 16px; line-height: 24px; font-weight: 600; color: var(--base-content)">internal-api</a>
+          <span style="display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 8px; border-radius: 4px; font-size: 13px; line-height: 20px; font-weight: 600; color: var(--status-error); background: var(--status-error-soft)"><span style="width: 8px; height: 8px; border-radius: 9999px; background: currentColor"></span>Error</span>
+        </div>
+        <span style="font-size: 14px; line-height: 20px; color: var(--muted)">Sign-in expired</span>
+        <button type="button" style="align-self: flex-start; min-height: 44px; padding: 0 14px; border: 1px solid var(--border); border-radius: 4px; background: var(--base-100); color: var(--base-content); font-size: 14px; font-weight: 600">Sign in</button>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px; padding: 12px">
+        <div style="display: flex; align-items: center; gap: 8px">
+          <a href="#" style="flex: 1; min-width: 0; font-size: 16px; line-height: 24px; font-weight: 600; color: var(--base-content)">pagerduty</a>
+          <span style="display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 8px; border-radius: 4px; font-size: 13px; line-height: 20px; font-weight: 600; color: var(--status-busy); background: var(--status-busy-soft)"><span style="width: 8px; height: 8px; border-radius: 9999px; background: currentColor"></span>Reconnecting</span>
+        </div>
+        <span style="font-size: 14px; line-height: 20px; color: var(--muted)">Connection refused, next try in 30s</span>
+        <button type="button" style="align-self: flex-start; min-height: 44px; padding: 0 14px; border: 1px solid var(--border); border-radius: 4px; background: var(--base-100); color: var(--base-content); font-size: 14px; font-weight: 600">Retry now</button>
+      </div>
+    </div>
+    <span style="font-size: 14px; line-height: 20px; color: var(--muted)">Showing 4 of 6</span>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

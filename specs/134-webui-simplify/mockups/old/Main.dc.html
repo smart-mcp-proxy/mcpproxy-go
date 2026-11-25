@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Servers</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+:root{--base-100:oklch(100% 0 0);--base-200:oklch(93% 0 0);--base-content:oklch(22.389% 0.031 278.072);--muted:oklch(46% 0.031 278.072);--border:oklch(86% 0 0);--brand:oklch(55% 0.158 241.966);--on-brand:oklch(100% 0 0);--brand-text:oklch(42% 0.158 241.966);--brand-soft:oklch(95% 0.03 241.966);--status-ok:oklch(39% 0.194 149.214);--status-ok-soft:oklch(95% 0.05 149.214);--status-review:oklch(42% 0.14 75);--status-review-soft:oklch(95% 0.07 91.936);--status-error:oklch(46% 0.191 22.216);--status-error-soft:oklch(95% 0.035 22.216);--status-busy:oklch(41% 0.126 221.723);--status-busy-soft:oklch(95% 0.03 221.723);--status-off:oklch(46% 0.031 278.072);--status-off-soft:oklch(93% 0 0);--danger:oklch(46% 0.191 22.216);--font-sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;--font-mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
+body{margin:0;font-family:var(--font-sans);color:var(--base-content);background:var(--base-200)}
+a{color:var(--brand-text)}a:hover{color:var(--base-content)}
+button{font-family:inherit;cursor:pointer}
+button:focus-visible,a:focus-visible{outline:2px solid var(--brand-text);outline-offset:2px}
+</style>
+</helmet>
+<div style="display: flex; flex-wrap: wrap; min-height: 900px; background: var(--base-200)">
+
+  <nav aria-label="Main" style="flex: 1 1 232px; max-width: 232px; box-sizing: border-box; background: var(--base-100); border-right: 1px solid var(--border); padding: 16px 12px; display: flex; flex-direction: column; gap: 20px">
+    <div style="display: flex; align-items: center; gap: 8px; padding: 0 8px">
+      <img src="/_blob/a2734d90f186b038360c927d1ecb2598" alt="" style="width: 28px; height: 28px">
+      <span style="font-size: 18px; line-height: 28px; font-weight: 700">MCPProxy</span>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 2px">
+      <a href="Home.dc.html" style="display: flex; justify-content: space-between; padding: 6px 8px; border-radius: 4px; font-size: 14px; line-height: 20px; color: var(--base-content); text-decoration: none">Home</a>
+      <a href="Main.dc.html" aria-current="page" style="display: flex; justify-content: space-between; padding: 6px 8px; border-radius: 4px; font-size: 14px; line-height: 20px; font-weight: 600; color: var(--brand-text); background: var(--brand-soft); text-decoration: none">Servers</a>
+      <a href="#" style="display: flex; justify-content: space-between; padding: 6px 8px; border-radius: 4px; font-size: 14px; line-height: 20px; color: var(--base-content); text-decoration: none">Tools</a>
+      <a href="#" style="display: flex; justify-content: space-between; padding: 6px 8px; border-radius: 4px; font-size: 14px; line-height: 20px; color: var(--base-content); text-decoration: none">Clients</a>
+      <a href="#" style="display: flex; justify-content: space-between; padding: 6px 8px; border-radius: 4px; font-size: 14px; line-height: 20px; color: var(--base-content); text-decoration: none">Profiles</a>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 2px">
+      <span style="padding: 0 8px 4px; font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted)">Protect</span>
+      <a href="Review.dc.html" style="display: flex; justify-content: space-between; align-items: center; padding: 6px 8px; border-radius: 4px; font-size: 14px; line-height: 20px; color: var(--base-content); text-decoration: none">Review <span style="font-size: 12px; font-weight: 600; padding: 0 7px; border-radius: 9999px; color: var(--status-review); background: var(--status-review-soft)">2</span></a>
+      <a href="#" style="display: flex; padding: 6px 8px; border-radius: 4px; font-size: 14px; line-height: 20px; color: var(--base-content); text-decoration: none">Secrets</a>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 2px">
+      <span style="padding: 0 8px 4px; font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted)">Monitor</span>
+      <a href="#" style="display: flex; padding: 6px 8px; border-radius: 4px; font-size: 14px; line-height: 20px; color: var(--base-content); text-decoration: none">Activity</a>
+      <a href="#" style="display: flex; padding: 6px 8px; border-radius: 4px; font-size: 14px; line-height: 20px; color: var(--base-content); text-decoration: none">Usage</a>
+    </div>
+    <div style="margin-top: auto; display: flex; flex-direction: column; gap: 2px">
+      <a href="#" style="display: flex; padding: 6px 8px; border-radius: 4px; font-size: 14px; line-height: 20px; color: var(--base-content); text-decoration: none">Settings</a>
+    </div>
+  </nav>
+
+  <main style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column">
+    <header style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 24px; background: var(--base-100); border-bottom: 1px solid var(--border)">
+      <button type="button" style="flex: 1 1 240px; max-width: 420px; display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--base-100); color: var(--muted); font-size: 14px; line-height: 20px">Search servers, tools, settings <span style="font-family: var(--font-mono); font-size: 12px">⌘K</span></button>
+      <span style="margin-left: auto; font-size: 14px; line-height: 20px; color: var(--muted)">28 of 34 online</span>
+      <a href="#attention" style="font-size: 14px; line-height: 20px; font-weight: 600; color: var(--status-error)">6 need attention</a>
+      <button type="button" style="padding: 8px 14px; border: 1px solid var(--brand); border-radius: 4px; background: var(--brand); color: var(--on-brand); font-size: 14px; line-height: 20px; font-weight: 600">Add server</button>
+    </header>
+
+    <div style="padding: 24px; display: flex; flex-direction: column; gap: 16px">
+      <div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px">
+        <h1 style="margin: 0; font-size: 30px; line-height: 36px; font-weight: 700">Servers</h1>
+        <span style="font-size: 14px; line-height: 20px; color: var(--muted)">35 servers, 56 tools</span>
+      </div>
+
+      <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px">
+        <button type="button" aria-pressed="true" style="padding: 5px 12px; border: 1px solid var(--brand); border-radius: 4px; background: var(--brand); color: var(--on-brand); font-size: 13px; line-height: 20px; font-weight: 600">All 35</button>
+        <button type="button" style="padding: 5px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--base-100); color: var(--base-content); font-size: 13px; line-height: 20px; font-weight: 600">Needs attention 6</button>
+        <button type="button" style="padding: 5px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--base-100); color: var(--base-content); font-size: 13px; line-height: 20px; font-weight: 600">Connected 28</button>
+        <button type="button" style="padding: 5px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--base-100); color: var(--base-content); font-size: 13px; line-height: 20px; font-weight: 600">Disabled 1</button>
+        <label for="filter" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%)">Filter servers</label>
+        <input id="filter" type="search" placeholder="Filter by name" style="margin-left: auto; flex: 0 1 220px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--base-100); color: var(--base-content); font-size: 14px; line-height: 20px; font-family: inherit">
+      </div>
+
+      <div id="attention" style="overflow-x: auto; background: var(--base-100); border: 1px solid var(--border); border-radius: 4px">
+        <table style="width: 100%; min-width: 720px; border-collapse: collapse">
+          <thead>
+            <tr>
+              <th scope="col" style="text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted)">Server</th>
+              <th scope="col" style="text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted)">Status</th>
+              <th scope="col" style="text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted)">Reason</th>
+              <th scope="col" style="text-align: right; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted)">Tools</th>
+              <th scope="col" style="text-align: right; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted)">Last call</th>
+              <th scope="col" style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><span style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%)">Action</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><a href="ServerDetail.dc.html" style="font-size: 14px; line-height: 20px; font-weight: 600; color: var(--base-content)">datadog</a><div style="font-family: var(--font-mono); font-size: 12px; line-height: 16px; color: var(--muted)">stdio</div></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><span style="display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 8px; border-radius: 4px; font-size: 13px; line-height: 20px; font-weight: 600; white-space: nowrap; color: var(--status-error); background: var(--status-error-soft)"><span style="width: 8px; height: 8px; border-radius: 9999px; background: currentColor"></span>Error</span></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; line-height: 20px; color: var(--muted)">Command not found: <code style="font-family: var(--font-mono); font-size: 13px; color: var(--base-content)">datadog-mcp</code></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">0</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">2m ago</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right"><button type="button" style="padding: 3px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--base-100); color: var(--base-content); font-size: 13px; line-height: 20px; font-weight: 600; white-space: nowrap">Edit command</button></td>
+            </tr>
+            <tr>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><a href="#" style="font-size: 14px; line-height: 20px; font-weight: 600; color: var(--base-content)">legacy-tools</a><div style="font-family: var(--font-mono); font-size: 12px; line-height: 16px; color: var(--muted)">stdio</div></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><span style="display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 8px; border-radius: 4px; font-size: 13px; line-height: 20px; font-weight: 600; white-space: nowrap; color: var(--status-error); background: var(--status-error-soft)"><span style="width: 8px; height: 8px; border-radius: 9999px; background: currentColor"></span>Error</span></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; line-height: 20px; color: var(--muted)">Exited at startup: missing <code style="font-family: var(--font-mono); font-size: 13px; color: var(--base-content)">API_TOKEN</code></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">0</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">never</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right"><button type="button" style="padding: 3px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--base-100); color: var(--base-content); font-size: 13px; line-height: 20px; font-weight: 600; white-space: nowrap">Add variable</button></td>
+            </tr>
+            <tr>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><a href="Review.dc.html" style="font-size: 14px; line-height: 20px; font-weight: 600; color: var(--base-content)">community-weather</a><div style="font-family: var(--font-mono); font-size: 12px; line-height: 16px; color: var(--muted)">stdio</div></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><span style="display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 8px; border-radius: 4px; font-size: 13px; line-height: 20px; font-weight: 600; white-space: nowrap; color: var(--status-review); background: var(--status-review-soft)"><span style="width: 8px; height: 8px; border-radius: 9999px; background: currentColor"></span>Needs review</span></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; line-height: 20px; color: var(--muted)">New server, 2 tools, scan clean</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">2</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">never</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right"><a href="Review.dc.html" style="display: inline-block; padding: 3px 10px; border: 1px solid var(--brand); border-radius: 4px; background: var(--brand); color: var(--on-brand); font-size: 13px; line-height: 20px; font-weight: 600; text-decoration: none">Review</a></td>
+            </tr>
+            <tr>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><a href="#" style="font-size: 14px; line-height: 20px; font-weight: 600; color: var(--base-content)">huggingface</a><div style="font-family: var(--font-mono); font-size: 12px; line-height: 16px; color: var(--muted)">stdio</div></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><span style="display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 8px; border-radius: 4px; font-size: 13px; line-height: 20px; font-weight: 600; white-space: nowrap; color: var(--status-review); background: var(--status-review-soft)"><span style="width: 8px; height: 8px; border-radius: 9999px; background: currentColor"></span>Needs review</span></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; line-height: 20px; color: var(--muted)">1 tool changed its description</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">12</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">1h ago</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right"><a href="#" style="display: inline-block; padding: 3px 10px; border: 1px solid var(--brand); border-radius: 4px; background: var(--brand); color: var(--on-brand); font-size: 13px; line-height: 20px; font-weight: 600; text-decoration: none">Review</a></td>
+            </tr>
+            <tr>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><a href="#" style="font-size: 14px; line-height: 20px; font-weight: 600; color: var(--base-content)">pagerduty</a><div style="font-family: var(--font-mono); font-size: 12px; line-height: 16px; color: var(--muted)">http</div></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><span style="display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 8px; border-radius: 4px; font-size: 13px; line-height: 20px; font-weight: 600; white-space: nowrap; color: var(--status-busy); background: var(--status-busy-soft)"><span style="width: 8px; height: 8px; border-radius: 9999px; background: currentColor"></span>Reconnecting</span></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; line-height: 20px; color: var(--muted)">Connection refused, next try in 30s</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">0</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">3h ago</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right"><button type="button" style="padding: 3px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--base-100); color: var(--base-content); font-size: 13px; line-height: 20px; font-weight: 600; white-space: nowrap">Retry now</button></td>
+            </tr>
+            <tr>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><a href="#" style="font-size: 14px; line-height: 20px; font-weight: 600; color: var(--base-content)">internal-api</a><div style="font-family: var(--font-mono); font-size: 12px; line-height: 16px; color: var(--muted)">http</div></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><span style="display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 8px; border-radius: 4px; font-size: 13px; line-height: 20px; font-weight: 600; white-space: nowrap; color: var(--status-error); background: var(--status-error-soft)"><span style="width: 8px; height: 8px; border-radius: 9999px; background: currentColor"></span>Error</span></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; line-height: 20px; color: var(--muted)">Sign-in expired</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">0</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">2d ago</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right"><button type="button" style="padding: 3px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--base-100); color: var(--base-content); font-size: 13px; line-height: 20px; font-weight: 600; white-space: nowrap">Sign in</button></td>
+            </tr>
+            <tr>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><a href="#" style="font-size: 14px; line-height: 20px; font-weight: 600; color: var(--base-content)">aws-docs</a><div style="font-family: var(--font-mono); font-size: 12px; line-height: 16px; color: var(--muted)">stdio</div></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><span style="display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 8px; border-radius: 4px; font-size: 13px; line-height: 20px; font-weight: 600; white-space: nowrap; color: var(--status-ok); background: var(--status-ok-soft)"><span style="width: 8px; height: 8px; border-radius: 9999px; background: currentColor"></span>Connected</span></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">4</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">2m ago</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"></td>
+            </tr>
+            <tr>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><a href="#" style="font-size: 14px; line-height: 20px; font-weight: 600; color: var(--base-content)">brave-search</a><div style="font-family: var(--font-mono); font-size: 12px; line-height: 16px; color: var(--muted)">stdio</div></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><span style="display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 8px; border-radius: 4px; font-size: 13px; line-height: 20px; font-weight: 600; white-space: nowrap; color: var(--status-ok); background: var(--status-ok-soft)"><span style="width: 8px; height: 8px; border-radius: 9999px; background: currentColor"></span>Connected</span></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">2</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">14m ago</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"></td>
+            </tr>
+            <tr>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><a href="#" style="font-size: 14px; line-height: 20px; font-weight: 600; color: var(--base-content)">calendar-with-a-very-long-descriptive-server-name</a><div style="font-family: var(--font-mono); font-size: 12px; line-height: 16px; color: var(--muted)">http</div></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><span style="display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 8px; border-radius: 4px; font-size: 13px; line-height: 20px; font-weight: 600; white-space: nowrap; color: var(--status-ok); background: var(--status-ok-soft)"><span style="width: 8px; height: 8px; border-radius: 9999px; background: currentColor"></span>Connected</span></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">9</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">1h ago</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"></td>
+            </tr>
+            <tr>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><a href="#" style="font-size: 14px; line-height: 20px; font-weight: 600; color: var(--base-content)">github</a><div style="font-family: var(--font-mono); font-size: 12px; line-height: 16px; color: var(--muted)">http</div></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"><span style="display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 8px; border-radius: 4px; font-size: 13px; line-height: 20px; font-weight: 600; white-space: nowrap; color: var(--status-ok); background: var(--status-ok-soft)"><span style="width: 8px; height: 8px; border-radius: 9999px; background: currentColor"></span>Connected</span></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"></td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">41</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border); text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">2m ago</td>
+              <td style="padding: 10px 16px; border-bottom: 1px solid var(--border)"></td>
+            </tr>
+            <tr>
+              <td style="padding: 10px 16px"><a href="#" style="font-size: 14px; line-height: 20px; font-weight: 600; color: var(--base-content)">elevenlabs</a><div style="font-family: var(--font-mono); font-size: 12px; line-height: 16px; color: var(--muted)">stdio</div></td>
+              <td style="padding: 10px 16px"><span style="display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 8px; border-radius: 4px; font-size: 13px; line-height: 20px; font-weight: 600; white-space: nowrap; color: var(--status-off); background: var(--status-off-soft)"><span style="width: 8px; height: 8px; border-radius: 9999px; background: currentColor"></span>Disabled</span></td>
+              <td style="padding: 10px 16px; font-size: 14px; line-height: 20px; color: var(--muted)">Turned off by you</td>
+              <td style="padding: 10px 16px; text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">0</td>
+              <td style="padding: 10px 16px; text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--muted)">3d ago</td>
+              <td style="padding: 10px 16px; text-align: right"><button type="button" style="padding: 3px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--base-100); color: var(--base-content); font-size: 13px; line-height: 20px; font-weight: 600; white-space: nowrap">Enable</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="margin: 0; font-size: 14px; line-height: 20px; color: var(--muted)">Showing 11 of 35. Servers that need attention are listed first.</p>
+    </div>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>
