@@ -44,7 +44,7 @@
         type="button"
         role="tab"
         :aria-selected="activeView === tab.id"
-        :class="['tab', activeView === tab.id ? 'tab-active' : '']"
+        :class="['tab max-sm:h-11', activeView === tab.id ? 'tab-active' : '']"
         :data-test="`activity-view-tab-${tab.id}`"
         @click="setView(tab.id)"
       >
@@ -106,7 +106,7 @@
                 type="button"
                 :data-test="`activity-compact-${part.key}`"
                 :class="[
-                  'text-sm hover:underline underline-offset-2 transition-colors',
+                  'text-sm hover:underline underline-offset-2 transition-colors max-sm:min-h-11 max-sm:inline-flex max-sm:items-center',
                   summaryToneClass(part.tone),
                   filterStatus === part.status && part.status !== '' ? 'font-semibold underline' : '',
                 ]"
@@ -491,8 +491,8 @@
 
 
     <!-- Activity Table -->
-    <div v-show="activeView !== 'sessions'" class="card bg-base-100 shadow-md">
-      <div class="card-body">
+    <div v-show="activeView !== 'sessions'" class="card bg-base-100 shadow-md" data-test="activity-results-card">
+      <div class="card-body max-sm:p-3">
         <!-- UX audit F30: the table auto-refreshes, so a screen reader is told
              how many rows it now holds. Rendered in every state — including the
              empty one — so "no records" is announced too. -->
@@ -562,7 +562,7 @@
           <!-- table-fixed below sm: with only Time/Details/Status left, fixed columns
                guarantee the row fits a 390px viewport instead of letting one long
                tool name push Status off the edge (F14). -->
-          <table class="table table-sm w-full" :class="isCalls ? 'table-auto' : 'table-fixed sm:table-auto'" data-test="activity-table">
+          <table class="table table-sm w-full" :class="isCalls ? 'table-auto max-sm:[&_td]:px-1.5 max-sm:[&_th]:px-1.5' : 'table-fixed sm:table-auto'" data-test="activity-table">
             <caption class="sr-only">
               Activity log — one row per proxied call, newest first. Updates automatically.
             </caption>
@@ -575,7 +575,7 @@
                      and the row-open action. Everything else is in the row detail. -->
                 <template v-if="isCalls">
                   <th data-test="activity-col-tool">Tool</th>
-                  <th class="cursor-pointer hover:bg-base-200 min-w-[5.5rem]" data-test="activity-col-result" @click="sortBy('status')">
+                  <th class="cursor-pointer hover:bg-base-200 sm:min-w-[5.5rem]" data-test="activity-col-result" @click="sortBy('status')">
                     Result {{ getSortIndicator('status') }}
                   </th>
                   <th class="hidden md:table-cell" data-test="activity-col-client">Client</th>
@@ -652,7 +652,7 @@
                      code_execution marker and the same fallbacks the Details
                      column printed for a record with no tool. -->
                 <td v-if="isCalls" class="max-w-0 w-full" data-test="activity-cell-tool">
-                  <div class="flex items-center gap-1.5 min-w-0">
+                  <div class="flex items-center gap-1.5 min-w-0 max-sm:flex-wrap">
                     <span
                       v-if="isChildCall(row.activity)"
                       data-test="activity-child-badge"
@@ -670,7 +670,7 @@
                       class="text-sm truncate"
                       data-test="activity-quarantine-batch-summary"
                     >{{ quarantineBatchSummary(row.activity, row.runCount) }}</span>
-                    <code v-else-if="row.activity.tool_name" class="text-sm bg-base-200 px-2 py-1 rounded truncate min-w-0" :title="toolLabel(row.activity)" data-test="activity-tool-label">{{ toolLabel(row.activity) }}</code>
+                    <code v-else-if="row.activity.tool_name" class="text-sm bg-base-200 px-2 py-1 rounded truncate min-w-0 max-sm:max-w-full max-sm:whitespace-normal max-sm:break-all max-sm:overflow-visible" :title="toolLabel(row.activity)" data-test="activity-tool-label">{{ toolLabel(row.activity) }}</code>
                     <span
                       v-else-if="isPreflightActivity(row.activity) && formatPreflightSummary(row.activity.metadata)"
                       class="text-sm truncate"
@@ -965,7 +965,7 @@
                     <span class="sr-only">{{ row.activity.max_severity || 'unknown' }}-severity sensitive data detected</span>
                   </span>
                 </td>
-                <td v-if="isCalls" class="hidden md:table-cell max-w-[11rem]" data-test="activity-cell-client">
+                <td v-if="isCalls" class="hidden md:table-cell max-w-[15rem]" data-test="activity-cell-client">
                   <AttributionChips :record="row.activity" :test-id="row.activity.id" client-only stacked />
                 </td>
                 <td class="whitespace-nowrap" :class="isCalls ? 'hidden sm:table-cell' : durationColumnClass">

@@ -1,7 +1,7 @@
 <template>
   <!-- One row, fixed height: the boundary between the filters and the results
        does not move when a chip is added, removed or the list overflows. -->
-  <div class="flex items-center gap-2 h-12 min-w-0" data-test="activity-filter-chips">
+  <div class="relative flex items-center gap-2 h-12 min-w-0" data-test="activity-filter-chips">
     <template v-if="chips.length > 0">
       <div
         ref="rowEl"
@@ -25,7 +25,7 @@
       </div>
 
       <!-- Shown when the chips do not fit: lists every active filter and removes each. -->
-      <div v-if="overflowing" ref="overflowEl" class="relative shrink-0">
+      <div v-if="overflowing" ref="overflowEl" class="shrink-0">
         <button
           type="button"
           data-test="activity-filter-overflow"
@@ -39,7 +39,7 @@
           role="dialog"
           aria-label="Active filters"
           data-test="activity-filter-overflow-list"
-          class="absolute right-0 top-full mt-1 w-72 max-w-[calc(100vw-2rem)] max-h-72 overflow-y-auto p-2 bg-base-100 border border-[var(--ds-border)] rounded-box shadow-lg z-[var(--z-dropdown)] space-y-1"
+          class="absolute left-0 right-0 sm:left-auto sm:w-96 top-full mt-1 max-h-72 overflow-y-auto p-2 bg-base-100 border border-[var(--ds-border)] rounded-box shadow-lg z-[var(--z-dropdown)] space-y-1"
           @keydown.esc.stop="closeOverflow(true)"
         >
           <div v-for="chip in chips" :key="chip.key" class="flex items-center gap-2">
