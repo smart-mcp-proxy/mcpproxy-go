@@ -10,6 +10,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // newSSECallerContextRefresher revalidates an agent token before each
@@ -292,6 +293,13 @@ func eventVisibleToCaller(ctx context.Context, evt internalRuntime.Event) bool {
 	if _, adminOnly := adminConfigEventTypes[evt.Type]; adminOnly {
 		return false
 	}
+	// A detection names the activity row it was found in. A row a scoped
+	// caller cannot read (storage.IsAdminOnlyActivityType) must not reach it
+	// through this derived event either; a detection whose row type is not
+	// stated is undecidable and fails closed.
+	if evt.Type == internalRuntime.EventTypeSensitiveDataDetected && !detectionRowReadable(evt.Payload) {
+		return false
+	}
 	// Spec 125 FR-019a: a review change caused by skills tells of held skills
 	// by its timing alone, even on a server the caller can see.
 	if isSkillsReviewChange(evt) && !skillVisibleTo(ctx) {
@@ -321,6 +329,13 @@ func eventVisibleToCaller(ctx context.Context, evt internalRuntime.Event) bool {
 		return false
 	}
 	return true
+}
+
+// detectionRowReadable reports whether a non-admin caller may read the
+// activity row a sensitive_data.detected event names.
+func detectionRowReadable(payload map[string]any) bool {
+	activityType, _ := payload["activity_type"].(string)
+	return activityType != "" && !storage.IsAdminOnlyActivityType(storage.ActivityType(activityType))
 }
 
 func canSeeReviewServer(ctx context.Context, name string) bool {
