@@ -29,6 +29,8 @@ func (c *Client) initialize(ctx context.Context) error {
 		Name:    "mcpproxy-go",
 		Version: "1.0.0",
 	}
+	// Empty on purpose: what mcpproxy declares (elicitation, sampling, roots)
+	// was set on the mcp-go client by relayOptions, and is kept by this merge.
 	initRequest.Params.Capabilities = mcp.ClientCapabilities{}
 
 	// Log request for trace debugging - use main logger for CLI debug mode
@@ -257,6 +259,8 @@ func (c *Client) dispatchNotification(notification mcp.JSONRPCNotification) {
 		c.handleToolsListChangedNotification()
 	case string(mcp.MethodNotificationPromptsListChanged):
 		c.handlePromptsListChangedNotification()
+	case string(mcp.MethodNotificationElicitationComplete):
+		c.urlElicitations.Complete(notification)
 	default:
 		// Ignore all other notifications (logging, resources, progress, ...).
 	}

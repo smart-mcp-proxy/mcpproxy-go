@@ -193,7 +193,7 @@ func activityEventViewer(ctx context.Context) *storage.ActivityEventViewer {
 // @Tags Activity
 // @Accept json
 // @Produce json
-// @Param type query string false "Filter by activity type(s), comma-separated for multiple (Spec 024)" Enums(tool_call, policy_decision, quarantine_change, server_change, system_start, system_stop, internal_tool_call, config_change, preflight, prompt_get, profile_change, upstream_event)
+// @Param type query string false "Filter by activity type(s), comma-separated for multiple (Spec 024)" Enums(tool_call, policy_decision, quarantine_change, server_change, system_start, system_stop, internal_tool_call, config_change, preflight, prompt_get, profile_change, upstream_event, client_request)
 // @Param server query string false "Filter by server name"
 // @Param tool query string false "Filter by tool name"
 // @Param session_id query string false "Filter by MCP transport session ID"
@@ -987,7 +987,7 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 		// lost or restored connection. That is not the outcome of a call and
 		// not traffic to the server, and Usage never counts it, so it stays out
 		// of the call tiles and the top lists (Usage errors = errors + blocked
-		// here, F1). The administrator-only skill rows (Spec 125) are not
+		// here, F1). The administrator-only rows (Spec 125, #1964) are not
 		// tool calls either: a skill access stores the outcome of a search,
 		// load or read, and a skill approval change stores its action
 		// ("blocked" when an administrator blocks a skill).

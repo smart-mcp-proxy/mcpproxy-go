@@ -383,6 +383,14 @@ func MergeServerConfig(base, patch *ServerConfig, opts MergeOptions) (*ServerCon
 		merged.ExposeSkills = &v
 	}
 
+	// ClientFeatures: same patch semantics as ForwardHeaders.
+	if patch.ClientFeatures != nil {
+		if diff != nil && !slices.Equal(base.ClientFeatures, patch.ClientFeatures) {
+			diff.Modified["client_features"] = FieldChange{Path: "client_features", From: base.ClientFeatures, To: patch.ClientFeatures}
+		}
+		merged.ClientFeatures = append([]string{}, patch.ClientFeatures...)
+	}
+
 	// Per-server concurrency overrides (spec 093, FR-020(c)): same tri-state
 	// patch semantics as InitTimeout — a non-nil pointer sets/replaces the
 	// override (including an explicit 0 = opt out), nil leaves the base value.
@@ -748,6 +756,9 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 	if src.ExposeSkills != nil {
 		exposeSkills := *src.ExposeSkills
 		dst.ExposeSkills = &exposeSkills
+	}
+	if src.ClientFeatures != nil {
+		dst.ClientFeatures = append([]string{}, src.ClientFeatures...)
 	}
 
 	// Copy nested structs

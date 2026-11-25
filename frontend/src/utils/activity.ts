@@ -42,7 +42,8 @@ export const ACTIVITY_TYPE_LABELS: Record<string, string> = {
   'profile_change': 'Profile Change', // Spec 108: client binding / credential change
   'upstream_event': 'Upstream Event', // Spec 124: connection lost/restored, process exited, OAuth refresh failed, login required
   'skill_quarantine_change': 'Skill Approval Change', // Spec 125: a skill's approval state (administrator-only)
-  'skill_access': 'Skill Access' // Spec 125: an agent searched, loaded or read a skill
+  'skill_access': 'Skill Access', // Spec 125: an agent searched, loaded or read a skill
+  'client_request': 'Client Request' // #1964: an upstream asked the client for elicitation, sampling or roots
 }
 
 const typeLabels = ACTIVITY_TYPE_LABELS
@@ -101,7 +102,8 @@ const typeIcons: Record<string, string> = {
   'profile_change': '🪪',
   'upstream_event': '🔌',
   'skill_quarantine_change': '📚',
-  'skill_access': '📖'
+  'skill_access': '📖',
+  'client_request': '🙋'
 }
 
 // Status labels

@@ -2309,6 +2309,10 @@ type AddServerRequest struct {
 	// Tri-state *bool mirroring config.ServerConfig.ExposeSkills: nil means
 	// "leave unchanged" on PATCH and "inherit" on create.
 	ExposeSkills *bool `json:"expose_skills,omitempty"`
+	// ClientFeatures lists which of the calling client's features this server
+	// may use: elicitation, sampling, roots. On PATCH a nil slice (field
+	// omitted) leaves the stored list unchanged and [] clears it.
+	ClientFeatures []string `json:"client_features,omitempty"`
 	// ForwardHeaders is the per-server allowlist of inbound MCP client header
 	// NAMES forwarded to this server on tools/call (Spec 112). Names only, never
 	// values. On PATCH a nil slice (field omitted) leaves the stored allowlist
@@ -2696,6 +2700,11 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	if req.ExposeSkills != nil {
 		serverConfig.ExposeSkills = req.ExposeSkills
 	}
+	if errs := config.ClientFeaturesValidationErrors("client_features", req.ClientFeatures); len(errs) > 0 {
+		s.writeError(w, r, http.StatusBadRequest, joinValidationMessages(errs))
+		return
+	}
+	serverConfig.ClientFeatures = append([]string(nil), req.ClientFeatures...)
 	// Spec 112: carry the forward_headers allowlist through on create, after
 	// validating the names (write-time layer of FR-005).
 	if len(req.ForwardHeaders) > 0 {
@@ -3008,6 +3017,16 @@ func resolveServerPatch(serverName string, req *AddServerRequest, existingSrv *c
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.ExposeSkills = existingSrv.ExposeSkills
+	}
+	// client_features: nil preserves the existing list, [] clears it.
+	if req.ClientFeatures != nil {
+		if errs := config.ClientFeaturesValidationErrors("client_features", req.ClientFeatures); len(errs) > 0 {
+			return nil, &patchError{status: http.StatusBadRequest, msg: joinValidationMessages(errs)}
+		}
+		updates.ClientFeatures = append([]string{}, req.ClientFeatures...)
+		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.ClientFeatures = existingSrv.ClientFeatures
 	}
 	// Spec 112: forward_headers preserves the existing allowlist when the
 	// request omits it (nil slice); a non-nil slice replaces it and an empty

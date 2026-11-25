@@ -193,6 +193,9 @@ var adminConfigEventTypes = map[internalRuntime.EventType]struct{}{
 	// A skill access names the id its caller asked for, which may be a held
 	// skill: administrator-only for the same reason.
 	internalRuntime.EventTypeActivitySkillAccess: {},
+	// A client request row is about another caller's client (#1964):
+	// administrator-only, like the stored row.
+	internalRuntime.EventTypeActivityClientRequest: {},
 }
 
 // identityBearingEventTypes are the event types whose payload is ABOUT one

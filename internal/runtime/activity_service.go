@@ -574,6 +574,8 @@ func (s *ActivityService) handleEvent(evt Event) {
 		s.handleConfigChange(evt)
 	case EventTypeActivityPromptGet:
 		s.handlePromptGet(evt)
+	case EventTypeActivityClientRequest:
+		s.handleClientRequest(evt)
 	// Spec 032: Tool-level quarantine events
 	case EventTypeActivityToolQuarantineChange:
 		s.handleToolQuarantineChange(evt)

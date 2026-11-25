@@ -1477,6 +1477,7 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 		mcpServerVersion(),
 		directOpts...,
 	)
+	watchClientRoots(p.directServer, p.upstreamManager)
 
 	// Single-server surfaces (/mcp/s/<server>) run the SAME discovery filter
 	// chain as the direct server, in the same order with the stamp strip last,
@@ -1511,6 +1512,8 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 		mcpServerVersion(),
 		append(append([]mcpserver.ServerOption{}, opts...), sharedInstructions)...,
 	)
+	watchClientRoots(p.codeExecServer, p.upstreamManager)
+	watchClientRoots(p.callToolServer, p.upstreamManager)
 
 	// Register tools for code execution mode (static tools that don't change)
 	codeExecTools := p.buildCodeExecModeTools()

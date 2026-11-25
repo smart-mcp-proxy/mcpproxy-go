@@ -214,7 +214,18 @@ func (c *Client) newListChangedStream(cl *client.Client, info *mcp.InitializeRes
 	opts := listChangedStreamOptions
 	opts.ProtocolVersion = info.ProtocolVersion
 	opts.Logger = c.logger
-	opts.OnNotification = queue.push
+	opts.OnNotification = func(n mcp.JSONRPCNotification) {
+		// Not through the queue: it coalesces per method, and each completion
+		// is for a different elicitation. Complete never blocks.
+		if n.Method == string(mcp.MethodNotificationElicitationComplete) {
+			c.urlElicitations.Complete(n)
+			return
+		}
+		queue.push(n)
+	}
+	if len(c.relayFeatures()) > 0 {
+		opts.OnRequest = c.relayHandler().Answer
+	}
 	ls := cfg.NewListenStream(sh, opts)
 
 	ctx, cancel := context.WithCancel(c.Gate().Context())

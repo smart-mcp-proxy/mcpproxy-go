@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientrelay"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
@@ -1210,6 +1211,19 @@ func (mc *Client) SetPromptsChangedCallback(callback func(serverName string)) {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 	mc.promptsChangedCallback = callback
+}
+
+// SetClientRequestObserver installs the sink every request this upstream sends
+// to a client (elicitation, sampling, roots) is reported to. The core client
+// is created once, so this covers every reconnect.
+func (mc *Client) SetClientRequestObserver(fn func(clientrelay.Event)) {
+	mc.coreClient.SetClientRequestObserver(fn)
+}
+
+// NotifyClientRootsChanged forwards a client's roots change to this upstream
+// when that client is the last one that called it (#1966).
+func (mc *Client) NotifyClientRootsChanged(sessionID string) {
+	mc.coreClient.NotifyClientRootsChanged(sessionID)
 }
 
 // ListToolsEvent reports one step of ListTools coalescing to a test observer:

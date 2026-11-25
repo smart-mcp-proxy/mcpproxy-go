@@ -184,6 +184,13 @@ components:
           $ref: '#/components/schemas/config.DockerIsolationConfig'
         docker_recovery:
           $ref: '#/components/schemas/config.DockerRecoveryConfig'
+        enable_client_features:
+          description: |-
+            EnableClientFeatures is the kill switch for the per-server
+            client_features (#1964-#1966). nil (default) leaves them in effect; false
+            declares none of them to any upstream. Read when an upstream connects, so
+            a change needs a restart. Resolved by ClientFeaturesFor.
+          type: boolean
         enable_code_execution:
           description: Code execution settings
           type: boolean
@@ -1260,6 +1267,16 @@ components:
             explicit auto_approve_tool_changes:false overrides a legacy skip_quarantine:true.
             Read via IsAutoApproveToolChanges().
           type: boolean
+        client_features:
+          description: |-
+            ClientFeatures lists what this server may use of the calling MCP client:
+            "elicitation", "sampling", "roots" (ClientFeatureNames). Unset or empty
+            (default) is none of them. A change reconnects the server
+            (ConnectionEquivalent).
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         command:
           type: string
         created:
@@ -3258,6 +3275,15 @@ components:
             an explicit false. Read-only on the GET path; PATCH/POST accept it via
             AddServerRequest.
           type: boolean
+        client_features:
+          description: |-
+            ClientFeatures mirrors config.ServerConfig.ClientFeatures: which of the
+            calling client's elicitation, sampling and roots this server may use.
+            Omitted when none.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         command:
           type: string
         connected:
@@ -4478,6 +4504,15 @@ components:
             semantics — do NOT collapse to a plain bool, or an omitted field would
             silently reset a previously-set value.
           type: boolean
+        client_features:
+          description: |-
+            ClientFeatures lists which of the calling client's features this server
+            may use: elicitation, sampling, roots. On PATCH a nil slice (field
+            omitted) leaves the stored list unchanged and [] clears it.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         command:
           type: string
         enabled:
@@ -6814,6 +6849,7 @@ paths:
           - prompt_get
           - profile_change
           - upstream_event
+          - client_request
           type: string
       - description: Filter by server name
         in: query

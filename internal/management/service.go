@@ -594,6 +594,11 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			srv.ForwardHeaders = append([]string(nil), names...)
 		}
 
+		// #1964: project which client features the server may use.
+		if names, ok := srvRaw["client_features"].([]string); ok && len(names) > 0 {
+			srv.ClientFeatures = append([]string(nil), names...)
+		}
+
 		// Spec 086: project the per-server trust tier (auto|scan|manual) so the
 		// GET payload, `mcpproxy upstream list` and the SSE servers.changed
 		// embed can read back the persisted mode. Plain string — an absent key

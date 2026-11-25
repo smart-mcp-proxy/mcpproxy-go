@@ -233,6 +233,104 @@ func TestListenStream_AnswersPingOnStream(t *testing.T) {
 	}
 }
 
+// A request other than ping goes to OnRequest (#1964), whose answer is posted
+// back; without OnRequest it is refused with method-not-found.
+func TestListenStream_AnswersRequestsWithOnRequest(t *testing.T) {
+	answerOf := func(t *testing.T, onRequest func(context.Context, string, json.RawMessage) (any, *mcp.JSONRPCErrorDetails)) map[string]any {
+		t.Helper()
+		answered := make(chan map[string]any, 1)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				body, _ := io.ReadAll(r.Body)
+				var m map[string]any
+				_ = json.Unmarshal(body, &m)
+				answered <- m
+				w.WriteHeader(http.StatusAccepted)
+				return
+			}
+			openSSE(w)
+			writeSSE(w, map[string]any{"jsonrpc": "2.0", "id": 9, "method": "roots/list", "params": map[string]any{"x": 1}})
+			<-r.Context().Done()
+		}))
+		defer srv.Close()
+
+		opts := fastListenOptions(nil)
+		opts.OnRequest = onRequest
+		ls := (&HTTPTransportConfig{URL: srv.URL}).NewListenStream(sessionTransport(t, srv.URL, "sess-r"), opts)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go ls.Run(ctx)
+		select {
+		case m := <-answered:
+			assert.Equal(t, float64(9), m["id"])
+			return m
+		case <-time.After(3 * time.Second):
+			t.Fatal("request on the GET stream was not answered")
+			return nil
+		}
+	}
+
+	m := answerOf(t, nil)
+	assert.Equal(t, float64(mcp.METHOD_NOT_FOUND), m["error"].(map[string]any)["code"])
+
+	m = answerOf(t, func(_ context.Context, method string, params json.RawMessage) (any, *mcp.JSONRPCErrorDetails) {
+		return map[string]any{"method": method, "params": string(params)}, nil
+	})
+	assert.Equal(t, map[string]any{"method": "roots/list", "params": `{"x":1}`}, m["result"])
+}
+
+// A flood of requests is answered maxListenRequests at a time; the rest are
+// refused without reaching OnRequest.
+func TestListenStream_ShedsARequestFlood(t *testing.T) {
+	const flood = 40
+	answers := make(chan map[string]any, flood)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			body, _ := io.ReadAll(r.Body)
+			var m map[string]any
+			_ = json.Unmarshal(body, &m)
+			answers <- m
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		openSSE(w)
+		for i := range flood {
+			writeSSE(w, map[string]any{"jsonrpc": "2.0", "id": i, "method": "elicitation/create"})
+		}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	var started atomic.Int32
+	release := make(chan struct{})
+	opts := fastListenOptions(nil)
+	opts.OnRequest = func(context.Context, string, json.RawMessage) (any, *mcp.JSONRPCErrorDetails) {
+		started.Add(1)
+		<-release
+		return map[string]any{}, nil
+	}
+	ls := (&HTTPTransportConfig{URL: srv.URL}).NewListenStream(sessionTransport(t, srv.URL, "sess-f"), opts)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ls.Run(ctx)
+
+	take := func(n int, key string) {
+		t.Helper()
+		for range n {
+			select {
+			case m := <-answers:
+				assert.Contains(t, m, key)
+			case <-time.After(5 * time.Second):
+				t.Fatalf("timed out waiting for an answer with %q", key)
+			}
+		}
+	}
+	take(flood-maxListenRequests, "error")
+	assert.EqualValues(t, maxListenRequests, started.Load())
+	close(release)
+	take(maxListenRequests, "result")
+}
+
 // The GET stream is long-lived: it must not be built on the plain branch's
 // 180s total-timeout client, and building it must not change that client.
 func TestListenStream_ClientHasNoTotalTimeout(t *testing.T) {

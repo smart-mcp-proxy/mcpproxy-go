@@ -171,6 +171,9 @@ func (r *Runtime) StartBackgroundInitialization() {
 			r.promptsRefresh.trigger()
 		})
 		r.logger.Info("Upstream prompts-changed callback registered on upstream manager")
+
+		// #1964: record every request an upstream sends to a client.
+		r.upstreamManager.SetClientRequestObserver(r.EmitActivityClientRequest)
 	}
 
 	// Spec 113-d FR-068: a rolling call-failure-rate flip changes a server's

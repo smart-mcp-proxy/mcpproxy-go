@@ -18,6 +18,7 @@
   },
   "not_in_settings": [
     "advertise_upstream_servers",
+    "enable_client_features",
     "forward_client_headers",
     "security.auto_baseline_scan",
     "security.auto_rescan_on_change",

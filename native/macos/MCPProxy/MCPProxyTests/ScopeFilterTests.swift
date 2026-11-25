@@ -41,6 +41,7 @@ final class ScopeFilterTests: XCTestCase {
             "credential_broker", "preflight", "prompt_get", "profile_change", "upstream_event",
             // Spec 125: administrator-only skill rows (the app is an administrator).
             "skill_quarantine_change", "skill_access",
+            "client_request",
         ]))
         XCTAssertFalse(types.contains("tool_call"))
         XCTAssertFalse(types.contains("internal_tool_call"))

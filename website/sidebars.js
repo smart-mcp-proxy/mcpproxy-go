@@ -101,6 +101,7 @@ const sidebars = {
       items: [
         'features/routing-modes',
         'features/single-server-endpoints',
+        'features/client-requests',
         'features/schema-deferred-direct-mode',
         'features/search-discovery',
         'features/tools-preflight',

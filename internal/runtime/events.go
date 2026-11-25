@@ -91,6 +91,9 @@ const (
 	EventTypeActivityConfigChange EventType = "activity.config_change"
 	// EventTypeActivityPromptGet is emitted when an upstream prompts/get completes (Finding F10).
 	EventTypeActivityPromptGet EventType = "activity.prompt_get.completed"
+	// EventTypeActivityClientRequest is emitted when an upstream's request to a
+	// client (elicitation, sampling, roots) has been answered (#1964).
+	EventTypeActivityClientRequest EventType = "activity.client_request.completed"
 	// EventTypeUpstreamPromptsChanged is emitted (debounced) when a connected
 	// upstream sends notifications/prompts/list_changed, so the aggregated prompt
 	// set is rebuilt without waiting for an unrelated servers.changed (F13).

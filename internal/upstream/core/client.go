@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientrelay"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
@@ -123,6 +124,19 @@ type Client struct {
 	// reconnect. Only the provider function is stored here: no header names or
 	// values live on the client (FR-011). Unset means nothing is forwarded.
 	forwardPolicy atomic.Pointer[func() headerfwd.Policy]
+
+	// calls holds the tool calls in flight, so an upstream request that does
+	// not arrive on a call's own stream can be relayed to its client
+	// (client_relay.go).
+	calls inflightCalls
+	// relayInFlight limits the upstream requests being answered at a time.
+	relayInFlight clientrelay.InFlight
+	// rootsChangedSendTimeout overrides rootsChangedTimeout (tests only).
+	rootsChangedSendTimeout time.Duration
+	// urlElicitations routes the upstream's URL elicitation completions.
+	urlElicitations clientrelay.URLElicitations
+	// requestObserver records every relayed request (activity log).
+	requestObserver atomic.Pointer[func(clientrelay.Event)]
 
 	// Transport type and stderr access (for stdio)
 	transportType string
@@ -694,6 +708,7 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 	// attributed to the upstream only when the request really left. A no-op
 	// when ctx carries no call recorder.
 	proxytransport.MarkDispatched(ctx)
+	defer c.beginCall(callCtx)()
 	result, err := client.CallTool(callCtx, request)
 	if err != nil {
 		// Spec 112 FR-016.1: scrub echoed forwarded values before this error
@@ -778,6 +793,9 @@ func (c *Client) httpTransportConfig(serverConfig *config.ServerConfig, oauthCon
 	// Spec 116 PR4 (FR-024): every branch builds on the instance's gated
 	// transport and the mcp-go transport is wrapped by the gate.
 	cfg.Gate = c.Gate()
+	// #1964-#1966: relay the upstream's elicitation, sampling and roots
+	// requests to the calling client (streamable HTTP only; SSE cannot).
+	cfg.ClientOptions = c.relayOptions()
 	// Spec 112 FR-018: the trace transport masks the live allowlisted names.
 	cfg.ForwardNames = func() []string {
 		if pp := c.forwardPolicy.Load(); pp != nil {

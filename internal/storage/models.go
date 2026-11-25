@@ -327,6 +327,9 @@ type UpstreamRecord struct {
 	// ExposeSkills is the per-server override for reading the server's skills
 	// (Spec 125): nil follows enable_skills, false excludes the server.
 	ExposeSkills *bool `json:"expose_skills,omitempty"`
+	// ClientFeatures lists which of the calling client's elicitation, sampling
+	// and roots this server may use (#1964).
+	ClientFeatures []string `json:"client_features,omitempty"`
 	// ForwardHeaders (Spec 112) is the per-server allowlist of inbound MCP
 	// client header NAMES to forward on tools/call. Names only, never values.
 	// Persisted here because SaveConfiguration rebuilds the JSON server list

@@ -83,6 +83,10 @@ type ListenEnd struct {
 	Detail string
 }
 
+// maxListenRequests is how many server-to-client requests of one stream are
+// answered at a time.
+const maxListenRequests = 4
+
 // ListenStreamOptions tunes a ListenStream. Zero durations take the defaults.
 type ListenStreamOptions struct {
 	// ProtocolVersion is sent as Mcp-Protocol-Version (the negotiated one).
@@ -90,7 +94,11 @@ type ListenStreamOptions struct {
 	// OnNotification receives every notification the stream carries. It runs
 	// on the stream's goroutine and is never called after Run's context ends.
 	OnNotification func(mcp.JSONRPCNotification)
-	Logger         *zap.Logger
+	// OnRequest answers a server-to-client request other than ping (#1964).
+	// It runs on its own goroutine, at most maxListenRequests at a time; the
+	// rest are refused. nil answers method-not-found.
+	OnRequest func(ctx context.Context, method string, params json.RawMessage) (any, *mcp.JSONRPCErrorDetails)
+	Logger    *zap.Logger
 
 	// MinBackoff is the first retry delay after a transient failure and the
 	// delay before re-opening a stream that ended after being healthy.
@@ -124,6 +132,8 @@ type ListenStream struct {
 	authorization   func(context.Context) (string, error)
 	protocolVersion string
 	onNotification  func(mcp.JSONRPCNotification)
+	onRequest       func(context.Context, string, json.RawMessage) (any, *mcp.JSONRPCErrorDetails)
+	requestSlots    chan struct{}
 	logger          *zap.Logger
 	minBackoff      time.Duration
 	maxBackoff      time.Duration
@@ -193,6 +203,8 @@ func (cfg *HTTPTransportConfig) NewListenStream(sh *mcptransport.StreamableHTTP,
 		sessionID:       sh.GetSessionId,
 		protocolVersion: opts.ProtocolVersion,
 		onNotification:  opts.OnNotification,
+		onRequest:       opts.OnRequest,
+		requestSlots:    make(chan struct{}, maxListenRequests),
 		logger:          logger,
 		minBackoff:      orDefault(opts.MinBackoff, defaultListenMinBackoff),
 		maxBackoff:      orDefault(opts.MaxBackoff, defaultListenMaxBackoff),
@@ -406,6 +418,7 @@ func (s *ListenStream) handle(ctx context.Context, raw []byte, sid string) {
 	var head struct {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
 	}
 	if err := json.Unmarshal(raw, &head); err != nil || head.Method == "" {
 		return
@@ -421,20 +434,42 @@ func (s *ListenStream) handle(ctx context.Context, raw []byte, sid string) {
 		}
 		return
 	}
-	s.answer(ctx, head.ID, head.Method, sid)
+	switch {
+	case head.Method == string(mcp.MethodPing):
+		s.answer(ctx, head.ID, head.Method, sid, map[string]any{}, nil)
+	case s.onRequest == nil:
+		// Rather than leaving the server waiting.
+		s.answer(ctx, head.ID, head.Method, sid, nil, &mcp.JSONRPCErrorDetails{
+			Code: mcp.METHOD_NOT_FOUND, Message: "method not supported by mcpproxy: " + head.Method,
+		})
+	default:
+		select {
+		case s.requestSlots <- struct{}{}:
+		default:
+			// Answered on the stream's goroutine, so a flood waits for its own
+			// refusals instead of piling up goroutines.
+			s.answer(ctx, head.ID, head.Method, sid, nil, &mcp.JSONRPCErrorDetails{
+				Code: mcp.INTERNAL_ERROR, Message: "too many requests in flight",
+			})
+			return
+		}
+		// An elicitation waits for a person: never on the stream's goroutine.
+		go func() {
+			defer func() { <-s.requestSlots }()
+			result, rpcErr := s.onRequest(ctx, head.Method, head.Params)
+			s.answer(ctx, head.ID, head.Method, sid, result, rpcErr)
+		}()
+	}
 }
 
 // answer replies to a server-to-client request received on the stream, on the
-// session that opened the stream (sid).
-// mcpproxy declares no client capabilities on the upstream hop, so ping is
-// the only request it serves; anything else gets method-not-found rather than
-// leaving the server waiting.
-func (s *ListenStream) answer(ctx context.Context, id json.RawMessage, method, sid string) {
+// session that opened the stream (sid), with result or rpcErr.
+func (s *ListenStream) answer(ctx context.Context, id json.RawMessage, method, sid string, result any, rpcErr *mcp.JSONRPCErrorDetails) {
 	msg := map[string]any{"jsonrpc": "2.0", "id": id}
-	if method == string(mcp.MethodPing) {
-		msg["result"] = map[string]any{}
+	if rpcErr != nil {
+		msg["error"] = rpcErr
 	} else {
-		msg["error"] = map[string]any{"code": mcp.METHOD_NOT_FOUND, "message": "method not supported by mcpproxy: " + method}
+		msg["result"] = result
 	}
 	body, err := json.Marshal(msg)
 	if err != nil {

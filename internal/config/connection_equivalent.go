@@ -35,6 +35,8 @@ func ConnectionEquivalent(a, b *ServerConfig) bool {
 		equalStringMap(a.Env, b.Env) &&
 		equalStringMap(a.Headers, b.Headers) &&
 		equalDurationPtr(a.InitTimeout, b.InitTimeout) &&
+		// Declared to the upstream at initialize.
+		equalStringSlice(a.ClientFeatures, b.ClientFeatures) &&
 		reflect.DeepEqual(a.OAuth, b.OAuth) &&
 		reflect.DeepEqual(a.Isolation, b.Isolation)
 }
