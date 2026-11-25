@@ -95,8 +95,8 @@ async function openConnect(page: Page) {
 // in the scratch HOME, so their buttons must exist: a missing one fails here.
 async function expectNoChoiceForOtherClients(page: Page, skip: string[]) {
   await openConnect(page)
-  const res = await fetch(`${BASE}/api/v1/clients`, { headers: { 'X-API-Key': KEY } })
-  const ids = ((await res.json()) as { data: { clients: { id: string }[] } }).data.clients.map((c) => c.id).filter((id) => !skip.includes(id))
+  const res = await fetch(`${BASE}/api/v1/connect`, { headers: { 'X-API-Key': KEY } })
+  const ids = ((await res.json()) as { data: { id: string }[] }).data.map((c) => c.id).filter((id) => !skip.includes(id))
   for (const id of ['cursor', 'vscode']) await expect(t(page, `connect-${id}`)).toBeVisible()
   for (const id of ids) {
     const btn = t(page, `connect-${id}`)
@@ -113,6 +113,9 @@ test.describe(OFF ? 'browser login off' : 'browser login on', () => {
     test.skip(OFF, 'feature-off run')
     const errors: string[] = []
     page.on('pageerror', (e) => errors.push(e.message))
+    // Seed unrelated settings and another MCP server, so "nothing else changed" is a real check.
+    const seed = { theme: 'dark', mcpServers: { other: { type: 'http', url: 'http://example.invalid/mcp' } } }
+    writeFileSync(CLAUDE_JSON, JSON.stringify(seed, null, 2) + '\n')
     const original = readFileSync(CLAUDE_JSON, 'utf8')
     await openConnect(page)
 
@@ -131,7 +134,7 @@ test.describe(OFF ? 'browser login off' : 'browser login on', () => {
     const entry = await t(page, 'client-preview-entry-claude-code').innerText()
     const shown = JSON.parse(entry) as Record<string, Record<string, unknown>>
     expect(Object.keys(shown)).toHaveLength(1)
-    const shownEntry = Object.values(shown)[0]
+    const [name, shownEntry] = Object.entries(shown)[0]
     expect(shownEntry.url).toBe(`${ORIGIN}/mcp/oauth/claude-code`)
     expect(shownEntry.type).toBe('http')
     expect(Object.keys(shownEntry).sort()).toEqual(['type', 'url'])
@@ -147,7 +150,7 @@ test.describe(OFF ? 'browser login off' : 'browser login on', () => {
     await expect(t(page, 'client-preview-entry-claude-code')).toContainText('/mcp/oauth/claude-code')
 
     await t(page, 'client-preview-confirm-claude-code').click()
-    await expect(t(page, 'connect-backup-path').or(t(page, 'connect-no-backup'))).toBeVisible()
+    await expect(t(page, 'connect-backup-path')).toBeVisible() // the file existed, so a backup is named
     await expect(t(page, 'connect-undo-offer')).toBeVisible()
     await shot(page, '03-connected')
 
@@ -155,16 +158,8 @@ test.describe(OFF ? 'browser login off' : 'browser login on', () => {
     await expect(t(page, 'connect-disconnect-claude-code')).toBeVisible()
     const written = readFileSync(CLAUDE_JSON, 'utf8')
     // Exactly the credential-free address: no headers, no query, nothing else.
-    const parsed = JSON.parse(written) as { mcpServers: Record<string, Record<string, unknown>> }
-    // Nothing else in the file changed: everything but mcpServers equals the original.
-    const { mcpServers: _w, ...restWritten } = parsed
-    const { mcpServers: _o, ...restOriginal } = JSON.parse(original) as Record<string, unknown>
-    expect(restWritten).toEqual(restOriginal)
-    const entries = Object.values(parsed.mcpServers)
-    expect(entries).toHaveLength(1)
-    expect(entries[0].url).toBe(`${ORIGIN}/mcp/oauth/claude-code`)
-    expect(entries[0].type).toBe('http')
-    expect(Object.keys(entries[0]).sort()).toEqual(['type', 'url'])
+    // The whole file is the seed plus exactly the previewed entry under the previewed name.
+    expect(JSON.parse(written)).toEqual({ ...seed, mcpServers: { ...seed.mcpServers, [name]: shownEntry } })
 
     // Undo restores the pre-connect state.
     await t(page, 'connect-undo').click()
