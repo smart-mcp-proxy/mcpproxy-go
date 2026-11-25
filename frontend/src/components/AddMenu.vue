@@ -8,20 +8,18 @@
     <button
       ref="trigger"
       type="button"
-      class="btn btn-outline"
+      class="btn btn-outline max-sm:h-11 max-sm:w-11 max-sm:min-h-11 max-sm:px-0"
       aria-haspopup="menu"
       :aria-expanded="open ? 'true' : 'false'"
       aria-label="Add"
       data-test="header-add-menu"
       @click="toggle"
     >
-      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-      </svg>
+      <!-- Spec 134: below 1100px this button is icon-only next to the "+"
+           Add server button, so it shows a caret, not a second "+". -->
+      <UiIcon name="plus" class="w-4 h-4 hidden min-[1100px]:block" />
       <span class="hidden min-[1100px]:inline">Add</span>
-      <svg class="w-3 h-3 hidden min-[1100px]:block" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-      </svg>
+      <UiIcon name="chevronDown" class="w-4 h-4 min-[1100px]:w-3 min-[1100px]:h-3" />
     </button>
     <ul
       v-if="open"
@@ -55,6 +53,7 @@
 </template>
 
 <script setup lang="ts">
+import UiIcon from '@/components/UiIcon.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'

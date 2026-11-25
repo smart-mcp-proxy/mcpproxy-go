@@ -4,11 +4,11 @@
          [menu] [logo] [search] ......... [online] [N need attention] [Add server] [+ Add].
          "View as" lives in the filter row of the pages it applies to (FR-016).
          The right cluster is always rendered; text collapses below 1100px. -->
-    <div class="flex items-center gap-2 px-3 sm:px-4 min-[1280px]:px-6 py-3 min-w-0" data-test="header-row">
+    <div class="flex items-center gap-1 sm:gap-2 px-2 sm:px-4 min-[1280px]:px-6 py-2 sm:py-3 min-w-0" data-test="header-row">
       <!-- Mobile menu toggle: a real button (Spec 134 FR-014). -->
       <button
         type="button"
-        class="btn btn-ghost btn-square lg:hidden shrink-0"
+        class="btn btn-ghost btn-square lg:hidden shrink-0 max-sm:h-11 max-sm:w-11 max-sm:min-h-11"
         aria-label="Open navigation menu"
         aria-controls="sidebar-panel"
         :aria-expanded="drawerOpen ? 'true' : 'false'"
@@ -20,7 +20,7 @@
 
       <router-link
         to="/"
-        class="lg:hidden shrink-0"
+        class="lg:hidden shrink-0 inline-flex items-center justify-center w-11 h-11"
         aria-label="MCPProxy home"
         data-test="header-logo"
       >
@@ -44,7 +44,7 @@
         </button>
         <button
           type="button"
-          class="btn btn-ghost btn-square min-[1100px]:hidden"
+          class="btn btn-ghost btn-square min-[1100px]:hidden max-sm:h-11 max-sm:w-11 max-sm:min-h-11"
           aria-label="Search"
           aria-keyshortcuts="Meta+K Control+K"
           data-test="header-search-icon"
@@ -54,7 +54,7 @@
         </button>
       </div>
 
-      <div class="ml-auto flex items-center gap-2 shrink-0">
+      <div class="ml-auto flex items-center gap-1 sm:gap-2 shrink-0">
         <!-- Spec 107 FR-041: a tenant never loads the fleet-wide servers store
              and cannot add through admin doors, so neither control renders. -->
         <HeaderStatus v-if="!isTenant" />
@@ -66,7 +66,7 @@
             ref="attentionButton"
             type="button"
             @click="showAttentionPopover = !showAttentionPopover"
-            class="flex items-center gap-2 px-3 py-2 min-h-10 bg-warning/10 text-warning rounded cursor-pointer hover:bg-warning/20 transition-colors"
+            class="flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-2 min-h-11 sm:min-h-10 bg-warning/10 text-warning rounded cursor-pointer hover:bg-warning/20 transition-colors"
             data-test="header-attention-pill-button"
             aria-controls="header-attention-popover"
             :aria-expanded="showAttentionPopover ? 'true' : 'false'"
@@ -112,7 +112,7 @@
         <router-link
           v-if="!isTenant"
           to="/add-server"
-          class="btn btn-primary shrink-0"
+          class="btn btn-primary shrink-0 max-sm:h-11 max-sm:w-11 max-sm:min-h-11 max-sm:px-0"
           aria-label="Add server"
           data-test="header-add-server"
         >

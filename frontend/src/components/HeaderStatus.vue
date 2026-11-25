@@ -11,7 +11,7 @@
        Spec 107 FR-041). -->
   <router-link
     to="/servers"
-    class="flex items-center gap-2 px-3 py-2 bg-base-200 rounded-lg text-sm whitespace-nowrap shrink-0 hover:bg-base-300 transition-colors"
+    class="flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-2 min-h-11 sm:min-h-0 bg-base-200 rounded text-sm whitespace-nowrap shrink-0 hover:bg-base-300 transition-colors"
     :aria-label="ariaLabel"
     :title="fullText"
     data-test="header-status-pill"

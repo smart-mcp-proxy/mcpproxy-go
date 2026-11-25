@@ -26,7 +26,7 @@ const app = readFileSync(resolve(root, 'src/assets/main.css'), 'utf8')
 const color = (v: string): RGB => parseColor(v)
 
 const TONES = ['ok', 'review', 'error', 'busy', 'off'] as const
-const TOKENS = ['--brand', '--on-brand', '--brand-text', '--brand-soft', '--border', '--focus',
+const TOKENS = ['--brand', '--on-brand', '--brand-text', '--brand-soft', '--ds-border', '--focus',
   ...TONES.flatMap((t) => [`--status-${t}`, `--status-${t}-soft`])]
 
 describe.each(['corporate', 'dark'] as const)('design tokens in %s', (theme) => {
@@ -52,6 +52,23 @@ describe.each(['corporate', 'dark'] as const)('design tokens in %s', (theme) => 
     const soft = color(mine[`--status-${tone}-soft`])
     expect(contrastRatio(fg, soft), `${tone} on soft`).toBeGreaterThanOrEqual(AA_NORMAL_TEXT)
     for (const s of surfaces) expect(contrastRatio(fg, s), `${tone} on base`).toBeGreaterThanOrEqual(AA_NORMAL_TEXT)
+  })
+
+  it('never redefines daisyUI --border (it is the border WIDTH; a colour there breaks every button and badge)', () => {
+    expect(mine['--border']).toBeUndefined()
+  })
+
+  it('the active sidebar item (brand-text on brand-soft) and the badges on it clear AA', () => {
+    const soft = color(mine['--brand-soft'])
+    expect(contrastRatio(color(mine['--brand-text']), soft)).toBeGreaterThanOrEqual(AA_NORMAL_TEXT)
+    // Count badges sit on the active item: badge-ghost (base-content on base-200)
+    // and the attention badge (warning-content on warning) carry their own fill.
+    const base200 = color(mine['--color-base-200'] ?? daisy['--color-base-200'])
+    const baseContent = color(mine['--color-base-content'] ?? daisy['--color-base-content'])
+    expect(contrastRatio(baseContent, base200)).toBeGreaterThanOrEqual(AA_NORMAL_TEXT)
+    const warning = color(mine['--color-warning'] ?? daisy['--color-warning'])
+    const warningContent = color(mine['--color-warning-content'] ?? daisy['--color-warning-content'])
+    expect(contrastRatio(warningContent, warning)).toBeGreaterThanOrEqual(AA_NORMAL_TEXT)
   })
 
   it('brand text clears AA on base surfaces and on brand-soft', () => {
