@@ -766,6 +766,10 @@ func (s *OAuthLoginService) resolveChoice(req mcplogin.Request, c ApprovalChoice
 			if def == nil {
 				return nil, ErrOAuthClientUnknown
 			}
+			if c.BindingRevision != "" {
+				// The page saw this client with a binding that is gone now.
+				return nil, ErrOAuthBindingChanged
+			}
 			rc.newClient, rc.display = true, def.Name
 		}
 	default:

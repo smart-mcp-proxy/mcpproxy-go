@@ -47,6 +47,7 @@ func TestOAuthApprove_BuiltinClientWithoutRecords(t *testing.T) {
 
 	redirect, err := fx.svc.Approve(fx.ctx(), id, ApprovalChoice{Client: ClientChoice{ID: "vscode"}, Profile: oauthStrp("ro")})
 	require.NoError(t, err)
+	fx.nothingStored() // approval stores nothing: the exchange is the commit
 	_, terr := fx.svc.Exchange(fx.tokenInput(reg, oauthCodeOf(t, redirect)))
 	require.Nil(t, terr)
 	g := fx.grants()
@@ -81,4 +82,15 @@ func TestOAuthDescribe_RecordedClientBeatsBuiltinInSuggestion(t *testing.T) {
 	s = fx.suggestFor("VS Code", "").SuggestedClient
 	require.NotNil(t, s)
 	assert.Equal(t, "my-vscode", s.ID)
+}
+
+// A binding revision from a page that saw the client WITH a binding must not
+// turn into a new-client approval after the client's records are gone.
+func TestOAuthApprove_StaleRevisionForVanishedBuiltinIsRefused(t *testing.T) {
+	fx := newOAuthFx(t)
+	reg := fx.register()
+	id := fx.authorize(reg, "")
+	_, err := fx.svc.Approve(fx.ctx(), id, ApprovalChoice{
+		Client: ClientChoice{ID: "vscode"}, Profile: oauthStrp(""), BindingRevision: "some-revision"})
+	assert.ErrorIs(t, err, ErrOAuthBindingChanged)
 }
