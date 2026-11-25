@@ -96,8 +96,8 @@ describe('ServerDetail — Health tile answers "can my client use it?" (F10)', (
     expect(tile.text()).toBe('Blocked')
     // …and never in the success tone.
     expect(tile.classes()).not.toContain('text-success')
-    // The observed fact stays on the sub-line.
-    expect(wrapper.find('[data-test="server-health-summary"]').text()).toContain(
+    // Spec 134 FR-030: the observed fact is the header's one-line reason, printed once.
+    expect(wrapper.find('[data-test="server-status-badge"]').text()).toContain(
       'Quarantined for review'
     )
   })
@@ -161,7 +161,7 @@ describe('ServerDetail — Health tile answers "can my client use it?" (F10)', (
     const tile = wrapper.find('[data-test="server-health-level"]')
     expect(tile.text()).not.toBe('Healthy')
     expect(tile.text()).toBe('Connecting')
-    expect(wrapper.find('[data-test="server-health-summary"]').text()).toContain('Connecting...')
+    expect(wrapper.find('[data-test="server-detail-reason"]').text()).toContain('Connecting...')
   })
 
   it('reads the status label ("Error"/"Sign-in required"), not "Unhealthy"/"Degraded", for an enabled server that is in trouble', async () => {
@@ -227,9 +227,7 @@ describe('ServerDetail — Health tile answers "can my client use it?" (F10)', (
     const tile = wrapper.find('[data-test="server-health-level"]')
     expect(tile.text()).not.toBe('Online')
     expect(tile.text()).toBe('Sign-in required')
-    expect(wrapper.find('[data-test="server-health-summary"]').text()).toContain(
-      'Sign-in required'
-    )
+    expect(wrapper.find('[data-test="server-status-badge"]').text()).toContain('Sign-in required')
   })
 
   it('does not claim an automatic quarantine-on-add was "set by you"', async () => {

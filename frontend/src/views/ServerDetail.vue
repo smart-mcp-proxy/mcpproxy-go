@@ -69,7 +69,7 @@
             <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
             {{ primaryLabel }}
           </button>
-          <div class="dropdown dropdown-end">
+          <div class="dropdown lg:dropdown-end">
             <div tabindex="0" role="button" class="btn btn-outline min-h-11" data-test="server-actions-menu">
               Actions
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -186,7 +186,7 @@
             <div class="stat-value text-sm" :class="healthLevelTone" data-test="server-health-level">
               {{ healthLevelLabel }}
             </div>
-            <div class="stat-desc [overflow-wrap:anywhere]" data-test="server-health-summary">{{ statusBadgeText }}</div>
+            <div class="stat-desc [overflow-wrap:anywhere]" data-test="server-health-summary">{{ server.health?.detail || '' }}</div>
           </div>
         </div>
       </div>
@@ -1916,29 +1916,36 @@ const reviewPart = ref<HTMLElement | null>(null)
 const scansPart = ref<HTMLElement | null>(null)
 const alertsRegion = ref<HTMLElement | null>(null)
 
-// A click on the tab keeps the part already open (a ?tab=security visit stays on the scans).
+// A click on the tab keeps the part already open (a ?tab=security visit stays on the scans). Entering from
+// another tab loads the scanner names and the report, as the former Security tab did on click.
 function openReviewScans() {
-  if (!reviewScansActive.value) activeTab.value = 'review'
-  else void scrollToPart(activeTab.value === 'security' ? 'security' : 'review')
+  if (!reviewScansActive.value) {
+    activeTab.value = 'review'
+    void loadScannerNames()
+    void loadScanReport()
+  } else void scrollToPart(activeTab.value === 'security' ? 'security' : 'review')
 }
+// A part that is not on screen yet (the server is still loading, a direct ?tab=security load) is
+// scrolled to and focused as soon as it mounts.
+let pendingPart: 'review' | 'security' | null = null
 async function scrollToPart(part: 'review' | 'security') {
   await nextTick()
   const el = part === 'security' ? scansPart.value : reviewPart.value
-  if (!el) return
+  if (!el) { pendingPart = part; return }
+  pendingPart = null
   el.scrollIntoView?.({ block: 'start' })
   el.focus?.({ preventScroll: true })
 }
-function jumpToPart(part: 'review' | 'security') {
-  if (activeTab.value !== part) activeTab.value = part // the watch below scrolls
-  else void scrollToPart(part)
-}
-watch(activeTab, (tab, prev) => {
-  if (tab !== 'review' && tab !== 'security') return
-  if (prev !== 'review' && prev !== 'security') {
-    void loadScannerNames()
-    void loadScanReport()
+watch([scansPart, reviewPart], () => { if (pendingPart) void scrollToPart(pendingPart) })
+async function jumpToPart(part: 'review' | 'security') {
+  if (activeTab.value !== part) {
+    activeTab.value = part
+    if (part === 'security') { void loadScannerNames(); void loadScanReport() }
   }
-  // Landing on the scan part scrolls to it; landing on the review part from outside needs no scroll.
+  await scrollToPart(part)
+}
+watch(activeTab, (tab) => {
+  // Landing on the scan part (a ?tab=security link, a banner action) scrolls to it.
   if (tab === 'security') void scrollToPart('security')
 })
 
@@ -1979,9 +1986,10 @@ async function runPrimaryAction() {
     case 'set_secret': void router.push('/secrets'); break
     case 'configure': activeTab.value = 'config'; break
     case 'edit_url': {
-      const query = { ...route.query, tab: 'config', focus: 'endpoint' }
-      void router.replace({ query })
+      // The endpoint editor opens in place (the same action as ?focus=endpoint on a fresh load).
       activeTab.value = 'config'
+      await nextTick()
+      if (server.value?.url && !editingUrl.value) { endpointHighlighted.value = true; startEditUrl() }
       break
     }
     case 'view_logs': activeTab.value = 'logs'; break
@@ -2015,8 +2023,7 @@ async function goToAttention(target: AttentionTarget) {
     return
   }
   if (target === 'scan') {
-    if (activeTab.value !== 'security') activeTab.value = 'security'
-    else void scrollToPart('security')
+    await jumpToPart('security')
     return
   }
   await nextTick()

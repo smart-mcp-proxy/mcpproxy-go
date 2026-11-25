@@ -95,9 +95,9 @@ export function attentionLines(server: Server, opts: { primaryAction?: string; p
   const held = heldCounts(server)
   if (held.total > 0) lines.push({ id: 'held-tools', text: `${held.text || `${held.total} tools held`}. Review them` })
   const scan = scanFact(server)
-  if (server.security_scan && (server.security_scan.status === 'dangerous' || server.security_scan.status === 'failed' || (server.security_scan.status === 'warnings' && !server.quarantined))) {
+  if (server.security_scan && (server.security_scan.status === 'dangerous' || server.security_scan.status === 'failed' || server.security_scan.status === 'warnings')) {
     lines.push({ id: 'scan', text: `${scan?.text ?? 'Scan needs a look'}. Open scan results` })
   }
-  if (opts.primaryAction && opts.primaryLabel) lines.push({ id: 'health-action', text: `Next step: ${opts.primaryLabel}` })
+  if (opts.primaryAction && opts.primaryLabel) lines.push({ id: 'health-action', text: `See the fix steps for ${opts.primaryLabel.toLowerCase()}` })
   return lines
 }

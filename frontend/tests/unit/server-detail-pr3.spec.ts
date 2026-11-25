@@ -92,6 +92,13 @@ describe('header (FR-030)', () => {
     expect(api.approveTools).not.toHaveBeenCalled()
   })
 
+  it('an edit_url primary action opens the endpoint editor in place', async () => {
+    serverExtra = { url: 'http://nope.invalid/mcp', protocol: 'http', health: { level: 'unhealthy', admin_state: 'enabled', summary: 'Cannot resolve host', status: 'needs_config', usable: false, actions: ['edit_url'] } }
+    const { wrapper } = await mountDetail()
+    await wrapper.get('[data-test="server-detail-primary-action"]').trigger('click'); await flushPromises()
+    expect(wrapper.find('[data-test="server-url-input"]').exists()).toBe(true)
+  })
+
   it('the Actions menu keeps every present action', async () => {
     const { wrapper } = await mountDetail()
     const text = wrapper.get('[data-test="server-actions-menu"]').element.parentElement!.textContent!
@@ -154,6 +161,19 @@ describe('Review and scans (FR-031)', () => {
   it('?tool= keeps today\'s precedence over ?tab=review', async () => {
     const { wrapper } = await mountDetail('?tab=review&tool=nonexistent')
     expect(wrapper.get('[data-test="review-tab"]').classes()).not.toContain('tab-active')
+  })
+
+  it('a direct ?tab=security load focuses the scan part once the server has loaded', async () => {
+    const { wrapper } = await mountDetail('?tab=security')
+    expect(document.activeElement).toBe(wrapper.get('[data-test="scans-part"]').element)
+  })
+
+  it('the Review link moves focus into the review part, the Scans link into the scan part', async () => {
+    const { wrapper } = await mountDetail('?tab=security')
+    await wrapper.get('[data-test="review-part-link"]').trigger('click'); await flushPromises()
+    expect(document.activeElement).toBe(wrapper.get('[data-test="review-part"]').element)
+    await wrapper.get('[data-test="scans-part-link"]').trigger('click'); await flushPromises()
+    expect(document.activeElement).toBe(wrapper.get('[data-test="scans-part"]').element)
   })
 
   it('a scan can still be started from the scan part', async () => {
