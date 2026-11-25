@@ -117,6 +117,9 @@ page disagree):
 - `web-ui-sweep.spec.ts`: servers list, server detail (+ security tab), tools
   page and its search, activity log, and settings; fails on uncaught page
   exceptions.
+- `connect-browser-login.spec.ts` (Spec 132, run by `scripts/run-connect-sweep.sh` against
+  scratch-HOME cores with browser login on and off): the Connect dialog's
+  browser-login choice, diff preview, connect and Undo.
 - `visual-a11y-sweep.spec.ts`: WCAG contrast, layouts, accessible names, themes.
 - `navigation-consistency.spec.ts`: Spec 109 sidebar, header, command palette,
   `+ Add` menu, redirects and filtered deep links.
