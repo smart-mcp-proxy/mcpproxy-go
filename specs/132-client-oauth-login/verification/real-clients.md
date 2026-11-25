@@ -56,7 +56,7 @@ Findings that matter for the design:
 
 ## Manual checklist (needs a human, not done)
 
-For each of Cursor, VS Code, MCP Inspector (web UI) (and, for the items marked NOT verified above, Claude Code), with an isolated scratch core (below) and the client configured with `http://127.0.0.1:18080/mcp/oauth/<client-id>` (back up the client config first):
+For each of Cursor, VS Code, MCP Inspector (web UI; use the generic `/mcp/oauth` address, the per-client one is 404 until that client id exists) (and, for the items marked NOT verified above, Claude Code), with an isolated scratch core (below) and the client configured with `http://127.0.0.1:18080/mcp/oauth/<client-id>` (back up the client config first):
 
 1. Start the client; does it show a sign-in step instead of failing on the 401?
 2. In the core log or with `GET /api/v1/oauth/authorizations`, note: name it registered (`reported_name`), redirect URI shape, whether `resource` was sent, and the metadata URLs it fetched in order.

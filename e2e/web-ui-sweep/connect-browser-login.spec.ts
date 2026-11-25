@@ -45,12 +45,16 @@ test.beforeAll(async () => {
   expect(lstatSync(cc!.config_path).isSymbolicLink(), '.claude.json must not be a symlink').toBe(false)
   // The effective flag, read from the core's own config (the metadata route also
   // answers 404 on an enabled core reached through a non-loopback listener).
-  const cfg = (await (await fetch(`${BASE}/api/v1/config`, { headers: { 'X-API-Key': KEY } })).json()) as { data: { config: { mcp_oauth_enabled?: boolean } } }
+  const cfg = (await (await fetch(`${BASE}/api/v1/config`, { headers: { 'X-API-Key': KEY } })).json()) as { data: { config: { mcp_oauth_enabled?: boolean; listen?: string } } }
   expect(!!cfg.data.config.mcp_oauth_enabled, OFF ? 'feature-off run against a core with mcp_oauth_enabled on' : 'feature-on run against a core with mcp_oauth_enabled off').toBe(!OFF)
+  ORIGIN = `http://${cfg.data.config.listen}`
   if (!OFF) {
     expect((await fetch(`${BASE}/.well-known/oauth-authorization-server`)).status, 'browser login is not served').toBe(200)
   }
 })
+// Connect derives the address from the core's configured listener, not from the
+// origin the browser used.
+let ORIGIN = ''
 const CLAUDE_JSON = `${HOME_DIR}/.claude.json`
 
 const t = (page: Page, id: string) => page.locator(`[data-test="${id}"]`)
@@ -63,7 +67,9 @@ async function shot(page: Page, name: string) {
 
 async function openConnect(page: Page) {
   await page.addInitScript((k) => localStorage.setItem('mcpproxy-api-key', k), KEY)
+  const onboarding = page.waitForResponse((r) => r.url().includes('/api/v1/onboarding'), { timeout: 15_000 }).catch(() => null)
   await page.goto(`${BASE}/ui/`, { waitUntil: 'domcontentloaded' })
+  await onboarding
   // A fresh data dir opens the setup wizard, which embeds the same client list;
   // otherwise open it from "+ Add -> Client".
   await page.locator('header [data-test="header-add-menu"]').waitFor({ state: 'visible' })
@@ -97,8 +103,9 @@ test.describe(OFF ? 'browser login off' : 'browser login on', () => {
     await expect(t(page, 'client-preview-entry-claude-code')).toContainText('/mcp/oauth/claude-code')
     const entry = await t(page, 'client-preview-entry-claude-code').innerText()
     const shown = JSON.parse(entry) as Record<string, Record<string, unknown>>
+    expect(Object.keys(shown)).toHaveLength(1)
     const shownEntry = Object.values(shown)[0]
-    expect(shownEntry.url).toBe(`${BASE}/mcp/oauth/claude-code`)
+    expect(shownEntry.url).toBe(`${ORIGIN}/mcp/oauth/claude-code`)
     expect(shownEntry.type).toBe('http')
     expect(Object.keys(shownEntry).sort()).toEqual(['type', 'url'])
     await expect(t(page, 'client-preview-credential-claude-code')).toHaveCount(0)
@@ -123,7 +130,7 @@ test.describe(OFF ? 'browser login off' : 'browser login on', () => {
     // Exactly the credential-free address: no headers, no query, nothing else.
     const entries = Object.values((JSON.parse(written) as { mcpServers: Record<string, Record<string, unknown>> }).mcpServers)
     expect(entries).toHaveLength(1)
-    expect(entries[0].url).toBe(`${BASE}/mcp/oauth/claude-code`)
+    expect(entries[0].url).toBe(`${ORIGIN}/mcp/oauth/claude-code`)
     expect(entries[0].type).toBe('http')
     expect(Object.keys(entries[0]).sort()).toEqual(['type', 'url'])
 
