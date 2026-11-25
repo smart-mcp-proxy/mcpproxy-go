@@ -62,7 +62,7 @@
                   :aria-pressed="filter === item.value"
                   :data-test="`kpi-card-${item.value}`"
                   @click="selectLegacy(item.value)"
-                >{{ item.label }} ({{ item.count }})</button>
+                >{{ item.label }} ({{ item.count }})<span v-if="item.note" class="block text-xs font-normal opacity-70 whitespace-normal">{{ item.note }}</span></button>
               </li>
             </ul>
           </details>
@@ -548,10 +548,10 @@ const chips = computed<{ value: ServerChip; label: string; count: number }[]>(()
   { value: 'online', label: 'Online', count: counts.value.online },
   { value: 'disabled', label: 'Disabled', count: counts.value.disabled },
 ])
-const legacyItems = computed<{ value: LegacyServerFilter; label: string; count: number }[]>(() => [
+const legacyItems = computed<{ value: LegacyServerFilter; label: string; count: number; note?: string }[]>(() => [
   { value: 'connected', label: 'Connected', count: counts.value.connected },
   { value: 'enabled', label: 'Enabled', count: counts.value.enabled },
-  { value: 'quarantined', label: 'Quarantined', count: counts.value.quarantined },
+  { value: 'quarantined', label: 'Quarantined', count: counts.value.quarantined, note: 'Need security review' },
   { value: 'needs_review', label: 'Needs review', count: counts.value.needsReview },
 ])
 const legacyActiveLabel = computed(() => legacyItems.value.find(i => i.value === filter.value)?.label ?? '')

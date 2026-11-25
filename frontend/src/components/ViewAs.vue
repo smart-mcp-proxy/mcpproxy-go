@@ -63,7 +63,7 @@
           <option v-if="clientValue && !credentialedClients.some(client => client.id === clientValue)" :value="clientValue">{{ clientValue }}</option>
         </select>
       </div>
-      <div class="flex justify-end"><button type="button" class="btn btn-ghost btn-xs" :disabled="!hasValue" @click="clear">Clear</button></div>
+      <div class="flex justify-end"><button type="button" class="btn btn-ghost btn-xs min-h-11 md:min-h-0" :disabled="!hasValue" @click="clear">Clear</button></div>
     </div>
     <div v-if="open" class="fixed inset-0 z-[calc(var(--z-dropdown)-1)]" @click="open = false" />
   </div>

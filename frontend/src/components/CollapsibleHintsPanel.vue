@@ -128,11 +128,13 @@ const isExpanded = ref(props.defaultExpanded)
 
 const root = ref<HTMLElement | null>(null)
 
-// The collapsed and expanded headers are different elements; after a keyboard
-// toggle focus would fall to <body>, so it returns to the new header.
-const toggleExpanded = (event?: Event) => {
+// The collapsed and expanded headers are different elements; after a toggle
+// (keyboard or assistive technology) focus would fall to <body>, so it returns
+// to the new header.
+const toggleExpanded = () => {
+  const hadFocus = !!root.value?.contains(document.activeElement)
   isExpanded.value = !isExpanded.value
-  if (event instanceof KeyboardEvent) {
+  if (hadFocus) {
     void nextTick(() => root.value?.querySelector<HTMLElement>('[data-test="hints-toggle"]')?.focus())
   }
 }
@@ -356,6 +358,10 @@ const copyToClipboard = async (text: string) => {
   cursor: pointer;
   color: color-mix(in oklch, var(--color-base-content) 70%, transparent);
   transition: all 0.2s ease;
+}
+
+@media (max-width: 767px) {
+  .copy-button { min-height: 44px; min-width: 44px; }
 }
 
 .copy-button:hover {

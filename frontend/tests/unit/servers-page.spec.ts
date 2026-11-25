@@ -108,7 +108,7 @@ describe('More filters and legacy status (P2-07, P2-08, P2-12)', () => {
     const { wrapper } = await mountAt('/servers')
     expect(wrapper.get('[data-test="kpi-card-connected"]').text()).toBe('Connected (2)')
     expect(wrapper.get('[data-test="kpi-card-enabled"]').text()).toBe('Enabled (4)')
-    expect(wrapper.get('[data-test="kpi-card-quarantined"]').text()).toBe('Quarantined (1)')
+    expect(wrapper.get('[data-test="kpi-card-quarantined"]').text()).toBe('Quarantined (1)Need security review')
     expect(wrapper.get('[data-test="kpi-card-needs_review"]').text()).toBe('Needs review (1)')
   })
 

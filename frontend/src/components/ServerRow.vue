@@ -13,7 +13,7 @@
       <span class="text-xs text-base-content/60 block truncate" data-test="server-card-protocol">{{ server.protocol }}</span>
     </div>
 
-    <div class="server-row__status" role="cell" data-test="server-card-status-line">
+    <div class="server-row__status" role="cell" :title="server.health?.status || undefined" data-test="server-card-status-line">
       <StatusPill v-if="hasStatus" :status="server.health?.status" data-test="server-status-chip" />
       <span v-else :class="['badge badge-sm', legacyChipClass]" data-test="server-status-chip">{{ legacyChipText }}</span>
     </div>
@@ -131,7 +131,7 @@
               <button
                 type="button"
                 class="text-error"
-                @click="showDeleteConfirmation = true"
+                @click="openDelete($event)"
                 :disabled="loading"
                 data-test="server-card-menu-delete"
               >Delete</button>
@@ -142,7 +142,7 @@
     <!-- Delete Confirmation Modal — the only place Delete is reachable from
          (Spec 109 FR-013: "Delete only in ⋯ with a confirmation naming the
          server"). -->
-    <div v-if="showDeleteConfirmation" class="modal modal-open" role="dialog" aria-modal="true" aria-label="Delete server" @keydown.esc="showDeleteConfirmation = false">
+    <div v-if="showDeleteConfirmation" class="modal modal-open" role="dialog" aria-modal="true" aria-label="Delete server" @keydown.esc="closeDelete" @keydown.tab="trapDeleteTab">
       <div class="modal-box">
         <h3 class="font-bold text-lg mb-4">Delete Server</h3>
         <p class="mb-4">
@@ -153,9 +153,9 @@
         </p>
         <div class="modal-action">
           <button
-            @click="showDeleteConfirmation = false"
+            @click="closeDelete"
             :disabled="loading"
-            class="btn btn-outline"
+            class="btn btn-outline min-h-11 md:min-h-8"
             ref="deleteCancel"
             data-test="server-card-delete-cancel"
           >
@@ -164,7 +164,7 @@
           <button
             @click="confirmDelete"
             :disabled="loading"
-            class="btn btn-error"
+            class="btn btn-error min-h-11 md:min-h-8"
             data-test="server-card-delete-confirm"
           >
             <span v-if="loading" class="loading loading-spinner loading-xs"></span>
@@ -212,6 +212,28 @@ const loading = ref(false)
 const showDeleteConfirmation = ref(false)
 // The dialog takes focus (Cancel, the safe choice) so a keyboard user is inside it.
 const deleteCancel = ref<HTMLButtonElement | null>(null)
+const deleteTrigger = ref<HTMLElement | null>(null)
+function closeDelete() {
+  showDeleteConfirmation.value = false
+  // Back to the control that opened it (the more button), not to <body>.
+  void nextTick(() => deleteTrigger.value?.focus())
+}
+// Keep Tab inside the open dialog: Cancel and Delete Server only.
+function trapDeleteTab(event: KeyboardEvent) {
+  const dialog = (event.currentTarget as HTMLElement | null)
+  const buttons = Array.from(dialog?.querySelectorAll<HTMLButtonElement>('button:not([disabled])') ?? [])
+  if (buttons.length === 0) return
+  const first = buttons[0]
+  const last = buttons[buttons.length - 1]
+  const active = document.activeElement
+  if (event.shiftKey && active === first) { event.preventDefault(); last.focus() }
+  else if (!event.shiftKey && active === last) { event.preventDefault(); first.focus() }
+}
+function openDelete(event: Event) {
+  // The more button holds focus while its menu is open; remember it for the return.
+  deleteTrigger.value = (event.currentTarget as HTMLElement | null)?.closest('.dropdown')?.querySelector<HTMLElement>('[data-test="server-card-menu-trigger"]') ?? null
+  showDeleteConfirmation.value = true
+}
 watch(showDeleteConfirmation, open => { if (open) void nextTick(() => deleteCancel.value?.focus()) })
 
 const isHttpProtocol = computed(() => {
@@ -536,6 +558,9 @@ async function confirmDelete() {
 .server-row__last,
 .server-row__tools { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .server-row__label { display: none; }
+/* A long forward-compatible status word is clipped inside its own cell. */
+.server-row__status { overflow: hidden; }
+.server-row__status :deep(.status-pill) { max-width: 100%; overflow: hidden; }
 .server-row__action { display: flex; justify-content: flex-end; }
 .server-row__more { display: flex; justify-content: flex-end; }
 @media (max-width: 1199px) {

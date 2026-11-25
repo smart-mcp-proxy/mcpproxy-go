@@ -56,3 +56,30 @@ describe('ServerRow', () => {
     }
   })
 })
+
+describe('ServerRow delete dialog (P2-43)', () => {
+  it('names the server, takes focus, keeps Tab inside, closes on Escape and returns focus to the more button', async () => {
+    const w = mount(ServerRow, { props: { server: srv({ name: 'doomed' }) }, attachTo: document.body, global: { plugins: [createPinia()], stubs: { RouterLink: Link, 'router-link': Link } } })
+    const trigger = w.get('[data-test="server-card-menu-trigger"]').element as HTMLElement
+    trigger.focus()
+    await w.get('[data-test="server-card-menu-delete"]').trigger('click')
+    await new Promise(r => setTimeout(r))
+    expect(w.text()).toContain('doomed')
+    const cancel = w.get('[data-test="server-card-delete-cancel"]').element as HTMLElement
+    const confirm = w.get('[data-test="server-card-delete-confirm"]').element as HTMLElement
+    expect(document.activeElement).toBe(cancel)
+    confirm.focus()
+    await w.get('[role="dialog"]').trigger('keydown', { key: 'Tab' })
+    expect(document.activeElement).toBe(cancel)
+    await w.get('[role="dialog"]').trigger('keydown', { key: 'Escape' })
+    await new Promise(r => setTimeout(r))
+    expect(w.find('[role="dialog"]').exists()).toBe(false)
+    expect(document.activeElement).toBe(trigger)
+    w.unmount()
+  })
+
+  it('a just-disabled server does not keep its old "Connected" summary as the reason', () => {
+    const w = mountRow(srv({ enabled: false, health: { level: 'healthy', admin_state: 'enabled', summary: 'Connected (3 tools)', status: 'disabled', usable: false, actions: ['enable'] } }))
+    expect(w.get('[data-test="server-row-reason"]').text()).toBe('Disabled')
+  })
+})

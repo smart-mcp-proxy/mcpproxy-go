@@ -159,6 +159,30 @@ test('phone 390x844: rows stack, no sideways scroll, body buttons at least 44 px
   await test.info().attach('servers-390', { path: test.info().outputPath('servers-390.png'), contentType: 'image/png' })
 })
 
+test('phone 390x844: the more menu opens by tap, its items are 44 px, Logs navigates, the delete dialog is usable', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await mockServers(page, [{ name: 'broken', status: 'error' }])
+  await open(page, '/servers?filter=all')
+  const row = page.locator('[data-server="broken"]')
+  await row.locator('[data-test="server-card-menu-trigger"]').click()
+  const menu = row.locator('[data-test="server-card-menu"]')
+  await expect(menu).toBeVisible()
+  const heights = await menu.locator('li > button, li > a').evaluateAll(els => els.map(e => Math.round((e as HTMLElement).getBoundingClientRect().height)))
+  expect(heights.length).toBeGreaterThanOrEqual(6)
+  expect(Math.min(...heights), `menu item heights ${heights.join(',')}`).toBeGreaterThanOrEqual(44)
+  await row.locator('[data-test="server-card-menu-delete"]').click()
+  const cancel = page.locator('[data-test="server-card-delete-cancel"]')
+  await expect(cancel).toBeFocused()
+  for (const id of ['server-card-delete-cancel', 'server-card-delete-confirm']) {
+    expect((await page.locator(`[data-test="${id}"]`).boundingBox())!.height).toBeGreaterThanOrEqual(44)
+  }
+  await page.keyboard.press('Escape')
+  await expect(page.locator('[role="dialog"]')).toHaveCount(0)
+  await row.locator('[data-test="server-card-menu-trigger"]').click()
+  await row.locator('[data-test="server-card-menu-logs"]').click()
+  await expect(page).toHaveURL(/\/ui\/servers\/broken\?tab=logs/)
+})
+
 test('FR-026: 300 servers: first row within 2 s, scripted scroll sees exactly the fixture ids', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   const fleet: Fx[] = Array.from({ length: 300 }, (_, i) => ({ name: `bulk-${String(i).padStart(3, '0')}`, status: (['ready', 'ready', 'ready', 'error', 'disabled', 'needs_review'] as const)[i % 6] }))

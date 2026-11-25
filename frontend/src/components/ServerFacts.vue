@@ -45,6 +45,15 @@
         <div v-if="server.health?.detail"><dt class="text-base-content/60">Health detail</dt><dd data-test="server-facts-health-detail">{{ server.health.detail }}</dd></div>
         <div v-if="server.diagnostic?.user_message"><dt class="text-base-content/60">Diagnostic</dt><dd data-test="server-facts-diagnostic-message">{{ server.diagnostic.user_message }}<span v-if="server.diagnostic.code" class="text-base-content/60"> ({{ server.diagnostic.code }})</span></dd></div>
         <div v-if="server.diagnostic?.code && !server.diagnostic?.user_message"><dt class="text-base-content/60">Diagnostic code</dt><dd data-test="server-facts-diagnostic-code">{{ server.diagnostic.code }}</dd></div>
+        <div v-if="server.diagnostic?.fix_steps?.length">
+          <dt class="text-base-content/60">Suggested fixes</dt>
+          <dd>
+            <ul class="list-disc pl-5 space-y-1" data-test="server-facts-fix-steps">
+              <li v-for="(step, i) in server.diagnostic.fix_steps" :key="i">{{ step.label }}<code v-if="step.command" class="ml-1 text-xs break-all">{{ step.command }}</code></li>
+            </ul>
+          </dd>
+        </div>
+        <div v-if="server.diagnostic?.docs_url"><dt class="text-base-content/60">Documentation</dt><dd><a :href="server.diagnostic.docs_url" class="link link-primary break-all" target="_blank" rel="noopener noreferrer" data-test="server-facts-docs">{{ server.diagnostic.docs_url }}</a></dd></div>
         <div v-if="server.diagnostic?.cause"><dt class="text-base-content/60">Cause</dt><dd>{{ server.diagnostic.cause }}</dd></div>
         <div v-if="server.last_error"><dt class="text-base-content/60">Raw error</dt><dd><pre class="whitespace-pre-wrap text-xs" data-test="server-facts-raw-error">{{ server.last_error }}</pre></dd></div>
       </dl>
@@ -71,5 +80,5 @@ const security = computed(() => securityLine(props.server))
 const securityToneClass = computed(() => securityTone(props.server))
 const held = computed(() => toolQuarantineSummary(props.server))
 const hasDiagnostic = computed(() =>
-  !!(props.server.health?.detail || props.server.last_error || props.server.diagnostic?.user_message || props.server.diagnostic?.cause || props.server.diagnostic?.code))
+  !!(props.server.health?.detail || props.server.last_error || props.server.diagnostic?.user_message || props.server.diagnostic?.cause || props.server.diagnostic?.code || props.server.diagnostic?.fix_steps?.length || props.server.diagnostic?.docs_url))
 </script>

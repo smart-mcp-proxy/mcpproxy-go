@@ -42,7 +42,7 @@ async function readCards() {
       const chip = card.querySelector('[data-test="server-status-chip"]')
       // Spec 134: the status is a pill carrying its tone; a legacy chip keeps its badge class.
       const color = chip
-        ? chip.getAttribute('data-tone') || [...chip.classList].find((c) => /^badge-(success|warning|error|neutral|secondary|ghost|info|accent|primary)$/.test(c)) || ''
+        ? ([...chip.classList].find((c) => /^tone-/.test(c)) || '').replace(/^tone-/, '') || [...chip.classList].find((c) => /^badge-(success|warning|error|neutral|secondary|ghost|info|accent|primary)$/.test(c)) || ''
         : ''
       const tools = card.querySelector('[data-test="server-card-tool-count"]')
       const toolMatch = tools ? /(\d+)/.exec(tools.textContent || '') : null

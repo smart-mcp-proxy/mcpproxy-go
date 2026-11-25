@@ -91,8 +91,10 @@ export function serverReason(server: Server): string {
   const message = server.diagnostic?.user_message
   if (message) return oneLine(message)
   const label = health?.status ? healthStatusLabel(health.status) : ''
-  if (health?.summary && health.admin_state === 'enabled' && health.summary !== label) return oneLine(health.summary)
+  if (health?.summary && health.admin_state === 'enabled' && server.enabled && health.summary !== label) return oneLine(health.summary)
   if (server.last_error) return oneLine(lastSegment(server.last_error))
+  // Disable updates `enabled` before `health` is refreshed: never show the old summary of a server just switched off.
+  if (!server.enabled && health?.status === 'disabled') return label
   if (health?.summary) return oneLine(health.summary)
   if (health?.status) return label
   // A payload with a health object but neither status nor summary, or an old

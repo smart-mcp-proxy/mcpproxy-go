@@ -243,6 +243,7 @@ describe('hints panel (P2-24)', () => {
     const wrapper = mount(Panel, { props: { hints: [{ icon: 'plus', title: 'T', sections: [{ text: 'x' }] }] }, attachTo: document.body })
     const toggle = () => wrapper.get('[data-test="hints-toggle"]')
     expect(toggle().attributes('aria-expanded')).toBe('false')
+    ;(toggle().element as HTMLElement).focus()
     await toggle().trigger('keydown', { key: 'Enter' })
     await flushPromises()
     expect(toggle().attributes('aria-expanded')).toBe('true')
