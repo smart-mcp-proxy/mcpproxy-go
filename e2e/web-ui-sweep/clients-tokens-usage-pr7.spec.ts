@@ -119,6 +119,10 @@ test('Tokens at 390: no sideways scroll, action buttons at least 44 px', async (
   await page.setViewportSize({ width: 390, height: 844 })
   await open(page, '/clients?tab=tokens')
   await noSideways(page, 'Tokens 390')
+  // Header actions stay inside the viewport (no clipped Create Token).
+  const create = page.getByRole('button', { name: 'Create Token' }).first()
+  const box = (await create.boundingBox())!
+  expect(box.x + box.width, 'Create Token inside the viewport').toBeLessThanOrEqual(390)
   const row = page.locator(`[data-test="token-row-${LEGACY_TOKEN}"]`)
   for (const name of ['Regenerate', 'Revoke']) expect((await row.getByRole('button', { name }).boundingBox())!.height, name).toBeGreaterThanOrEqual(44)
   await page.screenshot({ path: path.join(REPORT_DIR, 'pr7-tokens-390.png') })

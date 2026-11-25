@@ -1,8 +1,8 @@
 <template>
   <div class="space-y-6">
     <!-- Page Header -->
-    <div class="flex justify-between items-center">
-      <div>
+    <div class="flex flex-wrap justify-between items-center gap-3">
+      <div class="min-w-0">
         <h1 class="text-3xl font-bold">Agent Tokens</h1>
         <p class="text-base-content/70 mt-1">Create and manage scoped API tokens for AI agents and automation</p>
       </div>
@@ -10,7 +10,7 @@
         <button
           @click="refreshTokens"
           :disabled="loading"
-          class="btn btn-outline"
+          class="btn btn-outline max-sm:min-h-11"
         >
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
@@ -20,7 +20,7 @@
         </button>
         <button
           @click="openCreateDialog"
-          class="btn btn-primary"
+          class="btn btn-primary max-sm:min-h-11"
         >
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
@@ -36,7 +36,7 @@
     <ScopeChips v-if="scopeQuery" page="tokens" :scope-query="scopeQuery" :unavailable="scopeUnavailable" />
 
     <!-- Summary Stats — clickable cards drive the token filter (issue #436) -->
-    <div class="stats shadow bg-base-100 w-full">
+    <div class="stats stats-vertical sm:stats-horizontal shadow bg-base-100 w-full">
       <button
         type="button"
         data-test="kpi-card-total"
