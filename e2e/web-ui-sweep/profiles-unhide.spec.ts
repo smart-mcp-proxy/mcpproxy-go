@@ -203,7 +203,8 @@ test('8. keyboard: Tab reaches the attention fix and each Clients-row link; Ente
 
   await open(page, `/clients?focus=${CLIENT_ID}`)
   await expect(page.locator(`[data-test="clients-row-link-activity-${CLIENT_ID}"]`)).toBeVisible()
-  await page.locator('main h1').first().click()
+  // Spec 134 FR-060: the focused client's panel is open and focus is on its title; the links follow.
+  await expect(page.locator('[data-test="client-manage-title"]')).toBeFocused()
   for (const label of ['activity', 'sessions', 'tools', 'usage']) {
     expect(await tabTo(page, `[data-test="clients-row-link-${label}-${CLIENT_ID}"]`), label).toBe(true)
   }

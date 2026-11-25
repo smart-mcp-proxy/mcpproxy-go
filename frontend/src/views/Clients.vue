@@ -159,7 +159,9 @@ async function copyOtherClientSnippet() {
 }
 function selectTab(id: string) { tab.value = id }
 // The panel belongs to the Clients tab: leaving it (a tab, the palette, a link) closes it and its dialogs.
-watch(tab, (value) => { if (value !== 'clients' && panelId.value) panelId.value = '' })
+watch(tab, (value) => { if (value !== 'clients') { handledFocus = ''; if (panelId.value) panelId.value = '' } })
+// A scope change reloads the roster: the panel of a client from the old list closes with it.
+watch(() => store.loading, (loading) => { if (loading && panelId.value) panelId.value = '' })
 watch(tab, value => {
   if (route.path !== '/clients') return
   const query = { ...route.query }

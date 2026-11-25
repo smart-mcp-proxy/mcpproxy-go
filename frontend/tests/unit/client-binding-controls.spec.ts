@@ -419,6 +419,10 @@ describe('Client binding controls on the Clients page (Spec 108-i T092)', () => 
     ;(api.finalizeClientRotation as any).mockResolvedValue({ client: { ...custom, rotation_pending: false }, rotation: { state: 'finalized' } })
     await useClientsStore().load()
     await flushPromises()
+    // A full reload closes the panel (its client came from the old list); Manage reopens it.
+    ;(api.getClient as any).mockResolvedValue({ success: true, data: { ...custom, rotation_pending: true } })
+    await wrapper.get('[data-test="client-manage-dev-laptop"]').trigger('click')
+    await flushPromises()
     expect(wrapper.get('[data-test="client-rotation-badge-dev-laptop"]').text()).toBe('Rotation pending')
     expect(wrapper.get('[data-test="client-rotation-pending-dev-laptop"]').text()).toContain('Both secrets work for 24 h')
     await wrapper.get('[data-test="client-finalize-dev-laptop"]').trigger('click')

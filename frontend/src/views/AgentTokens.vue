@@ -336,7 +336,7 @@
             <label class="label">
               <span class="label-text font-medium">Expires In</span>
             </label>
-            <select v-model="createForm.expiresIn" class="select select-bordered w-full">
+            <select v-model="createForm.expiresIn" aria-label="Expires in" class="select select-bordered w-full">
               <option value="168h">7 days</option>
               <option value="720h">30 days</option>
               <option value="2160h">90 days</option>

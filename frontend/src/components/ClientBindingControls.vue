@@ -38,7 +38,7 @@
       </template>
       <div v-if="rotateError" role="alert" class="alert alert-error text-sm" data-test="rotate-error">{{ rotateError }}</div>
       <template #actions>
-        <button type="button" class="btn btn-ghost btn-sm" @click="closeRotate">Cancel</button>
+        <button type="button" class="btn btn-ghost btn-sm" :disabled="rotateBusy" @click="closeRotate">Cancel</button>
         <button type="button" class="btn btn-primary btn-sm" :disabled="rotateBusy || (!isCustom && !rotatePreview)" data-test="rotate-confirm" @click="confirmRotate">
           <span v-if="rotateBusy" class="loading loading-spinner loading-xs" />
           Rotate
@@ -112,6 +112,8 @@ async function startRotate() {
 }
 
 function closeRotate() {
+  // The one-time credential of a custom rotation must reach the page: no closing while it is in flight.
+  if (rotateBusy.value) return
   rotateOpen.value = false
   rotatePreview.value = null
 }

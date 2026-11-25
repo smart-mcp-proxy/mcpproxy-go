@@ -7,7 +7,7 @@
       <li v-for="cred in revocable" :key="credKey(cred)" class="space-y-1">
         <button v-if="cred.kind === 'api_key'" type="button" class="btn btn-sm btn-outline btn-error max-sm:min-h-11" data-test="revoke-api-key" @click="ask({ kind: 'api_key' })">Revoke API key</button>
         <button v-else type="button" class="btn btn-sm btn-outline btn-error max-sm:min-h-11" :data-test="`revoke-login-${cred.grant_id}`" :aria-label="`Revoke this login of ${client.display_name}`" @click="ask({ kind: 'browser_login', cred })">Revoke login of <bdi class="font-mono">{{ cred.reported_name }}</bdi></button>
-        <p v-if="cred.kind === 'browser_login'" class="text-sm" :data-test="`revoke-login-facts-${cred.grant_id}`">Approved {{ when(cred.approved_at) }} · last used {{ when(cred.last_used_at) }} · returns to <bdi class="font-mono">{{ cred.redirect_host }}</bdi></p>
+        <p v-if="cred.kind === 'browser_login'" class="text-sm" :data-test="`credential-facts-${cred.grant_id}`">Approved {{ when(cred.approved_at) }} · last used {{ when(cred.last_used_at) }} · returns to <bdi class="font-mono">{{ cred.redirect_host }}</bdi></p>
         <p class="text-sm text-base-content/70">{{ cred.kind === 'api_key' ? 'Stops the key working; browser logins and the profile binding stay.' : `Stops the login returning to ${cred.redirect_host} on its next request; other credentials and the profile binding stay.` }}</p>
       </li>
     </ul>
@@ -65,7 +65,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import BaseDialog from '@/components/BaseDialog.vue'
 import api from '@/services/api'
 import { describeError } from '@/utils/profiles'
@@ -95,6 +95,11 @@ const credentials = computed(() => props.client.credentials ?? [])
 const revocable = computed(() => credentials.value.filter(cred => cred.state !== 'revoked'))
 const dialogTitle = computed(() => pending.value?.kind === 'api_key' ? 'Revoke API key?' : 'Revoke browser login?')
 
+// A confirmation names the credential the operator chose. If the credential set changes under an open
+// confirmation (another session revoked or re-issued it) the confirmation is dropped, never retargeted.
+watch(() => credentials.value.map(cred => `${cred.kind}:${cred.grant_id ?? ''}:${cred.prefix ?? ''}:${cred.state}`).join('|'), () => {
+  if (!busy.value) { pending.value = null; error.value = '' }
+})
 function credKey(cred: ClientCredential) { return cred.kind === 'api_key' ? 'api_key' : `login-${cred.grant_id}` }
 function when(value?: string | null) { return value ? new Date(value).toLocaleString() : 'never' }
 function stateClass(state: string) {
