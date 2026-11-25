@@ -28,8 +28,9 @@ func TestResolveOAuthTokenKey_NilConfig(t *testing.T) {
 	assert.Equal(t, kidOf(t, k), key.ID())
 }
 
-// The key sources are never gated by secret_file_dirs: a key file outside every
-// allowed directory still resolves, and an empty allow-list changes nothing.
+// The env key file source is never gated by secret_file_dirs: a key file
+// outside every allowed directory still resolves, and an empty allow-list
+// changes nothing.
 func TestResolveOAuthTokenKey_NotGatedBySecretFileDirs(t *testing.T) {
 	clearOAuthKeyEnv(t)
 	k := newTestOAuthKey(t)
@@ -45,9 +46,11 @@ func TestResolveOAuthTokenKey_NotGatedBySecretFileDirs(t *testing.T) {
 }
 
 func TestOverrideForProcess_NilValueOnMissingBlock(t *testing.T) {
+	ResetProcessOverrides()
 	t.Cleanup(ResetProcessOverrides)
 	cfg := &Config{}
 	OverrideForProcess(cfg, FieldAutoBaselineScan, OverrideSourceEnv, nil)
+	assert.Contains(t, ProcessOverrideFields(), FieldAutoBaselineScan.Name, "the nil override is registered, so the restore path runs")
 	assert.Nil(t, cfg.Security, "nil value must not materialise an empty security block")
 	assert.NotPanics(t, func() { _ = PersistableConfig(cfg, "") })
 	assert.Nil(t, PersistableConfig(cfg, "").Security)
