@@ -94,6 +94,19 @@ func TestDetectFormat(t *testing.T) {
 			wantConfidence: "medium",
 		},
 		{
+			name: "gemini_client_secret_without_enabled_is_not_claude_code",
+			content: `{
+				"mcpServers": {
+					"remote": {
+						"url": "https://example.com/sse",
+						"oauth": {"clientId": "example-client", "clientSecret": "example-secret"}
+					}
+				}
+			}`,
+			wantFormat:     FormatCursor,
+			wantConfidence: "low",
+		},
+		{
 			name: "claude_desktop_stdio_only",
 			content: `{
 				"mcpServers": {

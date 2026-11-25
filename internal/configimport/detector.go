@@ -278,7 +278,14 @@ func tryDetectJSON(content []byte) *DetectionResult {
 			continue
 		}
 		if oauth, hasOAuth := serverMap["oauth"].(map[string]interface{}); hasOAuth {
-			_, isGemini := oauth["enabled"]
+			// Keys only Gemini's oauth block has (Claude Code keeps no secret
+			// or redirect URI in its config).
+			isGemini := false
+			for _, k := range []string{"enabled", "clientSecret", "redirectUri"} {
+				if _, ok := oauth[k]; ok {
+					isGemini = true
+				}
+			}
 			_, hasPort := oauth["callbackPort"]
 			_, hasMetadata := oauth["authServerMetadataUrl"]
 			_, scopesString := oauth["scopes"].(string)
