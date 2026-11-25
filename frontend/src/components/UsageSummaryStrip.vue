@@ -3,42 +3,43 @@
        errors" — each linking to the full Activity log with a filter. Sits
        below the topology normally; Home.vue renders it above instead when
        the attention list is empty. -->
-  <div class="flex flex-wrap gap-3" data-test="usage-summary-strip">
+  <div data-test="usage-summary-strip">
+  <div class="flex flex-wrap gap-3">
     <router-link
       :to="scope.linkTo('activity', { view: 'calls', from: '-24h' })"
-      class="card card-compact bg-base-100 border border-base-300 hover:shadow-md transition-shadow flex-1 min-w-[140px]"
+      style="border-color: var(--ds-border)" class="card card-compact bg-base-100 border hover:shadow-md transition-shadow flex-1 min-w-[140px]"
       data-test="usage-strip-calls"
     >
       <div class="card-body py-3 px-4">
         <div class="text-2xl font-bold leading-none">{{ loaded ? summary.call_count : '—' }}</div>
-        <div class="text-xs opacity-60 mt-1">calls today</div>
+        <div class="text-xs text-base-content/70 mt-1">calls</div>
       </div>
     </router-link>
     <router-link
       :to="scope.linkTo('activity', { view: 'calls', from: '-24h', status: 'blocked' })"
-      class="card card-compact bg-base-100 border border-base-300 hover:shadow-md transition-shadow flex-1 min-w-[140px]"
+      style="border-color: var(--ds-border)" class="card card-compact bg-base-100 border hover:shadow-md transition-shadow flex-1 min-w-[140px]"
       data-test="usage-strip-blocked"
     >
       <div class="card-body py-3 px-4">
         <div class="text-2xl font-bold leading-none">{{ loaded ? summary.blocked_count : '—' }}</div>
-        <div class="text-xs opacity-60 mt-1">blocked</div>
+        <div class="text-xs text-base-content/70 mt-1">blocked</div>
       </div>
     </router-link>
     <router-link
       :to="scope.linkTo('activity', { view: 'calls', from: '-24h', status: 'error' })"
-      class="card card-compact bg-base-100 border border-base-300 hover:shadow-md transition-shadow flex-1 min-w-[140px]"
+      style="border-color: var(--ds-border)" class="card card-compact bg-base-100 border hover:shadow-md transition-shadow flex-1 min-w-[140px]"
       data-test="usage-strip-errors"
     >
       <div class="card-body py-3 px-4">
         <div class="text-2xl font-bold leading-none">{{ loaded ? summary.call_error_count : '—' }}</div>
-        <div class="text-xs opacity-60 mt-1">errors</div>
+        <div class="text-xs text-base-content/70 mt-1">errors</div>
       </div>
     </router-link>
     <!-- Review finding F3: Home keeps its own way into the full Usage page
          (the sidebar's Monitor -> Usage entry, Spec 109-i, is a second one). -->
     <router-link
       :to="scope.linkTo('usage')"
-      class="card card-compact bg-base-100 border border-base-300 hover:shadow-md transition-shadow flex items-center justify-center min-w-[100px]"
+      style="border-color: var(--ds-border)" class="card card-compact bg-base-100 border hover:shadow-md transition-shadow flex items-center justify-center min-w-[100px]"
       data-test="usage-strip-view-usage"
     >
       <div class="card-body py-3 px-4 flex-row items-center gap-1">
@@ -48,6 +49,9 @@
         </svg>
       </div>
     </router-link>
+  </div>
+  <!-- The three figures cover a rolling 24 hours, not the calendar day. -->
+  <p class="text-xs text-base-content/70 mt-1" data-test="usage-strip-window">Usage in the last 24 hours (rolling window)</p>
   </div>
 </template>
 

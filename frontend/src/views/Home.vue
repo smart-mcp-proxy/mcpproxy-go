@@ -1,9 +1,7 @@
 <template>
   <div class="space-y-6">
-    <!-- Telemetry Notice Banner -->
+    <!-- Notices and warnings (unchanged, first) -->
     <TelemetryBanner />
-
-    <!-- Upgrade nudge (Spec 079): dismissible per-version update banner -->
     <UpdateBanner />
 
     <!-- Spec 101 FR-020: a suspended scan-mode auto-approval is otherwise
@@ -11,28 +9,28 @@
          gets an alert with its reason. Nothing is shown when coverage is fine. -->
     <div
       v-if="bundleDegraded"
-      class="alert alert-warning"
+      class="flex flex-wrap items-center gap-3 rounded border px-4 py-3"
+      style="background: var(--status-review-soft); color: var(--status-review); border-color: var(--status-review)"
       role="alert"
       data-test="home-signature-degraded"
     >
-      <div class="flex-1">
+      <div class="flex-1 min-w-0">
         <div class="font-semibold">Scan-mode auto-approval is suspended<span v-if="bundleDegraded.reason" class="font-mono text-xs font-normal"> ({{ bundleDegraded.reason }})</span></div>
         <div class="text-sm">{{ bundleDegraded.explanation }}</div>
       </div>
-      <router-link to="/review" class="btn btn-sm" data-test="home-signature-degraded-link">Open Review</router-link>
+      <router-link to="/review" class="btn btn-sm btn-outline max-sm:min-h-11" data-test="home-signature-degraded-link">Open Review</router-link>
     </div>
 
-    <!-- Spec 109 FR-051/FR-001/FR-003: the ONE needs-attention list, replacing
-         the two bespoke Dashboard.vue banners (servers needing attention,
-         tools pending approval) that duplicated FR-001's logic locally. -->
+    <!-- 1. Spec 109 FR-051/FR-001/FR-003, Spec 134 FR-040: the ONE needs-attention
+         list. A fresh instance (no server configured) has nothing to be "all
+         clear" about, so the Get started card takes its place; any attention
+         item still wins (showGettingStarted needs an empty list). -->
     <AttentionList v-if="!showGettingStarted && !holdAllClear" data-test="home-attention-list" />
 
-    <!-- A fresh instance (no server configured) has nothing to be "all clear"
-         about: the green banner would be false reassurance. Any attention item
-         still wins (showGettingStarted needs an empty list). -->
     <div
       v-if="showGettingStarted"
-      class="card bg-base-100 border border-primary/30 shadow-sm"
+      class="card bg-base-100 border"
+      style="border-color: var(--ds-border)"
       data-test="home-getting-started"
     >
       <div class="card-body p-4 gap-3">
@@ -43,312 +41,101 @@
         <ol class="space-y-2 text-sm">
           <li class="flex flex-wrap items-center gap-3">
             <span class="font-medium">1. Add a server</span>
-            <button type="button" class="btn btn-xs btn-primary" data-test="home-getting-started-add-server" @click="router.push('/add-server')">Add a server</button>
+            <button type="button" class="btn btn-sm btn-primary max-sm:min-h-11" data-test="home-getting-started-add-server" @click="router.push('/add-server')">Add a server</button>
           </li>
           <li class="flex flex-wrap items-center gap-3">
             <span class="font-medium">2. Connect a client</span>
-            <button type="button" class="btn btn-xs btn-primary btn-outline" data-test="home-getting-started-connect-client" @click="router.push('/clients')">Connect a client</button>
-            <span v-if="clientConnected" class="badge badge-success badge-sm" data-test="home-getting-started-client-done">&#10003; connected</span>
+            <button type="button" class="btn btn-sm btn-outline max-sm:min-h-11" data-test="home-getting-started-connect-client" @click="router.push('/clients')">Connect a client</button>
+            <span v-if="clientConnected" class="inline-flex items-center gap-1 text-sm" style="color: var(--status-ok)" data-test="home-getting-started-client-done"><UiIcon name="check" class="w-4 h-4" />connected</span>
           </li>
         </ol>
         <div>
-          <button type="button" class="link link-hover text-sm" data-test="home-getting-started-wizard" @click="onboardingStore.openWizard()">Run setup wizard</button>
+          <button type="button" class="link link-hover text-sm max-sm:min-h-11" data-test="home-getting-started-wizard" @click="onboardingStore.openWizard()">Run setup wizard</button>
         </div>
       </div>
     </div>
 
-    <!-- Usage summary strip: normally sits below the topology, but moves
-         above it when the attention list is empty (FR-051) so an otherwise-
-         calm landing page still opens on something live. -->
-    <UsageSummaryStrip v-if="authStore.principalKind !== 'tenant' && attentionStore.loaded && serversStore.loaded && attentionStore.count === 0 && !showGettingStarted" data-test="home-usage-strip-top" />
+    <!-- 2. Usage strip: three figures over a rolling 24 hours. Held until the
+         attention and server lists are known and never shown to a tenant or on
+         a fresh instance. -->
+    <UsageSummaryStrip v-if="showOverview" data-test="home-usage-strip" />
 
-    <!-- Topology (moved from Dashboard.vue's Overview panel). Always shown —
-         Home no longer switches between an Overview and a Usage panel;
-         /usage is its own page (Usage.vue), and /overview redirects to /. -->
-    <div class="space-y-6" data-test="home-topology">
-    <!-- Hub Visualization -->
-    <div class="grid grid-cols-1 lg:grid-cols-[280px_1fr_280px] gap-0 min-h-[520px] relative">
+    <!-- 3. Recent activity: five rows and a link to Activity. -->
+    <RecentActivity v-if="showOverview" />
 
-      <!-- Left Column: AI Agents / Clients -->
-      <div class="flex flex-col justify-center items-center lg:items-end space-y-3 py-6 lg:pr-0">
-        <h3 class="text-xs font-bold uppercase tracking-widest text-base-content/60 mb-1 w-full max-w-[260px] text-center lg:text-right">AI Agents</h3>
+    <!-- 4. Usable-tool count and routing mode (moved here from the header,
+         spec 134 FR-011). Usable = tools on servers whose health.usable is
+         true; the topology below keeps its separately labelled "tools
+         available" total. -->
+    <p v-if="authStore.principalKind !== 'tenant' && !showGettingStarted" class="text-sm flex flex-wrap items-baseline gap-x-2 gap-y-1" data-test="home-fleet-line">
+      <span><span class="font-bold tabular-nums" data-test="home-fleet-tools">{{ serversStore.loaded ? usableTools : '—' }}</span> usable {{ usableTools === 1 && serversStore.loaded ? 'tool' : 'tools' }}</span>
+      <span class="text-base-content/50" aria-hidden="true">·</span>
+      <span>Routing mode: <span class="font-medium" data-test="home-fleet-mode" :title="modeMeta.detail">{{ modeMeta.label }}</span></span>
+      <span v-if="systemStore.routingRestartRequired" class="rounded border px-2 py-0.5 text-xs" style="background: var(--status-review-soft); color: var(--status-review); border-color: var(--status-review)" data-test="home-fleet-pending">Restart pending: /mcp will serve {{ pendingModeLabel }} after the next start</span>
+    </p>
 
-        <!-- Single big clients box. Audit F10: "Connected" is now the same fact
-             /sessions shows — a live MCP session — instead of a flag the
-             content-read-free connect listing can never set. Each live client
-             links to its session row. -->
-        <div class="card card-compact bg-base-100 shadow-sm border border-base-300 w-full max-w-[260px]" data-test="dashboard-agents-box">
-          <div class="card-body py-3 px-4">
-            <div v-if="liveClients.length > 0" class="mb-1">
-              <div class="flex items-center gap-2 mb-1">
-                <div class="w-2.5 h-2.5 rounded-full bg-success shrink-0"></div>
-                <span class="text-xs font-bold uppercase tracking-wide text-base-content/60">Connected</span>
-              </div>
-              <router-link
-                v-for="client in liveClients"
-                :key="client.name"
-                to="/sessions"
-                class="flex items-baseline justify-between gap-2 text-sm link link-hover"
-                :data-test="`dashboard-live-client-${client.name}`"
-              >
-                <span class="font-medium truncate">{{ client.name }}</span>
-                <span class="text-xs text-base-content/60 shrink-0" data-test="dashboard-live-client-age">{{ formatRelativeTime(client.lastActivity) }}</span>
-              </router-link>
-            </div>
-            <div v-if="availableClientNames.length > 0">
-              <div class="text-xs text-base-content/60 mt-1" data-test="dashboard-available-clients">
-                Available: {{ availableClientNames.join(', ') }}
-              </div>
-            </div>
-            <div v-if="liveClients.length === 0 && availableClientNames.length === 0" class="text-sm text-base-content/60 text-center py-2">
-              No clients detected
-            </div>
-          </div>
+    <!-- 5. Shortcuts. Connect, Import, Sessions and Add are admin doors, so a
+         tenant sees Browse catalog only (Spec 107 FR-041). One primary button
+         per unit: none here; the page's primary actions are the fixes above. -->
+    <div class="flex flex-wrap gap-2" data-test="home-shortcuts">
+      <template v-if="authStore.principalKind !== 'tenant'">
+        <router-link to="/clients" class="btn btn-sm btn-outline max-sm:min-h-11" data-test="home-shortcut-connect"><UiIcon name="plug" class="w-4 h-4" />Connect clients</router-link>
+        <router-link to="/add-server?tab=import" class="btn btn-sm btn-outline max-sm:min-h-11" data-test="home-shortcut-import"><UiIcon name="send" class="w-4 h-4" />Import from client configs</router-link>
+        <router-link to="/sessions" class="btn btn-sm btn-outline max-sm:min-h-11" data-test="home-shortcut-sessions"><UiIcon name="eye" class="w-4 h-4" />Recent sessions</router-link>
+        <router-link to="/add-server" class="btn btn-sm btn-outline max-sm:min-h-11" data-test="home-shortcut-add-server"><UiIcon name="plus" class="w-4 h-4" />Add server</router-link>
+      </template>
+      <router-link to="/repositories" class="btn btn-sm btn-outline max-sm:min-h-11" data-test="home-shortcut-catalog"><UiIcon name="search" class="w-4 h-4" />Browse catalog</router-link>
+    </div>
+
+    <!-- 6. Security-scan summary (was the Security Scan button in the topology). -->
+    <div class="card bg-base-100 border" style="border-color: var(--ds-border)" data-test="home-security-scan">
+      <div class="card-body p-4 flex-row flex-wrap items-center justify-between gap-3">
+        <div class="flex items-center gap-2 min-w-0">
+          <UiIcon name="shield" class="w-5 h-5 shrink-0" />
+          <span class="font-medium">Security scan</span>
+          <span v-if="!securityScannerLoaded" class="text-sm text-base-content/70">Loading…</span>
+          <span v-else-if="securityTotalScans === 0" class="text-sm" style="color: var(--status-review)">Run first scan</span>
+          <span v-else-if="securityTotalFindings > 0" class="text-sm font-medium" style="color: var(--status-review)">{{ securityTotalFindings }} issue{{ securityTotalFindings === 1 ? '' : 's' }}</span>
+          <span v-else class="text-sm text-base-content/70">No issues found</span>
         </div>
-
-        <!-- Left Action Buttons. Spec 107 cross-review round 3, chunk 4 P2:
-             Connect Clients (/connect* mutation), Import from client
-             configs (generic add-server path) and Recent Sessions
-             (/sessions, a caller-scoped admin surface, not on the
-             tenant-session read allowlist) are all core admin-only doors a
-             tenant session cannot act on or read; hidden rather than
-             issued-and-403'd (FR-041), matching the TopHeader fix above. -->
-        <div v-if="authStore.principalKind !== 'tenant'" class="flex flex-col gap-2 w-full max-w-[260px] pt-3" data-test="dashboard-admin-left-actions">
-          <button @click="router.push('/clients')" class="btn btn-primary btn-sm w-full gap-1">
-            Connect Clients
-          </button>
-          <button @click="router.push('/add-server?tab=import')" class="btn btn-secondary btn-outline btn-sm w-full gap-1" data-test="dashboard-import-configs">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-            </svg>
-            Import from client configs
-          </button>
-          <router-link to="/sessions" class="btn btn-ghost btn-sm w-full gap-1" data-test="dashboard-recent-sessions-link">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-            </svg>
-            Recent Sessions
-          </router-link>
-        </div>
+        <router-link to="/security" class="btn btn-sm btn-outline max-sm:min-h-11" data-test="home-security-scan-link">Open security scan</router-link>
       </div>
+    </div>
 
-      <!-- Center Column: MCPProxy Hub -->
-      <div class="flex flex-col items-center justify-center relative py-6">
-        <!-- Connection lines: one fat horizontal line each side, big green running dot -->
-        <svg class="absolute inset-0 w-full h-full pointer-events-none hidden lg:block overflow-visible" preserveAspectRatio="none">
-          <!-- Left fat line (clients → hub) -->
-          <line x1="0" y1="50%" x2="42%" y2="50%" stroke="var(--color-success)" stroke-width="4" stroke-opacity="0.25" />
-          <!-- Right fat line (hub → servers) -->
-          <line x1="58%" y1="50%" x2="100%" y2="50%" stroke="var(--color-success)" stroke-width="4" stroke-opacity="0.25" />
-
-          <!-- Green dots travel once every 20s cycle, 4 dots total -->
-          <!-- Left dot 1: clients → hub -->
-          <circle r="7" fill="var(--color-success)" opacity="0">
-            <animate attributeName="cx" values="0%;0%;42%;42%" keyTimes="0;0.05;0.15;1" dur="20s" repeatCount="indefinite" />
-            <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
-            <animate attributeName="opacity" values="0;0.9;0.9;0;0" keyTimes="0;0.05;0.13;0.15;1" dur="20s" repeatCount="indefinite" />
-          </circle>
-          <!-- Left dot 2: clients → hub, staggered -->
-          <circle r="6" fill="var(--color-success)" opacity="0">
-            <animate attributeName="cx" values="0%;0%;42%;42%" keyTimes="0;0.1;0.2;1" dur="20s" repeatCount="indefinite" />
-            <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
-            <animate attributeName="opacity" values="0;0.7;0.7;0;0" keyTimes="0;0.1;0.18;0.2;1" dur="20s" repeatCount="indefinite" />
-          </circle>
-
-          <!-- Right dot 1: servers → hub -->
-          <circle r="7" fill="var(--color-success)" opacity="0">
-            <animate attributeName="cx" values="100%;100%;58%;58%" keyTimes="0;0.07;0.17;1" dur="20s" repeatCount="indefinite" />
-            <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
-            <animate attributeName="opacity" values="0;0.9;0.9;0;0" keyTimes="0;0.07;0.15;0.17;1" dur="20s" repeatCount="indefinite" />
-          </circle>
-          <!-- Right dot 2: servers → hub, staggered -->
-          <circle r="6" fill="var(--color-success)" opacity="0">
-            <animate attributeName="cx" values="100%;100%;58%;58%" keyTimes="0;0.12;0.22;1" dur="20s" repeatCount="indefinite" />
-            <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
-            <animate attributeName="opacity" values="0;0.7;0.7;0;0" keyTimes="0;0.12;0.2;0.22;1" dur="20s" repeatCount="indefinite" />
-          </circle>
-
-          <!-- Static green dots at hub connection points -->
-          <circle cx="42%" cy="50%" r="5" fill="var(--color-success)" opacity="0.7" />
-          <circle cx="58%" cy="50%" r="5" fill="var(--color-success)" opacity="0.7" />
-        </svg>
-
-        <!--
-          Token savings badge (above hub). This is the product's headline claim
-          and it used to be a chip with no tooltip, no destination and no window
-          — so when it read the same before and after 16 tool calls, there was
-          nothing on screen to explain why (audit finding F23, #1046). It is a
-          PER-REQUEST structural estimate over the current tool catalog; it says
-          so, explains itself on hover, and opens the breakdown that derives it.
-        -->
-        <div class="mb-6 z-10">
-          <button
-            v-if="tokenSavingsData && tokenSavingsData.saved_tokens_percentage > 0"
-            type="button"
-            data-test="dashboard-token-savings-chip"
-            class="badge badge-lg gap-1 px-4 py-3 bg-primary/10 text-primary border-primary/30 hover:bg-primary/20 transition-colors cursor-pointer"
-            :title="tokensSavedExplainer"
-            @click="openTokenSavingsDetails"
-          >
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-            </svg>
-            <span class="text-lg font-bold">{{ tokenSavingsData.saved_tokens_percentage >= 99.995 ? '99.99' : tokenSavingsData.saved_tokens_percentage >= 10 ? tokenSavingsData.saved_tokens_percentage.toFixed(1) : tokenSavingsData.saved_tokens_percentage.toFixed(0) }}%</span>
-            <span class="text-xs font-medium">smaller tool context per request</span>
-            <span
-              v-if="tokenSavingsData.estimated"
-              class="badge badge-ghost badge-xs"
-              data-test="dashboard-token-savings-estimate"
-              :title="TOKEN_ESTIMATE_TITLE"
-            >estimate</span>
-          </button>
-        </div>
-
-        <!-- Logo Hub -->
-        <div class="relative z-10">
-          <div class="w-36 h-36 flex items-center justify-center transition-all duration-500"
-            :class="systemStore.isRunning ? 'hub-glow' : ''">
-            <img :src="logoSvg" alt="MCPProxy" class="w-28 h-28" />
-          </div>
-          <div class="text-center mt-1 select-none">
-            <div class="text-xs font-bold uppercase tracking-wider" :class="systemStore.isRunning ? 'text-primary' : 'text-base-content/60'">
-              MCPProxy
-            </div>
-            <!-- Audit F06: hidden until a status has arrived. `isRunning`
-                 falls back to false while `status` is null, which labelled a
-                 running proxy "stopped" in error red behind the auth modal.
-                 Same gate as the Docker/quarantine rows below. -->
-            <div v-if="systemStore.status !== null" class="text-xs font-medium" :class="systemStore.isRunning ? 'text-success' : 'text-error'"
-                 data-test="overview-proxy-state">
-              {{ systemStore.isRunning ? 'active' : 'stopped' }}
-            </div>
-            <div v-if="uptime" class="text-xs text-base-content/60">{{ uptime }}</div>
-          </div>
-        </div>
-
-        <!-- Security Status -->
-        <div class="z-10 w-full max-w-[300px] space-y-2 mt-4">
-          <!-- Docker Isolation (hidden until status has been fetched to avoid
-               flashing a false "disabled" state on initial page load) -->
-          <div v-if="dockerStatus" class="flex items-center gap-2 text-xs px-3 py-2 rounded-lg"
-               :class="dockerStatus.available ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'">
-            <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                    d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
-            </svg>
-            <span v-if="dockerStatus.available" class="font-medium">Docker isolation active</span>
-            <span v-else class="font-medium">Docker isolation disabled — enable Docker to protect your system</span>
-          </div>
-
-          <!-- Quarantine (hidden until config fetch completes) -->
-          <div v-if="quarantineEnabled !== null" class="flex items-center gap-2 text-xs px-3 py-2 rounded-lg"
-               :class="quarantineEnabled ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'">
-            <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                    d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-            </svg>
-            <span v-if="quarantineEnabled" class="font-medium">Quarantine protection active</span>
-            <span v-else class="font-medium">Quarantine disabled — enable to prevent prompt injection attacks</span>
-          </div>
-
-          <!-- Activity Log link -->
-          <router-link to="/activity" class="flex items-center gap-2 text-xs px-3 py-2 rounded-lg bg-base-100/50 border border-base-300 hover:bg-base-200 transition-colors">
-            <svg class="w-4 h-4 shrink-0 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-            </svg>
-            <span class="font-medium opacity-70">Activity Log</span>
-          </router-link>
-        </div>
-      </div>
-
-      <!-- Right Column: Upstream Servers -->
-      <div class="flex flex-col justify-center items-center lg:items-start space-y-3 py-6 lg:pl-4">
-        <h3 class="text-xs font-bold uppercase tracking-widest text-base-content/60 mb-1 w-full max-w-[240px] text-center lg:text-left">Upstream Servers</h3>
-
-        <!-- Connected servers card -->
-        <router-link to="/servers" class="card card-compact bg-base-100 shadow-sm border border-base-300 w-full max-w-[240px] hover:shadow-md transition-shadow">
-          <div class="card-body py-3 px-4">
-            <div class="flex items-center gap-2">
-              <div class="w-2.5 h-2.5 rounded-full bg-success shrink-0"></div>
-              <!-- Audit F06: `servers` starts empty, so an unfetched list read
-                   as a confident "0 connected / 0 tools available". `loaded` is
-                   set in the single applyServerList funnel, which both the
-                   fetch and the SSE path go through. -->
-              <span class="text-2xl font-bold leading-none" data-test="overview-connected-count">{{ serversStore.loaded ? serversStore.serverCount.connected : '—' }}</span>
-              <span class="text-sm opacity-60">connected</span>
-            </div>
-            <div class="text-sm mt-1">
-              <span class="font-bold" data-test="overview-tool-count">{{ serversStore.loaded ? serversStore.totalTools : '—' }}</span>
-              <span class="opacity-60"> tools available</span>
-            </div>
-            <div
-              v-if="disabledCount > 0"
-              class="text-xs text-base-content/60 mt-0.5"
-            >
-              {{ disabledCount }} disabled
-            </div>
-          </div>
-        </router-link>
-
-        <!-- Quarantine card -->
-        <router-link
-          v-if="serversStore.serverCount.quarantined > 0"
-          to="/servers"
-          class="card card-compact bg-warning/10 border border-warning/30 w-full max-w-[240px] hover:shadow-md transition-shadow"
+    <!-- 7. Token savings: the headline claim (F23, #1046) and the breakdown that
+         derives it. It is a PER-REQUEST structural estimate over the current
+         tool catalog, not a running total, and says so. -->
+    <section v-if="tokenSavingsData" class="space-y-3" aria-labelledby="home-token-savings-title" data-test="dashboard-token-savings-section">
+      <div class="flex flex-wrap items-center gap-3">
+        <h2 id="home-token-savings-title" class="font-bold">Token savings</h2>
+        <button
+          v-if="tokenSavingsData.saved_tokens_percentage > 0"
+          type="button"
+          data-test="dashboard-token-savings-chip"
+          class="btn btn-sm btn-outline gap-2 max-sm:min-h-11"
+          :title="tokensSavedExplainer"
+          @click="openTokenSavingsDetails"
         >
-          <div class="card-body py-3 px-4">
-            <div class="flex items-center gap-2">
-              <svg class="w-4 h-4 text-warning shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-              </svg>
-              <span class="text-lg font-bold text-warning leading-none">{{ serversStore.serverCount.quarantined }}</span>
-              <span class="text-sm">in quarantine</span>
-            </div>
-          </div>
-        </router-link>
-
-        <!-- Right Action Buttons. -->
-        <div class="flex flex-col gap-2 w-full max-w-[240px] pt-3">
-          <button v-if="authStore.principalKind !== 'tenant'" @click="router.push('/add-server')" class="btn btn-primary btn-sm w-full gap-1" data-test="dashboard-right-add-server">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-            </svg>
-            Add Server
-          </button>
-          <router-link to="/repositories" class="btn btn-ghost btn-sm w-full gap-1">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-            </svg>
-            Browse catalog
-          </router-link>
-          <router-link to="/security" class="btn btn-ghost btn-sm w-full gap-1">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-              </svg>
-            Security Scan
-            <span v-if="securityScannerLoaded && securityTotalScans === 0" class="badge badge-ghost badge-xs ml-1">Run first scan</span>
-            <span v-else-if="securityTotalFindings > 0" class="badge badge-warning badge-xs ml-1">{{ securityTotalFindings }} issue{{ securityTotalFindings === 1 ? '' : 's' }}</span>
-          </router-link>
-        </div>
+          <span class="font-bold">{{ tokenSavingsData.saved_tokens_percentage >= 99.995 ? '99.99' : tokenSavingsData.saved_tokens_percentage >= 10 ? tokenSavingsData.saved_tokens_percentage.toFixed(1) : tokenSavingsData.saved_tokens_percentage.toFixed(0) }}%</span>
+          <span class="font-normal">smaller tool context per request</span>
+          <span
+            v-if="tokenSavingsData.estimated"
+            class="badge badge-ghost badge-sm"
+            data-test="dashboard-token-savings-estimate"
+            :title="TOKEN_ESTIMATE_TITLE"
+          >estimate</span>
+        </button>
       </div>
-    </div>
-
     <!-- Token Savings Collapsible Detail — where the headline chip lands. -->
     <div
-      v-if="tokenSavingsData"
       ref="tokenSavingsDetails"
       data-test="dashboard-token-savings-details"
-      class="collapse collapse-arrow bg-base-100 shadow-sm border border-base-300"
+      class="collapse collapse-arrow bg-base-100 border" style="border-color: var(--ds-border)"
     >
       <input type="checkbox" v-model="tokenDetailsOpen" aria-label="Show token savings details" />
       <div class="collapse-title font-medium flex items-center gap-3">
-        <svg class="w-5 h-5 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-        </svg>
-        Token Savings Details
-        <span class="badge badge-success badge-sm ml-auto" data-test="dashboard-token-savings-saved-badge">{{ formatNumber(tokenSavingsData.saved_tokens) }} saved{{ tokenSavingsData.estimated ? ' · estimate' : '' }}</span>
+        Token savings details
+        <span class="badge badge-ghost badge-sm ml-auto" data-test="dashboard-token-savings-saved-badge">{{ formatNumber(tokenSavingsData.saved_tokens) }} saved{{ tokenSavingsData.estimated ? ' · estimate' : '' }}</span>
       </div>
       <div class="collapse-content">
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 pt-2">
@@ -357,7 +144,7 @@
             <div class="grid grid-cols-3 gap-4">
               <div :title="tokensSavedExplainer">
                 <div class="text-sm opacity-60">Tokens Saved / request</div>
-                <div class="text-2xl font-bold text-success">
+                <div class="text-2xl font-bold">
                   {{ formatNumber(tokenSavingsData.saved_tokens) }}
                   <span
                     v-if="tokenSavingsData.estimated"
@@ -408,13 +195,217 @@
         </div>
       </div>
     </div>
+    </section>
 
-    <!-- Hints Panel (Bottom of Page) -->
-    <CollapsibleHintsPanel :hints="dashboardHints" />
-    </div>
-    <!-- /Topology -->
+    <!-- 8. Topology: collapsed by default, remembers its state. Opens in place
+         with everything it had when it led the page. Its six buttons are the
+         shortcut row and the security scan summary above. -->
+    <section class="space-y-3" data-test="home-topology">
+      <button
+        type="button"
+        class="btn btn-sm btn-outline gap-2 max-sm:min-h-11"
+        :aria-expanded="topologyOpen ? 'true' : 'false'"
+        aria-controls="home-topology-body"
+        data-test="home-topology-toggle"
+        @click="toggleTopology"
+      >
+        <UiIcon name="chevronDown" class="w-4 h-4 transition-transform" :class="topologyOpen ? '' : '-rotate-90'" />
+        Topology: clients, proxy and servers
+      </button>
+      <div v-if="topologyOpen" id="home-topology-body" data-test="home-topology-body" class="space-y-6">
+        <div class="grid grid-cols-1 lg:grid-cols-[280px_1fr_280px] gap-0 relative">
+      <!-- Left Column: AI Agents / Clients -->
+      <div class="flex flex-col justify-center items-center lg:items-end space-y-3 py-6 lg:pr-0">
+        <h3 class="text-xs font-bold uppercase tracking-widest text-base-content/60 mb-1 w-full max-w-[260px] text-center lg:text-right">AI Agents</h3>
 
-    <UsageSummaryStrip v-if="authStore.principalKind !== 'tenant' && attentionStore.loaded && serversStore.loaded && attentionStore.count > 0" data-test="home-usage-strip-bottom" />
+        <!-- Single big clients box. Audit F10: "Connected" is now the same fact
+             /sessions shows — a live MCP session — instead of a flag the
+             content-read-free connect listing can never set. Each live client
+             links to its session row. -->
+        <div class="card card-compact bg-base-100 shadow-sm border border-base-300 w-full max-w-[260px]" data-test="dashboard-agents-box">
+          <div class="card-body py-3 px-4">
+            <div v-if="liveClients.length > 0" class="mb-1">
+              <div class="flex items-center gap-2 mb-1">
+                <div class="w-2.5 h-2.5 rounded-full bg-success shrink-0"></div>
+                <span class="text-xs font-bold uppercase tracking-wide text-base-content/60">Connected</span>
+              </div>
+              <router-link
+                v-for="client in liveClients"
+                :key="client.name"
+                to="/sessions"
+                class="flex items-baseline justify-between gap-2 text-sm link link-hover"
+                :data-test="`dashboard-live-client-${client.name}`"
+              >
+                <span class="font-medium truncate">{{ client.name }}</span>
+                <span class="text-xs text-base-content/60 shrink-0" data-test="dashboard-live-client-age">{{ formatRelativeTime(client.lastActivity) }}</span>
+              </router-link>
+            </div>
+            <div v-if="availableClientNames.length > 0">
+              <div class="text-xs text-base-content/60 mt-1" data-test="dashboard-available-clients">
+                Available: {{ availableClientNames.join(', ') }}
+              </div>
+            </div>
+            <div v-if="liveClients.length === 0 && availableClientNames.length === 0" class="text-sm text-base-content/60 text-center py-2">
+              No clients detected
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Center Column: MCPProxy Hub -->
+      <div class="flex flex-col items-center justify-center relative py-6">
+        <!-- Connection lines: one fat horizontal line each side, big green running dot -->
+        <svg class="absolute inset-0 w-full h-full pointer-events-none hidden lg:block overflow-visible" preserveAspectRatio="none">
+          <!-- Left fat line (clients → hub) -->
+          <line x1="0" y1="50%" x2="42%" y2="50%" stroke="var(--color-success)" stroke-width="4" stroke-opacity="0.25" />
+          <!-- Right fat line (hub → servers) -->
+          <line x1="58%" y1="50%" x2="100%" y2="50%" stroke="var(--color-success)" stroke-width="4" stroke-opacity="0.25" />
+
+          <!-- Green dots travel once every 20s cycle, 4 dots total -->
+          <!-- Left dot 1: clients → hub -->
+          <circle r="7" fill="var(--color-success)" opacity="0">
+            <animate attributeName="cx" values="0%;0%;42%;42%" keyTimes="0;0.05;0.15;1" dur="20s" repeatCount="indefinite" />
+            <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
+            <animate attributeName="opacity" values="0;0.9;0.9;0;0" keyTimes="0;0.05;0.13;0.15;1" dur="20s" repeatCount="indefinite" />
+          </circle>
+          <!-- Left dot 2: clients → hub, staggered -->
+          <circle r="6" fill="var(--color-success)" opacity="0">
+            <animate attributeName="cx" values="0%;0%;42%;42%" keyTimes="0;0.1;0.2;1" dur="20s" repeatCount="indefinite" />
+            <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
+            <animate attributeName="opacity" values="0;0.7;0.7;0;0" keyTimes="0;0.1;0.18;0.2;1" dur="20s" repeatCount="indefinite" />
+          </circle>
+
+          <!-- Right dot 1: servers → hub -->
+          <circle r="7" fill="var(--color-success)" opacity="0">
+            <animate attributeName="cx" values="100%;100%;58%;58%" keyTimes="0;0.07;0.17;1" dur="20s" repeatCount="indefinite" />
+            <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
+            <animate attributeName="opacity" values="0;0.9;0.9;0;0" keyTimes="0;0.07;0.15;0.17;1" dur="20s" repeatCount="indefinite" />
+          </circle>
+          <!-- Right dot 2: servers → hub, staggered -->
+          <circle r="6" fill="var(--color-success)" opacity="0">
+            <animate attributeName="cx" values="100%;100%;58%;58%" keyTimes="0;0.12;0.22;1" dur="20s" repeatCount="indefinite" />
+            <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
+            <animate attributeName="opacity" values="0;0.7;0.7;0;0" keyTimes="0;0.12;0.2;0.22;1" dur="20s" repeatCount="indefinite" />
+          </circle>
+
+          <!-- Static green dots at hub connection points -->
+          <circle cx="42%" cy="50%" r="5" fill="var(--color-success)" opacity="0.7" />
+          <circle cx="58%" cy="50%" r="5" fill="var(--color-success)" opacity="0.7" />
+        </svg>
+
+        <!-- Logo Hub -->
+        <div class="relative z-10">
+          <div class="w-36 h-36 flex items-center justify-center transition-all duration-500"
+            :class="systemStore.isRunning ? 'hub-glow' : ''">
+            <img :src="logoSvg" alt="MCPProxy" class="w-28 h-28" />
+          </div>
+          <div class="text-center mt-1 select-none">
+            <div class="text-xs font-bold uppercase tracking-wider" :class="systemStore.isRunning ? 'text-primary' : 'text-base-content/60'">
+              MCPProxy
+            </div>
+            <!-- Audit F06: hidden until a status has arrived. `isRunning`
+                 falls back to false while `status` is null, which labelled a
+                 running proxy "stopped" in error red behind the auth modal.
+                 Same gate as the Docker/quarantine rows below. -->
+            <div v-if="systemStore.status !== null" class="text-xs font-medium" :class="systemStore.isRunning ? 'text-success' : 'text-error'"
+                 data-test="overview-proxy-state">
+              {{ systemStore.isRunning ? 'active' : 'stopped' }}
+            </div>
+            <div v-if="uptime" class="text-xs text-base-content/60">{{ uptime }}</div>
+          </div>
+        </div>
+
+        <!-- Security Status -->
+        <div class="z-10 w-full max-w-[300px] space-y-2 mt-4">
+          <!-- Docker Isolation (hidden until status has been fetched to avoid
+               flashing a false "disabled" state on initial page load) -->
+          <div v-if="dockerStatus" class="flex items-center gap-2 text-xs px-3 py-2 rounded border"
+               :style="cueStyle(dockerStatus.available)" data-test="home-cue-docker">
+            <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+            </svg>
+            <span v-if="dockerStatus.available" class="font-medium">Docker isolation active</span>
+            <span v-else class="font-medium">Docker isolation disabled — enable Docker to protect your system</span>
+          </div>
+
+          <!-- Quarantine (hidden until config fetch completes) -->
+          <div v-if="quarantineEnabled !== null" class="flex items-center gap-2 text-xs px-3 py-2 rounded border"
+               :style="cueStyle(quarantineEnabled)" data-test="home-cue-quarantine">
+            <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+            </svg>
+            <span v-if="quarantineEnabled" class="font-medium">Quarantine protection active</span>
+            <span v-else class="font-medium">Quarantine disabled — enable to prevent prompt injection attacks</span>
+          </div>
+
+          <!-- Activity Log link -->
+          <router-link to="/activity" class="flex items-center gap-2 text-xs px-3 py-2 min-h-11 rounded border hover:bg-base-200 transition-colors" style="border-color: var(--ds-border)" data-test="home-topology-activity-link">
+            <svg class="w-4 h-4 shrink-0 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+            </svg>
+            <span class="font-medium">Activity Log</span>
+          </router-link>
+        </div>
+      </div>
+
+      <!-- Right Column: Upstream Servers -->
+      <div class="flex flex-col justify-center items-center lg:items-start space-y-3 py-6 lg:pl-4">
+        <h3 class="text-xs font-bold uppercase tracking-widest text-base-content/60 mb-1 w-full max-w-[240px] text-center lg:text-left">Upstream Servers</h3>
+
+        <!-- Connected servers card -->
+        <router-link to="/servers" class="card card-compact bg-base-100 shadow-sm border border-base-300 w-full max-w-[240px] hover:shadow-md transition-shadow">
+          <div class="card-body py-3 px-4">
+            <div class="flex items-center gap-2">
+              <div class="w-2.5 h-2.5 rounded-full bg-success shrink-0"></div>
+              <!-- Audit F06: `servers` starts empty, so an unfetched list read
+                   as a confident "0 connected / 0 tools available". `loaded` is
+                   set in the single applyServerList funnel, which both the
+                   fetch and the SSE path go through. -->
+              <span class="text-2xl font-bold leading-none" data-test="overview-connected-count">{{ serversStore.loaded ? serversStore.serverCount.connected : '—' }}</span>
+              <span class="text-sm opacity-60">connected</span>
+            </div>
+            <div class="text-sm mt-1">
+              <span class="font-bold" data-test="overview-tool-count">{{ serversStore.loaded ? serversStore.totalTools : '—' }}</span>
+              <span class="opacity-60"> tools available</span>
+            </div>
+            <div
+              v-if="disabledCount > 0"
+              class="text-xs text-base-content/60 mt-0.5"
+            >
+              {{ disabledCount }} disabled
+            </div>
+          </div>
+        </router-link>
+
+        <!-- Quarantine card -->
+        <router-link
+          v-if="serversStore.serverCount.quarantined > 0"
+          to="/servers"
+          class="card card-compact border w-full max-w-[240px] hover:shadow-md transition-shadow"
+          style="background: var(--status-review-soft); color: var(--status-review); border-color: var(--status-review)"
+          data-test="home-quarantine-card"
+        >
+          <div class="card-body py-3 px-4">
+            <div class="flex items-center gap-2">
+              <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+              </svg>
+              <span class="text-lg font-bold leading-none">{{ serversStore.serverCount.quarantined }}</span>
+              <span class="text-sm">in quarantine</span>
+            </div>
+          </div>
+        </router-link>
+
+      </div>
+        </div>
+
+        <!-- Hints Panel -->
+        <CollapsibleHintsPanel :hints="dashboardHints" />
+      </div>
+    </section>
 
     <!-- Modals -->
     <OnboardingWizard :show="onboardingStore.wizardOpen" @close="onboardingStore.closeWizard" />
@@ -438,6 +429,10 @@ import TokenPieChart from '@/components/TokenPieChart.vue'
 import OnboardingWizard from '@/components/OnboardingWizard.vue'
 import AttentionList from '@/components/AttentionList.vue'
 import UsageSummaryStrip from '@/components/UsageSummaryStrip.vue'
+import RecentActivity from '@/components/RecentActivity.vue'
+import UiIcon from '@/components/UiIcon.vue'
+import { usableToolCount } from '@/utils/fleetCounts'
+import { routingModeMeta } from '@/utils/routingMode'
 import { useOnboardingStore } from '@/stores/onboarding'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { ClientStatus } from '@/types'
@@ -647,7 +642,7 @@ const openTokenSavingsDetails = () => {
   tokenDetailsOpen.value = true
   // Let the collapse expand before scrolling, or the target moves under us.
   nextTick(() => {
-    tokenSavingsDetails.value?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    tokenSavingsDetails.value?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
   })
 }
 
@@ -677,6 +672,47 @@ const holdAllClear = computed(
     !serversStore.loaded &&
     !serversStore.loading.error
 )
+
+// Usage strip and recent activity wait until both lists are known, so a fresh
+// instance never flashes them before the Get started card replaces them.
+const showOverview = computed(
+  () =>
+    authStore.principalKind !== 'tenant' &&
+    attentionStore.loaded &&
+    serversStore.loaded &&
+    !showGettingStarted.value
+)
+
+// Usable tools: tools on servers whose health says they are usable (moved from
+// the header, spec 134 FR-011).
+const usableTools = computed(() => usableToolCount(serversStore.servers))
+const modeMeta = computed(() => routingModeMeta(systemStore.routingMode))
+const pendingModeLabel = computed(() => routingModeMeta(systemStore.pendingRoutingMode).label)
+
+// Protection cues: soft status tones, never solid blocks.
+const cueStyle = (ok: boolean) =>
+  ok
+    ? 'background: var(--status-ok-soft); color: var(--status-ok); border-color: var(--status-ok)'
+    : 'background: var(--status-review-soft); color: var(--status-review); border-color: var(--status-review)'
+
+// The topology section is collapsed by default and remembers its state.
+const TOPOLOGY_KEY = 'mcpproxy.home.topology'
+function readTopologyOpen(): boolean {
+  try {
+    return localStorage.getItem(TOPOLOGY_KEY) === 'open'
+  } catch {
+    return false
+  }
+}
+const topologyOpen = ref(readTopologyOpen())
+function toggleTopology() {
+  topologyOpen.value = !topologyOpen.value
+  try {
+    localStorage.setItem(TOPOLOGY_KEY, topologyOpen.value ? 'open' : 'closed')
+  } catch {
+    // Storage may be unavailable; the section still opens for this visit.
+  }
+}
 
 const clientConnected = computed(() => onboardingStore.hasConnectedClient || liveClients.value.length > 0)
 
