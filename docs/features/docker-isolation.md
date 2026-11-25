@@ -125,7 +125,43 @@ Add to your `~/.mcpproxy/mcp_config.json`:
 | `network_mode` | Docker network mode | `"bridge"` |
 | `registry` | Docker registry to use | `"docker.io"` |
 | `default_images` | Runtime to image mappings. The optional `uvx-git` key (not shipped in the defaults) overrides the git-capable image used when a Python runner installs from a `git+` URL | See above |
-| `extra_args` | Additional docker run arguments | `[]` |
+| `extra_args` | Additional docker run arguments. They override mcpproxy's own, such as [`--init`](#init-process-and-stop-timeout) | `[]` |
+
+### Init process and stop timeout
+
+mcpproxy starts every isolated container with two defaults:
+
+| Flag | When | Why |
+|------|------|-----|
+| `--init` | The Docker daemon reports a working `docker-init`. Never on Podman. | Runs a small init as PID 1, so the MCP server does not have to be one |
+| `--stop-timeout 3` | Always | Seconds `docker stop` waits before it kills the container. Docker's own default is 10 |
+
+An MCP server is arbitrary third-party software, and few programs are written to run as PID 1. Without an init:
+
+- **Signals are ignored.** Linux drops a signal sent to PID 1 unless the program handles it, so `SIGTERM` does nothing and every stop waits out the whole timeout before the container is killed.
+- **Zombies pile up.** Orphaned child processes are re-parented to PID 1. A server that does not reap them keeps each one as a zombie, holding a process ID until the container ends.
+
+Both defaults come before `extra_args` on the command line and Docker uses the last occurrence of a flag, so a server can override either one:
+
+```json
+{
+  "mcpServers": [
+    {
+      "name": "s6-based-server",
+      "command": "my-server",
+      "isolation": {
+        "image": "example/s6-overlay-image",
+        "extra_args": ["--init=false", "--stop-timeout", "8"]
+      }
+    }
+  ]
+}
+```
+
+- Use `--init=false` for images whose own init must be PID 1, such as those built on **s6-overlay** or **systemd**. They refuse to start otherwise (for example `s6-overlay-suexec: fatal: can only run as pid 1`).
+- Raise `--stop-timeout` for a server that needs longer to clean up. When mcpproxy itself shuts down it gives a container about 15 seconds at most, so higher values only help when a single server is stopped or restarted.
+
+Containers you define yourself (`"command": "docker", "args": ["run", …]`) are not changed: add the flags to `args` if you want them.
 
 ### Git dependencies (`uvx-git`)
 
@@ -345,8 +381,8 @@ When a Docker-isolated server starts:
 
 When MCPProxy stops, containers are cleaned up with a 30-second timeout:
 
-1. **Graceful Stop**: `docker stop` (sends SIGTERM to container)
-2. **Force Kill**: `docker kill` if container doesn't stop gracefully
+1. **Graceful Stop**: `docker stop` (sends SIGTERM to the container, then SIGKILL after its [stop timeout](#init-process-and-stop-timeout), 3 seconds by default)
+2. **Force Kill**: `docker kill` if `docker stop` fails
 
 Containers are labeled with `com.mcpproxy.managed=true` for identification
 and `com.mcpproxy.server=<server name>` (the raw, unsanitised name) for

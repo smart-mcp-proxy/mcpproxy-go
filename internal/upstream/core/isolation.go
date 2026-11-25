@@ -513,6 +513,10 @@ func imageHasRegistryHost(image string) bool {
 	return strings.ContainsAny(host, ".:") || host == "localhost"
 }
 
+// containerStopTimeout is how many seconds `docker stop` waits before SIGKILL. With the docker
+// calls around it, it must stay below the 5s disconnect phase of Manager.ShutdownAll.
+const containerStopTimeout = "3"
+
 // BuildDockerArgs constructs Docker run arguments for isolation
 func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, runtimeType string) ([]string, error) {
 	image, err := im.GetDockerImage(serverConfig, runtimeType)
@@ -552,7 +556,8 @@ func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, r
 		}
 	}
 
-	args := []string{"run", "--rm", "-i"}
+	// ExtraArgs come later on the command line, so a server can override these.
+	args := []string{"run", "--rm", "-i", "--stop-timeout", containerStopTimeout}
 
 	// Add container name for easier identification
 	containerName := generateContainerName(serverConfig.Name)

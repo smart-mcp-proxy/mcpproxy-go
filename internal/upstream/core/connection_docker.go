@@ -1,11 +1,14 @@
 package core
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"go.uber.org/zap"
@@ -51,6 +54,11 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 		return shellCmd, shellArgs, true, ""
 	}
 
+	// Right after "run", so that `--init=false` in extra_args overrides it.
+	if c.dockerHasInit() {
+		dockerRunArgs = slices.Insert(dockerRunArgs, 1, "--init")
+	}
+
 	// Extract container name from Docker args for tracking
 	c.containerName = c.extractContainerNameFromArgs(dockerRunArgs)
 
@@ -89,6 +97,16 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 	// (connectStdio) via resolveDockerSpawn so both spawn paths behave identically
 	// (#696 / MCP-2868).
 	return c.resolveDockerSpawn(finalArgs)
+}
+
+// dockerHasInit reports whether the Docker daemon can run containers with --init. The daemon lists
+// the docker-init component only when it found and ran that binary. Podman lists none, and may
+// lack an init binary, so it never gets --init.
+func (c *Client) dockerHasInit() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := c.newDockerCmd(ctx, "version", "--format", "{{range .Server.Components}}{{println .Name}}{{end}}").Output()
+	return err == nil && slices.Contains(strings.Fields(string(out)), "docker-init")
 }
 
 // resolveDockerSpawn decides how to spawn `docker` given the fully built docker
