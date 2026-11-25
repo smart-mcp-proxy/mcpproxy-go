@@ -1,5 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, realpathSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname } from 'node:path'
 import { join } from 'node:path'
 
 // Spec 132 (issue #1971): the Connect dialog's browser-login choice, driven in a
@@ -34,9 +36,19 @@ test.beforeAll(async () => {
   const res = await fetch(`${BASE}/api/v1/clients`, { headers: { 'X-API-Key': KEY } })
   const body = (await res.json()) as { data: { clients: { id: string; config_path: string }[] } }
   const cc = body.data.clients.find((c) => c.id === 'claude-code')
-  expect(cc?.config_path.startsWith(HOME_DIR + '/'), `core config path ${cc?.config_path} is not inside ${HOME_DIR}`).toBe(true)
-  const served = (await fetch(`${BASE}/.well-known/oauth-authorization-server`)).status === 200
-  expect(served, OFF ? 'feature-off run against a core that serves browser login' : 'feature-on run against a core that does not serve browser login').toBe(!OFF)
+  expect(cc, 'core lists no claude-code client').toBeTruthy()
+  // Canonical paths: a symlink or a flag naming the real HOME must not pass.
+  const scratch = realpathSync(HOME_DIR)
+  expect(scratch).not.toBe(realpathSync(homedir()))
+  expect(realpathSync(dirname(cc!.config_path)), 'the core writes outside the scratch HOME').toBe(scratch)
+  expect(cc!.config_path).toBe(`${HOME_DIR}/.claude.json`)
+  // The effective flag, read from the core's own config (the metadata route also
+  // answers 404 on an enabled core reached through a non-loopback listener).
+  const cfg = (await (await fetch(`${BASE}/api/v1/config`, { headers: { 'X-API-Key': KEY } })).json()) as { data: { config: { mcp_oauth_enabled?: boolean } } }
+  expect(!!cfg.data.config.mcp_oauth_enabled, OFF ? 'feature-off run against a core with mcp_oauth_enabled on' : 'feature-on run against a core with mcp_oauth_enabled off').toBe(!OFF)
+  if (!OFF) {
+    expect((await fetch(`${BASE}/.well-known/oauth-authorization-server`)).status, 'browser login is not served').toBe(200)
+  }
 })
 const CLAUDE_JSON = `${HOME_DIR}/.claude.json`
 
@@ -105,8 +117,11 @@ test.describe(OFF ? 'browser login off' : 'browser login on', () => {
     // The client row now reads connected with Disconnect; the file holds the address.
     await expect(t(page, 'connect-disconnect-claude-code')).toBeVisible()
     const written = readFileSync(CLAUDE_JSON, 'utf8')
-    expect(written).toContain('/mcp/oauth/claude-code')
-    expect(written).not.toMatch(/mcp_cli_|mcp_agt_|X-API-Key|Authorization|scratch-key/i)
+    // Exactly the credential-free address: no headers, no query, nothing else.
+    const entries = Object.values((JSON.parse(written) as { mcpServers: Record<string, Record<string, unknown>> }).mcpServers)
+    expect(entries).toHaveLength(1)
+    expect(entries[0].url).toBe(`${BASE}/mcp/oauth/claude-code`)
+    expect(Object.keys(entries[0]).sort()).toEqual(['type', 'url'])
 
     // Undo restores the pre-connect state.
     await t(page, 'connect-undo').click()
