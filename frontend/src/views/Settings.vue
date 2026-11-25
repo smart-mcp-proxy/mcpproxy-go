@@ -17,7 +17,7 @@
       </div>
       <div class="flex items-center gap-2">
         <label class="input input-bordered input-sm flex items-center gap-2 w-64">
-          <span class="opacity-50">🔍</span>
+          <UiIcon name="search" class="w-4 h-4 opacity-50" />
           <input v-model="search" type="text" class="grow" placeholder="Search all settings…" data-test="settings-search" />
           <button v-if="search" class="opacity-50 hover:opacity-100" @click="search = ''" title="Clear">✕</button>
         </label>
@@ -65,7 +65,7 @@
           <!-- connect-a-client helper -->
           <div class="alert bg-base-200 border-base-300 mb-3 flex-col sm:flex-row items-start sm:items-center gap-2">
             <span class="text-sm grow">
-              🔌 Connecting an AI client (Claude, Cursor, VS Code…)? The helper registers mcpproxy with the right endpoint and API key in the client's config.
+              <UiIcon name="plug" class="w-4 h-4 inline" /> Connecting an AI client (Claude, Cursor, VS Code…)? The helper registers mcpproxy with the right endpoint and API key in the client's config.
             </span>
             <button class="btn btn-sm btn-primary" data-test="settings-connect-client" @click="router.push('/clients')">
               Connect a client
@@ -183,6 +183,7 @@
 </template>
 
 <script setup lang="ts">
+import UiIcon from '@/components/UiIcon.vue'
 import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick, h, type FunctionalComponent } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { VueMonacoEditor } from '@guolao/vue-monaco-editor'
@@ -508,7 +509,7 @@ async function applyConfig() {
 
 const settingsHints = computed<Hint[]>(() => [
   {
-    icon: '🔒',
+    icon: 'lock',
     title: 'Settings',
     description: 'Manage configuration from friendly forms or raw JSON',
     sections: [

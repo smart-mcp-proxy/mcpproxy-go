@@ -4,6 +4,7 @@
  */
 
 import { formatDateTime } from './datetime'
+import type { UiIconName } from './uiIcons'
 import {
   ActivityViewAll,
   ActivityViewCalls,
@@ -85,25 +86,25 @@ export function activityViewTypes(view: string): string[] | undefined {
 
 // Activity type icons. Same keys as ACTIVITY_TYPE_LABELS; each distinct, so a
 // glyph identifies the type on its own.
-const typeIcons: Record<string, string> = {
-  'tool_call': '🔧',
-  'system_start': '🚀',
-  'system_stop': '🛑',
-  'internal_tool_call': '⚙️',
-  'config_change': '⚡',
-  'policy_decision': '🛡️',
-  'quarantine_change': '⚠️',
-  'server_change': '🔄',
-  'preflight': '🛫',
-  'tool_quarantine_change': '🧪',
-  'security_scan': '🔎',
-  'credential_broker': '🔑',
-  'prompt_get': '💬',
-  'profile_change': '🪪',
-  'upstream_event': '🔌',
-  'skill_quarantine_change': '📚',
-  'skill_access': '📖',
-  'client_request': '🙋'
+const typeIcons: Record<string, UiIconName> = {
+  'tool_call': 'wrench',
+  'system_start': 'play',
+  'system_stop': 'stop',
+  'internal_tool_call': 'cog',
+  'config_change': 'bolt',
+  'policy_decision': 'shield',
+  'quarantine_change': 'alert',
+  'server_change': 'refresh',
+  'preflight': 'send',
+  'tool_quarantine_change': 'flask',
+  'security_scan': 'search',
+  'credential_broker': 'key',
+  'prompt_get': 'chat',
+  'profile_change': 'idCard',
+  'upstream_event': 'plug',
+  'skill_quarantine_change': 'book',
+  'skill_access': 'bookOpen',
+  'client_request': 'hand'
 }
 
 // Status labels
@@ -125,10 +126,10 @@ const statusClasses: Record<string, string> = {
 }
 
 // Intent operation type icons
-const intentIcons: Record<string, string> = {
-  'read': '📖',
-  'write': '✏️',
-  'destructive': '⚠️'
+const intentIcons: Record<string, UiIconName> = {
+  'read': 'eye',
+  'write': 'pencil',
+  'destructive': 'alert'
 }
 
 // Intent badge classes
@@ -161,9 +162,12 @@ export const formatType = (type: string): string => {
 /**
  * Get icon for activity type
  */
-export const getTypeIcon = (type: string): string => {
-  return typeIcons[type] || '📋'
+export const getTypeIcon = (type: string): UiIconName => {
+  return typeIcons[type] || 'clipboard'
 }
+
+/** Icon name for an activity type (alias kept for the icon-map contract). */
+export const getActivityTypeIcon = getTypeIcon
 
 /**
  * Format status for display
@@ -259,8 +263,8 @@ export const statusPresentation = (status: string): StatusPresentation => {
 /**
  * Get icon for intent operation type
  */
-export const getIntentIcon = (operationType: string): string => {
-  return intentIcons[operationType] || '❓'
+export const getIntentIcon = (operationType: string): UiIconName => {
+  return intentIcons[operationType] || 'question'
 }
 
 /**
@@ -270,7 +274,7 @@ export const getIntentIcon = (operationType: string): string => {
  * badges is unreadable without one (F26, #1046).
  */
 export interface ActivityLegendEntry {
-  icon: string
+  icon: UiIconName
   term: string
   description: string
 }
@@ -282,10 +286,10 @@ export const INTENT_LEGEND: ActivityLegendEntry[] = [
 ]
 
 export const SENSITIVE_LEGEND: ActivityLegendEntry[] = [
-  { icon: '☢️', term: 'critical', description: 'cloud credentials, private keys' },
-  { icon: '⚠️', term: 'high', description: 'API tokens, connection strings' },
-  { icon: '⚡', term: 'medium', description: 'card numbers, sensitive paths' },
-  { icon: 'ℹ️', term: 'low', description: 'high-entropy strings worth a look' },
+  { icon: 'alertOctagon', term: 'critical', description: 'cloud credentials, private keys' },
+  { icon: 'alert', term: 'high', description: 'API tokens, connection strings' },
+  { icon: 'bolt', term: 'medium', description: 'card numbers, sensitive paths' },
+  { icon: 'info', term: 'low', description: 'high-entropy strings worth a look' },
 ]
 
 /**
@@ -318,7 +322,7 @@ export interface IntentPresentation {
   /** False when the record declared no operation type — render a muted dash. */
   present: boolean
   /** Operation glyph: book / pencil / warning. Empty when absent. */
-  icon: string
+  icon: UiIconName | ''
   /**
    * Operation type, e.g. "read". PAINTED beside the glyph, not only announced:
    * 📖 / ✏️ / ⚠️ with no key and no word left the column decodable only by
@@ -1026,7 +1030,7 @@ export const activeFilterChips = (state: ActivityFilterState): ActiveFilterChip[
     chips.push({
       kind: 'type',
       key: `type:${type}`,
-      label: `${getTypeIcon(type)} ${formatType(type)}`,
+      label: formatType(type),
       value: type,
     })
   }
@@ -1060,7 +1064,7 @@ export const activeFilterChips = (state: ActivityFilterState): ActiveFilterChip[
     chips.push({
       kind: 'auth',
       key: 'auth',
-      label: `Auth: ${state.authType === 'admin' ? '🔑 Admin' : '🤖 Agent'}`,
+      label: `Auth: ${state.authType === 'admin' ? 'Admin' : 'Agent'}`,
     })
   }
   if (state.agentName) {
@@ -1070,7 +1074,7 @@ export const activeFilterChips = (state: ActivityFilterState): ActiveFilterChip[
     chips.push({
       kind: 'sensitive',
       key: 'sensitive',
-      label: `Sensitive: ${state.sensitiveData === 'true' ? '⚠️ Detected' : 'Clean'}`,
+      label: `Sensitive: ${state.sensitiveData === 'true' ? 'Detected' : 'Clean'}`,
     })
   }
   // Severity only narrows the list while the sensitive-data filter is

@@ -35,7 +35,7 @@ describe('preflight activity type', () => {
   })
 
   it('gives the preflight type its own icon', () => {
-    expect(getTypeIcon('preflight')).toBe('🛫')
+    expect(getTypeIcon('preflight')).toBe('send')
     expect(getTypeIcon('preflight')).not.toBe(getTypeIcon('unknown_type'))
   })
 

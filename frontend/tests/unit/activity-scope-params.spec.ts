@@ -223,6 +223,6 @@ describe('Activity scope params (Spec 108-j)', () => {
 
   it('the chips render on the Sessions view too', async () => {
     const { wrapper } = await mountActivityAt('/activity?view=sessions&client=cursor')
-    expect(wrapper.get('[data-test="scope-chip-client"]').text()).toContain('Client: Cursor')
+    expect(wrapper.get('[data-test="scope-chip-client"]').text()).toContain('Viewing as Cursor')
   })
 })

@@ -68,6 +68,7 @@
 
     <!-- Spec 108-j J4/J5 (FR-031): the profile/client/token this view is
          narrowed to, as removable chips, with the pickers that write them. -->
+    <div class="empty:hidden" data-test="usage-view-as"><ViewAs /></div>
     <div
       v-if="scopeQuery && (scopeChipsVisible || scopePickersVisible)"
       class="flex flex-wrap items-end gap-3"
@@ -251,6 +252,7 @@ import { useSystemStore } from '@/stores/system'
 import { useProfilesStore } from '@/stores/profiles'
 import { pickScopeParams, scopeParamsKey } from '@/utils/scopeParams'
 import ScopeChips from '@/components/scope/ScopeChips.vue'
+import ViewAs from '@/components/ViewAs.vue'
 import ScopeFilterSelects from '@/components/scope/ScopeFilterSelects.vue'
 import type { UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, UsageToolStat } from '@/types'
 import { formatNumber, partitionUsageTools, usageHeadline } from '@/utils/usageFormat'

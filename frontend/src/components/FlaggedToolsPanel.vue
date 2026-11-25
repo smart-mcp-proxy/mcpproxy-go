@@ -11,7 +11,7 @@
       <div class="flex items-start justify-between gap-3 flex-wrap">
         <div>
           <h3 class="font-semibold text-sm flex items-center gap-2">
-            <span aria-hidden="true">🔎</span>
+            <UiIcon name="search" class="w-4 h-4" />
             <span>Flagged tool descriptions ({{ groups.length }})</span>
           </h3>
           <!-- UX audit F09. This used to read "Informational — these findings
@@ -104,6 +104,7 @@
 </template>
 
 <script setup lang="ts">
+import UiIcon from '@/components/UiIcon.vue'
 import { computed } from 'vue'
 import FindingChip from '@/components/FindingChip.vue'
 import type { FlaggedToolGroup } from '@/utils/toolLocation'

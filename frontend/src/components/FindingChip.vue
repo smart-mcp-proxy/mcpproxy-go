@@ -10,6 +10,7 @@
     :title="presentation.title"
   >
     <span v-if="state === 'scanning'" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
+    <UiIcon v-else-if="presentation.iconName" :name="presentation.iconName" class="w-3 h-3" />
     <span v-else aria-hidden="true">{{ presentation.icon }}</span>
     <span>{{ presentation.label }}</span>
     <span v-if="stale && state !== 'stale'" aria-hidden="true" title="Findings may predate the current description">⟳</span>
@@ -43,7 +44,9 @@ export type FindingChipState =
 </script>
 
 <script setup lang="ts">
+import UiIcon from '@/components/UiIcon.vue'
 import { computed } from 'vue'
+import type { UiIconName } from '@/utils/uiIcons'
 
 const props = withDefaults(
   defineProps<{
@@ -59,6 +62,7 @@ const props = withDefaults(
 interface ChipPresentation {
   label: string
   icon: string
+  iconName?: UiIconName
   badgeClass: string
   title: string
 }
@@ -111,7 +115,8 @@ const presentation = computed<ChipPresentation | null>(() => {
       // Precaution tone — deliberately NOT badge-error.
       return {
         label: 'Scan could not complete',
-        icon: '🛡️',
+        icon: '',
+        iconName: 'shield',
         badgeClass: 'badge-warning badge-outline',
         title:
           'The security scan could not be completed for this tool. This is not a threat verdict — retry the scan or review the description manually.',

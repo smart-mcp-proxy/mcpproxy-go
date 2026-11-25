@@ -108,7 +108,7 @@
           @click="tab = 'surface'"
         >
           <span class="text-xs font-semibold leading-tight">Surface</span>
-          <span class="text-[0.7rem] font-normal leading-tight">{{ activeMeta.label }}</span>
+          <span class="text-xs font-normal leading-tight">{{ activeMeta.label }}</span>
         </button>
         <button
           type="button"
@@ -121,7 +121,7 @@
           @click="tab = 'detail'"
         >
           <span class="text-xs font-semibold leading-tight">Schema detail</span>
-          <span class="text-[0.7rem] font-normal leading-tight">{{ detailTabValue }}</span>
+          <span class="text-xs font-normal leading-tight">{{ detailTabValue }}</span>
         </button>
       </div>
 
@@ -180,7 +180,7 @@
                 :data-test="`mode-option-${m.mode}-prereq`"
               >{{ unmetPrerequisite(m) }}</span>
             </span>
-            <code class="text-[0.65rem] font-mono text-base-content/60 shrink-0">{{ m.endpoint }}</code>
+            <code class="text-xs font-mono text-base-content/60 shrink-0">{{ m.endpoint }}</code>
           </button>
         </div>
 

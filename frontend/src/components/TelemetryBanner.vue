@@ -2,7 +2,7 @@
   <!-- Inline variant: the wizard's Verify-step one-liner (Spec 109-b FR-044). -->
   <p
     v-if="variant === 'inline' && visible"
-    class="mt-4 border-t border-base-300 pt-3 text-[11px] opacity-60 flex items-center gap-2"
+    class="mt-4 border-t border-base-300 pt-3 text-xs opacity-60 flex items-center gap-2"
     data-test="wizard-telemetry-notice"
     :data-mode="mode"
   >

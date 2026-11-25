@@ -49,23 +49,23 @@ describe('Activity Type Rendering', () => {
 
   describe('getTypeIcon', () => {
     it('returns wrench icon for tool_call', () => {
-      expect(getTypeIcon('tool_call')).toBe('🔧')
+      expect(getTypeIcon('tool_call')).toBe('wrench')
     })
 
     it('returns shield icon for policy_decision', () => {
-      expect(getTypeIcon('policy_decision')).toBe('🛡️')
+      expect(getTypeIcon('policy_decision')).toBe('shield')
     })
 
     it('returns warning icon for quarantine_change', () => {
-      expect(getTypeIcon('quarantine_change')).toBe('⚠️')
+      expect(getTypeIcon('quarantine_change')).toBe('alert')
     })
 
     it('returns refresh icon for server_change', () => {
-      expect(getTypeIcon('server_change')).toBe('🔄')
+      expect(getTypeIcon('server_change')).toBe('refresh')
     })
 
     it('returns clipboard icon for unknown type', () => {
-      expect(getTypeIcon('unknown')).toBe('📋')
+      expect(getTypeIcon('unknown')).toBe('clipboard')
     })
   })
 })
@@ -110,19 +110,19 @@ describe('Status Badge Colors', () => {
 
   describe('getIntentIcon', () => {
     it('returns book icon for read operation', () => {
-      expect(getIntentIcon('read')).toBe('📖')
+      expect(getIntentIcon('read')).toBe('eye')
     })
 
     it('returns pencil icon for write operation', () => {
-      expect(getIntentIcon('write')).toBe('✏️')
+      expect(getIntentIcon('write')).toBe('pencil')
     })
 
     it('returns warning icon for destructive operation', () => {
-      expect(getIntentIcon('destructive')).toBe('⚠️')
+      expect(getIntentIcon('destructive')).toBe('alert')
     })
 
     it('returns question icon for unknown operation', () => {
-      expect(getIntentIcon('unknown')).toBe('❓')
+      expect(getIntentIcon('unknown')).toBe('question')
     })
   })
 
@@ -196,15 +196,15 @@ describe('intentPresentation', () => {
   it('renders glyph + reason and a full hover title', () => {
     const p = intentPresentation({ operation_type: 'read', reason: 'list open issues' })
     expect(p.present).toBe(true)
-    expect(p.icon).toBe('📖')
+    expect(p.icon).toBe('eye')
     expect(p.label).toBe('read')
     expect(p.reason).toBe('list open issues')
     expect(p.title).toBe('read — list open issues')
   })
 
   it('uses the pencil glyph for write and the warning glyph for destructive', () => {
-    expect(intentPresentation({ operation_type: 'write' }).icon).toBe('✏️')
-    expect(intentPresentation({ operation_type: 'destructive' }).icon).toBe('⚠️')
+    expect(intentPresentation({ operation_type: 'write' }).icon).toBe('pencil')
+    expect(intentPresentation({ operation_type: 'destructive' }).icon).toBe('alert')
   })
 
   it('falls back to just the glyph when no reason was declared', () => {
@@ -279,7 +279,7 @@ describe('activeFilterChips', () => {
 
   it('emits one chip per selected type, icon included', () => {
     const chips = activeFilterChips({ types: ['tool_call', 'preflight'] })
-    expect(chips.map(c => c.label)).toEqual(['🔧 Tool Call', '🛫 Preflight'])
+    expect(chips.map(c => c.label)).toEqual(['Tool Call', 'Preflight'])
     expect(chips.map(c => c.kind)).toEqual(['type', 'type'])
     expect(chips.map(c => c.value)).toEqual(['tool_call', 'preflight'])
   })
@@ -308,9 +308,9 @@ describe('activeFilterChips', () => {
     expect(chips.map(c => c.label)).toEqual([
       'Server: github',
       'Status: error',
-      'Auth: 🤖 Agent',
+      'Auth: Agent',
       'Agent: claude',
-      'Sensitive: ⚠️ Detected',
+      'Sensitive: Detected',
       'Severity: critical',
       'Session: Claude Code · 14:32',
     ])

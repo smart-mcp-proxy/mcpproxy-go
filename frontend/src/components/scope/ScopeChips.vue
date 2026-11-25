@@ -14,7 +14,7 @@
       <button
         type="button"
         class="btn btn-ghost btn-xs btn-circle min-h-6 h-6 w-6"
-        :aria-label="`Remove ${item.label} filter`"
+        :aria-label="`Remove ${item.label} filter (${item.name})`"
         :data-test="`scope-chip-remove-${item.name}`"
         @click="item.remove()"
       >
@@ -66,7 +66,15 @@ const props = defineProps<{
 const SCOPE_NAMES = ['profile', 'client', 'token'] as const
 
 const route = useRoute()
-const { chipLabel } = useScopeLabels()
+const { chipLabel: baseChipLabel, valueLabel } = useScopeLabels()
+
+// Spec 134 FR-016: the profile and client filters are the "View as" scope, so
+// their chips read "Viewing as <name>". The token chip keeps its wording.
+function chipLabel(name: ScopeName, value: string): string {
+  return (name === 'profile' || name === 'client') && value !== '-'
+    ? `Viewing as ${valueLabel(name, value)}`
+    : baseChipLabel(name, value)
+}
 
 interface Item {
   name: ScopeName

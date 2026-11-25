@@ -73,7 +73,7 @@ describe('Usage scope params (Spec 108-j)', () => {
     const { wrapper } = await mountUsageAt('/usage?profile=work-ro')
     expect(getUsageMock).toHaveBeenCalledTimes(1)
     expect(getUsageMock.mock.calls[0][0]).toEqual(expect.objectContaining({ profile: 'work-ro' }))
-    expect(wrapper.get('[data-test="usage-scope-chips"] [data-test="scope-chip-profile"]').text()).toContain('Profile: Work')
+    expect(wrapper.get('[data-test="usage-scope-chips"] [data-test="scope-chip-profile"]').text()).toContain('Viewing as Work')
     expect(wrapper.get('[data-test="usage-tokens-saved-scoped"]').text()).toContain('not computed for a filtered view')
     expect(wrapper.find('[data-test="usage-tokens-saved-tile"]').exists()).toBe(false)
   })

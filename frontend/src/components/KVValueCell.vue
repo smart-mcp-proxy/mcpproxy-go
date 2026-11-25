@@ -16,7 +16,7 @@
     <!-- Keyring reference: rendered as a chip; no convert affordance. -->
     <template v-if="isKeyringRef">
       <span class="badge badge-info badge-sm gap-1" :title="rawValue">
-        <span aria-hidden="true">🔑</span>
+        <UiIcon name="key" class="w-4 h-4" />
         <span class="font-mono text-xs">stored in keyring: {{ keyringName }}</span>
       </span>
     </template>
@@ -47,7 +47,7 @@
         @click="$emit('convert')"
         :disabled="busy"
       >
-        <span aria-hidden="true">🔒</span>
+        <UiIcon name="lock" class="w-4 h-4" />
         <span class="hidden md:inline ml-1">Convert to secret</span>
       </button>
     </template>
@@ -57,6 +57,7 @@
 </template>
 
 <script setup lang="ts">
+import UiIcon from '@/components/UiIcon.vue'
 import { computed, nextTick, ref, watch } from 'vue'
 
 // KVValueCell encapsulates the per-row UI for the Headers and Environment

@@ -12,7 +12,7 @@
         class="peer"
       />
       <div class="collapse-title text-base font-medium flex items-center gap-2">
-        <span class="text-2xl">{{ hint.icon }}</span>
+        <UiIcon :name="hint.icon" class="w-6 h-6" />
         <span>{{ hint.title }}</span>
       </div>
       <div class="collapse-content">
@@ -37,7 +37,7 @@
                   class="btn btn-xs btn-ghost"
                   title="Copy to clipboard"
                 >
-                  📋 Copy
+                  <UiIcon name="copy" class="w-4 h-4" /> Copy
                 </button>
               </div>
               <pre class="text-xs overflow-x-auto"><code>{{ section.codeBlock.code }}</code></pre>
@@ -54,6 +54,8 @@
 </template>
 
 <script setup lang="ts">
+import UiIcon from '@/components/UiIcon.vue'
+import type { UiIconName } from '@/utils/uiIcons'
 import { ref } from 'vue'
 
 export interface HintSection {
@@ -68,7 +70,7 @@ export interface HintSection {
 }
 
 export interface Hint {
-  icon: string
+  icon: UiIconName
   title: string
   description?: string
   sections: HintSection[]

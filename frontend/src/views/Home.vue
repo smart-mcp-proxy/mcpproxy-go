@@ -223,7 +223,7 @@
                  data-test="overview-proxy-state">
               {{ systemStore.isRunning ? 'active' : 'stopped' }}
             </div>
-            <div v-if="uptime" class="text-[10px] text-base-content/60">{{ uptime }}</div>
+            <div v-if="uptime" class="text-xs text-base-content/60">{{ uptime }}</div>
           </div>
         </div>
 
@@ -734,7 +734,7 @@ const dashboardHints = computed<Hint[]>(() => {
   const hints: Hint[] = []
 
   hints.push({
-    icon: '\u{1F4A1}',
+    icon: 'lightbulb',
     title: 'CLI Commands for Managing MCPProxy',
     description: 'Useful commands for working with MCPProxy',
     sections: [
@@ -763,7 +763,7 @@ const dashboardHints = computed<Hint[]>(() => {
   })
 
   hints.push({
-    icon: '\u{1F916}',
+    icon: 'bot',
     title: 'Use MCPProxy with LLM Agents',
     description: 'Connect Claude or other LLM agents to MCPProxy',
     sections: [

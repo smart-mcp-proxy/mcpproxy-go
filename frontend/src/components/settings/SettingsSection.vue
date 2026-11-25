@@ -15,7 +15,7 @@
     <div class="flex items-center justify-between pt-2">
       <div class="text-sm min-h-[1.25rem]">
         <span v-if="lastResult?.requires_restart" class="text-warning" :data-test="`settings-restart-${sectionId}`">
-          ⚠️ Saved — restart required{{ lastResult.restart_reason ? `: ${lastResult.restart_reason}` : '' }}
+          <UiIcon name="alert" class="w-4 h-4 inline" /> Saved — restart required{{ lastResult.restart_reason ? `: ${lastResult.restart_reason}` : '' }}
         </span>
         <span v-else-if="lastResult" class="text-success" :data-test="`settings-saved-${sectionId}`">
           ✓ Saved
@@ -76,6 +76,7 @@
 </template>
 
 <script setup lang="ts">
+import UiIcon from '@/components/UiIcon.vue'
 import { ref, computed, getCurrentInstance } from 'vue'
 import SettingField from './SettingField.vue'
 import { getPath, setPath, buildPartial, validateField, SAVE_CHANGES_LABEL, type SettingField as Field } from '@/views/settings/fields'

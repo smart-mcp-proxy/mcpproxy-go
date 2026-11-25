@@ -84,7 +84,7 @@ describe('ClientConnectList', () => {
     expect(wrapper.text()).toContain('/Users/test/.config/opencode/opencode.json')
   })
 
-  it('renders emoji icons for OpenCode, Gemini, and Codex', async () => {
+  it('renders SVG icons for OpenCode, Gemini, and Codex', async () => {
     ;(api.getConnectStatus as any).mockResolvedValue({
       success: true,
       data: [
@@ -126,9 +126,9 @@ describe('ClientConnectList', () => {
     await wrapper.setProps({ show: true })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('⚡')
-    expect(wrapper.text()).toContain('♊')
-    expect(wrapper.text()).toContain('⌘')
+    expect(wrapper.find('[data-test="client-icon-opencode"] [data-icon="bolt"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="client-icon-gemini"] [data-icon="sparkles"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="client-icon-codex"] [data-icon="cog"]').exists()).toBe(true)
   })
 
   it('renders a Connect button and bridge note for Claude Desktop', async () => {

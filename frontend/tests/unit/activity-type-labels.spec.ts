@@ -29,9 +29,12 @@ describe('activity type labels', () => {
     const types = Object.keys(ACTIVITY_TYPE_LABELS)
     const icons = types.map(getTypeIcon)
     types.forEach((type, i) => {
-      expect(icons[i], `${type} falls back to the generic glyph`).not.toBe('📋')
+      expect(icons[i], `${type} falls back to the generic glyph`).not.toBe('clipboard')
     })
-    expect(new Set(icons).size, 'two activity types share an icon').toBe(icons.length)
+    // Every type has its own glyph: at 390 px the Type column is hidden and the
+    // glyph is the only marker (Spec 134 FR-005, FR-039: the two skill types too).
+    const shared = icons.filter((icon, i) => icons.indexOf(icon) !== i)
+    expect(shared, 'two activity types share an icon').toEqual([])
   })
 
   it('humanises snake_case', () => {

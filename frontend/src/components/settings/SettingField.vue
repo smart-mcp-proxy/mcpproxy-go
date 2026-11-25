@@ -87,7 +87,7 @@
             @input="emitVal(($event.target as HTMLInputElement).value)"
           />
           <button type="button" class="btn btn-sm join-item" :title="showSecret ? 'Hide' : 'Show'" @click="showSecret = !showSecret">
-            {{ showSecret ? '🙈' : '👁' }}
+            <UiIcon :name="showSecret ? 'eyeOff' : 'eye'" class="w-4 h-4" />
           </button>
           <button
             type="button"
@@ -98,7 +98,7 @@
             :disabled="!modelValue"
             @click="copy"
           >
-            {{ copied ? '✓' : '📋' }}
+            <template v-if="copied">✓</template><UiIcon v-else name="copy" class="w-4 h-4" />
           </button>
           <button
             type="button"
@@ -183,6 +183,7 @@
 </template>
 
 <script setup lang="ts">
+import UiIcon from '@/components/UiIcon.vue'
 import { ref, computed } from 'vue'
 import { docsUrl, validateField, type SettingField } from '@/views/settings/fields'
 

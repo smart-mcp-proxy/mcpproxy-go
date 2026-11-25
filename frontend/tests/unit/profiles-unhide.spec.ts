@@ -67,7 +67,7 @@ vi.mock('@/composables/useSecurityScannerStatus', () => ({
 import SidebarNav from '@/components/SidebarNav.vue'
 import AddMenu from '@/components/AddMenu.vue'
 import CommandPalette from '@/components/CommandPalette.vue'
-import ViewingFilter from '@/components/ViewingFilter.vue'
+import ViewingFilter from '@/components/ViewAs.vue'
 import Clients from '@/views/Clients.vue'
 import AgentTokens from '@/views/AgentTokens.vue'
 import Servers from '@/views/Servers.vue'

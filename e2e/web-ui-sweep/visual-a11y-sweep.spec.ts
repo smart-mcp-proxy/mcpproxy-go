@@ -25,7 +25,7 @@ const VIEWPORTS = [
   { name: 'mobile', width: 390, height: 844 },
 ] as const
 
-const ROUTES = ['/', '/servers', '/activity', '/tools', '/sessions'] as const
+const ROUTES = ['/', '/servers', '/activity', '/tools', '/sessions', '/review', '/secrets'] as const
 
 function url(route: string): string {
   const sep = route.includes('?') ? '&' : '?'
@@ -554,7 +554,7 @@ test('mobile drawer sidebar paints above the sticky header, not under it (H4)', 
   )
   expect(beforeOpen, 'test point does not land on the header before the drawer opens').toBe(true)
 
-  await page.locator('label[for="sidebar-drawer"][aria-label="Open navigation menu"]').click()
+  await page.locator('[data-test="header-drawer-toggle"]').click()
   await expect(page.locator('#sidebar-drawer')).toBeChecked()
 
   // daisyUI's drawer opens via a `visibility`/`opacity` CSS transition

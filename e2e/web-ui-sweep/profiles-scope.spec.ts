@@ -105,7 +105,7 @@ test('1. Tools view-as: filtered from the first render, greyed rows with reasons
   await open(page, `/tools?client=${SCOPE_CLIENT}`)
   await firstScoped
   expect(scopedSeen).toBe(true)
-  await expect(page.locator('[data-test="scope-chip-client"]')).toContainText('Client: E2E Scope')
+  await expect(page.locator('[data-test="scope-chip-client"]')).toContainText('Viewing as E2E Scope')
   await page.waitForTimeout(500)
   await expect(page.locator('[data-test="tool-row"]'), 'no rows before the scoped answer').toHaveCount(0)
   await page.unroute('**/api/v1/tools?client=*')
@@ -150,7 +150,7 @@ test('2. Usage carries the profile and does not print a false "0 tokens saved"',
   const scopedUsage = page.waitForRequest(request => request.url().includes('/api/v1/activity/usage') && request.url().includes(`profile=${SCOPE_PROFILE}`))
   await open(page, `/usage?profile=${SCOPE_PROFILE}`)
   await scopedUsage
-  await expect(page.locator('[data-test="usage-scope-chips"] [data-test="scope-chip-profile"]')).toContainText('Profile: E2E Scope RO')
+  await expect(page.locator('[data-test="usage-scope-chips"] [data-test="scope-chip-profile"]')).toContainText('Viewing as E2E Scope RO')
   await expect(page.locator('[data-test="usage-tokens-saved-scoped"]')).toContainText('not computed for a filtered view')
   await expect(page.locator('[data-test="usage-tokens-saved-tile"]')).toHaveCount(0)
   await shot(page, 'usage-1440')
@@ -192,7 +192,7 @@ test('5. A blocked call: attribution chips, Allow in profile… and Why?', async
   const firstActivity = page.waitForRequest(request => /\/api\/v1\/activity\?/.test(request.url()))
   await open(page, `/activity?client=${SCOPE_CLIENT}&status=blocked`)
   expect((await firstActivity).url()).toContain(`client=${SCOPE_CLIENT}`)
-  await expect(page.locator('[data-test="scope-chip-client"]')).toContainText('Client: E2E Scope')
+  await expect(page.locator('[data-test="scope-chip-client"]')).toContainText('Viewing as E2E Scope')
   const rows = page.locator('[data-test="activity-row"]')
   await expect(rows).toHaveCount(1)
   await expect(rows.first()).toContainText('echo')

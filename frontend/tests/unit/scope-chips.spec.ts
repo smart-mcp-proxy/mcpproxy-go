@@ -46,21 +46,21 @@ describe('ScopeChips (Spec 108-j J4)', () => {
 
   it('labels come from the stores: profile title, client display name, token name', async () => {
     const { wrapper } = await mountChips('/activity?profile=work-ro&client=cursor&token=ro-bot', 'activity')
-    expect(wrapper.get('[data-test="scope-chip-profile"]').text()).toContain('Profile: Work')
-    expect(wrapper.get('[data-test="scope-chip-client"]').text()).toContain('Client: Cursor')
+    expect(wrapper.get('[data-test="scope-chip-profile"]').text()).toContain('Viewing as Work')
+    expect(wrapper.get('[data-test="scope-chip-client"]').text()).toContain('Viewing as Cursor')
     expect(wrapper.get('[data-test="scope-chip-token"]').text()).toContain('Token: ro-bot')
   })
 
   it('an unknown value falls back to the raw id; - renders as unattributed', async () => {
     const { wrapper } = await mountChips('/activity?client=ghost&profile=-', 'activity')
-    expect(wrapper.get('[data-test="scope-chip-client"]').text()).toContain('Client: ghost')
+    expect(wrapper.get('[data-test="scope-chip-client"]').text()).toContain('Viewing as ghost')
     expect(wrapper.get('[data-test="scope-chip-profile"]').text()).toContain('Profile: unattributed')
   })
 
   it('every remove button has an aria-label naming the filter, and removing writes the URL without it', async () => {
     const { wrapper, router } = await mountChips('/activity?client=cursor&status=blocked', 'activity')
     const remove = wrapper.get('[data-test="scope-chip-remove-client"]')
-    expect(remove.attributes('aria-label')).toBe('Remove Client: Cursor filter')
+    expect(remove.attributes('aria-label')).toBe('Remove Viewing as Cursor filter (client)')
     await remove.trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.query).toEqual({ status: 'blocked' })

@@ -6,11 +6,11 @@
         <div v-for="source in detectedSources" :key="source.path" :data-test="`import-section-${source.format}`" class="border-b border-base-300 last:border-b-0">
           <label class="flex items-center gap-3 px-3 py-2 bg-base-200/50 cursor-pointer">
             <input v-model="source.all" type="checkbox" class="checkbox checkbox-sm" :data-test="`select-all-${source.format}`" @change="toggleSource(source)" />
-            <span class="min-w-0"><span class="font-medium text-sm">{{ source.name }}</span><span class="block text-[11px] opacity-50 font-mono truncate">{{ source.path }}</span></span>
+            <span class="min-w-0"><span class="font-medium text-sm">{{ source.name }}</span><span class="block text-xs opacity-50 font-mono truncate">{{ source.path }}</span></span>
           </label>
           <label v-for="server in source.servers" :key="server.name" class="flex items-start gap-3 pl-10 pr-3 py-2 hover:bg-base-200/40 cursor-pointer">
             <input v-model="source.selected[server.name]" type="checkbox" class="checkbox checkbox-sm mt-0.5" :data-test="`server-checkbox-${source.format}-${server.name}`" @change="syncAll(source)" />
-            <span class="min-w-0"><span class="text-sm block">{{ server.name }}</span><span :data-test="`import-summary-${source.format}-${server.name}`" class="text-[11px] opacity-50 font-mono block truncate">{{ server.summary }}</span>
+            <span class="min-w-0"><span class="text-sm block">{{ server.name }}</span><span :data-test="`import-summary-${source.format}-${server.name}`" class="text-xs opacity-50 font-mono block truncate">{{ server.summary }}</span>
               <span v-if="server.tags?.length" class="mt-1 flex flex-wrap gap-1">
                 <span v-for="tag in server.tags" :key="tag" :data-test="`import-tag-${source.format}-${server.name}-${tag.replaceAll(' ', '-')}`" class="badge badge-xs" :class="tag === 'needs secret' ? 'badge-warning' : 'badge-ghost'">{{ tag }}</span>
               </span>
@@ -77,7 +77,7 @@
         <span class="min-w-0">
           <span class="font-mono text-sm">{{ s.name }}</span>
           <span class="text-xs text-base-content/60 ml-2">{{ s.protocol }}</span>
-          <span v-if="s.summary" :data-test="`import-summary-preview-${s.name}`" class="text-[11px] opacity-50 font-mono block truncate">{{ s.summary }}</span>
+          <span v-if="s.summary" :data-test="`import-summary-preview-${s.name}`" class="text-xs opacity-50 font-mono block truncate">{{ s.summary }}</span>
           <span v-if="s.tags?.length" class="mt-1 flex flex-wrap gap-1">
             <span v-for="tag in s.tags" :key="tag" :data-test="`import-tag-preview-${s.name}-${tag.replaceAll(' ', '-')}`" class="badge badge-xs" :class="tag === 'needs secret' ? 'badge-warning' : 'badge-ghost'">{{ tag }}</span>
           </span>

@@ -56,7 +56,7 @@
               >U+{{ piece.hex }}</code>
               <template v-else>{{ piece.text }}</template>
             </template>
-            <sup aria-hidden="true" class="ml-0.5 text-[10px] font-bold">{{ part.segment.sources[0].index }}</sup>
+            <sup aria-hidden="true" class="ml-0.5 text-xs font-bold">{{ part.segment.sources[0].index }}</sup>
           </mark>
         </template>
       </template>

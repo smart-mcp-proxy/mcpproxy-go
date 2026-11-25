@@ -15,8 +15,8 @@
       :class="badgeClasses('info')"
       :title="compact ? 'Read-only: Does not modify data' : ''"
     >
-      <span v-if="!compact">📖 Read-only</span>
-      <span v-else>📖</span>
+      <span v-if="!compact" class="inline-flex items-center gap-1"><UiIcon name="eye" class="w-4 h-4" /> Read-only</span>
+      <UiIcon v-else name="eye" class="w-4 h-4" label="Read-only" />
     </div>
 
     <!-- Destructive -->
@@ -25,8 +25,8 @@
       :class="badgeClasses('error')"
       :title="compact ? 'Destructive: May delete or modify data' : ''"
     >
-      <span v-if="!compact">⚠️ Destructive</span>
-      <span v-else>⚠️</span>
+      <span v-if="!compact" class="inline-flex items-center gap-1"><UiIcon name="alert" class="w-4 h-4" /> Destructive</span>
+      <UiIcon v-else name="alert" class="w-4 h-4" label="Destructive" />
     </div>
 
     <!-- Idempotent -->
@@ -35,8 +35,8 @@
       :class="badgeClasses('neutral')"
       :title="compact ? 'Idempotent: Safe to retry' : ''"
     >
-      <span v-if="!compact">🔄 Idempotent</span>
-      <span v-else>🔄</span>
+      <span v-if="!compact" class="inline-flex items-center gap-1"><UiIcon name="refresh" class="w-4 h-4" /> Idempotent</span>
+      <UiIcon v-else name="refresh" class="w-4 h-4" label="Idempotent" />
     </div>
 
     <!-- Open World -->
@@ -45,13 +45,14 @@
       :class="badgeClasses('secondary')"
       :title="compact ? 'Open World: May access external resources' : ''"
     >
-      <span v-if="!compact">🌐 Open World</span>
-      <span v-else>🌐</span>
+      <span v-if="!compact" class="inline-flex items-center gap-1"><UiIcon name="globe" class="w-4 h-4" /> Open World</span>
+      <UiIcon v-else name="globe" class="w-4 h-4" label="Open World" />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
+import UiIcon from '@/components/UiIcon.vue'
 import { computed } from 'vue'
 import type { ToolAnnotation } from '@/types/api'
 

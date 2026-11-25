@@ -8,7 +8,7 @@
     <button
       ref="trigger"
       type="button"
-      class="btn btn-primary"
+      class="btn btn-outline"
       aria-haspopup="menu"
       :aria-expanded="open ? 'true' : 'false'"
       aria-label="Add"

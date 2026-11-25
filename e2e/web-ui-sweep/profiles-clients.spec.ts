@@ -184,12 +184,12 @@ test('Explain access on a client shows the verdict and a fix that lands on the f
   await expect(row).toHaveAttribute('aria-current', 'true')
 })
 
-test('the header has no Profile switcher and the Viewing chip survives navigation and Back', async ({ page }) => {
-  await open(page, '/clients')
+test('the header has no Profile switcher and "View as" survives navigation and Back', async ({ page }) => {
+  await open(page, '/tools')
   await expect(page.locator('header')).not.toContainText('Profile:')
   await expect(page.locator('[data-test="profile-switcher"]')).toHaveCount(0)
   const chip = page.locator('[data-test="viewing-filter-button"]')
-  await expect(chip).toContainText('Viewing: all')
+  await expect(chip).toContainText('View as: everyone')
   await chip.click()
   await page.locator('[data-test="viewing-profile-select"]').selectOption(WORK)
   await expect(page).toHaveURL(new RegExp(`profile=${WORK}`))
@@ -200,6 +200,7 @@ test('the header has no Profile switcher and the Viewing chip survives navigatio
   await expect(chip).toBeFocused()
 
   // In-app links built with the link map carry the filter: the Clients row's Tools link.
+  await open(page, `/clients?profile=${WORK}`)
   await page.locator('tbody tr', { hasText: 'E2E laptop' }).first().click()
   // Spec 109-l: the link reads "Tools it sees" (url-filter-contract.md link map).
   await page.locator(`[data-test="clients-row-link-tools-${CLIENT_ID}"]`).click()
@@ -207,6 +208,7 @@ test('the header has no Profile switcher and the Viewing chip survives navigatio
   await expect(chip).toContainText(WORK)
   await page.goBack()
   await expect(page).toHaveURL(new RegExp(`/ui/clients.*profile=${WORK}`))
+  await page.goForward()
   await expect(chip).toContainText(WORK)
   await page.locator('[data-test="viewing-filter-clear"]').click()
   await expect(page).not.toHaveURL(/profile=/)
@@ -221,7 +223,7 @@ for (const width of [1440, 1100, 900, 390]) {
       const overflow = await page.evaluate(() => ({ scroll: document.scrollingElement!.scrollWidth, inner: window.innerWidth }))
       expect(overflow.scroll, `${route} at ${width}px`).toBeLessThanOrEqual(overflow.inner)
       // The header row and the Viewing chip stay inside the viewport.
-      for (const selector of ['[data-test="header-row"]', '[data-test="viewing-filter-button"]', '[data-test="header-add-menu"]']) {
+      for (const selector of ['[data-test="header-row"]', '[data-test="header-add-server"]', '[data-test="header-add-menu"]']) {
         const box = await page.locator(selector).first().boundingBox()
         if (!box) continue
         expect(box.x, `${selector} left edge at ${width}px`).toBeGreaterThanOrEqual(-1)

@@ -188,6 +188,7 @@
 
         <!-- Spec 108-j J4: the profile/client/token chips (removable), with the
              disabled variants for a value Tools cannot apply. -->
+        <div class="mt-2 empty:hidden" data-test="tools-view-as"><ViewAs :conflict="scopeConflict" /></div>
         <div v-if="scopeQuery" class="mt-2" data-test="tools-scope-chips">
           <ScopeChips
             page="tools"
@@ -537,7 +538,7 @@
                     :title="holdEvidenceFor(tool)!.description"
                     data-test="tool-hold-evidence"
                   >
-                    <span aria-hidden="true">{{ holdEvidenceFor(tool)!.icon }}</span>
+                    <UiIcon :name="holdEvidenceFor(tool)!.icon" class="w-3 h-3" />
                     <span
                       v-if="holdEvidenceFor(tool)!.verdict"
                       class="badge badge-xs"
@@ -707,6 +708,8 @@
 </template>
 
 <script setup lang="ts">
+import UiIcon from '@/components/UiIcon.vue'
+import type { UiIconName } from '@/utils/uiIcons'
 import { serverDetailPath, reviewPath } from '@/utils/serverRoute'
 import { tierLabel, toolApprovalLabel } from '@/utils/toolQuarantine'
 import { formatDate } from '@/utils/datetime'
@@ -716,6 +719,7 @@ import { isScopeParamAvailable, useScopeQuery } from '@/composables/useScopeQuer
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import AccessExplainer from '@/components/AccessExplainer.vue'
 import ScopeChips from '@/components/scope/ScopeChips.vue'
+import ViewAs from '@/components/ViewAs.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { GlobalTool, GlobalToolsStats, ViewAsCounts } from '@/types/api'
 import { parseHoldEvidence, displaySignals, reasonPresentation, verdictPresentation } from '@/utils/holdEvidence'
@@ -1236,7 +1240,7 @@ function getApprovalBadgeClass(status: string): string {
 const COMPACT_SIGNAL_CAP = 1
 
 interface CompactHoldEvidence {
-  icon: string
+  icon: UiIconName
   /** Plain-language reason; shown inline when there are no signal chips. */
   label: string
   description: string
@@ -1263,7 +1267,7 @@ function buildHoldEvidence(tool: GlobalTool): CompactHoldEvidence | null {
   const { visible, collapsedCount } = displaySignals(evidence, COMPACT_SIGNAL_CAP)
 
   return {
-    icon: reason.tone === 'threat' ? '⚠️' : reason.tone === 'precaution' ? '🛡️' : 'ℹ️',
+    icon: (reason.tone === 'threat' ? 'alert' : reason.tone === 'precaution' ? 'shield' : 'info') as UiIconName,
     label: reason.label,
     description: reason.description,
     toneClass:
@@ -1553,7 +1557,7 @@ watch(pageSize, () => { currentPage.value = 1 })
 // ---- Hints ----
 const toolsHints = computed<Hint[]>(() => [
   {
-    icon: '🔍',
+    icon: 'search',
     title: 'Global Tools Overview',
     description: 'See every tool across all configured MCP servers in one place',
     sections: [

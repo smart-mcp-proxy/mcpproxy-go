@@ -14,7 +14,7 @@
     :aria-label="title"
     data-test="oauth-signin-panel"
   >
-    <span class="text-2xl shrink-0" aria-hidden="true">🔑</span>
+    <UiIcon name="key" class="w-6 h-6 shrink-0" />
     <div class="w-full">
       <h3 class="font-bold" data-test="oauth-signin-title">{{ title }}</h3>
       <p class="text-sm mt-1" data-test="oauth-signin-body">{{ body }}</p>
@@ -59,6 +59,7 @@
 </template>
 
 <script setup lang="ts">
+import UiIcon from '@/components/UiIcon.vue'
 import { computed } from 'vue'
 import type { OAuthSignInState } from '@/utils/health'
 
@@ -82,8 +83,8 @@ const isReauth = computed(() => props.state === 'reauth')
 
 const title = computed(() =>
   isReauth.value
-    ? `🔑 Session expired — sign in to ${props.serverName}`
-    : `🔑 Sign in to ${props.serverName}`,
+    ? `Session expired — sign in to ${props.serverName}`
+    : `Sign in to ${props.serverName}`,
 )
 
 const body = computed(() =>

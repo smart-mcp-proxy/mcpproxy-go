@@ -53,6 +53,7 @@
           <option v-if="profileOrphan" :value="profileValue">{{ profileValue }}</option>
         </select>
       </div>
+      <ViewAs />
       <ScopeChips page="servers" :scope-query="scopeQuery" :disabled="disabledScope" :unavailable="scopeUnavailableNames" />
     </div>
 
@@ -367,6 +368,7 @@ import api from '@/services/api'
 import type { Server } from '@/types'
 import ServerCard from '@/components/ServerCard.vue'
 import ScopeChips from '@/components/scope/ScopeChips.vue'
+import ViewAs from '@/components/ViewAs.vue'
 import { isServerConnected } from '@/utils/health'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
@@ -701,7 +703,7 @@ async function scanAllServers() {
 const serversHints = computed<Hint[]>(() => {
   return [
     {
-      icon: '➕',
+      icon: 'plus',
       title: 'Add New MCP Servers',
       description: 'Multiple ways to add servers to MCPProxy',
       sections: [
@@ -729,7 +731,7 @@ const serversHints = computed<Hint[]>(() => {
       ]
     },
     {
-      icon: '🔧',
+      icon: 'wrench',
       title: 'Manage Servers via CLI',
       description: 'Common server management operations',
       sections: [
@@ -757,7 +759,7 @@ const serversHints = computed<Hint[]>(() => {
       ]
     },
     {
-      icon: '🤖',
+      icon: 'bot',
       title: 'Use LLM Agents to Manage Servers',
       description: 'Let AI agents help you configure MCPProxy',
       sections: [

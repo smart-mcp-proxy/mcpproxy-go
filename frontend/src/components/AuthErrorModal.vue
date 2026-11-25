@@ -7,8 +7,8 @@
       aria-modal="true"
       aria-labelledby="auth-error-modal-title"
     >
-      <h3 id="auth-error-modal-title" class="font-bold text-lg text-error mb-4">
-        🔒 Authentication Required
+      <h3 id="auth-error-modal-title" class="font-bold text-lg text-error mb-4 flex items-center gap-2">
+        <UiIcon name="lock" class="w-4 h-4" /> Authentication Required
       </h3>
 
       <div class="mb-6">
@@ -118,6 +118,7 @@
 </template>
 
 <script setup lang="ts">
+import UiIcon from '@/components/UiIcon.vue'
 import { ref, computed, watch } from 'vue'
 import api from '@/services/api'
 import { useModalA11y } from '@/composables/useModalA11y'
