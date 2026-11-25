@@ -28,6 +28,29 @@ describe('serverReason', () => {
     expect(failurePattern(s)).not.toBe('')
   })
 
+  it('a classified code beats free text: a timeout mentioning a missing path is a timeout, npx with nothing to run is not "not found"', () => {
+    const timeout = srv({ status: 'error', last_error: 'x /etc/foo: no such file or directory executable file not found', diagnostic: { code: 'MCPX_STDIO_HANDSHAKE_TIMEOUT', severity: 'error' } as any })
+    expect(serverReason(timeout)).toBe('Timed out')
+    const noArgs = srv({ status: 'error', command: 'npx', last_error: 'exit 1', diagnostic: { code: 'MCPX_CONFIG_INVALID_COMMAND', severity: 'error', user_message: 'npx needs a package to run' } as any })
+    expect(serverReason(noArgs)).toBe('npx needs a package to run')
+  })
+
+  it('token refresh pending is not "Sign-in expired"', () => {
+    const s = srv({ status: 'connecting', summary: 'Token refresh pending', health: undefined } as any)
+    s.health = { level: 'degraded', admin_state: 'enabled', summary: 'Token refresh pending', detail: 'access token expired; refresh retrying', status: 'connecting', usable: false, actions: ['view_logs'] } as any
+    expect(serverReason(s)).toBe('Token refresh pending')
+  })
+
+  it('the diagnostic message leads the summary (FR-022), the summary leads the raw error', () => {
+    const s = srv({ status: 'error', summary: 'Access forbidden', last_error: 'HTTP 403', diagnostic: { code: 'MCPX_HTTP_403', severity: 'error', user_message: 'The server returned 403 Forbidden' } as any })
+    expect(serverReason(s)).toBe('The server returned 403 Forbidden')
+  })
+
+  it('a health payload with neither status nor summary never reads Connected when unusable', () => {
+    const s = { name: 'x', protocol: 'stdio', enabled: true, quarantined: false, connected: true, connecting: false, tool_count: 0, health: { level: 'unhealthy', admin_state: 'enabled', summary: '', usable: false, actions: [] } } as any
+    expect(serverReason(s)).toBe('Unavailable')
+  })
+
   it('command not found without a command says only that', () => {
     expect(serverReason(srv({ status: 'error', last_error: 'executable file not found' }))).toBe('Command not found')
   })

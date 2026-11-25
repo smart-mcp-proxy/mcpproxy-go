@@ -25,7 +25,8 @@ describe('FR-024 order', () => {
   })
   it('legacy servers without health are placed by their fields', () => {
     const down = srv('down', null); const up = srv('up', null, { connected: true }); const off = srv('off', null, { enabled: false })
-    expect(sortServers([off, up, down]).map(s => s.name)).toEqual(['down', 'up', 'off'])
+    const held = srv('held', null, { connected: true, quarantined: true })
+    expect(sortServers([off, up, down, held]).map(s => s.name)).toEqual(['down', 'held', 'up', 'off'])
   })
   it('does not mutate its input', () => {
     const list = [srv('b', 'ready'), srv('a', 'error')]
@@ -67,6 +68,10 @@ describe('FR-023 resolveFilter', () => {
   it.each(['connected', 'enabled', 'quarantined', 'needs_review'])('legacy status=%s keeps its meaning', s => {
     expect(resolveFilter({ ...base, status: s })).toBe(s)
     expect(resolveFilter({ ...base, status: s, filter: 'online' })).toBe(s)
+  })
+  it('a valueless ?filter or ?status is not a bare visit', () => {
+    expect(resolveFilter({ ...base, wide: false, filter: null })).toBe('all')
+    expect(resolveFilter({ ...base, wide: false, status: null })).toBe('all')
   })
   it('status=all is All; unknown status is ignored', () => {
     expect(resolveFilter({ ...base, wide: false, status: 'all' })).toBe('all')

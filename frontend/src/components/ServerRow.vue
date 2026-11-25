@@ -102,8 +102,9 @@
                 class="disabled opacity-50 tooltip tooltip-right"
                 :data-tip="scanDisabledReason"
                 :title="scanDisabledReason"
+                aria-disabled="true"
                 data-test="server-card-scan-disabled"
-              >Scan</span>
+              >Scan<span class="block text-xs font-normal whitespace-normal" data-test="server-card-scan-disabled-reason">{{ scanDisabledReason }}</span></span>
             </li>
             <li>
               <button type="button" @click="restart" :disabled="loading" data-test="server-card-menu-restart">Restart</button>
@@ -509,14 +510,17 @@ async function confirmDelete() {
 </script>
 <style scoped>
 /* Fixed row height at desktop widths; the table header (Servers.vue) uses the
-   same grid. Reason and last call never wrap (FR-020). Below 768 px the row
-   stacks: name + status, reason, tools + last call, action + more. */
+   same grid. Reason and last call never wrap (FR-020). The desktop columns need
+   about 900 px of table; below a 1200 px viewport (sidebar included) the row
+   stacks: name + status, reason, tools + last call, action + more, with 44 px
+   targets. A container query would be neater, but layout containment would make
+   the table the containing block of the fixed delete dialog. */
 .server-row {
   display: grid;
   grid-template-columns: var(--servers-cols);
   align-items: center;
   column-gap: 12px;
-  height: 52px;
+  height: 40px;
   padding: 0 12px;
   border-bottom: 1px solid var(--color-base-300, oklch(var(--b3)));
 }
@@ -527,7 +531,7 @@ async function confirmDelete() {
 .server-row__label { display: none; }
 .server-row__action { display: flex; justify-content: flex-end; }
 .server-row__more { display: flex; justify-content: flex-end; }
-@media (max-width: 767px) {
+@media (max-width: 1199px) {
   .server-row {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas: 'name status' 'reason reason' 'tools last' 'action more';
@@ -545,5 +549,6 @@ async function confirmDelete() {
   .server-row__label { display: inline; }
   .server-row__btn { min-height: 44px; }
   .server-row__btn--icon { min-width: 44px; }
+  .server-row__menu :where(li > *) { min-height: 44px; display: flex; align-items: center; }
 }
 </style>

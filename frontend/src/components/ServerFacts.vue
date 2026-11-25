@@ -26,6 +26,9 @@
         </svg>
         <span data-test="server-facts-trust-label">{{ trust.label }}{{ trust.invalid ? ' (configured value not recognised)' : '' }}</span>
       </span>
+      <!-- The tooltip is not the only place: the meaning is plain text too, so a
+           keyboard or touch user reads it without hovering. -->
+      <span class="text-base-content/60" data-test="server-facts-trust-detail">{{ trust.detail }}</span>
     </div>
 
     <div v-if="security" data-test="server-facts-security">
@@ -41,6 +44,7 @@
       <dl v-if="diagOpen" class="mt-2 space-y-2 [overflow-wrap:anywhere]">
         <div v-if="server.health?.detail"><dt class="text-base-content/60">Health detail</dt><dd data-test="server-facts-health-detail">{{ server.health.detail }}</dd></div>
         <div v-if="server.diagnostic?.user_message"><dt class="text-base-content/60">Diagnostic</dt><dd data-test="server-facts-diagnostic-message">{{ server.diagnostic.user_message }}<span v-if="server.diagnostic.code" class="text-base-content/60"> ({{ server.diagnostic.code }})</span></dd></div>
+        <div v-if="server.diagnostic?.code && !server.diagnostic?.user_message"><dt class="text-base-content/60">Diagnostic code</dt><dd data-test="server-facts-diagnostic-code">{{ server.diagnostic.code }}</dd></div>
         <div v-if="server.diagnostic?.cause"><dt class="text-base-content/60">Cause</dt><dd>{{ server.diagnostic.cause }}</dd></div>
         <div v-if="server.last_error"><dt class="text-base-content/60">Raw error</dt><dd><pre class="whitespace-pre-wrap text-xs" data-test="server-facts-raw-error">{{ server.last_error }}</pre></dd></div>
       </dl>
@@ -67,5 +71,5 @@ const security = computed(() => securityLine(props.server))
 const securityToneClass = computed(() => securityTone(props.server))
 const held = computed(() => toolQuarantineSummary(props.server))
 const hasDiagnostic = computed(() =>
-  !!(props.server.health?.detail || props.server.last_error || props.server.diagnostic?.user_message || props.server.diagnostic?.cause))
+  !!(props.server.health?.detail || props.server.last_error || props.server.diagnostic?.user_message || props.server.diagnostic?.cause || props.server.diagnostic?.code))
 </script>

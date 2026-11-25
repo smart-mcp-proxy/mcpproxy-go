@@ -84,6 +84,8 @@ export interface TrustBadge {
   title: string
   tone: string
   invalid: boolean
+  /** The mode's meaning (and, for an unrecognised value, the raw configured value) as plain text. */
+  detail: string
 }
 
 export function trustBadge(server: Server): TrustBadge {
@@ -95,7 +97,10 @@ export function trustBadge(server: Server): TrustBadge {
   const title = state.isInvalid
     ? `Trust mode: configured value "${state.raw}" is not recognized — using ${meta.label} (fail closed). ${meta.description}`
     : `${state.isDefault ? `Trust mode: ${meta.label} (default)` : `Trust mode: ${meta.label}`} — ${meta.description}`
-  return { label: meta.label, title, tone, invalid: state.isInvalid }
+  const detail = state.isInvalid
+    ? `Configured value "${state.raw}" is not recognized; using ${meta.label} (fail closed). ${meta.description}`
+    : `${state.isDefault ? 'Default. ' : ''}${meta.description}`
+  return { label: meta.label, title, tone, invalid: state.isInvalid, detail }
 }
 
 export function lastCallText(iso: string | undefined, nowMs: number): string {

@@ -1,5 +1,5 @@
 <template>
-  <div class="space-y-4">
+  <div class="space-y-3">
     <!-- Page Header -->
     <div class="flex flex-wrap justify-between items-center gap-3">
       <div>
@@ -253,6 +253,7 @@
             server.last_error,
             server.authenticated,
             server.title,
+            server.trust_mode,
             server.diagnostic?.code,
             server.diagnostic?.user_message,
             server.health?.status,
@@ -511,9 +512,12 @@ function openImportWizard() {
  * percentage. With nothing enabled there is no ratio to report, only a fact.
  */
 const connectedSummary = computed(() => {
-  const { connected, enabled } = counts.value
+  // "Online" is health.usable, the same measure as the Online chip and the header
+  // (Spec 134 FR-012); the transport-connected count is the Connected filter.
+  const { online, notOnline } = counts.value
+  const enabled = online + notOnline
   if (enabled === 0) return 'no servers enabled'
-  return `${connected} of ${enabled} enabled online`
+  return `${online} of ${enabled} enabled online`
 })
 
 // FR-023: the filter in force, from the URL (`status` legacy, `filter` chip) or
@@ -712,7 +716,7 @@ const serversHints = computed<Hint[]>(() => {
   color: color-mix(in oklab, currentColor 60%, transparent);
   border-bottom: 1px solid var(--color-base-300, oklch(var(--b3)));
 }
-@media (max-width: 767px) {
+@media (max-width: 1199px) {
   .servers-table__head { display: none; }
 }
 </style>

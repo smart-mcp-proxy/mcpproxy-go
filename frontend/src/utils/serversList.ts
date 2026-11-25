@@ -104,7 +104,8 @@ export function resolveFilter(input: FilterInputs): ServerFilter {
   if (status && (LEGACY_FILTERS as string[]).includes(status)) return status as LegacyServerFilter
   const filter = asString(input.filter)
   if (filter && (SERVER_CHIPS as string[]).includes(filter)) return filter as ServerChip
-  const bare = filter === undefined && status === undefined && !input.hasQ && !input.hasProfile
+  // Presence, not validity: a valueless `?filter` (null) is still a visit with a filter in the URL.
+  const bare = input.filter === undefined && input.status === undefined && !input.hasQ && !input.hasProfile
   if (bare && !input.wide && input.notOnlineCount > 0) return 'not-online'
   return 'all'
 }
@@ -115,11 +116,19 @@ export function resolveFilter(input: FilterInputs): ServerFilter {
 
 /** The status a row is sorted and drawn by: `health.status`, else derived from the legacy fields. */
 export function effectiveStatus(server: Server): string {
-  if (server.health?.status) return server.health.status
+  const health = server.health
+  if (health?.status) return health.status
+  // A payload with health but no status: derive from what it does say.
+  if (health) {
+    if (health.admin_state === 'disabled') return 'disabled'
+    if (health.admin_state === 'quarantined') return 'needs_review'
+    if (health.usable) return 'ready'
+    return server.connecting ? 'connecting' : 'error'
+  }
   if (!server.enabled) return 'disabled'
+  if (server.quarantined) return 'needs_review'
   if (server.connected) return 'ready'
   if (server.connecting) return 'connecting'
-  if (server.quarantined) return 'needs_review'
   return 'error'
 }
 

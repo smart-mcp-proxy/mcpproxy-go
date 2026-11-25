@@ -4,7 +4,13 @@
     <div
       v-if="!isExpanded"
       @click="toggleExpanded"
+      @keydown.enter.prevent="toggleExpanded"
+      @keydown.space.prevent="toggleExpanded"
       class="hints-collapsed"
+      role="button"
+      tabindex="0"
+      aria-expanded="false"
+      data-test="hints-toggle"
     >
       <UiIcon name="lightbulb" class="w-4 h-4 bulb-icon" />
       <span class="hints-title">Hints: {{ getSummaryText() }}</span>
@@ -16,7 +22,16 @@
     <!-- Expanded State: Full Hints Content -->
     <div v-else class="hints-expanded">
       <!-- Header with Collapse Button -->
-      <div class="hints-header" @click="toggleExpanded">
+      <div
+        class="hints-header"
+        @click="toggleExpanded"
+        @keydown.enter.prevent="toggleExpanded"
+        @keydown.space.prevent="toggleExpanded"
+        role="button"
+        tabindex="0"
+        aria-expanded="true"
+        data-test="hints-toggle"
+      >
         <div class="hints-header-left">
           <UiIcon name="lightbulb" class="w-4 h-4 bulb-icon" />
           <span class="hints-title">Hints</span>

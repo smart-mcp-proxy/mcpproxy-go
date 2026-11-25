@@ -1,5 +1,5 @@
 import type { Server } from '@/types'
-import { healthStatusLabel } from '@/utils/health'
+import { healthStatusLabel, healthStatusText } from '@/utils/health'
 import { effectiveStatus } from '@/utils/serversList'
 
 // Spec 134 FR-022: the one-line reason of a Servers row. Pure; never invents
@@ -10,6 +10,7 @@ const REAUTH_CODES = ['MCPX_OAUTH_REAUTH_REQUIRED', 'MCPX_OAUTH_REFRESH_EXPIRED'
 
 interface Pattern {
   codes?: string[]
+  /** Applied only when the core attached no classified diagnostic code (a code wins over free text). */
   text?: RegExp
   sentence: (server: Server) => string
 }
@@ -17,8 +18,8 @@ interface Pattern {
 // Order matters: the first pattern that matches wins.
 const PATTERNS: Pattern[] = [
   {
-    codes: ['MCPX_STDIO_SPAWN_ENOENT', 'MCPX_DOCKER_EXEC_NOT_FOUND', 'MCPX_CONFIG_INVALID_COMMAND'],
-    text: /executable file not found|command not found|not found in \$?path|\benoent\b|no such file or directory/i,
+    codes: ['MCPX_STDIO_SPAWN_ENOENT', 'MCPX_DOCKER_EXEC_NOT_FOUND'],
+    text: /executable file not found|command not found|not found in \$?path/i,
     sentence: s => (s.command ? `Command not found: ${s.command}` : 'Command not found'),
   },
   {
@@ -28,7 +29,7 @@ const PATTERNS: Pattern[] = [
   },
   {
     codes: REAUTH_CODES,
-    text: /refresh token.*(expired|revoked)|token.*expired|invalid_grant|re-?auth/i,
+    text: /refresh token.*(expired|revoked)|invalid_grant/i,
     sentence: () => 'Sign-in expired',
   },
   {
@@ -63,8 +64,13 @@ export function failurePattern(server: Server): string {
   const haystack = [server.diagnostic?.user_message, server.diagnostic?.cause, server.last_error, server.health?.detail]
     .filter((v): v is string => !!v)
     .join('\n')
+  // A classified code is authoritative: check every pattern's codes first, and
+  // fall to free text only when the core attached no code (or an unclassified one).
   for (const p of PATTERNS) {
     if (code && p.codes?.includes(code)) return p.sentence(server)
+  }
+  if (code && code !== 'MCPX_UNKNOWN_UNCLASSIFIED') return ''
+  for (const p of PATTERNS) {
     if (haystack && p.text?.test(haystack)) return p.sentence(server)
   }
   return ''
@@ -78,18 +84,21 @@ export function serverReason(server: Server): string {
     const known = failurePattern(server)
     if (known) return known
   }
-  // The card's detail, unchanged (ServerCard.statusDetail): while administratively
-  // enabled the core's plain-language summary ("Host not found") leads; for a
-  // disabled or quarantined server that summary describes the admin state, so
-  // the structured diagnostic, then the last error's root cause, come first.
-  const label = health?.status ? healthStatusLabel(health.status) : ''
-  if (health?.summary && health.admin_state === 'enabled' && health.summary !== label) return oneLine(health.summary)
+  // The structured diagnostic's message, then, while administratively enabled,
+  // the core's plain-language summary ("Host not found") over the raw last
+  // error. For a disabled or quarantined server that summary describes the
+  // admin state, so the last error's root cause comes first.
   const message = server.diagnostic?.user_message
   if (message) return oneLine(message)
+  const label = health?.status ? healthStatusLabel(health.status) : ''
+  if (health?.summary && health.admin_state === 'enabled' && health.summary !== label) return oneLine(health.summary)
   if (server.last_error) return oneLine(lastSegment(server.last_error))
   if (health?.summary) return oneLine(health.summary)
   if (health?.status) return label
-  // Old core with no health object: the present legacy words.
+  // A payload with a health object but neither status nor summary, or an old
+  // core with none: the present legacy words (never "Connected" for a server
+  // the core reported unusable).
+  if (health) return healthStatusText(health, server.connected)
   if (server.connected) return 'Connected'
   if (server.connecting) return 'Connecting'
   return 'Disconnected'
