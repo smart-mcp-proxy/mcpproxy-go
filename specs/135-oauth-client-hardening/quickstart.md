@@ -41,9 +41,10 @@ For each provider (Cloudflare, Smithery, GitHub MCP, Notion, Atlassian, Sentry),
 
 | Provider shape | Expected strict | Expected with opt-out |
 |---|---|---|
-| consistent metadata and `iss`, no cross-origin redirect | signs in, `mix_up_protected` true if `iss` sent | signs in, `mix_up_protected` true if `iss` sent (nothing waived) |
+| consistent metadata and `iss`, no cross-origin redirect, HTTPS (or loopback) | signs in, `mix_up_protected` true if `iss` sent | signs in, `mix_up_protected` true if `iss` sent (nothing waived) |
 | metadata issuer or `iss` mismatch only | `METADATA_ISSUER_MISMATCH` / `ISSUER_MISMATCH` | signs in, `mix_up_protected` false, warning `issuer_validation_disabled` |
 | metadata mismatch, callback `iss` matching | `METADATA_ISSUER_MISMATCH` | signs in, `mix_up_protected` false (metadata check waived) |
+| consistent metadata and matching `iss`, but a non-loopback `http` issuer or endpoint | signs in, `mix_up_protected` false, warning `insecure_issuer` | same |
 | metadata behind a cross-origin redirect | `METADATA_ISSUER_MISMATCH` | `METADATA_ISSUER_MISMATCH` |
 
 Commands for one provider:
