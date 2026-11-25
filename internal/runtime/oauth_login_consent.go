@@ -845,8 +845,8 @@ func (s *OAuthLoginService) resolveChoice(req mcplogin.Request, c ApprovalChoice
 	case c.Client.ID != "":
 		rc.clientID = c.Client.ID
 		if !s.hasClientRecords(rc.clientID) {
-			// A supported built-in client without records is created by this
-			// approval, exactly as on its per-client address.
+			// A supported built-in client without records is created when the
+			// approved code is exchanged, exactly as on its per-client address.
 			def := s.builtinClient(rc.clientID)
 			if def == nil {
 				return nil, ErrOAuthClientUnknown
