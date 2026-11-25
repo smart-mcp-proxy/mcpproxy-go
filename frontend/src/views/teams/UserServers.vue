@@ -43,7 +43,15 @@
                 {{ server.url || server.command || '\u2014' }}
               </td>
               <td>
-                <span class="badge badge-xs" :class="healthBadgeClass(server)">
+                <template v-if="server.health?.status">
+                  <StatusPill :status="server.health.status" />
+                  <span
+                    v-if="server.health.summary"
+                    class="block text-xs text-base-content/70 max-w-xs whitespace-normal break-words"
+                    data-test="server-status-summary"
+                  >{{ server.health.summary }}</span>
+                </template>
+                <span v-else class="badge badge-xs" :class="healthBadgeClass(server)">
                   {{ healthLabel(server) }}
                 </span>
               </td>
@@ -111,9 +119,17 @@
                 {{ server.url || server.command || '\u2014' }}
               </td>
               <td>
-                <span class="badge badge-xs" :class="healthBadgeClass(server)">
+                <span v-if="isSharedDisabled(server) || !server.health?.status" class="badge badge-xs" :class="healthBadgeClass(server)">
                   {{ isSharedDisabled(server) ? 'disabled by you' : healthLabel(server) }}
                 </span>
+                <template v-else>
+                  <StatusPill :status="server.health.status" />
+                  <span
+                    v-if="server.health.summary"
+                    class="block text-xs text-base-content/70 max-w-xs whitespace-normal break-words"
+                    data-test="server-status-summary"
+                  >{{ server.health.summary }}</span>
+                </template>
               </td>
               <td class="text-xs text-base-content/60">
                 {{ server.tool_count != null ? server.tool_count : '\u2014' }}
@@ -205,6 +221,7 @@ import { ref, reactive, onMounted, computed } from 'vue'
 import { useDialogOpen } from '@/composables/useDialogOpen'
 import { useRouter } from 'vue-router'
 import { healthStatusTextOrEmpty } from '@/utils/health'
+import StatusPill from '@/components/StatusPill.vue'
 
 interface UserServer {
   name: string

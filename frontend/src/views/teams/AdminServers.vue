@@ -81,7 +81,15 @@
                 {{ server.url || server.command || '\u2014' }}
               </td>
               <td>
-                <span class="badge badge-xs" :class="statusBadge(server)">
+                <template v-if="server.health?.status">
+                  <StatusPill :status="server.health.status" />
+                  <span
+                    v-if="server.health.summary"
+                    class="block text-xs text-base-content/70 max-w-xs whitespace-normal break-words"
+                    data-test="server-status-summary"
+                  >{{ server.health.summary }}</span>
+                </template>
+                <span v-else class="badge badge-xs" :class="statusBadge(server)">
                   {{ statusLabel(server) }}
                 </span>
               </td>
@@ -155,6 +163,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/services/api'
 import { healthStatusLabel, healthStatusTextOrEmpty } from '@/utils/health'
+import StatusPill from '@/components/StatusPill.vue'
 
 interface AdminServer {
   name: string
