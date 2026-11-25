@@ -3361,6 +3361,45 @@ func (s *Server) extendedDeadline(d time.Duration, next http.Handler) http.Handl
 // their context is cancelled.
 const requestShutdownGrace = 5 * time.Second
 
+// cancelRequestsOnShutdown makes srv.Shutdown cancel the requests still open once only event
+// streams are left, and after grace at the latest. Event streams never end on their own, so
+// Shutdown would wait for them; while a call is running they stay open, since they can carry
+// messages for it. This applies on every OS. Tool calls run on the request context, so one still
+// running when grace expires is cancelled too (Docker cleanup in runtime.Close is not on this
+// context and still runs afterwards).
+func cancelRequestsOnShutdown(srv *http.Server, grace time.Duration) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var (
+		mu       sync.Mutex
+		calls    int // requests in progress, event streams excluded
+		stopping bool
+	)
+	update := func(delta int, stop bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls += delta
+		stopping = stopping || stop
+		if stopping && calls == 0 {
+			cancel()
+		}
+	}
+
+	next := srv.Handler
+	srv.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// MCP POSTs accept text/event-stream too, but they are calls.
+		if r.Method != http.MethodGet || !strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+			update(1, false)
+			defer update(-1, false)
+		}
+		next.ServeHTTP(w, r)
+	})
+	srv.BaseContext = func(net.Listener) context.Context { return ctx }
+	srv.RegisterOnShutdown(func() {
+		time.AfterFunc(grace, cancel)
+		update(0, true)
+	})
+}
+
 // httpServerTimeouts resolves the Read/Write/Idle deadlines applied to the
 // main http.Server (GH #965). Extracted as a pure function so the policy is
 // unit-testable without binding a socket. A nil config yields the built-in
@@ -3920,7 +3959,6 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// /events) clear it per-request via streamingNoDeadline so slow tool calls
 	// and SSE streams survive without weakening the rest of the surface.
 	readTimeout, writeTimeout, idleTimeout := httpServerTimeouts(cfg)
-	requestsCtx, cancelRequests := context.WithCancel(context.Background())
 
 	s.mu.Lock()
 	s.httpServer = &http.Server{
@@ -3935,14 +3973,8 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		ConnState: s.logConnectionState,
 		// Tag connections with their source (TCP vs Tray)
 		ConnContext: taggedConnContext,
-		BaseContext: func(net.Listener) context.Context { return requestsCtx },
 	}
-	// Shutdown waits for every active request, and the SSE / MCP streams never end on their
-	// own: after a short grace for ordinary requests, cancel their context so they return.
-	// This applies on every OS. Tool calls run on the request context, so an in-flight tool
-	// call still running when the grace expires is cancelled too (Docker cleanup in
-	// runtime.Close is not on this context and still runs afterwards).
-	s.httpServer.RegisterOnShutdown(func() { time.AfterFunc(requestShutdownGrace, cancelRequests) })
+	cancelRequestsOnShutdown(s.httpServer, requestShutdownGrace)
 	s.running = true
 	s.runtime.SetRunning(true)
 	s.listenAddr = displayAddr
