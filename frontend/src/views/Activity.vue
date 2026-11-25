@@ -647,7 +647,7 @@
                   <div class="text-sm sm:hidden">{{ formatTimeOfDay(row.activity.timestamp) }}</div>
                   <div class="text-xs text-base-content/60">
                     {{ formatRelativeTime(row.activity.timestamp) }}
-                    <span v-if="row.runSpan" class="opacity-70">· {{ row.runSpan }}</span>
+                    <span v-if="row.runSpan">· {{ row.runSpan }}</span>
                   </div>
                 </td>
                 <!-- Calls view: the tool as `server:tool`, with the run marker, the
@@ -670,6 +670,7 @@
                     <span
                       v-if="row.activity.type === 'tool_quarantine_change' && row.runCount > 1"
                       class="text-sm truncate"
+                      :title="quarantineBatchSummary(row.activity, row.runCount)"
                       data-test="activity-quarantine-batch-summary"
                     >{{ quarantineBatchSummary(row.activity, row.runCount) }}</span>
                     <code v-else-if="row.activity.tool_name" class="text-sm bg-base-200 px-2 py-1 rounded truncate min-w-0 max-sm:max-w-full max-sm:whitespace-normal max-sm:break-all max-sm:overflow-visible" :title="toolLabel(row.activity)" data-test="activity-tool-label">{{ toolLabel(row.activity) }}</code>
@@ -707,7 +708,7 @@
                       v-if="row.reasonsVary"
                       data-test="activity-run-reasons-vary"
                       class="text-xs text-base-content/40 shrink-0"
-                      title="Calls in this run declared different reasons — expand to read them"
+                      title="Calls in this run declared different reasons — expand the run and open a call to read them"
                     >+…</span>
                   </div>
                 </td>

@@ -246,6 +246,21 @@ describe('Activity Log — row treatment', () => {
     expect(panel.text()).toContain('Intent Declaration')
     expect(panel.text()).toContain('enumerate repositories for the release notes')
     expect(panel.text()).toContain('read')
+
+    // Declared operation with no reason: the operation, no empty "Reason:" row.
+    await wrapper.find('[data-test="activity-detail-panel"] button.btn-circle').trigger('click')
+    await rowFor(wrapper, 'post_message').find('[data-test="activity-open-act-bad"]').trigger('click')
+    await flushPromises()
+    const noReason = wrapper.find('[data-test="activity-detail-panel"]').text()
+    expect(noReason).toContain('Intent Declaration')
+    expect(noReason).toContain('write')
+    expect(noReason).not.toContain('Reason:')
+
+    // No intent at all: no Intent Declaration section.
+    await wrapper.find('[data-test="activity-detail-panel"] button.btn-circle').trigger('click')
+    await rowFor(wrapper, 'code_execution').find('[data-test="activity-open-act-parent"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="activity-detail-panel"]').text()).not.toContain('Intent Declaration')
   })
 
 })

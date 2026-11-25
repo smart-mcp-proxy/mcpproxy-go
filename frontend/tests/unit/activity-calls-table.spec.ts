@@ -260,7 +260,12 @@ describe('A5-11 sort control (FR-046)', () => {
     await sel.setValue('duration_ms:asc')
     expect(rows(w)[0].text()).not.toContain('slack:post_message')
     await sel.setValue('server_name:asc')
-    expect(rows(w)[0].text()).toContain('fs:')
+    const servers = rows(w).map(r => r.find('[data-test="activity-tool-label"]').exists() ? r.find('[data-test="activity-tool-label"]').text().split(':')[0] : '')
+    expect(servers.length).toBeGreaterThan(2)
+    expect(servers).toEqual([...servers].sort((a, b) => a.localeCompare(b)))
+    await sel.setValue('server_name:desc')
+    const desc = rows(w).map(r => r.find('[data-test="activity-tool-label"]').exists() ? r.find('[data-test="activity-tool-label"]').text().split(':')[0] : '')
+    expect(desc).toEqual([...desc].sort((a, b) => b.localeCompare(a)))
   })
 })
 
@@ -279,8 +284,13 @@ describe('A5-35 Group repeats (FR-048)', () => {
 
   it('expands every member of a run and keeps the run summary', async () => {
     const w = await mountAt()
+    const lead = rows(w).find(r => r.find('[data-test="activity-run-count"]').exists())!
+    expect(lead.text()).toContain('over 2m')
+    expect(lead.text()).toContain('4ms–6ms')
     await w.find('[data-test="activity-run-count"]').trigger('click')
-    expect(w.findAll('[data-test="activity-run-member"]')).toHaveLength(2)
+    const members = w.findAll('[data-test="activity-run-member"]')
+    expect(members).toHaveLength(2)
+    expect(members.map(m => m.find('button[data-test^="activity-open-"]').attributes('data-test')).sort()).toEqual(['activity-open-rep-1', 'activity-open-rep-2'])
   })
 
   it('does not group outside time order', async () => {

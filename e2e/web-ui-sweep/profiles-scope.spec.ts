@@ -196,15 +196,18 @@ test('5. A blocked call: attribution chips, Allow in profile… and Why?', async
   const rows = page.locator('[data-test="activity-row"]')
   await expect(rows).toHaveCount(1)
   await expect(rows.first()).toContainText('echo')
-  await expect(page.locator('[data-test="activity-scope-col"]')).toBeVisible()
-  const chips = rows.first().locator('[data-test^="activity-attribution-"]')
+  // Spec 134 FR-045/049: the calls table has a Client column; profile and token chips live in the row detail.
+  await expect(page.locator('[data-test="activity-col-client"]')).toBeVisible()
+  await expect(rows.first().locator('[data-test="attribution-client"]')).toContainText('E2E Scope')
+  await expect(rows.first().locator('[data-test="attribution-profile"]')).toHaveCount(0)
+  await shot(page, 'activity-1440')
+
+  await rows.first().locator('[data-test^="activity-open-"]').click()
+  const chips = page.locator('[data-test="activity-detail-panel"] [data-test^="activity-attribution-"]')
   await expect(chips.locator('[data-test="attribution-client"]')).toContainText('E2E Scope')
   await expect(chips.locator('[data-test="attribution-profile"]')).toContainText('E2E Scope RO · locked by credential')
   // The client's own credential (client-<id>) is the client chip already.
   await expect(chips.locator('[data-test="attribution-token"]')).toHaveCount(0)
-  await shot(page, 'activity-1440')
-
-  await rows.first().locator('[data-test^="activity-open-"]').click()
   const allow = page.locator('[data-test^="activity-allow-in-profile-"]')
   await expect(allow).toContainText('Allow in profile…')
   await allow.click()
