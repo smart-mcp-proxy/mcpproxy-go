@@ -22,7 +22,7 @@
           </div>
         </div>
         <!-- Manual Refresh -->
-        <button v-if="!autoRefresh" @click="loadActivities" class="btn btn-sm btn-ghost" :disabled="loading">
+        <button v-if="!autoRefresh" @click="loadActivities" class="btn btn-sm max-sm:min-h-11 btn-ghost" :disabled="loading">
           <svg class="w-4 h-4" :class="{ 'animate-spin': loading }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
@@ -90,8 +90,8 @@
       toggle. Active filters stay visible as dismissable chips even collapsed,
       so the list is never silently narrowed.
     -->
-    <div v-show="activeView !== 'sessions'" class="card bg-base-100 shadow-sm">
-      <div class="card-body py-3 gap-3">
+    <div v-show="activeView !== 'sessions'" ref="filterStripEl" class="card bg-base-100 shadow-sm relative" data-test="activity-filter-strip">
+      <div class="card-body py-3 gap-1">
         <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
           <!-- Counts: total muted; only non-zero error/blocked/rejected speak up. -->
           <div
@@ -140,7 +140,7 @@
           <button
             type="button"
             data-test="activity-group-toggle"
-            class="btn btn-sm btn-ghost gap-2"
+            class="btn btn-sm max-sm:min-h-11 btn-outline gap-2 max-sm:min-h-11 border-[var(--ds-border)]"
             :disabled="!groupingApplies"
             :aria-pressed="groupRepeats && groupingApplies"
             :title="groupingApplies
@@ -162,13 +162,18 @@
             </span>
           </button>
 
-          <!-- Filters toggle — the expanded cards + controls hang off this. -->
+          <ActivitySortControl :column="sortColumn" :direction="sortDirection" @update="setSort" />
+
+          <!-- Filters toggle — opens ONE popover with every filter setter. -->
           <button
             type="button"
             data-test="activity-filters-toggle"
-            class="btn btn-sm btn-ghost gap-2"
+            ref="filtersToggleEl"
+            class="btn btn-sm max-sm:min-h-11 btn-outline gap-2 max-sm:min-h-11 border-[var(--ds-border)]"
+            aria-haspopup="dialog"
+            aria-controls="activity-filter-popover"
             :aria-expanded="showFilterPanel"
-            @click="showFilterPanel = !showFilterPanel"
+            @click="toggleFilterPopover"
           >
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
@@ -196,7 +201,7 @@
                Spec 107 FR-041/T088: /activity/export is the core (admin-only)
                door; a tenant principal has no export target yet. -->
           <div v-if="authStore.principalKind !== 'tenant'" class="dropdown dropdown-end">
-            <div tabindex="0" role="button" class="btn btn-sm btn-outline">
+            <div tabindex="0" role="button" class="btn btn-sm max-sm:min-h-11 btn-outline max-sm:min-h-11 border-[var(--ds-border)]">
               <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
               </svg>
@@ -209,48 +214,31 @@
           </div>
         </div>
 
-        <!-- Active filters — always shown, collapsed or not. -->
-        <div
-          v-if="activeChips.length > 0"
-          data-test="activity-active-filters"
-          class="flex flex-wrap items-center gap-2 pt-2 border-t border-base-300"
-        >
-          <span class="text-xs text-base-content/50">Filters:</span>
-          <button
-            v-for="chip in activeChips"
-            :key="chip.key"
-            type="button"
-            :data-test="chipTestId(chip)"
-            class="badge badge-sm badge-ghost gap-1 hover:bg-base-300"
-            :title="chip.title || chip.label"
-            @click="clearChip(chip)"
-          >
-            {{ chip.label }}
-            <svg class="w-3 h-3 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-          <button type="button" class="btn btn-xs btn-ghost" @click="clearFilters">Clear all</button>
-        </div>
+        <!-- Active filters: one row of removable chips, fixed height, with an
+             overflow list (Spec 134 FR-047). -->
+        <ActivityFilterChips :chips="activeChips" @remove="clearChip" @clear-all="clearFilters" />
       </div>
-    </div>
 
-    <!--
-      Summary Stats — clickable, drive the Status filter (issue #436).
-
-      The tiles are a PARTITION of the denominator they sit under: every row in
-      the window lands in exactly one of them, with "Other / internal" holding
-      the rows whose status is not a tool-call outcome (a quarantine action, a
-      policy verdict). They used to add up to less than the total printed beside
-      them — 15+4+0+0 under a 42 (audit finding F2, #1046) — which is the fastest
-      way to make a dashboard untrustworthy. statusBucketTiles owns the list, and
-      a unit test asserts the sum.
-    -->
-    <div v-if="showFilterPanel && summary" class="stats shadow bg-base-100 w-full">
+      <!--
+        The filter popover (Spec 134 FR-047). It opens OVER the page: nothing
+        below it moves. Summary tiles, every filter setter and the legend are
+        inside, unchanged from the inline panel it replaces.
+      -->
+      <div
+        v-if="showFilterPanel"
+        id="activity-filter-popover"
+        ref="filterPopoverEl"
+        role="dialog"
+        aria-label="Activity filters"
+        tabindex="-1"
+        data-test="activity-filter-popover"
+        class="absolute left-0 right-0 top-full mt-1 z-[var(--z-dropdown)] bg-base-100 border border-[var(--ds-border)] rounded-box shadow-lg max-h-[75vh] overflow-y-auto p-4 space-y-4"
+      >
+        <div v-if="summary" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2" data-test="activity-tiles">
       <button
         type="button"
         data-test="kpi-card-total"
-        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filterStatus === '' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60 rounded-box border border-[var(--ds-border)] px-3 py-2 max-sm:min-h-11', filterStatus === '' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
         :aria-pressed="filterStatus === ''"
         title="Every row in the last 24h. The tiles to the right split this number; the sub-count is how many of these rows are calls the user made — the figure the Usage tab reports."
         @click="filterStatus = ''"
@@ -269,7 +257,7 @@
         :key="tile.status"
         type="button"
         :data-test="`kpi-card-${tile.status}`"
-        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filterStatus === tile.status ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60 rounded-box border border-[var(--ds-border)] px-3 py-2 max-sm:min-h-11', filterStatus === tile.status ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
         :aria-pressed="filterStatus === tile.status"
         :title="tile.title"
         @click="filterStatus = filterStatus === tile.status ? '' : tile.status"
@@ -278,11 +266,9 @@
         <!-- Only error and blocked spend colour; success is the norm. -->
         <div class="stat-value text-2xl" :class="statTileValueClass(tile.tone)">{{ tile.count }}</div>
       </button>
-    </div>
+        </div>
 
-    <!-- Filters — rendered only when the compact strip's toggle asks for them. -->
-    <div v-if="showFilterPanel" data-test="activity-filter-panel" class="card bg-base-100 shadow-md">
-      <div class="card-body py-4">
+        <div data-test="activity-filter-panel">
         <div class="flex flex-wrap gap-4 items-end">
           <!-- Type Filter (Multi-select dropdown) -->
           <div class="form-control min-w-[180px]">
@@ -308,7 +294,7 @@
                   <button
                     v-if="selectedTypes.length > 0"
                     @click.stop="clearTypeFilter"
-                    class="btn btn-xs btn-ghost"
+                    class="btn btn-xs max-sm:min-h-11 btn-ghost"
                   >
                     Clear
                   </button>
@@ -464,7 +450,7 @@
           <button
             v-if="hasActiveFilters"
             @click="clearFilters"
-            class="btn btn-sm btn-ghost"
+            class="btn btn-sm max-sm:min-h-11 btn-ghost"
           >
             Clear Filters
           </button>
@@ -495,8 +481,14 @@
             <span class="opacity-70">— the number is how many detections that row carries.</span>
           </div>
         </div>
+        </div>
+
+        <div class="flex justify-end">
+          <button type="button" class="btn btn-sm max-sm:min-h-11 btn-primary max-sm:min-h-11" data-test="activity-filters-close" @click="closeFilterPopover(true)">Done</button>
+        </div>
       </div>
     </div>
+
 
     <!-- Activity Table -->
     <div v-show="activeView !== 'sessions'" class="card bg-base-100 shadow-md">
@@ -521,7 +513,7 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
           <span>Server and tool filters don't match — <code>server={{ filterServer }}</code> and <code>tool={{ filterTool }}</code> name different servers. Remove one to continue.</span>
-          <button class="btn btn-sm btn-ghost" data-test="activity-scope-conflict-clear" @click="clearFilters">Clear filters</button>
+          <button class="btn btn-sm max-sm:min-h-11 btn-ghost" data-test="activity-scope-conflict-clear" @click="clearFilters">Clear filters</button>
         </div>
 
         <!-- Loading State -->
@@ -535,7 +527,7 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
           <span>{{ error }}</span>
-          <button @click="loadActivities" class="btn btn-sm btn-ghost">Retry</button>
+          <button @click="loadActivities" class="btn btn-sm max-sm:min-h-11 btn-ghost">Retry</button>
         </div>
 
         <!-- Empty State -->
@@ -552,7 +544,7 @@
             <p class="text-sm">Refused attempts are not tool calls that ran; they are listed under Blocked.</p>
             <button
               type="button"
-              class="btn btn-sm btn-outline mt-2"
+              class="btn btn-sm max-sm:min-h-11 btn-outline mt-2"
               data-test="activity-empty-show-blocked"
               @click="showBlockedAttempts"
             >
@@ -570,7 +562,7 @@
           <!-- table-fixed below sm: with only Time/Details/Status left, fixed columns
                guarantee the row fits a 390px viewport instead of letting one long
                tool name push Status off the edge (F14). -->
-          <table class="table table-sm w-full table-fixed sm:table-auto">
+          <table class="table table-sm w-full" :class="isCalls ? 'table-auto' : 'table-fixed sm:table-auto'" data-test="activity-table">
             <caption class="sr-only">
               Activity log — one row per proxied call, newest first. Updates automatically.
             </caption>
@@ -579,6 +571,19 @@
                 <th class="cursor-pointer hover:bg-base-200" @click="sortBy('timestamp')">
                   Time {{ getSortIndicator('timestamp') }}
                 </th>
+                <!-- Calls view (Spec 134 FR-045): time, tool, result, client, duration
+                     and the row-open action. Everything else is in the row detail. -->
+                <template v-if="isCalls">
+                  <th data-test="activity-col-tool">Tool</th>
+                  <th class="cursor-pointer hover:bg-base-200 min-w-[5.5rem]" data-test="activity-col-result" @click="sortBy('status')">
+                    Result {{ getSortIndicator('status') }}
+                  </th>
+                  <th class="hidden md:table-cell" data-test="activity-col-client">Client</th>
+                  <th class="hidden sm:table-cell cursor-pointer hover:bg-base-200 whitespace-nowrap" data-test="activity-col-duration" @click="sortBy('duration_ms')">
+                    Duration {{ getSortIndicator('duration_ms') }}
+                  </th>
+                </template>
+                <template v-else>
                 <th class="cursor-pointer hover:bg-base-200" :class="typeColumnClass" @click="sortBy('type')">
                   Type {{ getSortIndicator('type') }}
                 </th>
@@ -595,33 +600,19 @@
                 <th v-if="hasSensitiveColumn" class="hidden lg:table-cell">Sensitive</th>
                 <!-- Intent carries the declared reason, not a 52px icon slot. -->
                 <th v-if="hasIntentColumn" class="hidden lg:table-cell min-w-[11rem]">Intent</th>
-                <!--
-                  F14 follow-up: at <640px the table is `table-fixed`, so every
-                  visible column takes an equal share — too narrow for the
-                  status badge, which is `whitespace-nowrap` and so overflowed
-                  its own cell. The committed sweep never caught it because a
-                  `success` row renders an `sr-only` label (zero width), and a
-                  success row is ~90% of traffic: the assertion only became
-                  real once a run put an error row first. Floor the column at
-                  the widest pill, like the Intent column above.
-                -->
+                <!-- A `success` row renders an sr-only label (zero width); floor the
+                     column at the widest pill (F14 follow-up). -->
                 <th class="cursor-pointer hover:bg-base-200 min-w-[5.5rem]" @click="sortBy('status')">
                   Status {{ getSortIndicator('status') }}
                 </th>
-                <!--
-                  Acceptance scenario 6 (Spec 109-k): a `table-fixed` layout
-                  gives every visible column an equal share, and this one had
-                  no floor — a run's span ("120ms – 4.2s") or "System events"'
-                  longer values wrapped onto two lines and clipped, the same
-                  bug the Status column's min-width above already works
-                  around.
-                -->
+                <!-- A run's span ("120ms – 4.2s") must not wrap and clip (109-k scenario 6). -->
                 <th class="cursor-pointer hover:bg-base-200 min-w-[4.5rem] whitespace-nowrap" :class="durationColumnClass" @click="sortBy('duration_ms')">
                   Duration {{ getSortIndicator('duration_ms') }}
                 </th>
+                </template>
                 <!-- Row-open chevron. Kept at every width: it is the actual
                      named, keyboard-operable control for the row (F30). -->
-                <th class="w-8"></th>
+                <th class="w-8"><span class="sr-only">Open details</span></th>
               </tr>
             </thead>
             <!--
@@ -657,6 +648,67 @@
                     <span v-if="row.runSpan" class="opacity-70">· {{ row.runSpan }}</span>
                   </div>
                 </td>
+                <!-- Calls view: the tool as `server:tool`, with the run marker, the
+                     code_execution marker and the same fallbacks the Details
+                     column printed for a record with no tool. -->
+                <td v-if="isCalls" class="max-w-0 w-full" data-test="activity-cell-tool">
+                  <div class="flex items-center gap-1.5 min-w-0">
+                    <span
+                      v-if="isChildCall(row.activity)"
+                      data-test="activity-child-badge"
+                      class="badge badge-xs badge-ghost shrink-0 font-normal text-base-content/60"
+                      title="Sub-call dispatched by a code_execution run"
+                    >↳ via code_execution</span>
+                    <span
+                      v-if="isCodeExecutionActivity(row.activity)"
+                      data-test="activity-parent-badge"
+                      class="text-sm opacity-60 shrink-0"
+                      title="Sandboxed script run — may have dispatched sub-calls"
+                    ><UiIcon name="puzzle" class="w-4 h-4" label="Sandboxed script run" /></span>
+                    <span
+                      v-if="row.activity.type === 'tool_quarantine_change' && row.runCount > 1"
+                      class="text-sm truncate"
+                      data-test="activity-quarantine-batch-summary"
+                    >{{ quarantineBatchSummary(row.activity, row.runCount) }}</span>
+                    <code v-else-if="row.activity.tool_name" class="text-sm bg-base-200 px-2 py-1 rounded truncate min-w-0" :title="toolLabel(row.activity)" data-test="activity-tool-label">{{ toolLabel(row.activity) }}</code>
+                    <span
+                      v-else-if="isPreflightActivity(row.activity) && formatPreflightSummary(row.activity.metadata)"
+                      class="text-sm truncate"
+                      :title="formatPreflightSummary(row.activity.metadata)"
+                    >{{ formatPreflightSummary(row.activity.metadata) }}</span>
+                    <span
+                      v-else-if="row.activity.type === 'profile_change' && credentialLifecycleSummary(row.activity.metadata)"
+                      class="text-sm truncate"
+                      :title="credentialLifecycleSummary(row.activity.metadata)"
+                      data-test="activity-credential-lifecycle"
+                    >{{ credentialLifecycleSummary(row.activity.metadata) }}</span>
+                    <span v-else-if="row.activity.metadata?.action" class="text-sm truncate">{{ row.activity.metadata.action }}</span>
+                    <span v-else-if="!isCallType(row.activity)" class="text-sm truncate" data-test="activity-tool-type">{{ formatType(row.activity.type) }}</span>
+                    <span v-else class="text-base-content/40">-</span>
+                    <button
+                      v-if="row.runCount > 1"
+                      type="button"
+                      data-test="activity-run-count"
+                      class="badge badge-sm badge-ghost shrink-0 gap-1 hover:bg-base-300 max-sm:min-h-11 max-sm:px-3"
+                      :aria-expanded="isRunExpanded(row.key)"
+                      :title="isRunExpanded(row.key)
+                        ? 'Collapse these repeated calls'
+                        : `${row.runCount} consecutive identical calls — click to expand`"
+                      @click.stop="toggleRun(row.key)"
+                    >
+                      ×{{ row.runCount }}
+                      <span aria-hidden="true">{{ isRunExpanded(row.key) ? '▾' : '▸' }}</span>
+                    </button>
+                    <!-- A folded run shows the LEAD's reason; say when members differ. -->
+                    <span
+                      v-if="row.reasonsVary"
+                      data-test="activity-run-reasons-vary"
+                      class="text-xs text-base-content/40 shrink-0"
+                      title="Calls in this run declared different reasons — expand to read them"
+                    >+…</span>
+                  </div>
+                </td>
+                <template v-if="!isCalls">
                 <td :class="typeColumnClass">
                   <div class="flex flex-col gap-1">
                     <div class="flex items-center gap-2">
@@ -852,6 +904,7 @@
                   </div>
                   <span v-else class="text-base-content/40">-</span>
                 </td>
+                </template>
                 <!--
                   Status: success is the norm — ~90% of rows — and gets NO mark at
                   all, so the two rows that need a human are the only marked ones
@@ -900,8 +953,22 @@
                     :aria-label="`Why was ${row.activity.tool_name} blocked?`"
                     @click.stop="openExplain(row.activity)"
                   >Why?</button>
+                  <!-- The Sensitive column's at-a-glance mark; the detail has the rest. -->
+                  <span
+                    v-if="isCalls && row.activity.has_sensitive_data"
+                    data-test="activity-sensitive-mark"
+                    class="inline-flex align-middle ml-1"
+                    :class="row.activity.max_severity === 'critical' ? 'text-error' : 'text-warning'"
+                    :title="`${row.activity.max_severity || 'unknown'}-severity sensitive data detected`"
+                  >
+                    <UiIcon :name="getSeverityIcon(row.activity.max_severity)" class="w-4 h-4" />
+                    <span class="sr-only">{{ row.activity.max_severity || 'unknown' }}-severity sensitive data detected</span>
+                  </span>
                 </td>
-                <td class="whitespace-nowrap" :class="durationColumnClass">
+                <td v-if="isCalls" class="hidden md:table-cell max-w-[11rem]" data-test="activity-cell-client">
+                  <AttributionChips :record="row.activity" :test-id="row.activity.id" client-only stacked />
+                </td>
+                <td class="whitespace-nowrap" :class="isCalls ? 'hidden sm:table-cell' : durationColumnClass">
                   <!-- A run reports the SPAN its members took, not one member's. -->
                   <span v-if="row.runDuration" class="text-sm whitespace-nowrap" :title="`${row.runCount} calls`">
                     {{ row.runDuration }}
@@ -913,7 +980,7 @@
                 </td>
                 <td class="w-8">
                   <button
-                    class="btn btn-xs btn-ghost"
+                    class="btn btn-xs max-sm:min-h-11 btn-ghost max-sm:min-h-11 max-sm:min-w-11"
                     :aria-label="`Open details for ${formatType(row.activity.type)} at ${formatTimestamp(row.activity.timestamp)}`"
                     :data-test="`activity-open-${row.activity.id}`"
                     @click.stop="selectActivity(row.activity)"
@@ -945,31 +1012,31 @@
               <button
                 @click="currentPage = 1"
                 :disabled="currentPage === 1"
-                class="join-item btn btn-sm"
+                class="join-item btn btn-sm max-sm:min-h-11"
               >
                 «
               </button>
               <button
                 @click="currentPage = Math.max(1, currentPage - 1)"
                 :disabled="currentPage === 1"
-                class="join-item btn btn-sm"
+                class="join-item btn btn-sm max-sm:min-h-11"
               >
                 ‹
               </button>
-              <button class="join-item btn btn-sm">
+              <button class="join-item btn btn-sm max-sm:min-h-11">
                 {{ currentPage }} / {{ totalPages }}
               </button>
               <button
                 @click="currentPage = Math.min(totalPages, currentPage + 1)"
                 :disabled="currentPage === totalPages"
-                class="join-item btn btn-sm"
+                class="join-item btn btn-sm max-sm:min-h-11"
               >
                 ›
               </button>
               <button
                 @click="currentPage = totalPages"
                 :disabled="currentPage === totalPages"
-                class="join-item btn btn-sm"
+                class="join-item btn btn-sm max-sm:min-h-11"
               >
                 »
               </button>
@@ -1018,7 +1085,7 @@
                 </h3>
                 <p class="text-sm text-base-content/60">{{ formatTimestamp(selectedActivity.timestamp) }}</p>
               </div>
-              <button @click="closeDetailDrawer" class="btn btn-sm btn-circle btn-ghost">
+              <button @click="closeDetailDrawer" class="btn btn-sm max-sm:min-h-11 btn-circle btn-ghost">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
                 </svg>
@@ -1041,6 +1108,17 @@
               <div v-if="selectedActivity.id" class="flex gap-2">
                 <span class="text-sm text-base-content/60 w-24 shrink-0">ID:</span>
                 <code class="text-xs bg-base-200 px-2 py-1 rounded break-all">{{ selectedActivity.id }}</code>
+              </div>
+              <!-- Spec 134 FR-049: the cells the calls table no longer has. -->
+              <div class="flex gap-2" data-test="activity-detail-type">
+                <span class="text-sm text-base-content/60 w-24 shrink-0">Type:</span>
+                <span class="text-sm flex items-center gap-1.5">
+                  <UiIcon :name="getTypeIcon(selectedActivity.type)" class="w-4 h-4" />{{ formatType(selectedActivity.type) }}
+                </span>
+              </div>
+              <div v-if="detailsSummary(selectedActivity)" class="flex gap-2" data-test="activity-detail-details">
+                <span class="text-sm text-base-content/60 w-24 shrink-0">Details:</span>
+                <span class="text-sm break-words min-w-0">{{ detailsSummary(selectedActivity) }}</span>
               </div>
               <div v-if="selectedActivity.server_name" class="flex gap-2">
                 <span class="text-sm text-base-content/60 w-24 shrink-0">Server:</span>
@@ -1069,14 +1147,14 @@
                   <button
                     type="button"
                     data-test="activity-filter-by-session"
-                    class="btn btn-xs btn-outline"
+                    class="btn btn-xs max-sm:min-h-11 btn-outline"
                     @click="filterBySession(selectedActivity)"
                   >
                     Filter this log
                   </button>
                   <router-link
                     data-test="activity-view-session"
-                    class="btn btn-xs btn-outline"
+                    class="btn btn-xs max-sm:min-h-11 btn-outline"
                     :to="{ name: 'sessions' }"
                   >
                     Open Sessions
@@ -1100,14 +1178,14 @@
             <!-- Spec 108-j J10/J8/J9: who made the call, under which profile, and
                  for a blocked call the two ways forward. Below md this is the
                  only place the chips and the actions appear. -->
-            <div v-if="hasAttribution(selectedActivity) || canExplain(selectedActivity)" class="space-y-2" data-test="activity-drawer-attribution">
+            <div v-if="hasAttribution(selectedActivity) || canExplain(selectedActivity) || isCallType(selectedActivity)" class="space-y-2" data-test="activity-drawer-attribution">
               <h4 class="text-sm font-semibold text-base-content/70">Attribution</h4>
               <AttributionChips :record="selectedActivity" :test-id="`drawer-${selectedActivity.id}`" />
               <div v-if="canExplain(selectedActivity) || profileAction(selectedActivity)" class="flex flex-wrap items-center gap-2">
                 <router-link
                   v-if="profileAction(selectedActivity)"
                   :to="profileAction(selectedActivity)!.to"
-                  class="btn btn-sm btn-outline"
+                  class="btn btn-sm max-sm:min-h-11 btn-outline"
                   :data-test="`activity-allow-in-profile-${selectedActivity.id}`"
                 >{{ profileAction(selectedActivity)!.label }}</router-link>
                 <span
@@ -1118,7 +1196,7 @@
                 <button
                   v-if="canExplain(selectedActivity)"
                   type="button"
-                  class="btn btn-sm btn-outline"
+                  class="btn btn-sm max-sm:min-h-11 btn-outline"
                   :data-test="`activity-why-${selectedActivity.id}`"
                   @click="openExplain(selectedActivity)"
                 >Why?</button>
@@ -1137,7 +1215,7 @@
               <button
                 v-if="isCodeExecutionActivity(selectedActivity) && selectedActivity.request_id"
                 data-test="activity-view-subcalls"
-                class="btn btn-sm btn-outline"
+                class="btn btn-sm max-sm:min-h-11 btn-outline"
                 @click="viewSubCalls(selectedActivity)"
               >
                 ↳ View sub-calls ({{ subCallCount(selectedActivity) }})
@@ -1145,7 +1223,7 @@
               <button
                 v-if="isChildCall(selectedActivity)"
                 data-test="activity-view-parent"
-                class="btn btn-sm btn-outline"
+                class="btn btn-sm max-sm:min-h-11 btn-outline"
                 @click="viewParentCall(selectedActivity)"
               >
                 ↰ View parent call
@@ -1295,14 +1373,14 @@
                   <router-link
                     v-if="selectedActivity.server_name"
                     data-test="activity-scan-open-server"
-                    class="btn btn-sm btn-outline"
+                    class="btn btn-sm max-sm:min-h-11 btn-outline"
                     :to="serverDetailPath(selectedActivity.server_name)"
                   >
                     Open {{ selectedActivity.server_name }}
                   </router-link>
                   <router-link
                     data-test="activity-scan-open-security"
-                    class="btn btn-sm btn-outline"
+                    class="btn btn-sm max-sm:min-h-11 btn-outline"
                     to="/security"
                   >
                     Security &amp; scan reports
@@ -1490,7 +1568,7 @@ import UiIcon from '@/components/UiIcon.vue'
 import type { UiIconName } from '@/utils/uiIcons'
 import { activityColumnClasses } from '@/utils/activityColumns'
 import { serverDetailPath } from '@/utils/serverRoute'
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import { useAuthStore } from '@/stores/auth'
@@ -1500,6 +1578,9 @@ import { buildSessionLabels } from '@/utils/sessionLabel'
 import { splitScopeTool, useScopeQuery, resolveScopeTime, sessionRestParam } from '@/composables/useScopeQuery'
 import SessionsPanel from '@/components/activity/SessionsPanel.vue'
 import AttributionChips from '@/components/activity/AttributionChips.vue'
+import ActivityFilterChips from '@/components/activity/ActivityFilterChips.vue'
+import ActivitySortControl from '@/components/activity/ActivitySortControl.vue'
+import type { ActivitySortColumn, ActivitySortDirection } from '@/utils/activitySort'
 import AccessExplainer from '@/components/AccessExplainer.vue'
 import ScopeChips from '@/components/scope/ScopeChips.vue'
 import ViewAs from '@/components/ViewAs.vue'
@@ -1588,6 +1669,29 @@ const activeView = computed<ActivityViewId>(() => {
   const value = typeof raw === 'string' ? raw : ''
   return (ACTIVITY_VIEW_IDS as string[]).includes(value) ? (value as ActivityViewId) : 'calls'
 })
+
+/** The calls view has the five-column table (Spec 134 FR-045); System and All keep theirs. */
+const isCalls = computed(() => activeView.value === 'calls')
+
+/** `server:tool`, the form every other surface uses; a tool with no server is just its name. */
+const toolLabel = (a: ActivityRecord): string => (a.server_name && a.tool_name ? `${a.server_name}:${a.tool_name}` : (a.tool_name ?? ''))
+
+const CALL_TYPES = new Set(['tool_call', 'internal_tool_call', 'policy_decision', 'prompt_get'])
+const isCallType = (a: ActivityRecord | null): boolean => Boolean(a && CALL_TYPES.has(a.type))
+
+/** What the Details cell printed, for the row detail (Spec 134 FR-049). */
+function detailsSummary(a: ActivityRecord): string {
+  if (a.tool_name) return a.tool_name
+  if (isPreflightActivity(a)) {
+    const summary = formatPreflightSummary(a.metadata)
+    if (summary) return summary
+  }
+  if (a.type === 'profile_change') {
+    const life = credentialLifecycleSummary(a.metadata)
+    if (life) return life
+  }
+  return a.metadata?.action ? String(a.metadata.action) : ''
+}
 
 /** Tab click: `router.replace` (FR-080), never a local-only assignment —
  * `calls` is the default so it clears the param instead of writing it back,
@@ -1809,8 +1913,8 @@ const currentPage = ref(1)
 const pageSize = ref(25)
 
 // Sorting (Spec 024: US6)
-type SortColumn = 'timestamp' | 'type' | 'server_name' | 'status' | 'duration_ms'
-type SortDirection = 'asc' | 'desc'
+type SortColumn = ActivitySortColumn
+type SortDirection = ActivitySortDirection
 const sortColumn = ref<SortColumn>('timestamp')
 const sortDirection = ref<SortDirection>('desc') // Default: newest first
 
@@ -2065,10 +2169,9 @@ const hasActiveFilters = computed(() => {
 // --- compact header ---------------------------------------------------------
 
 /**
- * Whether the stat cards + full filter grid are shown. Persisted per browser so
- * an operator who wants the controls open keeps them open, while a first visit
- * lands on the compact strip. localStorage can throw outright (private windows,
- * blocked site data), so every touch is guarded and falls back to collapsed.
+ * Whether the filter popover is open (Spec 134 FR-047). The stored choice of
+ * the inline panel it replaces is kept: it is per browser, and a storage
+ * failure falls back to closed.
  */
 const FILTER_PANEL_STORAGE_KEY = 'mcpproxy.activity.filtersExpanded'
 
@@ -2089,6 +2192,27 @@ watch(showFilterPanel, expanded => {
     // Preference is a convenience; never let a storage failure break the page.
   }
 })
+const filtersToggleEl = ref<HTMLElement | null>(null)
+const filterPopoverEl = ref<HTMLElement | null>(null)
+const filterStripEl = ref<HTMLElement | null>(null)
+
+function closeFilterPopover(returnFocus = false) {
+  showFilterPanel.value = false
+  if (returnFocus) void nextTick(() => filtersToggleEl.value?.focus())
+}
+
+// Focus moves into the popover when the user opens it (not when a stored
+// choice reopens it on load), so Tab continues through its controls.
+function toggleFilterPopover() {
+  showFilterPanel.value = !showFilterPanel.value
+  if (showFilterPanel.value) void nextTick(() => filterPopoverEl.value?.focus())
+}
+
+function onDocumentClick(event: MouseEvent) {
+  if (showFilterPanel.value && filterStripEl.value && !filterStripEl.value.contains(event.target as Node)) {
+    showFilterPanel.value = false
+  }
+}
 
 /** "54 calls · 6 errors · 1 blocked" — zeros omitted. */
 const summaryParts = computed(() => compactSummaryParts(summary.value))
@@ -2171,10 +2295,6 @@ const activeChips = computed(() =>
     endDate: filterEndDate.value,
   })
 )
-
-/** The sub-call chip keeps its own hook — it is the code_execution exit door. */
-const chipTestId = (chip: ActiveFilterChip): string =>
-  chip.kind === 'parent' ? 'activity-parent-filter-chip' : `activity-filter-chip-${chip.kind}`
 
 const clearChip = (chip: ActiveFilterChip) => {
   switch (chip.kind) {
@@ -2846,6 +2966,12 @@ const sortBy = (column: SortColumn) => {
 }
 
 // Get sort indicator for column header
+/** The Sort control: any key, either direction (Spec 134 FR-046). */
+const setSort = (column: ActivitySortColumn, direction: ActivitySortDirection) => {
+  sortColumn.value = column
+  sortDirection.value = direction
+}
+
 const getSortIndicator = (column: SortColumn): string => {
   if (sortColumn.value !== column) return ''
   return sortDirection.value === 'asc' ? '↑' : '↓'
@@ -3121,6 +3247,10 @@ const handleKeydown = (event: KeyboardEvent) => {
   // The access explainer opened from the drawer owns Escape while it is open:
   // closing the drawer too would unmount the "Why?" button the dialog returns
   // focus to and drop focus on <body> (Spec 108-j live QA).
+  if (event.key === 'Escape' && showFilterPanel.value && !showDetailDrawer.value) {
+    closeFilterPopover(true)
+    return
+  }
   if (event.key === 'Escape' && showDetailDrawer.value && explain.value === null) {
     closeDetailDrawer()
   }
@@ -3150,6 +3280,7 @@ onMounted(() => {
   window.addEventListener('mcpproxy:activity-completed', handleActivityCompleted as EventListener)
   window.addEventListener('mcpproxy:activity-policy', handleActivityEvent as EventListener)
   window.addEventListener('keydown', handleKeydown)
+  document.addEventListener('click', onDocumentClick)
 })
 
 onUnmounted(() => {
@@ -3158,5 +3289,6 @@ onUnmounted(() => {
   window.removeEventListener('mcpproxy:activity-completed', handleActivityCompleted as EventListener)
   window.removeEventListener('mcpproxy:activity-policy', handleActivityEvent as EventListener)
   window.removeEventListener('keydown', handleKeydown)
+  document.removeEventListener('click', onDocumentClick)
 })
 </script>

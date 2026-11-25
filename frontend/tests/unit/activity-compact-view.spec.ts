@@ -235,22 +235,17 @@ describe('Activity Log — row treatment', () => {
     expect(marker.classes().join(' ')).not.toContain('badge-accent')
   })
 
-  it('shows the intent reason inline, glyph first, no coloured pill', async () => {
+  it('moves the intent into the row detail in the calls view (Spec 134 FR-049)', async () => {
     const wrapper = await mountActivity()
 
-    const intent = rowFor(wrapper, 'list_repos').find('[data-test="activity-intent"]')
-    expect(intent.exists()).toBe(true)
-    expect(intent.attributes('title')).toBe('read — enumerate repositories for the release notes')
-    expect(intent.text()).toContain('enumerate repositories for the release notes')
-    expect(intent.classes().join(' ')).not.toContain('badge')
-    expect(intent.find('[data-test="activity-intent-reason"]').classes()).toContain('truncate')
-
-    // Declared operation with no reason: glyph only, no dangling text node.
-    const noReason = rowFor(wrapper, 'post_message').find('[data-test="activity-intent"]')
-    expect(noReason.attributes('title')).toBe('write')
-    expect(noReason.find('[data-test="activity-intent-reason"]').exists()).toBe(false)
-
-    // No intent at all: a muted dash, not a "❓" chip.
-    expect(rowFor(wrapper, 'code_execution').find('[data-test="activity-intent"]').exists()).toBe(false)
+    // The calls table no longer has an Intent column; the declared reason is in the detail.
+    expect(rowFor(wrapper, 'list_repos').find('[data-test="activity-intent"]').exists()).toBe(false)
+    await rowFor(wrapper, 'list_repos').find('[data-test="activity-open-act-ok"]').trigger('click')
+    await flushPromises()
+    const panel = wrapper.find('[data-test="activity-detail-panel"]')
+    expect(panel.text()).toContain('Intent Declaration')
+    expect(panel.text()).toContain('enumerate repositories for the release notes')
+    expect(panel.text()).toContain('read')
   })
+
 })
