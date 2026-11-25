@@ -207,6 +207,7 @@ describe('skillErrorNotice', () => {
 
 // Spec 134 FR-036/FR-037
 describe('skillStateTone and skillRowAction', () => {
+  const entry = (status: string, blocked = false) => ({ status, blocked }) as any
   it('maps the five states to the status tones', () => {
     expect(skillStateTone(entry('approved'))).toBe('ok')
     expect(skillStateTone(entry('pending'))).toBe('review')

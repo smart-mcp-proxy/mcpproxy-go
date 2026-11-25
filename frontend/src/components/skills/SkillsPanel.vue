@@ -38,7 +38,7 @@
       <p v-if="!listing.supported && listing.skills.length === 0" class="text-base-content/70" data-test="skills-empty-unsupported">
         This server does not announce the skills extension.
       </p>
-      <div v-else class="space-y-4">
+      <div v-else class="grid items-start gap-4" :class="{ 'lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]': review }">
         <div class="min-w-0 space-y-3" :class="{ 'hidden lg:block': review }">
           <div class="join" role="group" aria-label="Filter skills">
             <button ref="allFilter" type="button" class="btn btn-sm join-item min-h-11 lg:min-h-0" :class="{ 'btn-active': !needsReview }" :aria-pressed="!needsReview" data-test="skills-filter-all" @click="emit('filter', false)">All skills</button>
@@ -53,23 +53,23 @@
           <!-- Spec 134 FR-036: a table; below md each row stacks and the headers move into the cells. -->
           <div v-else ref="skillList" class="border border-base-300 rounded-lg lg:max-h-[65vh] lg:overflow-y-auto" data-test="skills-list">
             <table class="table w-full text-sm" aria-label="Skills">
-              <thead class="hidden md:table-header-group">
+              <thead :class="stacked ? 'hidden' : 'hidden md:table-header-group'">
                 <tr><th scope="col">Skill</th><th scope="col">Description</th><th scope="col">State</th><th scope="col">Scan result</th><th scope="col">Files</th><th scope="col"><span class="sr-only">Action</span></th></tr>
               </thead>
               <tbody>
-                <tr v-for="s in visibleSkills" :key="s.path" class="block md:table-row border-b border-base-200" :class="s.path === selectedPath ? 'bg-base-200' : ''" :data-test="`skill-tr-${s.path}`">
-                  <td class="block md:table-cell min-w-0">
+                <tr v-for="s in visibleSkills" :key="s.path" class="border-b border-base-200" :class="[rowCls, s.path === selectedPath ? 'bg-base-200' : '']" :data-test="`skill-tr-${s.path}`">
+                  <td class="min-w-0" :class="cellCls">
                     <span class="font-medium break-all" v-text="s.name || s.path"></span>
                     <span class="block text-xs text-base-content/70">{{ s.available ? 'Offered to agents' : 'Not offered' }}</span>
                   </td>
-                  <td class="block md:table-cell min-w-0 md:max-w-xs"><span class="block text-base-content/80 line-clamp-2 break-words" v-text="s.description || 'No description'"></span></td>
-                  <td class="block md:table-cell">
+                  <td class="min-w-0 md:max-w-xs" :class="cellCls"><span class="block text-base-content/80 line-clamp-2 break-words" v-text="s.description || 'No description'"></span></td>
+                  <td :class="cellCls">
                     <StateTag :tone="skillStateTone(s)" :data-test="`skill-chip-${s.path}`"><span v-text="skillStateChip(s).label"></span></StateTag>
                     <span v-if="s.unusable_reason" class="block text-xs text-base-content/70 break-words" :data-test="`skill-unusable-${s.path}`">Unusable: <span v-text="s.unusable_reason"></span></span>
                   </td>
-                  <td class="block md:table-cell text-base-content/80"><span class="md:hidden">Scan: </span><span v-text="s.scan?.verdict || 'not scanned'"></span></td>
-                  <td class="block md:table-cell text-base-content/80">{{ s.files?.length ?? 0 }} file{{ (s.files?.length ?? 0) === 1 ? '' : 's' }}</td>
-                  <td class="block md:table-cell md:text-right">
+                  <td class="text-base-content/80" :class="cellCls"><span :class="stacked ? '' : 'md:hidden'">Scan: </span><span v-text="s.scan?.verdict || 'not scanned'"></span></td>
+                  <td class="text-base-content/80" :class="cellCls">{{ s.files?.length ?? 0 }} file{{ (s.files?.length ?? 0) === 1 ? '' : 's' }}</td>
+                  <td :class="[cellCls, stacked ? '' : 'md:text-right']">
                     <button
                       type="button"
                       class="btn btn-sm min-h-11 lg:min-h-0"
@@ -147,6 +147,10 @@ const heldSkills = computed(() => {
   if (!current || !props.serverReviewable || current.expose_skills === false) return []
   return current.skills.filter(s => s.listed && !s.blocked && (s.status === 'pending' || s.status === 'changed'))
 })
+// A card open beside the list narrows the table: rows stack, every fact stays in its cell.
+const stacked = computed(() => !!review.value)
+const rowCls = computed(() => stacked.value ? 'block' : 'block md:table-row')
+const cellCls = computed(() => stacked.value ? 'block' : 'block md:table-cell')
 const visibleSkills = computed(() => props.needsReview ? heldSkills.value : listing.value?.skills ?? [])
 // A live skills.changed for this server: the records moved, so the version on
 // screen may be out of date. Approve is off (for the open review and for one

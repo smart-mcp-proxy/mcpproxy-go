@@ -36,7 +36,7 @@
           <!-- FR-002: both behaviors each mode governs — tool changes… -->
           <span class="block mt-1 text-sm opacity-80 leading-relaxed">{{ m.description }}</span>
           <!-- …and new-server admission. -->
-          <span class="block mt-1 text-xs opacity-60 leading-relaxed">{{ m.admissionNote }}</span>
+          <span class="block mt-1 text-xs opacity-75 leading-relaxed">{{ m.admissionNote }}</span>
         </span>
       </label>
 
