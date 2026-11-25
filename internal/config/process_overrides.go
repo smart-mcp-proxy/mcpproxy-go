@@ -1,10 +1,14 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"io/fs"
+	"os"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -505,6 +509,35 @@ func PersistableConfigWithEdits(effective, mergeBase *Config, path string) *Conf
 // value the file never held.
 var ErrSecretFileDirsUnverified = errors.New("config file cannot be decoded; refusing to save secret_file_dirs it does not hold")
 
+// fileMayHoldSecretFileDirs reports whether the file at path, which could not
+// be decoded as a config, still shows a secret_file_dirs key (or cannot be
+// read at all, so nothing shows it does not). A save that dropped the key
+// would turn an explicit setting (for instance [] = file references off) back
+// into the platform default. A file whose text does not even mention the key
+// holds no setting and may be overwritten, so a repair save stays possible.
+func fileMayHoldSecretFileDirs(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return true
+	}
+	var top map[string]json.RawMessage
+	if json.Unmarshal(data, &top) == nil {
+		// The decoder matches keys case-insensitively, so this must too.
+		for k := range top {
+			if strings.EqualFold(k, "secret_file_dirs") {
+				return true
+			}
+		}
+		return false
+	}
+	// Not a JSON object (a trailing comma after the setting, say): the loader
+	// cannot read it either, but the text may still hold the key. Fail closed
+	// when the quoted key appears anywhere in it.
+	// A JSON escape can spell the key (\u005f for "_"), so any escape counts.
+	lower := bytes.ToLower(data)
+	return bytes.Contains(lower, []byte(`"secret_file_dirs"`)) || bytes.Contains(lower, []byte(`\u`))
+}
+
 // persistableConfigWithEdits is PersistableConfigWithEdits for the save path:
 // it fails closed (ErrSecretFileDirsUnverified) where the comparison helper
 // would fall back to the in-memory value. A missing file is not an error (the
@@ -525,7 +558,7 @@ func persistableConfigWithEdits(effective, mergeBase *Config, path string) (*Con
 		case err == nil:
 			base = onDisk
 		case !errors.Is(err, fs.ErrNotExist):
-			unverified = effective.SecretFileDirs != nil
+			unverified = effective.SecretFileDirs != nil || fileMayHoldSecretFileDirs(path)
 		}
 	}
 	if unverified {

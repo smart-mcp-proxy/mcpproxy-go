@@ -309,6 +309,14 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 		diag.RuntimeWarnings = append(diag.RuntimeWarnings, warning)
 	}
 
+	// #2031: upstream ${file:} references that secret_file_dirs refuses. The
+	// startup WARN is gone from the log by now; this keeps the finding in
+	// doctor and GET /api/v1/diagnostics. Server names only (never paths), and
+	// a scoped caller sees only the servers it may enumerate.
+	if warning, ok := s.fileRefsOutsideAllowListWarning(ctx); ok {
+		diag.RuntimeWarnings = append(diag.RuntimeWarnings, warning)
+	}
+
 	// Spec 123 FR-030: the OAuth token storage section, and one runtime
 	// warning per undecryptable server so the issue count and tray badge
 	// reflect it. Optional: a runtime that cannot report leaves it out.
@@ -429,4 +437,33 @@ func getStringFromMap(m map[string]interface{}, key string) string {
 		}
 	}
 	return ""
+}
+
+// fileRefsOutsideAllowListWarning builds the doctor line for upstream servers
+// whose ${file:} references secret_file_dirs refuses by path.
+func (s *service) fileRefsOutsideAllowListWarning(ctx context.Context) (string, bool) {
+	// The live config (it changes on hot reload), when the runtime offers it.
+	cfg := s.config
+	if lc, ok := s.runtime.(interface{ Config() *config.Config }); ok {
+		if live := lc.Config(); live != nil {
+			cfg = live
+		}
+	}
+	if cfg == nil {
+		return "", false
+	}
+	// Filter by scope BEFORE resolving any path: an out-of-scope server's
+	// references must not cost the caller filesystem time.
+	scoped := *cfg
+	scoped.Servers = nil
+	for _, sc := range cfg.Servers {
+		if sc != nil && auth.CanEnumerateServer(ctx, sc.Name) {
+			scoped.Servers = append(scoped.Servers, sc)
+		}
+	}
+	visible := config.UpstreamFileRefsOutsideAllowList(&scoped)
+	if len(visible) == 0 {
+		return "", false
+	}
+	return fmt.Sprintf("%s: %s", config.MsgUpstreamFileRefsOutsideAllowList, strings.Join(visible, ", ")), true
 }

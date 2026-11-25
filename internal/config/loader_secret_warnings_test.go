@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -55,4 +56,38 @@ func hasLoadWarning(rec []LoadWarning, message, value string) bool {
 		}
 	}
 	return false
+}
+
+func TestLoad_WarnsUnresolvableSecretFileDirRoot(t *testing.T) {
+	dir := t.TempDir()
+	notDir := filepath.Join(dir, "a-file")
+	require.NoError(t, os.WriteFile(notDir, []byte("x"), 0o600))
+	loopA, loopB := filepath.Join(dir, "loop-a"), filepath.Join(dir, "loop-b")
+	if err := os.Symlink(loopB, loopA); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	require.NoError(t, os.Symlink(loopA, loopB))
+	cfg := &Config{DataDir: dir, Listen: "127.0.0.1:8080", SecretFileDirs: &SecretFileDirs{notDir, loopA}}
+	path := filepath.Join(dir, ConfigFileName)
+	require.NoError(t, SaveConfig(cfg, path))
+
+	var rec []LoadWarning
+	SetLoadWarningRecorder(func(message, key, value string) {
+		rec = append(rec, LoadWarning{Message: message, Key: key, Value: value})
+	})
+	t.Cleanup(func() { SetLoadWarningRecorder(nil) })
+
+	_, err := LoadFromFile(path)
+	require.NoError(t, err)
+	assert.True(t, hasLoadWarning(rec, MsgSecretFileDirsRootUnusable, notDir), "a file is not a directory")
+	assert.True(t, hasLoadWarning(rec, MsgSecretFileDirsRootUnusable, loopA), "a symlink loop cannot be resolved")
+}
+
+func TestEmitSecretFileDirsWarnings_SharedByBothLoaders(t *testing.T) {
+	var rec []LoadWarning
+	SetLoadWarningRecorder(func(m, k, v string) { rec = append(rec, LoadWarning{m, k, v}) })
+	t.Cleanup(func() { SetLoadWarningRecorder(nil) })
+	missing := filepath.Join(t.TempDir(), "nope")
+	emitSecretFileDirsWarnings(&Config{SecretFileDirs: &SecretFileDirs{missing}})
+	assert.True(t, hasLoadWarning(rec, "secret_file_dirs root does not exist yet", missing))
 }

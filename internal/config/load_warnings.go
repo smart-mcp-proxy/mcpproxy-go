@@ -1,6 +1,11 @@
 package config
 
-import "sync"
+import (
+	"fmt"
+	"io"
+	"os"
+	"sync"
+)
 
 // LoadWarningRecorder receives non-fatal messages from config loading.
 type LoadWarningRecorder func(message string, key string, value string)
@@ -50,4 +55,24 @@ func DrainLoadWarnings() []LoadWarning {
 	}
 	pendingLoadWarnings = nil
 	return out
+}
+
+// loadWarningStderr is where emitLoadWarningVisible writes when no recorder is
+// installed. A variable so tests can capture it.
+var loadWarningStderr io.Writer = os.Stderr
+
+// emitLoadWarningVisible is emitLoadWarning for a warning that must not be lost
+// in a process that never installs a recorder (a standalone CLI save): with no
+// recorder it also prints one line to stderr. The warning is still queued, so
+// a core that installs its recorder later logs it too.
+func emitLoadWarningVisible(message, key, value string) {
+	loadWarnMu.Lock()
+	defer loadWarnMu.Unlock()
+	if loadWarnRecorder != nil {
+		loadWarnRecorder(message, key, value)
+		return
+	}
+	// %q: the value can be a file name, which may carry control characters.
+	fmt.Fprintf(loadWarningStderr, "warning: %s (%s=%q)\n", message, key, value)
+	pendingLoadWarnings = append(pendingLoadWarnings, pendingWarning{message, key, value})
 }
