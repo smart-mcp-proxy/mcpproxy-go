@@ -98,26 +98,8 @@ jobs:
           CGO_ENABLED: "0"
         run: go build -tags nogui -o mcpproxy ./cmd/mcpproxy
 
-      - name: Run unit tests
-        # -short skips the heavy property/timing tests (TestRapidQuarantine* etc.);
-        # they run unguarded in the main-only stress-tests job below so coverage
-        # is preserved.
-        #
-        # Timeout matches the Windows sweep in unit-tests.yml. It was
-        # 4m, which the windows-latest runner could not meet: internal/server
-        # took 240s and died at `panic: test timed out after 4m0s` — with a
-        # single test only 2s in, so cumulative slowness (Bleve index creation
-        # on the Windows filesystem), never a hang. That kept this job red on
-        # main from 2026-08-13 (issue #1034). The same signature returned at
-        # 10m on 2026-09-12 (a74a7cf0f: 449s one push, 600s+ the next, a 4s
-        # test in flight), so both budgets moved to 20m. Keep them in step;
-        # the same code timing out in one and passing in the other is the
-        # signature of this bug returning. unit-tests.yml moved its Windows
-        # sweep to 40m when internal/server reached ~1100-1200s; this step was
-        # left at 20m and hit it on 6 of ~10 windows-latest main runs in
-        # 2026-10 (internal/server at 650s to over 1200s, no hang in the
-        # goroutine dumps), so it is 40m again to match.
-        run: go test -v -short -race -timeout 40m -skip "Binary|MCP|E2E|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/...
+      # Unit tests are not run here: unit-tests.yml runs a superset of them, with
+      # -race, on the same runners and events.
 
       # Binary tests are too flaky in CI due to server startup timing issues
       # All Binary tests consistently timeout waiting for server to be ready
@@ -140,7 +122,9 @@ jobs:
         env:
           GO_TEST_TIMEOUT: 300s
 
+      # On ubuntu the unfiltered race step below runs these same tests.
       - name: Run E2E tests
+        if: matrix.os != 'ubuntu-latest'
         run: go test -v -race -timeout 5m ./internal/server -run TestE2E -skip 'TestE2E_ToolDiscovery|TestE2E_ServerDeleteReaddDifferentTools'
         env:
           GO_TEST_TIMEOUT: 300s
@@ -173,6 +157,7 @@ jobs:
           echo "✅ All security tests executed successfully (no skips detected)"
 
       - name: Run Logging E2E tests
+        if: matrix.os != 'ubuntu-latest'
         run: go test -v -race -timeout 5m ./internal/logs -run TestE2E
         env:
           GO_TEST_TIMEOUT: 300s

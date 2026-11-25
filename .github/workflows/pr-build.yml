@@ -100,6 +100,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
+      # Once per OS: the tests run on the host, so the leg for the other GOARCH
+      # would run the very same ones.
+      RUN_TESTS: ${{ contains(fromJSON('["linux/amd64", "windows/amd64", "darwin/arm64"]'), format('{0}/{1}', matrix.goos, matrix.goarch)) }}
     strategy:
       matrix:
         include:
@@ -191,9 +194,8 @@ jobs:
       # Spec 083: the bench/arms tscg tests spawn the committed Node shim
       # (bench/tscg/shim.mjs) and hard-fail (never skip) under CI per FR-006, so
       # the tscg runtime must be provisioned wherever `go test ./...` runs.
-      # Skipped for Windows ARM64, which cross-compiles and does not run tests.
       - name: Set up Node.js (TSCG bench arm)
-        if: '!(matrix.goos == ''windows'' && matrix.goarch == ''arm64'')'
+        if: env.RUN_TESTS == 'true'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: '22'
@@ -201,7 +203,7 @@ jobs:
           cache-dependency-path: bench/tscg/package-lock.json
 
       - name: Install pinned TSCG shim dependencies (FR-006)
-        if: '!(matrix.goos == ''windows'' && matrix.goarch == ''arm64'')'
+        if: env.RUN_TESTS == 'true'
         shell: bash
         run: npm ci --prefix bench/tscg
 
@@ -212,15 +214,14 @@ jobs:
       # makes every later tokenizer construction a cache hit. Same fix as
       # unit-tests.yml.
       - name: Warm the tiktoken vocabulary cache
-        if: '!(matrix.goos == ''windows'' && matrix.goarch == ''arm64'')'
+        if: env.RUN_TESTS == 'true'
         shell: bash
         run: go run ./bench/cmd/warmtiktoken
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
       - name: Run tests (skip binary E2E tests - not compatible with cross-compilation)
-        # Skip tests for Windows ARM64 (cross-compilation - can't run ARM64 binaries on AMD64 runner)
-        if: '!(matrix.goos == ''windows'' && matrix.goarch == ''arm64'')'
+        if: env.RUN_TESTS == 'true'
         shell: bash
         run: |
           # On Windows, skip internal/server tests (E2E tests timeout after 11 minutes).
