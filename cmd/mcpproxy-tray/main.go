@@ -1833,7 +1833,10 @@ func (cpl *CoreProcessLauncher) handleShutdown() {
 		cpl.logger.Info("Core was not started by the tray - leaving it running")
 	}
 
-	if shouldTerminateCore(cpl.coreOwnership) {
+	// Once the monitor has reaped the core there is nothing left to verify, and the status API
+	// could only time out or name a core the tray did not start.
+	coreExited := cpl.processMonitor != nil && cpl.processMonitor.GetExitInfo() != nil
+	if shouldTerminateCore(cpl.coreOwnership) && !coreExited {
 		if err := cpl.ensureCoreTermination(); err != nil {
 			cpl.logger.Error("Final core termination verification failed", zap.Error(err))
 		}
