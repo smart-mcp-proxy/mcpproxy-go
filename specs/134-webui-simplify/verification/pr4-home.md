@@ -59,3 +59,8 @@ Brief: which existing function the diff removes, hides without a named place, or
 | Loading/failed attention branches now render text | intended (P4-09) | none |
 
 Round 2 not run: no design change after round 1 beyond the fixes above.
+
+## Visual review round 2
+
+- Recent activity statuses use `StateTag` in soft tones (error → error tone, blocked → review tone, other pill statuses neutral); "Success" stays plain text. The contrast sweep for `/` passes in both themes.
+- Vertical rhythm: Home sections 16 px apart, usage cards shorter. At 1440×900 with two attention items the usable-tools line ends at y=749 of 900, so it and the shortcut row are inside the first screen (measured by script, screenshot looked at).

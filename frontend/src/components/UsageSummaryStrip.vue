@@ -10,8 +10,8 @@
       style="border-color: var(--ds-border)" class="card card-compact bg-base-100 border hover:shadow-md transition-shadow flex-1 min-w-[140px]"
       data-test="usage-strip-calls"
     >
-      <div class="card-body py-3 px-4">
-        <div class="text-2xl font-bold leading-none">{{ loaded ? summary.call_count : '—' }}</div>
+      <div class="card-body py-2 px-4 gap-0">
+        <div class="text-xl font-bold leading-none">{{ loaded ? summary.call_count : '—' }}</div>
         <div class="text-xs text-base-content/70 mt-1">calls</div>
       </div>
     </router-link>
@@ -20,8 +20,8 @@
       style="border-color: var(--ds-border)" class="card card-compact bg-base-100 border hover:shadow-md transition-shadow flex-1 min-w-[140px]"
       data-test="usage-strip-blocked"
     >
-      <div class="card-body py-3 px-4">
-        <div class="text-2xl font-bold leading-none">{{ loaded ? summary.blocked_count : '—' }}</div>
+      <div class="card-body py-2 px-4 gap-0">
+        <div class="text-xl font-bold leading-none">{{ loaded ? summary.blocked_count : '—' }}</div>
         <div class="text-xs text-base-content/70 mt-1">blocked</div>
       </div>
     </router-link>
@@ -30,8 +30,8 @@
       style="border-color: var(--ds-border)" class="card card-compact bg-base-100 border hover:shadow-md transition-shadow flex-1 min-w-[140px]"
       data-test="usage-strip-errors"
     >
-      <div class="card-body py-3 px-4">
-        <div class="text-2xl font-bold leading-none">{{ loaded ? summary.call_error_count : '—' }}</div>
+      <div class="card-body py-2 px-4 gap-0">
+        <div class="text-xl font-bold leading-none">{{ loaded ? summary.call_error_count : '—' }}</div>
         <div class="text-xs text-base-content/70 mt-1">errors</div>
       </div>
     </router-link>

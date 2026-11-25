@@ -23,7 +23,8 @@
               <div class="text-xs text-base-content/70">{{ formatRelativeTime(a.timestamp) }}</div>
             </div>
           </div>
-          <span data-test="recent-activity-status" :class="statusPresentation(a.status).className">{{ statusPresentation(a.status).label }}</span>
+          <span v-if="!statusPresentation(a.status).pill" data-test="recent-activity-status" class="text-sm text-base-content/70">{{ statusPresentation(a.status).label }}</span>
+          <StateTag v-else :tone="tagTone(a.status)" data-test="recent-activity-status">{{ statusPresentation(a.status).label }}</StateTag>
         </li>
       </ul>
     </div>
@@ -33,9 +34,14 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import UiIcon from '@/components/UiIcon.vue'
+import StateTag from '@/components/StateTag.vue'
+import type { StatusTone } from '@/utils/healthTone'
 import api from '@/services/api'
 import type { ActivityRecord } from '@/types/api'
 import { formatPreflightSummary, formatRelativeTime, formatType, getTypeIcon, isPreflightActivity, statusPresentation } from '@/utils/activity'
+
+// Soft tones: error -> error, blocked -> review, anything else neutral.
+const tagTone = (status: string): StatusTone => (status === 'error' ? 'error' : status === 'blocked' ? 'review' : 'neutral')
 
 const rows = ref<ActivityRecord[]>([])
 const loading = ref(true)
