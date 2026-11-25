@@ -69,6 +69,6 @@ describe('Tools batch bar in grouped mode', () => {
     await wrapper.find('[data-test="tools-select-all"]').setValue(true)
     await wrapper.find('[data-test="tools-pager"] .join-item:nth-child(4)').trigger('click')
     await flushPromises()
-    expect(wrapper.find('[data-test="tools-selected-count"]').text()).toBe('25 tools selected on 1 server (25 not shown on this page)')
+    expect(wrapper.find('[data-test="tools-selected-count"]').text()).toBe('25 tools selected on 1 server (25 on other pages)')
   })
 })

@@ -1,6 +1,6 @@
 <template>
   <section class="border-t border-[var(--ds-border)] first:border-t-0" :data-test="`tools-section-${group.server}`" data-test-section>
-    <header class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1 bg-base-200/40">
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1 bg-base-200/40" data-test="tools-section-header">
       <button
         type="button"
         class="btn btn-ghost btn-sm min-h-11 min-w-11 px-2"
@@ -19,7 +19,7 @@
       <span class="text-xs text-base-content/70" data-test="tools-section-count">
         {{ group.total }} tool{{ group.total === 1 ? '' : 's' }}<template v-if="group.tools.length < group.total"> · {{ group.tools.length }} on this page</template>
       </span>
-    </header>
+    </div>
     <ul v-show="expanded" :id="bodyId" class="divide-y divide-[var(--ds-border)]" data-test="tools-section-body">
       <li
         v-for="tool in group.tools"
@@ -65,7 +65,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { useId } from 'vue'
 import StatusPill from '@/components/StatusPill.vue'
 import UiIcon from '@/components/UiIcon.vue'
 import ToolExceptionLabels from '@/components/tools/ToolExceptionLabels.vue'
@@ -76,7 +76,7 @@ import { formatRelativeTime, type SectionServerInfo } from '@/utils/toolsGroupin
 // Spec 134 FR-055/FR-056: one collapsible section of the grouped list. Built
 // only from rows this caller was sent; `info` is the server's health when the
 // caller can read it, else absent (no pill).
-const props = defineProps<{
+defineProps<{
   group: { server: string; tools: GlobalTool[]; total: number }
   info?: SectionServerInfo & { status?: string | null }
   expanded: boolean
@@ -92,5 +92,6 @@ const emit = defineEmits<{
   (e: 'details', tool: GlobalTool, opener: HTMLElement): void
 }>()
 
-const bodyId = computed(() => `tools-section-body-${props.group.server.replace(/[^a-zA-Z0-9_-]/g, '_')}`)
+// A server name may differ from another only by a character an id cannot hold.
+const bodyId = `tools-section-body-${useId()}`
 </script>

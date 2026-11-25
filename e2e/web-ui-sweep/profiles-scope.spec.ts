@@ -31,6 +31,9 @@ function url(route: string): string {
 }
 
 async function open(page: Page, route: string) {
+  // Spec 134 PR 6: these cases drive the Flat list (Access column, per-row Why?).
+  // The grouped default is covered by case 1c below and by tools-pr6.spec.ts.
+  await page.addInitScript(() => { try { window.localStorage.setItem('mcpproxy.tools.layout', 'flat') } catch { /* ignore */ } })
   await page.goto(url(route))
   await page.waitForLoadState('domcontentloaded')
   const closeWizard = page.locator('[data-test="close-wizard"]')
@@ -129,6 +132,34 @@ test('1. Tools view-as: filtered from the first render, greyed rows with reasons
   await expect(dialog.locator('[data-test="explain-verdict"]')).toHaveCount(0)
   // The browser hands focus back to the button that opened the dialog.
   await expect(why).toBeFocused()
+})
+
+test('1c. Tools view-as, grouped default: Details carries the verdict and Why?, a real Escape returns focus', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.addInitScript(() => { try { window.localStorage.removeItem('mcpproxy.tools.layout') } catch { /* ignore */ } })
+  await page.goto(url(`/tools?client=${SCOPE_CLIENT}`))
+  await page.waitForLoadState('domcontentloaded')
+  const closeWizard = page.locator('[data-test="close-wizard"]')
+  if (await closeWizard.isVisible().catch(() => false)) await closeWizard.click()
+  await expect(page.locator('[data-test="tools-grouped"]')).toBeVisible()
+  await expect(page.locator('[data-test="tools-view-as-banner"]')).toContainText('Viewing as E2E Scope')
+  await expect(page.locator('[data-test="tools-select-all"]')).toBeDisabled()
+  const row = page.locator(`[data-test="tool-row"]:has-text("echo")`).first()
+  await expect(row.locator('[data-test="tool-not-callable"]')).toBeVisible()
+  const details = row.locator('[data-test="tool-details-button"]')
+  await details.focus()
+  await page.keyboard.press('Enter')
+  const dialog = page.locator('[data-test="tool-details-dialog"]')
+  await expect(dialog.locator('[data-test="tool-details-access"]')).toContainText('Denied by rule')
+  await dialog.locator('[data-test="tool-details-why"]').click()
+  const explainer = page.locator('[data-test="access-explainer"]')
+  await expect(explainer.locator('[data-test="explain-verdict"]')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(explainer.locator('[data-test="explain-verdict"]')).toHaveCount(0)
+  await expect(dialog.locator('[data-test="tool-details-why"]')).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(dialog.locator('[data-test="tool-details"]')).toHaveCount(0)
+  await expect(details).toBeFocused()
 })
 
 test('1b. Both client and profile: the conflict state and no scoped /tools request (rule 8)', async ({ page }) => {

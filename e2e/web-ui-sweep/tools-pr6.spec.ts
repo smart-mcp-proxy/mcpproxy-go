@@ -70,12 +70,34 @@ test('Details opens by keyboard, shows the full facts, Escape returns focus', as
   await page.keyboard.press('Enter')
   const dialog = page.locator('[data-test="tool-details-dialog"]')
   await expect(dialog).toBeVisible()
+  // The browser's own modal behaviour keeps Tab inside the dialog.
+  for (let i = 0; i < 12; i++) {
+    await page.keyboard.press('Tab')
+    expect(await page.evaluate(() => !!document.activeElement?.closest('[data-test="tool-details-dialog"]'))).toBe(true)
+  }
   await expect(dialog.locator('[data-test="tool-details-tier"]')).toHaveText('Write')
   await expect(dialog.locator('[data-test="tool-calls-link"]')).toBeVisible()
   await expect(dialog.locator('[data-test="tool-details-last-used"]')).toHaveText('1h ago')
   await page.keyboard.press('Escape')
-  await expect(dialog).toHaveCount(0)
+  await expect(dialog.locator('[data-test="tool-details"]')).toHaveCount(0)
+  await expect(dialog).not.toHaveAttribute('open', /.*/)
   await expect(button).toBeFocused()
+})
+
+test('flat rows and sort headers work from the keyboard', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.addInitScript(() => { try { window.localStorage.setItem('mcpproxy.tools.layout', 'flat') } catch { /* ignore */ } })
+  await open(page)
+  const th = page.locator('thead th', { hasText: /^Tool/ })
+  await th.focus()
+  await page.keyboard.press('Enter')
+  await expect(th).toHaveAttribute('aria-sort', 'descending')
+  const row = page.locator('[data-test="tool-row"]').first()
+  await row.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.locator('[data-test="tool-details-dialog"] [data-test="tool-details"]')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(row).toBeFocused()
 })
 
 test('Only exceptions and More filters', async ({ page }) => {

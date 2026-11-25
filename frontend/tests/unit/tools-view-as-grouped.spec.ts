@@ -88,4 +88,16 @@ describe('Tools grouped under View as', () => {
     expect((wrapper.find('[data-test="tools-select-all"]').element as HTMLInputElement).disabled).toBe(true)
     expect((wrapper.find('[data-test="tool-select"]').element as HTMLInputElement).disabled).toBe(true)
   })
+
+  it('the Callable filter lives in More filters, narrows the rows and counts as an advanced filter', async () => {
+    const wrapper = await mountAt('/tools?client=cursor')
+    const panel = wrapper.find('[data-test="tools-more-filters"]')
+    expect(panel.find('[data-test="tools-show-filter"]').exists()).toBe(true)
+    await wrapper.find('[data-test="tools-more-filters-toggle"]').trigger('click')
+    await panel.find('[data-test="tools-show-callable"]').trigger('click')
+    expect(wrapper.findAll('[data-test="tool-row"]')).toHaveLength(1)
+    expect(wrapper.find('[data-test="tools-more-filters-toggle"]').text()).toContain('1')
+    await panel.find('[data-test="tools-show-not_callable"]').trigger('click')
+    expect(wrapper.find('[data-test="tool-name"]').text()).toBe('create_issue')
+  })
 })

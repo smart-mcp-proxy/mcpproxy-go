@@ -67,6 +67,29 @@ describe('Tools grouped mode', () => {
     expect(body.isVisible()).toBe(true)
   })
 
+  it('a search reopens a section the user closed before searching', async () => {
+    const { wrapper } = await mountTools({ api, tools: TOOLS, servers: SERVERS })
+    await wrapper.find('[data-test="tools-section-alpha"] [data-test="tools-section-toggle"]').trigger('click')
+    expect(wrapper.find('[data-test="tools-section-alpha"] [data-test="tools-section-body"]').isVisible()).toBe(false)
+    await wrapper.find('[data-test="tools-search"]').setValue('write_a')
+    expect(wrapper.find('[data-test="tools-section-alpha"] [data-test="tools-section-body"]').isVisible()).toBe(true)
+  })
+
+  it('toggle ids are unique even when server names differ by one character', async () => {
+    const { wrapper } = await mountTools({ api, tools: [tool({ server_name: 'org/repo' }), tool({ server_name: 'org_repo' })], servers: [] })
+    const ids = wrapper.findAll('[data-test="tools-section-toggle"]').map(b => b.attributes('aria-controls'))
+    expect(new Set(ids).size).toBe(2)
+  })
+
+  it('Total is not marked active while Only exceptions narrows the list; clicking it resets', async () => {
+    const { wrapper } = await mountTools({ api, tools: TOOLS, servers: SERVERS })
+    expect(wrapper.find('[data-test="stat-total"]').classes().join(' ')).toContain('ring-2')
+    await wrapper.find('[data-test="tools-only-exceptions"]').setValue(true)
+    expect(wrapper.find('[data-test="stat-total"]').classes().join(' ')).not.toContain('ring-2')
+    await wrapper.find('[data-test="stat-total"]').trigger('click')
+    expect((wrapper.find('[data-test="tools-only-exceptions"]').element as HTMLInputElement).checked).toBe(false)
+  })
+
   it('an ordinary row has no label; exceptions are labelled; last used and Details are on the row', async () => {
     const { wrapper } = await mountTools({ api, tools: TOOLS, servers: SERVERS })
     const rows = wrapper.findAll('[data-test="tool-row"]')

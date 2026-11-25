@@ -220,6 +220,23 @@
               <option value="changed">Changed, needs review</option>
             </select>
           </div>
+
+          <!-- Callable filter (administrator View as only; page-local, no URL
+               parameter): it narrows the rows already loaded. -->
+          <div v-if="viewAsAdmin" class="form-control" data-test="tools-show-filter-wrap">
+            <span class="label py-1"><span class="label-text text-xs">Show</span></span>
+            <div class="join" role="group" aria-label="Show tools" data-test="tools-show-filter">
+              <button
+                v-for="option in SHOW_OPTIONS"
+                :key="option.value"
+                type="button"
+                class="btn btn-sm btn-outline join-item min-h-11 sm:min-h-8"
+                :aria-pressed="showFilter === option.value"
+                :data-test="`tools-show-${option.value}`"
+                @click="showFilter = option.value"
+              >{{ option.label }}</button>
+            </div>
+          </div>
         </div>
 
         <!-- Spec 108-j J4: the profile/client/token chips (removable), with the
@@ -260,25 +277,13 @@
         </div>
         <div class="text-xs opacity-80">This is a view of {{ viewAsSubjectLabel }}'s access. Nothing here changes it.</div>
       </div>
-      <div v-if="viewAsAdmin" class="join" role="group" aria-label="Show tools" data-test="tools-show-filter">
-        <button
-          v-for="option in SHOW_OPTIONS"
-          :key="option.value"
-          type="button"
-          class="btn btn-xs join-item"
-          :class="showFilter === option.value ? 'btn-primary' : 'btn-ghost'"
-          :aria-pressed="showFilter === option.value"
-          :data-test="`tools-show-${option.value}`"
-          @click="showFilter = option.value"
-        >{{ option.label }}</button>
-      </div>
     </div>
 
     <!-- Batch action bar -->
     <!-- Sticky: a selection made far down a long grouped list keeps its bar in view. -->
     <div v-if="selectedKeys.size > 0" class="alert shadow-md sticky top-2 z-20" data-test="tools-batch-bar">
       <div class="flex items-center gap-3 w-full flex-wrap">
-        <span class="font-medium" data-test="tools-selected-count">{{ selectedKeys.size }} tool{{ selectedKeys.size === 1 ? '' : 's' }} selected on {{ selectedServerCount }} server{{ selectedServerCount === 1 ? '' : 's' }}<template v-if="hiddenSelectedCount > 0"> ({{ hiddenSelectedCount }} not shown on this page)</template></span>
+        <span class="font-medium" data-test="tools-selected-count">{{ selectedKeys.size }} tool{{ selectedKeys.size === 1 ? '' : 's' }} selected on {{ selectedServerCount }} server{{ selectedServerCount === 1 ? '' : 's' }}<template v-if="hiddenSelectedCount > 0"> ({{ hiddenSelectedCount }} on other pages)</template></span>
         <button
           @click="batchEnable(true)"
           :disabled="batchLoading || viewAsActive"
@@ -488,27 +493,27 @@
                     data-test="tools-select-all"
                   />
                 </th>
-                <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('name')">
+                <th class="cursor-pointer hover:bg-base-200 select-none" tabindex="0" :aria-sort="ariaSort('name')" @click="sortBy('name')" @keydown.enter.prevent="sortBy('name')" @keydown.space.prevent="sortBy('name')">
                   Tool {{ getSortIndicator('name') }}
                 </th>
-                <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('server_name')">
+                <th class="cursor-pointer hover:bg-base-200 select-none" tabindex="0" :aria-sort="ariaSort('server_name')" @click="sortBy('server_name')" @keydown.enter.prevent="sortBy('server_name')" @keydown.space.prevent="sortBy('server_name')">
                   Server {{ getSortIndicator('server_name') }}
                 </th>
                 <th v-if="viewAsAdmin">Access</th>
                 <th :class="viewAsAdmin ? 'hidden lg:table-cell' : ''">Description</th>
-                <th :class="viewAsAdmin ? 'hidden lg:table-cell' : ''" class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('tier')">
+                <th :class="viewAsAdmin ? 'hidden lg:table-cell' : ''" class="cursor-pointer hover:bg-base-200 select-none" tabindex="0" :aria-sort="ariaSort('tier')" @click="sortBy('tier')" @keydown.enter.prevent="sortBy('tier')" @keydown.space.prevent="sortBy('tier')">
                   Tier {{ getSortIndicator('tier') }}
                 </th>
-                <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('approval_status')">
+                <th class="cursor-pointer hover:bg-base-200 select-none" tabindex="0" :aria-sort="ariaSort('approval_status')" @click="sortBy('approval_status')" @keydown.enter.prevent="sortBy('approval_status')" @keydown.space.prevent="sortBy('approval_status')">
                   Approval {{ getSortIndicator('approval_status') }}
                 </th>
-                <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('enabled')">
+                <th class="cursor-pointer hover:bg-base-200 select-none" tabindex="0" :aria-sort="ariaSort('enabled')" @click="sortBy('enabled')" @keydown.enter.prevent="sortBy('enabled')" @keydown.space.prevent="sortBy('enabled')">
                   Enabled {{ getSortIndicator('enabled') }}
                 </th>
-                <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('usage')">
+                <th class="cursor-pointer hover:bg-base-200 select-none" tabindex="0" :aria-sort="ariaSort('usage')" @click="sortBy('usage')" @keydown.enter.prevent="sortBy('usage')" @keydown.space.prevent="sortBy('usage')">
                   Usage {{ getSortIndicator('usage') }}
                 </th>
-                <th class="cursor-pointer hover:bg-base-200 select-none" :class="viewAsAdmin ? 'hidden lg:table-cell' : ''" @click="sortBy('last_used')">
+                <th class="cursor-pointer hover:bg-base-200 select-none" :class="viewAsAdmin ? 'hidden lg:table-cell' : ''" tabindex="0" :aria-sort="ariaSort('last_used')" @click="sortBy('last_used')" @keydown.enter.prevent="sortBy('last_used')" @keydown.space.prevent="sortBy('last_used')">
                   Last Used {{ getSortIndicator('last_used') }}
                 </th>
               </tr>
@@ -520,7 +525,11 @@
                 class="hover cursor-pointer"
                 :class="{ 'bg-primary/5': selectedKeys.has(toolKey(tool)), 'bg-base-200/70': viewAsAdmin && !isCallable(tool) }"
                 :data-not-callable="viewAsAdmin && !isCallable(tool) ? 'true' : undefined"
+                tabindex="0"
+                :aria-label="`Details for ${tool.name}`"
                 @click="openDetail(tool, $event.currentTarget as HTMLElement)"
+                @keydown.enter.self.prevent="openDetail(tool, $event.currentTarget as HTMLElement)"
+                @keydown.space.self.prevent="openDetail(tool, $event.currentTarget as HTMLElement)"
                 data-test="tool-row"
               >
                 <td @click.stop>
@@ -657,46 +666,24 @@
     </div>
 
     <!-- Tool Detail dialog: opened by a flat row or by the Details button of a
-         grouped row. Escape closes it and focus returns to what opened it. -->
-    <div
-      v-if="selectedTool"
-      class="modal modal-open"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="tool-details-title"
-      data-test="tool-details-dialog"
-      @click.self="closeDetail"
-      @keydown.esc.stop="closeDetail"
-    >
-      <div class="modal-box max-w-3xl">
-        <div class="flex justify-between items-start mb-4 gap-2">
-          <div class="min-w-0">
-            <h3 id="tool-details-title" class="font-bold text-lg">
-              <code class="text-base bg-base-200 px-2 py-1 rounded break-all">{{ selectedTool.name }}</code>
-            </h3>
-            <div class="flex items-center gap-2 mt-2">
-              <router-link :to="serverDetailPath(selectedTool.server_name)" class="link link-primary text-sm" data-test="tool-details-server-link">
-                {{ selectedTool.server_name }}
-              </router-link>
-            </div>
-          </div>
-          <button ref="detailCloseButton" class="btn btn-sm btn-circle btn-ghost min-h-11 min-w-11" aria-label="Close details" data-test="tool-details-close-x" @click="closeDetail">
-            <UiIcon name="x" class="w-5 h-5" />
-          </button>
-        </div>
-
+         grouped row. A native <dialog> (BaseDialog): the browser traps focus,
+         Escape closes it and focus returns to what opened it. -->
+    <BaseDialog :open="selectedTool !== null" :title="selectedTool?.name ?? ''" wide test-id="tool-details-dialog" @close="closeDetail">
+      <template v-if="selectedTool">
+        <router-link :to="serverDetailPath(selectedTool.server_name)" class="link link-primary text-sm" data-test="tool-details-server-link">
+          {{ selectedTool.server_name }}
+        </router-link>
         <ToolDetails
           :tool="selectedTool"
           :view-as-admin="viewAsAdmin"
           :calls-link="toolCallsLink(selectedTool)"
-          @why="whyFromDetails(selectedTool)"
+          @why="openWhy(selectedTool)"
         />
-
-        <div class="modal-action">
-          <button class="btn btn-sm btn-outline min-h-11 sm:min-h-8" data-test="tool-details-close" @click="closeDetail">Close</button>
-        </div>
-      </div>
-    </div>
+      </template>
+      <template #actions>
+        <button type="button" class="btn btn-sm btn-outline min-h-11 sm:min-h-8" data-test="tool-details-close" @click="closeDetail">Close</button>
+      </template>
+    </BaseDialog>
 
     <!-- Spec 108-j J6/J17 (FR-046): "Why?" from a view-as row. -->
     <AccessExplainer
@@ -713,6 +700,7 @@
 
 <script setup lang="ts">
 import UiIcon from '@/components/UiIcon.vue'
+import BaseDialog from '@/components/BaseDialog.vue'
 import ToolDetails from '@/components/tools/ToolDetails.vue'
 import ToolGroupSection from '@/components/tools/ToolGroupSection.vue'
 import ToolHoldEvidence from '@/components/tools/ToolHoldEvidence.vue'
@@ -965,7 +953,7 @@ const onlyExceptions = ref(false)
 // "More filters" holds Status, Tier and Approval; it opens by itself when a
 // link has set one of them.
 const moreFiltersOpen = ref(false)
-const advancedFilterCount = computed(() => [filterStatus.value, filterTier.value, filterApproval.value].filter(Boolean).length)
+const advancedFilterCount = computed(() => [filterStatus.value, filterTier.value, filterApproval.value, showFilter.value !== 'all' ? showFilter.value : ''].filter(Boolean).length)
 watch(advancedFilterCount, count => { if (count > 0) moreFiltersOpen.value = true })
 
 // Debounce search
@@ -987,6 +975,11 @@ function sortBy(col: SortCol) {
     sortColumn.value = col
     sortDirection.value = col === 'usage' || col === 'last_used' ? 'desc' : 'asc'
   }
+}
+
+function ariaSort(col: SortCol): 'ascending' | 'descending' | 'none' {
+  if (sortColumn.value !== col) return 'none'
+  return sortDirection.value === 'asc' ? 'ascending' : 'descending'
 }
 
 function getSortIndicator(col: SortCol): string {
@@ -1196,7 +1189,7 @@ type StatCard = 'total' | 'enabled' | 'disabled'
 const activeStatCard = computed<StatCard | null>(() => {
   if (filterStatus.value === 'enabled') return 'enabled'
   if (filterStatus.value === 'disabled') return 'disabled'
-  if (filterApproval.value) return null
+  if (filterApproval.value || onlyExceptions.value) return null
   return 'total'
 })
 
@@ -1209,6 +1202,7 @@ function selectStatCard(card: StatCard) {
   if (card === 'total' || activeStatCard.value === card) {
     filterStatus.value = ''
     filterApproval.value = ''
+    onlyExceptions.value = false
     return
   }
   filterStatus.value = card // 'enabled' | 'disabled'
@@ -1434,6 +1428,9 @@ const pageGroups = computed(() =>
 // then every section with a match is open so a match is never hidden.
 const sectionChoice = ref(new Map<string, boolean>())
 const filtering = computed(() => hasActiveFilters.value || viewAsActive.value || showFilter.value !== 'all')
+// A new search or filter overrides earlier open/close choices, so a match is
+// never hidden inside a section the user closed before searching.
+watch([searchQuery, filterServer, filterStatus, filterTier, filterApproval, onlyExceptions, showFilter, requestKey], () => { sectionChoice.value.clear() })
 function isSectionExpanded(group: { server: string; rank: number }): boolean {
   const chosen = sectionChoice.value.get(group.server)
   if (chosen !== undefined) return chosen
@@ -1511,27 +1508,20 @@ async function loadTools() {
 }
 
 // ---- Detail dialog (Spec 134 FR-056) ----
-const detailCloseButton = ref<HTMLElement | null>(null)
 let detailOpener: HTMLElement | null = null
 
 function openDetail(tool: GlobalTool, opener?: HTMLElement) {
   selectedTool.value = tool
   detailOpener = opener ?? null
-  void nextTick(() => detailCloseButton.value?.focus())
 }
 
 function closeDetail() {
   selectedTool.value = null
   const opener = detailOpener
   detailOpener = null
-  // Focus returns to what opened the dialog while that element still exists.
-  void nextTick(() => { if (opener && opener.isConnected) opener.focus() })
-}
-
-// "Why?" opens its own explainer; the details dialog steps aside first.
-function whyFromDetails(tool: GlobalTool) {
-  closeDetail()
-  openWhy(tool)
+  // The native dialog returns focus itself; this covers an opener that was
+  // re-rendered while the dialog was open.
+  void nextTick(() => { if (opener && opener.isConnected && document.activeElement !== opener) opener.focus() })
 }
 
 function clearFilters() {
@@ -1665,6 +1655,10 @@ watch(requestKey, () => {
   showFilter.value = 'all'
   currentPage.value = 1
   selectedKeys.value.clear()
+  // The rows of the previous subject must not be read as this one's while the
+  // new answer is pending, and an open Details would show the old verdict.
+  selectedTool.value = null
+  allTools.value = []
   void loadTools()
 })
 

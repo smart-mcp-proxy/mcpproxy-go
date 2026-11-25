@@ -36,9 +36,10 @@
           <span v-else>Never used</span>
         </dd>
       </div>
-      <div v-if="tool.approval_status" class="sm:col-span-2">
+      <div class="sm:col-span-2">
         <dt class="text-base-content/60">Approval</dt>
-        <dd class="flex flex-wrap items-center gap-2" data-test="tool-details-approval">
+        <dd v-if="!tool.approval_status" data-test="tool-details-approval">—</dd>
+        <dd v-else class="flex flex-wrap items-center gap-2" data-test="tool-details-approval">
           <StateTag :tone="approvalTone" class="whitespace-nowrap">{{ toolApprovalLabel(tool.approval_status) }}</StateTag>
           <template v-if="approvable">
             <span
@@ -53,7 +54,7 @@
             >Review</router-link>
           </template>
         </dd>
-        <ToolHoldEvidence :tool="tool" />
+        <ToolHoldEvidence :tool="tool" expanded />
       </div>
       <div v-if="viewAsAdmin" class="sm:col-span-2" data-test="tool-details-access">
         <dt class="text-base-content/60">Access</dt>

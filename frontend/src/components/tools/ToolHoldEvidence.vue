@@ -28,6 +28,10 @@
       data-test="tool-hold-signal-more"
     >+{{ evidence.collapsedCount }}</span>
   </div>
+  <!-- Details: the reason and the raw signal ids as text, not only as hover titles. -->
+  <p v-if="evidence && expanded" class="text-xs text-base-content/70 mt-1 break-words" data-test="tool-hold-description">
+    {{ evidence.description }}<template v-if="evidence.signals.length"> Matched: {{ evidence.signals.map(x => x.raw).join(', ') }}<template v-if="evidence.collapsedCount > 0"> and {{ evidence.collapsedCount }} more</template>.</template>
+  </p>
 </template>
 
 <script setup lang="ts">
@@ -44,7 +48,7 @@ import { parseHoldEvidence, displaySignals, reasonPresentation, verdictPresentat
 // overflow count. Compact cap: TPA ids are never collapsed by it.
 const COMPACT_SIGNAL_CAP = 1
 
-const props = defineProps<{ tool: GlobalTool }>()
+const props = defineProps<{ tool: GlobalTool; expanded?: boolean }>()
 
 const evidence = computed(() => {
   const tool = props.tool
