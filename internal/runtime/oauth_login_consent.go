@@ -575,16 +575,13 @@ func tieBreakSuggestion(ms []suggestionMatch, seen map[string]time.Time, now tim
 		if def == nil {
 			continue
 		}
-		at := latestSeenForAliases(seen, def.ClientInfoNames)
-		if at == nil {
+		at, ok := recentSighting(seen, def.ClientInfoNames, now)
+		if !ok {
 			continue
-		}
-		if age := now.Sub(*at); age > presenceWindow || age < 0 {
-			continue // too old, or in the future (clock moved back)
 		}
 		switch {
 		case best == nil || at.After(bestAt):
-			best, bestAt, tied = &ms[i], *at, false
+			best, bestAt, tied = &ms[i], at, false
 		case at.Equal(bestAt):
 			tied = true
 		}
@@ -605,6 +602,28 @@ func tieBreakSuggestion(ms []suggestionMatch, seen map[string]time.Time, now tim
 		return nil
 	}
 	return &SuggestedExisting{ID: pref.id, Matched: pref.matched}
+}
+
+// recentSighting is the newest sighting among the aliases that falls inside
+// the window. Each alias is filtered on its own, so a timestamp from the
+// future (clock moved back) or an old one never hides a valid sighting of
+// another alias of the same client.
+func recentSighting(seen map[string]time.Time, aliases []string, now time.Time) (time.Time, bool) {
+	var latest time.Time
+	found := false
+	for _, alias := range aliases {
+		at, ok := seen[sanitizeClientName(alias)]
+		if !ok {
+			continue
+		}
+		if age := now.Sub(at); age > presenceWindow || age < 0 {
+			continue
+		}
+		if !found || at.After(latest) {
+			latest, found = at, true
+		}
+	}
+	return latest, found
 }
 
 // seenNames is the installation's clientInfo sightings, or nil.

@@ -57,7 +57,7 @@ Records the decision and issues the code. The login itself is stored when the cl
 
 ```jsonc
 {
-  "client": { "id": "cursor" },                    // generic address: existing id, or
+  "client": { "id": "cursor" },                    // generic address: an existing id or a built-in (builtin: true) without records, or
   // "client": { "new": { "id": "acme-agent", "display_name": "Acme Agent" } },
   "profile": "dev-readonly",                       // "" = All servers; ignored when the client has a binding
   "mode": "locked",

@@ -171,6 +171,14 @@ func TestOAuthDescribe_VSCodeRegistrationTieBreak(t *testing.T) {
 		fx.seen(map[string]time.Time{name: fx.clock.Now().Add(48 * time.Hour)})
 		assert.Equal(t, "copilot", fx.suggestFor(name, "").SuggestedClient.ID)
 	})
+	t.Run("a future alias does not hide a valid sighting of another alias", func(t *testing.T) {
+		fx := newOAuthFx(t)
+		fx.seen(map[string]time.Time{
+			name:                 fx.clock.Now().Add(-24 * time.Hour),
+			"visual-studio-code": fx.clock.Now().Add(24 * time.Hour),
+		})
+		assert.Equal(t, "vscode", fx.suggestFor(name, "").SuggestedClient.ID)
+	})
 	t.Run("old presence is ignored", func(t *testing.T) {
 		fx := newOAuthFx(t)
 		fx.seen(map[string]time.Time{name: fx.clock.Now().Add(-90 * 24 * time.Hour)})
