@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
-import { mkdirSync, readFileSync, realpathSync } from 'node:fs'
+import { lstatSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname } from 'node:path'
 import { join } from 'node:path'
@@ -42,6 +42,7 @@ test.beforeAll(async () => {
   expect(scratch).not.toBe(realpathSync(homedir()))
   expect(realpathSync(dirname(cc!.config_path)), 'the core writes outside the scratch HOME').toBe(scratch)
   expect(cc!.config_path).toBe(`${HOME_DIR}/.claude.json`)
+  expect(lstatSync(cc!.config_path).isSymbolicLink(), '.claude.json must not be a symlink').toBe(false)
   // The effective flag, read from the core's own config (the metadata route also
   // answers 404 on an enabled core reached through a non-loopback listener).
   const cfg = (await (await fetch(`${BASE}/api/v1/config`, { headers: { 'X-API-Key': KEY } })).json()) as { data: { config: { mcp_oauth_enabled?: boolean } } }
@@ -66,9 +67,7 @@ async function openConnect(page: Page) {
   // A fresh data dir opens the setup wizard, which embeds the same client list;
   // otherwise open it from "+ Add -> Client".
   await page.locator('header [data-test="header-add-menu"]').waitFor({ state: 'visible' })
-  if (!(await t(page, 'client-connect-list').isVisible().catch(() => false))) {
-    await page.waitForTimeout(1500)
-  }
+  await page.waitForTimeout(2000) // let the auto-opening setup wizard settle first
   if (!(await t(page, 'client-connect-list').isVisible().catch(() => false))) {
     await page.locator('header [data-test="header-add-menu"]').click()
     await t(page, 'add-menu-client').click()
@@ -97,7 +96,11 @@ test.describe(OFF ? 'browser login off' : 'browser login on', () => {
     // (the preview is re-fetched when the choice changes, so wait for it)
     await expect(t(page, 'client-preview-entry-claude-code')).toContainText('/mcp/oauth/claude-code')
     const entry = await t(page, 'client-preview-entry-claude-code').innerText()
-    expect(entry).not.toMatch(/mcp_agt_|X-API-Key|Authorization/)
+    const shown = JSON.parse(entry) as Record<string, Record<string, unknown>>
+    const shownEntry = Object.values(shown)[0]
+    expect(shownEntry.url).toBe(`${BASE}/mcp/oauth/claude-code`)
+    expect(shownEntry.type).toBe('http')
+    expect(Object.keys(shownEntry).sort()).toEqual(['type', 'url'])
     await expect(t(page, 'client-preview-credential-claude-code')).toHaveCount(0)
     await shot(page, '02-preview-oauth')
 
@@ -121,6 +124,7 @@ test.describe(OFF ? 'browser login off' : 'browser login on', () => {
     const entries = Object.values((JSON.parse(written) as { mcpServers: Record<string, Record<string, unknown>> }).mcpServers)
     expect(entries).toHaveLength(1)
     expect(entries[0].url).toBe(`${BASE}/mcp/oauth/claude-code`)
+    expect(entries[0].type).toBe('http')
     expect(Object.keys(entries[0]).sort()).toEqual(['type', 'url'])
 
     // Undo restores the pre-connect state.
