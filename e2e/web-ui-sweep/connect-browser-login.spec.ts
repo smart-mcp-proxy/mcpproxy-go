@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { userInfo } from 'node:os'
 import { dirname } from 'node:path'
 import { join } from 'node:path'
 
@@ -39,10 +39,12 @@ test.beforeAll(async () => {
   expect(cc, 'core lists no claude-code client').toBeTruthy()
   // Canonical paths: a symlink or a flag naming the real HOME must not pass.
   const scratch = realpathSync(HOME_DIR)
-  expect(scratch).not.toBe(realpathSync(homedir()))
+  expect(scratch).not.toBe(realpathSync(userInfo().homedir))
   expect(realpathSync(dirname(cc!.config_path)), 'the core writes outside the scratch HOME').toBe(scratch)
   expect(cc!.config_path).toBe(`${HOME_DIR}/.claude.json`)
-  expect(lstatSync(cc!.config_path).isSymbolicLink(), '.claude.json must not be a symlink').toBe(false)
+  const st = lstatSync(cc!.config_path)
+  expect(st.isSymbolicLink(), '.claude.json must not be a symlink').toBe(false)
+  expect(st.nlink, '.claude.json must not be hard-linked').toBe(1)
   // The effective flag, read from the core's own config (the metadata route also
   // answers 404 on an enabled core reached through a non-loopback listener).
   const cfg = (await (await fetch(`${BASE}/api/v1/config`, { headers: { 'X-API-Key': KEY } })).json()) as { data: { config: { mcp_oauth_enabled?: boolean; listen?: string } } }
@@ -51,9 +53,8 @@ test.beforeAll(async () => {
   // wildcard listener changes what Connect writes, and is not what this checks).
   expect(cfg.data.config.listen ?? '', 'sweep core must listen on plain 127.0.0.1').toMatch(/^127\.0\.0\.1:\d+$/)
   ORIGIN = `http://${cfg.data.config.listen}`
-  if (!OFF) {
-    expect((await fetch(`${BASE}/.well-known/oauth-authorization-server`)).status, 'browser login is not served').toBe(200)
-  }
+  const metadata = (await fetch(`${BASE}/.well-known/oauth-authorization-server`)).status
+  expect(metadata, OFF ? 'a feature-off core still serves browser login discovery' : 'browser login is not served').toBe(OFF ? 404 : 200)
 })
 // Connect derives the address from the core's configured listener, not from the
 // origin the browser used.
