@@ -260,6 +260,11 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
           cache: true
+          # Its own cache key: the default one is shared with every other job, and
+          # whichever finishes first saves it (a 71 MB cache without race objects).
+          cache-dependency-path: |
+            go.sum
+            .github/workflows/unit-tests.yml
 
       - name: Download dependencies
         run: go mod download
