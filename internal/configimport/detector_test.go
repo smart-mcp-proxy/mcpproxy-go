@@ -67,6 +67,19 @@ func TestDetectFormat(t *testing.T) {
 			wantConfidence: "low",
 		},
 		{
+			name: "gemini_enabled_with_claude_code_marker_is_not_claude_code",
+			content: `{
+				"mcpServers": {
+					"remote": {
+						"url": "https://example.com/sse",
+						"oauth": {"enabled": true, "callbackPort": 8080}
+					}
+				}
+			}`,
+			wantFormat:     FormatCursor,
+			wantConfidence: "low",
+		},
+		{
 			name: "claude_desktop_stdio_only",
 			content: `{
 				"mcpServers": {

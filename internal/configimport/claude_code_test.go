@@ -150,10 +150,13 @@ func TestClaudeCodeParser_Parse(t *testing.T) {
 		if len(servers[0].Warnings) != 1 || !strings.Contains(servers[0].Warnings[0], "unknown keys clientSecret, futureField;") {
 			t.Errorf("warnings = %v, want one naming clientSecret and futureField", servers[0].Warnings)
 		}
+		if strings.Contains(strings.Join(servers[0].Warnings, " "), "example-secret") {
+			t.Errorf("warnings = %v, must not echo the secret value", servers[0].Warnings)
+		}
 	})
 
 	t.Run("oauth_malformed_keeps_servers", func(t *testing.T) {
-		for _, block := range []string{`false`, `"x"`, `[]`, `{"scopes":["read"]}`, `{"callbackPort":"8080"}`} {
+		for _, block := range []string{`false`, `"x"`, `[]`, `{"scopes":["read"]}`, `{"callbackPort":"8080"}`, `{"clientId":"example-client","scopes":["read"]}`, `{"clientId":"example-client","callbackPort":"8080"}`} {
 			content := []byte(`{"mcpServers":{
 				"bad": {"type":"http","url":"https://bad.example.com/mcp","oauth":` + block + `},
 				"good": {"type":"http","url":"https://good.example.com/mcp"}
