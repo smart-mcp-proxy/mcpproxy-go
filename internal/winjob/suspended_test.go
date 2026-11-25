@@ -53,6 +53,8 @@ func startReady(cmd *exec.Cmd, afterStart func() error) (exited <-chan struct{},
 	if err != nil || cmd.Start() != nil || (afterStart != nil && afterStart() != nil) {
 		return nil, false
 	}
+	stuck := time.AfterFunc(10*time.Second, func() { _ = cmd.Process.Kill() }) // ends the read below
+	defer stuck.Stop()
 	line := make([]byte, len(childReady))
 	if _, err := io.ReadFull(out, line); err != nil || string(line) != childReady {
 		return nil, false

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -88,8 +89,9 @@ func TestDisconnectDocker_ClosesStdinBeforeStopping(t *testing.T) {
 			raw, err := os.ReadFile(log)
 			require.NoError(t, err)
 			calls := strings.Fields(string(raw))
-			require.Contains(t, calls, "close-stdin")
-			require.Contains(t, calls, "wait")
+			closeAt, waitAt := slices.Index(calls, "close-stdin"), slices.Index(calls, "wait")
+			require.GreaterOrEqual(t, closeAt, 0, calls)
+			require.Greater(t, waitAt, closeAt, calls)
 			require.Empty(t, c.containerID)
 			if tt.exits {
 				require.NotContains(t, calls, "stop", "a container that already exited is not stopped")

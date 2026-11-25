@@ -424,8 +424,12 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 		select {
 		case <-closeDone:
 		case <-time.After(stdinCloseGrace):
-			// Windows has no SIGTERM: ask the process tree to exit in its place.
-			requestProcessTreeExit(pgid)
+			select {
+			case <-closeDone: // both were ready: the child is reaped, so its PID may be another's
+			default:
+				// Windows has no SIGTERM: ask the process tree to exit in its place.
+				requestProcessTreeExit(pgid)
+			}
 		}
 	}
 	gracefulCloseSucceeded := false
