@@ -239,9 +239,9 @@ not enough.
 | Client | Offered by Connect | What was verified |
 |---|---|---|
 | Claude Code | **yes** (`claude-code`) | Claude Code CLI 2.1.318 on macOS completed the login flow over plain HTTP loopback: it accepted the `http://127.0.0.1` issuer, registered itself, sent the authorize request for the per-client address (`resource` equal to it), and after approval reported "Connected" and made MCP calls with the token. **Not** verified: token refresh, the order of the metadata requests, the browser-and-callback path (the check pasted the redirect URL at the CLI prompt), tool calls inside an interactive session, the generic `/mcp/oauth` address, Windows and Linux |
-| Cursor | no | not verified (needs its real config and a GUI) |
-| VS Code, GitHub Copilot | no | not verified (needs its real settings and a GUI) |
-| MCP Inspector | not a Connect client | not verified (needs a TTY and a browser) |
+| Cursor | no | not verified: a scratch Cursor 3.12.30 asks for a Cursor account sign-in before it will use MCP, which a check must not do. Its documentation says the desktop app registers dynamically and returns to `http://localhost:8787/callback`, a loopback address this server accepts, so it may work; keep using the API key until it is checked |
+| VS Code, GitHub Copilot | no | not verified: VS Code 1.122.0 could not be driven in a scratch profile (the check could only click, and the window could not be told apart from another VS Code window already open) |
+| MCP Inspector 2.13.0 (web) | not a Connect client (it has no config file Connect can write) | **verified** at the generic `/mcp/oauth` address: it registered, was approved, connected over MCP 2025-11-25 and listed the 10 tools. The per-client address `/mcp/oauth/inspector` answers `404` because `inspector` is not a Connect client; approve it as a new client from the consent page |
 | MCP TypeScript SDK 1.32.2 | not a Connect client | login, refresh and tool calls verified with a script |
 | Every other Connect client | no | not checked |
 
@@ -267,5 +267,5 @@ logins simply stop being usable.
 The issuer is `http://127.0.0.1:<port>`, not HTTPS. The specifications ask for HTTPS for
 non-loopback issuers; loopback HTTP is the common local-tool case. Client behaviour is
 checked in `specs/132-client-oauth-login/verification/real-clients.md`; the MCP
-TypeScript SDK client flow and the Claude Code CLI login flow are verified so far (Cursor, VS
-Code and MCP Inspector are not; see [Clients checked so far](#clients-checked-so-far)).
+TypeScript SDK client flow, the Claude Code CLI login flow and the MCP Inspector web login are verified so far (Cursor and VS
+Code are not; see [Clients checked so far](#clients-checked-so-far)).
