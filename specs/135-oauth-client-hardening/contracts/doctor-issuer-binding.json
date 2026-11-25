@@ -1,7 +1,7 @@
 {
-  "$comment": "Spec 135 per-server OAuth issuer status. Placement: (1) doctor / GET /api/v1/diagnostics: new object `oauth_issuer_status` beside the Spec 123 `oauth_token_storage` report, built by management from Runtime.OAuthIssuerStatus (live per-server state) — not inside the admin-only `warnings` of the storage report. (2) Each entry's warnings are ALSO appended to the per-server runtime warnings that diagnostics already emits (internal/management/diagnostics.go:327-334). (3) Scoped callers (agent tokens, pinned profiles) receive only servers in reach; counts are recomputed over that set. (4) An undecryptable row (Spec 123) reports binding_state=unknown and no issuer fields. The same per-server fields are exposed by `mcpproxy auth status --server=<name>` and the OAuth block of GET /api/v1/servers/{id} (Web UI ServerDetail, tray detail). Issuers are origins only.",
+  "$comment": "Spec 135 per-server OAuth issuer status. Placement: (1) doctor / GET /api/v1/diagnostics: new object `oauth_issuer_status` beside the Spec 123 `oauth_token_storage` report, built by management from Runtime.OAuthIssuerStatus (live per-server state) — not inside the admin-only `warnings` of the storage report. (2) Each entry's warnings are ALSO appended to the per-server runtime warnings that diagnostics already emits (internal/management/diagnostics.go:327-334). (3) Scoped callers (agent tokens, pinned profiles) receive only servers in reach; counts are recomputed over that set. (4) An undecryptable row (Spec 123) reports binding_state=unknown and no issuer fields. The same per-server fields are added to the existing scoped server-list projection (GET /api/v1/servers, contracts.Server), which feeds `mcpproxy auth status --server=<name>`, Web UI ServerDetail and the macOS detail. Issuers are origins only.",
   "oauth_issuer_status": {
-    "counts": { "bound": 3, "unbound": 1, "changed": 1, "unknown": 0 },
+    "counts": { "bound": 2, "unbound": 1, "changed": 2, "unknown": 0 },
     "servers": [
       {
         "server": "notion",
@@ -19,6 +19,17 @@
         "issuer_source": "discovered",
         "mix_up_protected": true,
         "health_action": "login",
+        "warnings": ["issuer_changed"]
+      },
+      {
+        "server": "partner-api",
+        "binding_state": "changed",
+        "issuer_origin": "https://auth.partner.example",
+        "current_issuer_origin": "https://auth2.partner.example",
+        "issuer_source": "discovered",
+        "mix_up_protected": true,
+        "health_action": "configure",
+        "refused_credential": "configured_client_auth",
         "warnings": ["issuer_changed"]
       },
       {

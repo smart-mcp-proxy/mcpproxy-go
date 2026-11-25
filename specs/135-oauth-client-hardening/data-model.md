@@ -23,7 +23,7 @@ A binding is `{issuer, target, source}`. `Binding.Matches(stored, current, skip)
 | Field | Rule |
 |---|---|
 | `Binding` | as above |
-| `AuthorizationEndpoint`, `TokenEndpoint`, `RegistrationEndpoint` | exact URLs. The last-hop guard requires a request to go to exactly one of these. |
+| `AuthorizationEndpoint`, `TokenEndpoint`, `RegistrationEndpoint` | exact URLs. Every POST through a guarded client must carry a marked operation (`SendContext.Op`). Its URL must equal the endpoint for **that** operation. An unmarked or unknown operation fails closed. |
 | `IssSupported` | `authorization_response_iss_parameter_supported` from the document |
 | `Verified` | `configured` only: the configured URL equals a candidate derived from the declared issuer (FR-008) |
 | `Skipped` | the metadata comparison was skipped under the opt-out |
@@ -109,4 +109,4 @@ Keys are normalised as in `internal/oauth/logging.go:376-419`. The first match w
 
 ## Diagnostics / per-server status
 
-See `contracts/doctor-issuer-binding.json`. The same per-server fields feed `mcpproxy auth status --server=<name>`, the OAuth block of `GET /api/v1/servers/{id}`, Web UI ServerDetail and the tray detail.
+See `contracts/doctor-issuer-binding.json`. The same per-server fields are added to the existing scoped server-list projection (`GET /api/v1/servers`, `contracts.Server`). That projection is the one source for `mcpproxy auth status --server=<name>` (`cmd/mcpproxy/auth_cmd.go:332-351`), Web UI ServerDetail (`frontend/src/stores/servers.ts`) and the macOS detail (`APIClient.swift`). No new detail route is added.

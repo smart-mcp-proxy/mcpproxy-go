@@ -6,9 +6,10 @@ Run each package whole, not filtered by test name, so that every gate named in t
 
 ```bash
 go list -m github.com/mark3labs/mcp-go            # must be >= v1.4.0 (FR-019)
-go test -race ./internal/oauth/... ./internal/upstream/core/... ./internal/storage/... ./internal/config/... ./internal/diagnostics/... ./internal/management/...
+go test -race ./internal/oauth/... ./internal/upstream/core/... ./internal/storage/... ./internal/config/... ./internal/diagnostics/... ./internal/management/... ./internal/httpapi/... ./cmd/mcpproxy/...
 go test -race -tags server ./internal/serveredition/broker/... ./internal/serveredition/api/...
-cd frontend && npx vitest run                  # skip_issuer_validation editor field, issuer status line
+cd frontend && npx vitest run                  # skip_issuer_validation editor field, issuer status line (PR-3)
+# macOS editor field: the Swift unit tests in native/macos (CI job "macOS tray"), PR-3
 ```
 
 These suites contain: the last-hop guard, the final-token-form and extras-classification tests, the broker redirect test, the callback matrix, the resolver tests, the surface goldens and the AST guards.
@@ -17,7 +18,8 @@ These suites contain: the last-hop guard, the final-token-form and extras-classi
 
 ```bash
 go build -o mcpproxy ./cmd/mcpproxy
-./scripts/test-oauth-client-hardening-e2e.sh   # fake AS: login, mix-up, swap, warm-handler swap, redirect refusal
+./scripts/test-oauth-client-hardening-e2e.sh             # fake AS: login, mix-up, swap, warm-handler swap, redirect refusal (PR-2)
+./scripts/test-oauth-client-hardening-e2e.sh --upgrade   # seeded pre-upgrade config.db (PR-2)
 ./scripts/test-api-e2e.sh
 ```
 
@@ -39,8 +41,9 @@ For each provider (Cloudflare, Smithery, GitHub MCP, Notion, Atlassian, Sentry),
 
 | Provider shape | Expected strict | Expected with opt-out |
 |---|---|---|
-| consistent metadata and `iss`, no cross-origin redirect | signs in, `mix_up_protected` true if `iss` sent | signs in, `mix_up_protected` false |
-| metadata issuer or `iss` mismatch only | `METADATA_ISSUER_MISMATCH` / `ISSUER_MISMATCH` | signs in, warning `issuer_validation_disabled` |
+| consistent metadata and `iss`, no cross-origin redirect | signs in, `mix_up_protected` true if `iss` sent | signs in, `mix_up_protected` true if `iss` sent (nothing waived) |
+| metadata issuer or `iss` mismatch only | `METADATA_ISSUER_MISMATCH` / `ISSUER_MISMATCH` | signs in, `mix_up_protected` false, warning `issuer_validation_disabled` |
+| metadata mismatch, callback `iss` matching | `METADATA_ISSUER_MISMATCH` | signs in, `mix_up_protected` false (metadata check waived) |
 | metadata behind a cross-origin redirect | `METADATA_ISSUER_MISMATCH` | `METADATA_ISSUER_MISMATCH` |
 
 Commands for one provider:
