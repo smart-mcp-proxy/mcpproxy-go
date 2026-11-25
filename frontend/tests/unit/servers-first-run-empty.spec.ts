@@ -68,7 +68,7 @@ async function mountServers() {
     global: {
       plugins: [createPinia(), router],
       stubs: {
-        ServerCard: { template: '<div class="server-card" />' },
+        ServerRow: { template: '<div class="server-row" />' },
         CollapsibleHintsPanel: true,
       },
     },
@@ -160,7 +160,7 @@ describe('Servers first-run empty state (F3)', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-test="servers-pending"]').exists()).toBe(false)
-    expect(wrapper.findAll('.server-card')).toHaveLength(2)
+    expect(wrapper.findAll('.server-row')).toHaveLength(2)
   })
 
   it('Add Server opens the catalog-first /add-server page', async () => {
@@ -204,7 +204,7 @@ describe('Servers first-run empty state (F3)', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-test="servers-refresh-error"]').exists()).toBe(true)
-    expect(wrapper.findAll('.server-card')).toHaveLength(1)
+    expect(wrapper.findAll('.server-row')).toHaveLength(1)
     expect(wrapper.find('.alert-error').exists()).toBe(false)
   })
 

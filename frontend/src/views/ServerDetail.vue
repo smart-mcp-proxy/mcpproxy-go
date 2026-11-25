@@ -105,6 +105,11 @@
         </div>
       </div>
 
+      <!-- Spec 134 PR 2: facts the Servers row no longer shows (id, trust mode,
+           scan verdict, held tools, full diagnostic). PR 3 folds this into the
+           restructured summary. -->
+      <ServerFacts :server="server" class="mt-3" />
+
       <!-- Status Cards -->
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <div class="stats shadow bg-base-100">
@@ -1675,6 +1680,7 @@ import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import AnnotationBadges from '@/components/AnnotationBadges.vue'
+import ServerFacts from '@/components/ServerFacts.vue'
 import ErrorPanel from '@/components/diagnostics/ErrorPanel.vue'
 import { formatDateTime } from '@/utils/datetime'
 import SignInPanel from '@/components/diagnostics/SignInPanel.vue'

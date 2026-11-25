@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import ServerCard from '@/components/ServerCard.vue'
+import ServerRow from '@/components/ServerRow.vue'
 import type { Server, HealthStatus } from '@/types'
 import { HEALTH_STATUS_LABELS, HEALTH_ACTION_LABELS, type HealthStatusValue } from '@/types/contracts'
 import { healthStatusLabel, healthActionLabel } from '@/utils/health'
@@ -40,7 +40,7 @@ function makeServer(overrides: Partial<Server> = {}): Server {
 }
 
 function mountCard(server: Server) {
-  return mount(ServerCard, {
+  return mount(ServerRow, {
     props: { server },
     global: {
       plugins: [createPinia()],
@@ -79,7 +79,7 @@ describe('healthStatusLabel / healthActionLabel (Spec 109 FR-014 label table)', 
   })
 })
 
-describe('ServerCard status line renders `status`, never `level`, as text (FR-011)', () => {
+describe('ServerRow status line renders `status`, never `level`, as text (FR-011)', () => {
   it('renders the status label when summary is absent', () => {
     const wrapper = mountCard(
       makeServer({
@@ -98,7 +98,7 @@ describe('ServerCard status line renders `status`, never `level`, as text (FR-01
     expect(chip.text()).not.toMatch(/healthy/i)
   })
 
-  it('prefers the free-text summary over the bare label when both are present', () => {
+  it('prints the label in the pill and the free-text summary as the reason', () => {
     const wrapper = mountCard(
       makeServer({
         health: {
@@ -111,7 +111,9 @@ describe('ServerCard status line renders `status`, never `level`, as text (FR-01
         } as unknown as HealthStatus,
       })
     )
-    expect(wrapper.find('[data-test="server-status-chip"]').text()).toBe('Connected (14 tools)')
+    // Spec 134 FR-003/FR-004: the pill prints the label; the summary is the reason.
+    expect(wrapper.find('[data-test="server-status-chip"]').text()).toBe('Online')
+    expect(wrapper.find('[data-test="server-row-reason"]').text()).toBe('Connected (14 tools)')
   })
 
   // Round-4 review finding: a version-skew payload with BOTH summary and

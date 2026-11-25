@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import ServerCard from '@/components/ServerCard.vue'
+import ServerRow from '@/components/ServerRow.vue'
 import type { Server } from '@/types'
 
 vi.mock('@/services/api', () => ({
@@ -36,7 +36,7 @@ function makeServer(overrides: Partial<Server> = {}): Server {
 }
 
 function mountCard(server: Server) {
-  return mount(ServerCard, {
+  return mount(ServerRow, {
     props: { server },
     global: {
       plugins: [createPinia()],
@@ -55,7 +55,7 @@ beforeEach(() => {
 // Spec 109 FR-013/FR-014 (109-e) folded the card's whole action row down to
 // ONE primary button = `health.actions[0]`, so "Review" opens the dedicated
 // queue detail (never a direct approval — FR-005).
-describe('ServerCard — quarantined card affords review (audit F7)', () => {
+describe('ServerRow — quarantined card affords review (audit F7)', () => {
   it('offers Review as the one primary action, deep-linked to the review screen', () => {
     const wrapper = mountCard(
       makeServer({
@@ -132,7 +132,7 @@ describe('ServerCard — quarantined card affords review (audit F7)', () => {
 // Spec 109 FR-013 folds that block into the ONE status line: the plain-language
 // summary is the line's detail segment, and the raw chain moves to the
 // tooltip — never printed on the card face.
-describe('ServerCard — error dump is collapsed (audit F12)', () => {
+describe('ServerRow — error dump is collapsed (audit F12)', () => {
   const wrappedError =
     'failed to connect: MCP initialize failed during no-auth strategy: transport error: ' +
     'failed to send request: Post "https://example.invalid/mcp": ' +
@@ -149,16 +149,17 @@ describe('ServerCard — error dump is collapsed (audit F12)', () => {
       } as unknown as Partial<Server>)
     )
 
-    const statusLine = wrapper.find('[data-test="server-card-status-line"]')
-    expect(statusLine.text()).toContain('Host not found')
-    // The raw wrapped chain never appears as visible text on the card.
-    expect(statusLine.text()).not.toContain('dial tcp')
-    expect(statusLine.attributes('data-tip')).toContain('dial tcp')
+    const reason = wrapper.find('[data-test="server-row-reason"]')
+    expect(reason.text()).toBe('Host not found')
+    // The raw wrapped chain never appears as visible text on the row; the
+    // whole of it is on server detail ("Full diagnostic"), and in the title.
+    expect(wrapper.text()).not.toContain('dial tcp')
+    expect(reason.attributes('title')).toContain('dial tcp')
   })
 
   it('falls back to the root cause when no health summary is present', () => {
     const wrapper = mountCard(makeServer({ last_error: 'outer: inner: the real cause' }))
-    expect(wrapper.find('[data-test="server-card-status-line"]').text()).toContain('the real cause')
+    expect(wrapper.find('[data-test="server-row-reason"]').text()).toContain('the real cause')
   })
 
   // For a quarantined or disabled server the health calculator short-circuits
@@ -182,7 +183,7 @@ describe('ServerCard — error dump is collapsed (audit F12)', () => {
       } as unknown as Partial<Server>)
     )
 
-    const line = wrapper.find('[data-test="server-card-status-line"]').text()
+    const line = wrapper.find('[data-test="server-row-reason"]').text()
     expect(line).not.toContain('Quarantined for review — Quarantined')
     expect(line).toContain('exited before completing')
   })
@@ -198,14 +199,14 @@ describe('ServerCard — error dump is collapsed (audit F12)', () => {
         },
       } as unknown as Partial<Server>)
     )
-    expect(wrapper.find('[data-test="server-card-status-line"]').text()).toContain('transport closed')
+    expect(wrapper.find('[data-test="server-row-reason"]').text()).toContain('transport closed')
   })
 })
 
 // Audit F11: a name that does not resolve is not a restartable outage. Send
 // the user to the field that is actually wrong — now via the ONE primary
 // action (Spec 109 FR-013/FR-014), not a dedicated button.
-describe('ServerCard — edit_url action (audit F11)', () => {
+describe('ServerRow — edit_url action (audit F11)', () => {
   it('offers Edit URL as the primary action, pointing at the config tab with the endpoint focused', () => {
     const wrapper = mountCard(
       makeServer({

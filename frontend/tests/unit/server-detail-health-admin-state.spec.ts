@@ -210,7 +210,7 @@ describe('ServerDetail — Health tile answers "can my client use it?" (F10)', (
     // `connected ? 'Online' : 'Unknown'` without checking sign-in state
     // first — rendering "Online" in the tile directly above the sub-line's
     // "Sign-in required" text. SC-003 forbids "healthy"/"online"/"connected"
-    // for a usable=false server; every sibling surface (ServerCard.vue,
+    // for a usable=false server; every sibling surface (ServerRow.vue,
     // AdminServers.vue, UserServers.vue, and this file's own
     // statusBadgeText) checks signInState before falling back to connected.
     const wrapper = await mountDetail({

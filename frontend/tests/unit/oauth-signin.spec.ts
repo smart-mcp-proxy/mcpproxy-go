@@ -3,10 +3,10 @@ import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { Server } from '@/types'
 import SignInPanel from '@/components/diagnostics/SignInPanel.vue'
-import ServerCard from '@/components/ServerCard.vue'
+import ServerRow from '@/components/ServerRow.vue'
 import { oauthSignInState, isOAuthDiagnosticCode } from '@/utils/health'
 
-// ServerCard pulls in stores + the security-scanner composable (which fetches
+// ServerRow pulls in stores + the security-scanner composable (which fetches
 // the security overview). Stub the API so mounting stays offline.
 vi.mock('@/services/api', () => ({
   default: {
@@ -129,10 +129,10 @@ describe('SignInPanel component (MCP-1821)', () => {
   })
 })
 
-describe('ServerCard status chip — OAuth sign-in (MCP-1857)', () => {
+describe('ServerRow status chip — OAuth sign-in (MCP-1857)', () => {
   function mountCard(server: Server) {
     setActivePinia(createPinia())
-    return mount(ServerCard, {
+    return mount(ServerRow, {
       props: { server },
       global: {
         plugins: [createPinia()],

@@ -4,8 +4,8 @@ import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createWebHistory } from 'vue-router'
 
 // Review round 1 of the F09 fix. The approve-dialog paragraph exists TWICE —
-// once in ServerCard.vue and once here in ServerDetail.vue — and only the
-// ServerCard copy was pinned (scanner-gate-wording.spec.ts). Reverting the
+// once in ServerRow.vue and once here in ServerDetail.vue — and only the
+// ServerRow copy was pinned (scanner-gate-wording.spec.ts). Reverting the
 // ServerDetail hunk to the old "Force-approving bypasses the scanner gate."
 // left the whole 1236-test suite green, so the half of the fix that lands on
 // the screen F09 was actually reported against was unverified and free to
@@ -18,7 +18,7 @@ const SERVER = 'context7-docs'
 
 let serverQuarantined = true
 // Review round 2 (109-e medium finding): scanner-gate-wording.spec.ts's own
-// no-scan-mode test was deleted when ServerCard's copy of this dialog was
+// no-scan-mode test was deleted when ServerRow's copy of this dialog was
 // removed (Spec 109, 109-e), on the claim that this file covers "both modes"
 // — it did not; this file had only the findings-mode fixture below. Toggling
 // `withScan` lets the same mount function drive either dialog mode.
@@ -109,7 +109,7 @@ describe('ServerDetail — approval enters informed review (Spec 109-g)', () => 
   // Review round 2 (109-e medium finding): the gate sentence
   // ("skips the scan-based approval gate…") is shared by BOTH dialog modes —
   // it must say nothing about findings, because the no_scan mode has none.
-  // scanner-gate-wording.spec.ts pinned this for ServerCard's now-deleted
+  // scanner-gate-wording.spec.ts pinned this for ServerRow's now-deleted
   // copy of the dialog; deleting that test left this exact regression class
   // (the shared sentence mentioning findings even with no scan) uncoverable
   // anywhere — server-detail-quarantine-banner.spec.ts's own no-scan-mode

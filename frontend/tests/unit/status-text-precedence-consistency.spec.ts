@@ -6,12 +6,12 @@ import { createRouter, createMemoryHistory } from 'vue-router'
 // resolve a server's status TEXT through the same helper and the same
 // fallback order — `healthStatusText()` in @/utils/health, which is
 // `summary || label(status) || connected-fallback` (see its doc comment and
-// the ServerCard/ServerDetail specs that lock that order in).
+// the ServerRow/ServerDetail specs that lock that order in).
 //
 // AdminServers.vue and UserServers.vue instead carried their OWN inline
 // `statusLabel()`/`healthLabel()` that checked `status` BEFORE `summary` —
 // the reverse order — so the same health payload rendered different text
-// on the teams tables than it did on ServerCard/ServerDetail. This spec
+// on the teams tables than it did on ServerRow/ServerDetail. This spec
 // pins the ONE order across all four surfaces.
 
 const getConfigMock = vi.hoisted(() => vi.fn())

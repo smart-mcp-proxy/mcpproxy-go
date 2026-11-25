@@ -197,12 +197,12 @@ describe.each(MATRIX)('profiles un-hide: $name (Spec 109-l T151)', cell => {
     }
   })
 
-  it('Servers shows the Profile select and chip only with the filters, and sends the parameter only then', async () => {
+  it('Servers shows the View as control and chip only with the filters, and sends the parameter only then', async () => {
     const { pinia, router } = await setup(cell, '/servers?profile=work-ro', Servers)
     useServersStore().$patch({ servers: [{ name: 'github', enabled: true, connected: true, quarantined: false, tool_count: 1 }] as never, loaded: true })
     const wrapper = mount(Servers, { global: { plugins: [pinia, router] } })
     await flushPromises()
-    expect(wrapper.find('[data-test="servers-profile-select"]').exists()).toBe(cell.features)
+    expect(wrapper.find('[data-test="viewing-filter-button"]').exists()).toBe(cell.features)
     expect(wrapper.find('[data-test="scope-chip-profile"]').exists()).toBe(cell.features)
     const scoped = calls.filter(call => call.fn === 'getServers' && (call.args[0] as { profile?: string } | undefined)?.profile)
     expect(scoped).toHaveLength(cell.features ? 1 : 0)
