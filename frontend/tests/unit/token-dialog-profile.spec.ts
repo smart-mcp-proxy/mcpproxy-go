@@ -135,6 +135,8 @@ describe('Token dialog and list (Spec 108-i T093, FR-043)', () => {
     const facts = wrapper.get('[data-test="token-facts-ci"]')
     expect(facts.get('[data-test="token-kind-ci"]').text()).toBe('Agent')
     for (const label of ['Kind', 'Mode', 'Prefix', 'Last used']) expect(facts.text()).toContain(label)
+    // The raw profile id stays visible even though the chip shows the title.
+    expect(wrapper.get('[data-test="token-profile-id-ci"]').text()).toBeTruthy()
     await wrapper.get('[data-test="token-expand-client-cursor"]').trigger('click')
     expect(wrapper.get('[data-test="token-kind-client-cursor"]').text()).toBe('Client')
     expect(wrapper.get('[data-test="token-facts-client-cursor"]').text()).toContain('Locked')

@@ -146,7 +146,7 @@
               >{{ token.name }}</button>
               <!-- Spec 134 FR-061: describes the configured limits (own server and permission
                    list), not effective access, which a profile or a lock can narrow further. -->
-              <StateTag v-if="token.legacy_scope" tone="review" class="ml-2" :data-test="`token-legacy-badge-${token.name}`" title="This token carries its own server list and permissions instead of a profile">Own server list</StateTag>
+              <StateTag v-if="token.legacy_scope" tone="review" class="ml-2" :data-test="`token-legacy-badge-${token.name}`" title="This token carries its own server list and permissions">Own server list</StateTag>
               <CredentialLifecycle
                 v-if="token.issuer || token.purpose || token.profile_state === 'dangling'"
                 class="mt-1"
@@ -174,11 +174,12 @@
               </div>
             </td>
             <td class="align-top max-sm:p-0 max-sm:border-0!">
+              <span class="sm:hidden text-sm text-base-content/70">Profile </span>
               <span v-if="token.profile_pin" class="badge badge-outline badge-sm max-w-[12rem] min-w-0 justify-start overflow-hidden whitespace-nowrap" :title="profilesStore.titleFor(token.profile_pin)" :data-test="`token-profile-${token.name}`"><span class="truncate">{{ profilesStore.titleFor(token.profile_pin) }}</span></span>
               <span v-else class="text-base-content/70 text-sm">&mdash;<span class="sr-only">No profile</span></span>
             </td>
             <td class="align-top whitespace-nowrap max-sm:p-0 max-sm:border-0! text-sm">
-              <span :class="{ 'text-warning': isExpiringSoon(token), 'text-error': isExpired(token) && !token.lease }" :data-test="`token-expiry-${token.name}`">
+              <span class="sm:hidden text-base-content/70">Expires </span><span :class="{ 'text-warning': isExpiringSoon(token), 'text-error': isExpired(token) && !token.lease }" :data-test="`token-expiry-${token.name}`">
                 {{ expiryText(token) }}
               </span>
             </td>
@@ -234,6 +235,7 @@
           <tr v-if="expandedToken === token.name" :data-test="`token-detail-${token.name}`" class="max-sm:block">
             <td colspan="5" class="bg-base-200/40 space-y-2 max-sm:block">
               <dl class="flex flex-wrap gap-x-6 gap-y-1 text-sm" :data-test="`token-facts-${token.name}`">
+                <div v-if="token.profile_pin" class="flex gap-2"><dt class="text-base-content/70">Profile id</dt><dd :data-test="`token-profile-id-${token.name}`"><code class="text-sm">{{ token.profile_pin }}</code></dd></div>
                 <div class="flex gap-2"><dt class="text-base-content/70">Kind</dt><dd :data-test="`token-kind-${token.name}`">{{ isClientCredential(token) ? 'Client' : 'Agent' }}</dd></div>
                 <div class="flex gap-2"><dt class="text-base-content/70">Mode</dt><dd>{{ isClientCredential(token) && token.profile_mode ? modeLabel(token.profile_mode) : '—' }}</dd></div>
                 <div class="flex gap-2"><dt class="text-base-content/70">Prefix</dt><dd><code class="text-sm bg-base-200 px-2 py-1 rounded">{{ token.token_prefix }}</code></dd></div>
