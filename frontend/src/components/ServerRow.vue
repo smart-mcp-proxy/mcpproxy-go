@@ -142,7 +142,7 @@
     <!-- Delete Confirmation Modal — the only place Delete is reachable from
          (Spec 109 FR-013: "Delete only in ⋯ with a confirmation naming the
          server"). -->
-    <div v-if="showDeleteConfirmation" class="modal modal-open">
+    <div v-if="showDeleteConfirmation" class="modal modal-open" role="dialog" aria-modal="true" aria-label="Delete server" @keydown.esc="showDeleteConfirmation = false">
       <div class="modal-box">
         <h3 class="font-bold text-lg mb-4">Delete Server</h3>
         <p class="mb-4">
@@ -156,6 +156,8 @@
             @click="showDeleteConfirmation = false"
             :disabled="loading"
             class="btn btn-outline"
+            ref="deleteCancel"
+            data-test="server-card-delete-cancel"
           >
             Cancel
           </button>
@@ -175,7 +177,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick, watch } from 'vue'
 import type { Server, ActivityPerServer } from '@/types'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
@@ -208,6 +210,9 @@ const systemStore = useSystemStore()
 const { hasEnabledScanners } = useSecurityScannerStatus()
 const loading = ref(false)
 const showDeleteConfirmation = ref(false)
+// The dialog takes focus (Cancel, the safe choice) so a keyboard user is inside it.
+const deleteCancel = ref<HTMLButtonElement | null>(null)
+watch(showDeleteConfirmation, open => { if (open) void nextTick(() => deleteCancel.value?.focus()) })
 
 const isHttpProtocol = computed(() => {
   return props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
@@ -228,8 +233,10 @@ const trustBadgeLabel = computed(() => trustBadge(props.server).label)
 const hasStatus = computed(() => !!props.server.health?.status)
 const legacyChipClass = computed(() => {
   const health = props.server.health
+  if (health?.admin_state === 'disabled') return 'badge-neutral'
   if (signInState.value) return 'badge-warning'
   if (health) {
+    if (health.admin_state === 'quarantined') return 'badge-secondary'
     switch (health.level) {
       case 'healthy': return 'badge-success'
       case 'degraded': return 'badge-warning'

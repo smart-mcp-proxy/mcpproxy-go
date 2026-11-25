@@ -31,7 +31,6 @@ Environment:
   MCPPROXY_FIXTURE_PATH  optional cmd/mcpfixture binary; registered as a stdio
                          upstream so the sweep sees real servers and tools
   MCPPROXY_BASE_URL      base URL to serve on (default: http://127.0.0.1:18080)
-  SWEEP_SPECS            space-separated spec files to run instead of the default list
   ARTIFACT_DIR           where the HTML report + server log land
                          (default: <repo>/tmp/web-smoke-artifacts)
 EOF
@@ -348,7 +347,7 @@ set +e
   MCPPROXY_API_KEY="$API_KEY" \
   SWEEP_SERVER_NAME="$SWEEP_SERVER_NAME" \
   SWEEP_REPORT_DIR="$REPORT_DIR" \
-    "$PLAYWRIGHT_BIN" test ${SWEEP_SPECS:-client-oauth-consent.spec.ts web-ui-sweep.spec.ts visual-a11y-sweep.spec.ts navigation-consistency.spec.ts shell-pr1.spec.ts servers-pr2.spec.ts profiles-clients.spec.ts profiles-scope.spec.ts profiles-unhide.spec.ts demo-ux-fixes.spec.ts usertest-web-fixes.spec.ts}
+    "$PLAYWRIGHT_BIN" test client-oauth-consent.spec.ts web-ui-sweep.spec.ts visual-a11y-sweep.spec.ts navigation-consistency.spec.ts shell-pr1.spec.ts servers-pr2.spec.ts profiles-clients.spec.ts profiles-scope.spec.ts profiles-unhide.spec.ts demo-ux-fixes.spec.ts usertest-web-fixes.spec.ts
 )
 PLAYWRIGHT_STATUS=$?
 set -e

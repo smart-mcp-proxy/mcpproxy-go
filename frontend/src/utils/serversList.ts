@@ -18,9 +18,13 @@ export function isOnline(server: Server): boolean {
   return server.connected && server.enabled && !server.quarantined
 }
 
-/** Administratively on. A disabled+quarantined row is `disabled`, as in the header. */
+/** Administratively on. */
 export function isEnabledServer(server: Server): boolean {
-  return server.health ? server.health.admin_state !== 'disabled' : server.enabled
+  // `enabled` is the field Enable/Disable update at once (before the SSE-driven
+  // refresh replaces `health`), so the Disabled chip and the Enabled filter
+  // never contradict each other in that window. A disabled+quarantined row has
+  // enabled=false, as in the header.
+  return server.enabled
 }
 
 export function isNeedsReview(server: Server): boolean {
@@ -89,7 +93,8 @@ export interface FilterInputs {
   notOnlineCount: number
 }
 
-const asString = (v: unknown): string | undefined => (Array.isArray(v) ? asString(v[0]) : typeof v === 'string' ? v : undefined)
+// A repeated parameter (an array) is not a value, as before.
+const asString = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
 
 /**
  * The filter in force. A known `status` wins (old links keep their meaning,

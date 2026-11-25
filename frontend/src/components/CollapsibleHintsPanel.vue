@@ -1,5 +1,5 @@
 <template>
-  <div v-if="hints.length > 0" class="hints-panel-wrapper">
+  <div v-if="hints.length > 0" ref="root" class="hints-panel-wrapper">
     <!-- Collapsed State: Single Line with Bulb Icon -->
     <div
       v-if="!isExpanded"
@@ -95,7 +95,7 @@
 <script setup lang="ts">
 import UiIcon from '@/components/UiIcon.vue'
 import type { UiIconName } from '@/utils/uiIcons'
-import { ref } from 'vue'
+import { nextTick, ref } from 'vue'
 
 export interface HintSection {
   title?: string
@@ -126,8 +126,15 @@ const props = withDefaults(defineProps<Props>(), {
 
 const isExpanded = ref(props.defaultExpanded)
 
-const toggleExpanded = () => {
+const root = ref<HTMLElement | null>(null)
+
+// The collapsed and expanded headers are different elements; after a keyboard
+// toggle focus would fall to <body>, so it returns to the new header.
+const toggleExpanded = (event?: Event) => {
   isExpanded.value = !isExpanded.value
+  if (event instanceof KeyboardEvent) {
+    void nextTick(() => root.value?.querySelector<HTMLElement>('[data-test="hints-toggle"]')?.focus())
+  }
 }
 
 const getSummaryText = () => {

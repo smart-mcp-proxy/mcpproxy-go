@@ -174,11 +174,34 @@ test('FR-026: 300 servers: first row within 2 s, scripted scroll sees exactly th
   const seen = new Set<string>()
   const collect = async () => { for (const id of await page.locator('[data-test="server-row"]').evaluateAll(els => els.map(e => e.getAttribute('data-server') || ''))) seen.add(id) }
   await collect()
-  const total = await page.evaluate(() => document.documentElement.scrollHeight)
+  // The page scrolls inside <main> (App.vue), not the window.
+  const total = await page.evaluate(() => document.querySelector('main')!.scrollHeight)
+  expect(total, 'main scroll height').toBeGreaterThan(300 * 36)
   for (let y = 0; y <= total + 900; y += 400) {
-    await page.evaluate(top => window.scrollTo(0, top), y)
+    await page.evaluate(top => { document.querySelector('main')!.scrollTop = top }, y)
     await page.waitForTimeout(30)
     await collect()
   }
   expect([...seen].sort()).toEqual(fleet.map(f => f.name).sort())
 })
+
+// Light and dark at both widths: screenshots for the verification note, and no
+// sideways scroll in either. Contrast of the Servers page in both themes is
+// measured by visual-a11y-sweep.spec.ts (it walks /servers in light and dark).
+for (const theme of ['corporate', 'dark']) {
+  for (const [w, h] of [[1440, 900], [390, 844]] as const) {
+    test(`themes: ${theme} at ${w}x${h}: no sideways scroll, screenshot attached`, async ({ page }, info) => {
+      await page.setViewportSize({ width: w, height: h })
+      await mockServers(page, fleet34())
+      await page.goto(url('/servers?filter=all'))
+      await page.evaluate(t => window.localStorage.setItem('mcpproxy-theme', t), theme)
+      await page.goto(url('/servers?filter=all'))
+      await expect.poll(() => page.evaluate(() => document.documentElement.getAttribute('data-theme'))).toBe(theme)
+      await page.locator('[data-test="server-row"]').first().waitFor({ state: 'visible' })
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+      const file = info.outputPath(`servers-${theme}-${w}.png`)
+      await page.screenshot({ path: file })
+      await info.attach(`servers-${theme}-${w}`, { path: file, contentType: 'image/png' })
+    })
+  }
+}

@@ -134,6 +134,14 @@ page disagree):
   at 1440 and 900 px: the token Profile chip is one line inside its cell, and
   radio labels sit next to their radios in the create-profile, custom-client and
   bulk-move dialogs.
+- `shell-pr1.spec.ts`: the Spec 134 shell: skip link and first Tab, the palette
+  never opening on Tab, the phone menu overlay, the footer disclosure, "Add
+  server" in the header, and "View as" in the page filter rows.
+- `servers-pr2.spec.ts`: the Spec 134 Servers table: 14 rows in the first screen
+  with a 34-server fleet and all unusable servers among them, a 300-server fleet
+  (first row within 2 s, a scripted scroll sees exactly the fleet's ids), filter
+  chips and legacy `?status=`, the keyboard path to a menu item, and the 390 px
+  layout.
 - `usertest-web-fixes.spec.ts`: the first-run user test findings, at 1440 and
   900 px: the header status pill names servers awaiting review, a secret-like
   Manual-add value is masked with a Show toggle, and profile Try it is readable
@@ -220,7 +228,7 @@ and compares every surface against the core's `GET /api/v1/servers`:
 |---------|-----------|-----------------|
 | CLI | `mcpproxy upstream list -o json --config <gate config>` (daemon client mode) | enabled, quarantined, connected, connection state, `health.level`, `health.admin_state`, `health.status`, `tool_count` |
 | MCP | `/mcp` `upstream_servers` `operation=list` — storage + upstream manager + runtime health, an independent projection | enabled, quarantined, connection state, `health.level`, `health.admin_state`, `health.status` (the row carries no tool count) |
-| Web UI | rendered server cards on `/ui/servers`, read by `e2e/web-ui-sweep/surface-snapshot.mjs` in one long-lived Chromium page | enabled (⋯ menu Enable/Disable), quarantined (⋯ Review), tool count, status chip colour and text — the expected chip is derived from the core row with `ServerCard.vue`'s rules, because the Web UI never prints `health.level` as text |
+| Web UI | rendered server rows on `/ui/servers`, read by `e2e/web-ui-sweep/surface-snapshot.mjs` in one long-lived Chromium page | enabled (more menu Enable/Disable), quarantined (more menu Review), tool count, status chip tone and text — the expected chip is derived from the core row with `ServerRow.vue`'s rules (the status pill when `health.status` is present), because the Web UI never prints `health.level` as text |
 | macOS tray | — | not compared; recorded as `not_compared` in the fragment (T3) |
 
 Connection state is compared only for enabled, non-quarantined servers (a

@@ -210,3 +210,26 @@ describe('states (P2-14, P2-17, P2-20)', () => {
     expect(wrapper.get('[data-test="servers-refresh-error"] button').text()).toBe('Retry')
   })
 })
+
+describe('shared clock (P2-50)', () => {
+  it('advances the last-call age without a data change and stops its timer on unmount', async () => {
+    vi.useFakeTimers()
+    try {
+      const base = new Date('2026-01-01T12:00:00.000Z')
+      vi.setSystemTime(base)
+      fetchSummary.mockResolvedValue({ success: true, data: { per_server: [{ name: 'ok-1', calls: 1, errors: 0, last_call_at: new Date(base.getTime() - 5 * 60_000).toISOString() }] } })
+      const { wrapper } = await mountAt('/servers?filter=online', [server('ok-1', 'ready')])
+      expect(wrapper.get('[data-test="server-card-stats-line"]').text()).toContain('last call 5m ago')
+      vi.setSystemTime(new Date(base.getTime() + 3 * 3_600_000))
+      vi.advanceTimersByTime(31_000)
+      await flushPromises()
+      expect(wrapper.get('[data-test="server-card-stats-line"]').text()).toContain('last call 3h ago')
+      const clear = vi.spyOn(globalThis, 'clearInterval')
+      wrapper.unmount()
+      expect(clear).toHaveBeenCalled()
+      clear.mockRestore()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

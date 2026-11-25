@@ -236,3 +236,20 @@ describe('Servers first-run empty state (F3)', () => {
     expect(wrapper.find('[data-test="kpi-card-total"]').exists()).toBe(true)
   })
 })
+
+describe('hints panel (P2-24)', () => {
+  it('opens and closes from the keyboard and keeps focus on its header', async () => {
+    const { default: Panel } = await import('@/components/CollapsibleHintsPanel.vue')
+    const wrapper = mount(Panel, { props: { hints: [{ icon: 'plus', title: 'T', sections: [{ text: 'x' }] }] }, attachTo: document.body })
+    const toggle = () => wrapper.get('[data-test="hints-toggle"]')
+    expect(toggle().attributes('aria-expanded')).toBe('false')
+    await toggle().trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(toggle().attributes('aria-expanded')).toBe('true')
+    expect(document.activeElement).toBe(toggle().element)
+    await toggle().trigger('keydown', { key: ' ' })
+    await flushPromises()
+    expect(toggle().attributes('aria-expanded')).toBe('false')
+    wrapper.unmount()
+  })
+})

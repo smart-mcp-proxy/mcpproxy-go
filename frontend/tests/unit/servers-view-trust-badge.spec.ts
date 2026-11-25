@@ -121,6 +121,17 @@ describe('Server detail facts — trust-mode badge (spec 088 FR-007, spec 134 FR
   })
 })
 
+describe('Server detail facts — trust shield accessible name', () => {
+  it.each([['auto', 'Auto'], ['bogus', 'bogus']])('names %s for a screen reader, not only in the tooltip', async (mode, expected) => {
+    const wrapper = await mountServers([makeServer('srv', mode)])
+    const shield = wrapper.find('[data-test="server-trust-mode"]')
+    expect(shield.attributes('role')).toBe('img')
+    expect(shield.attributes('aria-label')).toContain(expected)
+    // The meaning is plain text too (no hover needed).
+    expect(wrapper.find('[data-test="server-facts-trust-detail"]').text().length).toBeGreaterThan(10)
+  })
+})
+
 describe('Servers row — trust mode stays reachable from the more menu', () => {
   it('lists "Trust mode: <label>" linking to the configuration tab', async () => {
     setActivePinia(createPinia())

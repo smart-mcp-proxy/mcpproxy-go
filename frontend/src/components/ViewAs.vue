@@ -3,7 +3,7 @@
     <div class="flex items-center gap-1">
       <button
         type="button"
-        class="btn btn-sm btn-outline gap-2 max-w-[22rem] normal-case min-h-10 md:min-h-8"
+        class="btn btn-sm btn-outline gap-2 max-w-[22rem] normal-case min-h-11 md:min-h-8"
         :class="hasValue && 'btn-active'"
         aria-haspopup="dialog"
         :aria-expanded="open ? 'true' : 'false'"
@@ -27,7 +27,7 @@
       <button
         v-if="hasValue"
         type="button"
-        class="btn btn-sm btn-ghost btn-square min-h-10 min-w-10 md:min-h-8 md:min-w-8"
+        class="btn btn-sm btn-ghost btn-square min-h-11 min-w-11 md:min-h-8 md:min-w-8"
         aria-label="Clear view filter"
         data-test="viewing-filter-clear"
         @click="clear"
