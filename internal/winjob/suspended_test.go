@@ -5,11 +5,14 @@ package winjob
 import (
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/windows"
 )
 
 // markerHelperEnv makes the test binary act as a child that writes a marker
@@ -24,7 +27,65 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	switch os.Getenv(breakHelperEnv) {
+	case "parent":
+		os.Exit(breakParent())
+	case "child":
+		time.Sleep(time.Minute)
+		os.Exit(0)
+	}
 	os.Exit(m.Run())
+}
+
+// breakHelperEnv makes the test binary act as a process that sends CTRL_BREAK
+// to its own console group ("parent"), or as a child it started ("child").
+const breakHelperEnv = "MCPPROXY_WINJOB_BREAK"
+
+// breakParent starts a child the way the core starts its stdio upstreams, sends
+// CTRL_BREAK to its own group and returns 0 when the child outlives it.
+func breakParent() int {
+	got := make(chan os.Signal, 1)
+	signal.Notify(got, os.Interrupt)
+	child := exec.Command(os.Args[0], "-test.run=^$") //nolint:gosec // re-executes the test binary
+	child.Env = append(os.Environ(), breakHelperEnv+"=child")
+	MarkSuspended(child)
+	job, err := New()
+	if err != nil || child.Start() != nil || job.AssignAndResume(child.Process.Pid) != nil {
+		return 3
+	}
+	exited := make(chan struct{})
+	go func() { _ = child.Wait(); close(exited) }()
+	time.Sleep(700 * time.Millisecond) // let the child start
+	if windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(os.Getpid())) != nil {
+		return 4
+	}
+	select {
+	case <-got:
+	case <-time.After(5 * time.Second):
+		return 5
+	}
+	select {
+	case <-exited:
+		return 6
+	case <-time.After(time.Second):
+	}
+	_ = job.Close() // still contained: closing the job ends it
+	select {
+	case <-exited:
+		return 0
+	case <-time.After(5 * time.Second):
+		return 7
+	}
+}
+
+// The tray stops the core with CTRL_BREAK. Upstream children must not get it, or
+// every call running on them fails at once instead of getting the shutdown grace.
+func TestMarkSuspended_ChildDoesNotGetTheParentsCtrlBreak(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^$") //nolint:gosec // re-executes the test binary
+	cmd.Env = append(os.Environ(), breakHelperEnv+"=parent")
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_NO_WINDOW}
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "exit codes: 3 setup, 4 send, 5 parent got no signal, 6 child died, 7 child survived its job; output: %s", out)
 }
 
 func markerChild(t *testing.T, marker string) *exec.Cmd {

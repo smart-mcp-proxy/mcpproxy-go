@@ -15,13 +15,15 @@ import (
 // runs no user code, so it cannot fork a descendant that escapes the Job. The
 // caller assigns the suspended process to its Job, then calls Resume.
 
-// MarkSuspended makes cmd start with its main thread suspended. It keeps any
-// SysProcAttr fields the caller already set. Call it before cmd.Start.
+// MarkSuspended makes cmd start with its main thread suspended, in its own
+// console process group: a CTRL_BREAK that asks the core to shut down must not
+// reach the children, which would fail the calls still running on them. It
+// keeps any SysProcAttr fields the caller already set. Call it before cmd.Start.
 func MarkSuspended(cmd *exec.Cmd) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
-	cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED
+	cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED | windows.CREATE_NEW_PROCESS_GROUP
 }
 
 // IsSuspended reports whether cmd was marked to start suspended.
