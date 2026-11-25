@@ -159,6 +159,25 @@ test('phone 390x844: rows stack, no sideways scroll, body buttons at least 44 px
   await test.info().attach('servers-390', { path: test.info().outputPath('servers-390.png'), contentType: 'image/png' })
 })
 
+test('phone 390x844: the first server row is visible without scrolling, chips are one row, row actions are not all primary', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await mockServers(page, fleet34())
+  await open(page, '/servers')
+  const first = page.locator('[data-test="server-row"]').first()
+  await expect(first).toBeVisible()
+  const footerTop = await page.evaluate(() => document.querySelector('footer')?.getBoundingClientRect().top ?? Infinity)
+  const box = (await first.boundingBox())!
+  expect(box.y + box.height, 'first row bottom vs viewport/footer').toBeLessThanOrEqual(Math.min(844, footerTop))
+  const chips = page.locator('[data-test="servers-chips"] button')
+  const ys = await chips.evaluateAll(els => els.map(e => Math.round(e.getBoundingClientRect().top)))
+  expect(new Set(ys).size, `chip tops ${ys.join(',')}`).toBe(1)
+  const moreY = await page.locator('[data-test="servers-more-filters-toggle"]').boundingBox().then(b => Math.round(b!.y))
+  expect(Math.abs(moreY - ys[0]), 'More filters sits in the chip row').toBeLessThanOrEqual(4)
+  const primaries = await page.locator('[data-test="server-card-primary-action"].btn-primary').evaluateAll(els => els.map(e => e.textContent!.trim()))
+  expect(primaries.every(t => t === 'Review'), `primary row buttons: ${primaries.join(',')}`).toBe(true)
+  await page.screenshot({ path: test.info().outputPath('servers-390-after.png') })
+})
+
 test('phone 390x844: the more menu opens by tap, its items are 44 px, Logs navigates, the delete dialog is usable', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await mockServers(page, [{ name: 'broken', status: 'error' }])

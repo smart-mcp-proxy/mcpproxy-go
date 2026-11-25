@@ -4,11 +4,11 @@ Checked on the PR head, 2026-11-25, macOS arm64, an isolated instance (own confi
 
 | Check | Command | Result |
 |---|---|---|
-| Frontend unit tests | `cd frontend && npx vitest run` | 3256 passed (362 files) |
+| Frontend unit tests | `cd frontend && npx vitest run` | 3260 passed (362 files) |
 | Type check | `cd frontend && npx vue-tsc --noEmit` | clean |
 | Build | `make frontend-build`; `go build -o mcpproxy ./cmd/mcpproxy`; `go build -tags server ./cmd/mcpproxy` | ok |
 | Release gate Go tests | `go test ./cmd/release-gate/` | ok (the Web UI row is derived from the status pill) |
-| Playwright sweeps, with fixture upstream | `MCPPROXY_BASE_URL=http://127.0.0.1:18734 MCPPROXY_FIXTURE_PATH=<mcpfixture> HOME=<scratch> ./scripts/run-web-smoke.sh` | 179 passed, 3 skipped, 0 failed |
+| Playwright sweeps, with fixture upstream | `MCPPROXY_BASE_URL=http://127.0.0.1:18734 MCPPROXY_FIXTURE_PATH=<mcpfixture> HOME=<scratch> ./scripts/run-web-smoke.sh` | 180 passed, 3 skipped, 0 failed |
 | Playwright sweeps, no fixture | same on `:18735` without `MCPPROXY_FIXTURE_PATH` | 109 passed, 73 skipped (need the fixture), 0 failed |
 
 One earlier full run showed `shell-pr1.spec.ts` "Tab through the header never opens the palette ... Ctrl+K" failing once (`Control+k` did not open the palette); it passed on the three later full runs and alone. It is a PR 1 spec and was not touched here.
@@ -39,3 +39,9 @@ Left as is (recorded, not a function loss): going from `?status=connected` to `?
 - No visual check of the server edition (`-tags server`) pages; they are not touched.
 - The macOS app and tray are not touched.
 - CI on the runner (the 2 s bound was measured locally).
+
+## Design review round (visual review of the 34-server fixture)
+
+Six changes after the first visual review: the Reason column takes the free width (Server column about 20% with a 180 px minimum, last call and action columns narrower); known failures read as short sentences ("Server exited during startup" for `MCPX_STDIO_EXIT_BEFORE_INITIALIZE` or its text, "Command not found: <name>" from the config or from `exec: "name"`), unit-tested with the real strings; row actions are outline buttons and only Review is primary, and Scan All in the page header is outline; the Last call cell has no prefix and the error count only when above zero (the link and its screen-reader text are unchanged); at 390 px the chips are one row that scrolls sideways with "More filters" at its end, so the first server row is fully visible without scrolling (asserted in `servers-pr2.spec.ts`). Spec amendment: SC-005 and user story 7 scenario 4 now list filter chip rows among the containers that may scroll sideways. Shared outline and chip styles are the PR 1 session's; not touched here.
+
+Before (first version): [light 1440](pr2-servers-before-light-1440.png), [dark 1440](pr2-servers-before-dark-1440.png), [dark 390](pr2-servers-before-dark-390.png). After: [light 1440](pr2-servers-light-1440.png), [dark 1440](pr2-servers-dark-1440.png), [light 390](pr2-servers-light-390.png), [dark 390](pr2-servers-dark-390.png).

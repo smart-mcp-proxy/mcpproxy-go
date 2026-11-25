@@ -185,7 +185,7 @@ describe('ServerRow — error dump is collapsed (audit F12)', () => {
 
     const line = wrapper.find('[data-test="server-row-reason"]').text()
     expect(line).not.toContain('Quarantined for review — Quarantined')
-    expect(line).toContain('exited before completing')
+    expect(line).toBe('Server exited during startup')
   })
 
   it('falls back to the root cause on a quarantined server with no diagnostic', () => {

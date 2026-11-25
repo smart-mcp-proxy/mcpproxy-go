@@ -83,3 +83,22 @@ describe('ServerRow delete dialog (P2-43)', () => {
     expect(w.get('[data-test="server-row-reason"]').text()).toBe('Disabled')
   })
 })
+
+describe('ServerRow: secondary row actions, quiet last call (design review)', () => {
+  const h = (status: string, actions: string[]) => ({ level: 'unhealthy', admin_state: 'enabled', summary: 's', status, usable: false, actions })
+  it('only Review is a primary button; other actions are outline', () => {
+    expect(mountRow(srv({ health: h('error', ['restart']) })).get('[data-test="server-card-primary-action"]').classes()).toContain('btn-outline')
+    expect(mountRow(srv({ health: h('error', ['restart']) })).get('[data-test="server-card-primary-action"]').classes()).not.toContain('btn-primary')
+    expect(mountRow(srv({ quarantined: true, health: h('needs_review', ['approve']) })).get('[data-test="server-card-primary-action"]').classes()).toContain('btn-primary')
+  })
+  it('last call drops the prefix and shows errors only when there are some, keeping the link and its text for screen readers', () => {
+    const none = mountRow(srv())
+    const link = none.get('[data-test="server-card-stats-line"]')
+    expect(link.text()).toContain('last call never')
+    expect(link.element.querySelector('.text-error')).toBeNull()
+    expect(link.attributes('href')).toBe('/activity?server=alpha&from=-24h')
+    const withErrors = mount(ServerRow, { props: { server: srv(), activityStats: { name: 'alpha', calls: 9, errors: 5, last_call_at: new Date().toISOString() } as any }, global: { plugins: [createPinia()], stubs: { RouterLink: Link, 'router-link': Link } } })
+    expect(withErrors.get('[data-test="server-card-stats-line"]').get('.text-error').text()).toBe('· 5 errors (24h)')
+    expect(withErrors.get('[data-test="server-card-stats-line"]').attributes('href')).toBe('/activity?server=alpha&from=-24h&status=error')
+  })
+})

@@ -51,6 +51,20 @@ describe('serverReason', () => {
     expect(serverReason(s)).toBe('Unavailable')
   })
 
+  it('the real stdio-exit string maps to a short sentence, by code and by text alone', () => {
+    const msg = 'The stdio server process exited before completing the MCP initialize handshake.'
+    const byCode = srv({ status: 'needs_review', last_error: 'failed to connect: stdio transport: transport closed', diagnostic: { code: 'MCPX_STDIO_EXIT_BEFORE_INITIALIZE', severity: 'error', user_message: msg } as any })
+    ;(byCode.health as any).admin_state = 'quarantined'
+    expect(serverReason(byCode)).toBe('Server exited during startup')
+    expect(serverReason(srv({ status: 'error', diagnostic: { code: 'MCPX_UNKNOWN_UNCLASSIFIED', severity: 'error', user_message: msg } as any }))).toBe('Server exited during startup')
+  })
+
+  it('"executable file not found" names the command, from the config or from the exec: "name" in the error', () => {
+    const err = 'failed to connect: exec: "uvx": executable file not found in $PATH'
+    expect(serverReason(srv({ status: 'error', command: 'uvx', last_error: err }))).toBe('Command not found: uvx')
+    expect(serverReason(srv({ status: 'error', last_error: err }))).toBe('Command not found: uvx')
+  })
+
   it('command not found without a command says only that', () => {
     expect(serverReason(srv({ status: 'error', last_error: 'executable file not found' }))).toBe('Command not found')
   })

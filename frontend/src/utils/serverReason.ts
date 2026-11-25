@@ -18,9 +18,17 @@ interface Pattern {
 // Order matters: the first pattern that matches wins.
 const PATTERNS: Pattern[] = [
   {
+    codes: ['MCPX_STDIO_EXIT_BEFORE_INITIALIZE'],
+    text: /process exited before completing|exited before (completing|initializ)/i,
+    sentence: () => 'Server exited during startup',
+  },
+  {
     codes: ['MCPX_STDIO_SPAWN_ENOENT', 'MCPX_DOCKER_EXEC_NOT_FOUND'],
     text: /executable file not found|command not found|not found in \$?path/i,
-    sentence: s => (s.command ? `Command not found: ${s.command}` : 'Command not found'),
+    sentence: s => {
+      const name = s.command || /exec: "([^"]+)"/.exec(`${s.last_error ?? ''} ${s.diagnostic?.cause ?? ''}`)?.[1]
+      return name ? `Command not found: ${name}` : 'Command not found'
+    },
   },
   {
     codes: ['MCPX_HTTP_CONN_REFUSED'],

@@ -21,7 +21,7 @@
           v-if="hasEnabledScanners()"
           @click="scanAllServers"
           :disabled="scanAllRunning"
-          class="btn btn-primary min-h-11 md:min-h-8"
+          class="btn btn-outline min-h-11 md:min-h-8"
           data-test="servers-scan-all"
         >
           <UiIcon name="shield" class="w-5 h-5" />
@@ -38,22 +38,26 @@
       <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
         <ViewAs />
         <template v-if="hasServers">
-          <div class="flex flex-wrap gap-2" role="group" aria-label="Server filter" data-test="servers-chips">
+          <!-- One row at every width; at phone width it scrolls sideways (a permitted
+               container, SC-005) with "More filters" at its end, so the list stays
+               in the first screen. -->
+          <div class="flex items-center gap-2 w-full md:w-auto min-w-0" data-test="servers-chip-row">
+          <div class="flex gap-2 min-w-0 overflow-x-auto md:overflow-visible md:flex-wrap pb-1 md:pb-0" role="group" aria-label="Server filter" data-test="servers-chips">
             <button
               v-for="chip in chips"
               :key="chip.value"
               type="button"
-              :class="['btn btn-sm min-h-11 md:min-h-8', filter === chip.value ? 'btn-primary' : 'btn-outline']"
+              :class="['btn btn-sm min-h-11 md:min-h-8 shrink-0 whitespace-nowrap', filter === chip.value ? 'btn-primary' : 'btn-outline']"
               :aria-pressed="filter === chip.value"
               :data-test="chip.value === 'all' ? 'kpi-card-total' : `servers-chip-${chip.value}`"
               @click="selectChip(chip.value)"
             >{{ chip.label }} ({{ chip.count }})</button>
           </div>
-          <details ref="moreFilters" class="dropdown" data-test="servers-more-filters">
+          <details ref="moreFilters" class="dropdown shrink-0" data-test="servers-more-filters">
             <summary class="btn btn-sm btn-outline min-h-11 md:min-h-8" data-test="servers-more-filters-toggle">
               More filters<span v-if="legacyActiveLabel"> ({{ legacyActiveLabel }})</span>
             </summary>
-            <ul class="dropdown-content menu z-[var(--z-dropdown)] bg-base-100 rounded-box shadow-lg border border-base-300 w-64 p-2">
+            <ul class="dropdown-content menu dropdown-end z-[var(--z-dropdown)] bg-base-100 rounded-box shadow-lg border border-base-300 w-64 p-2">
               <li v-for="item in legacyItems" :key="item.value">
                 <button
                   type="button"
@@ -66,6 +70,7 @@
               </li>
             </ul>
           </details>
+          </div>
           <input
             v-model="searchQuery"
             type="search"
@@ -297,7 +302,8 @@ import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus
 import type { ActivityPerServer } from '@/types'
 
 // Grid columns shared by the table header and every row (ServerRow.vue).
-const COLS = 'minmax(160px, 1.1fr) 150px minmax(0, 2fr) 64px 250px 120px 44px'
+// The reason takes what the fixed columns leave (FR-020); the name gets about a fifth.
+const COLS = 'minmax(180px, 20%) 140px minmax(0, 1fr) 56px 176px 112px 44px'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()

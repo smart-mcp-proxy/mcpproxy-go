@@ -28,8 +28,12 @@
         class="link link-hover text-base-content/70 hover:text-base-content whitespace-nowrap"
         data-test="server-card-stats-line"
       >
-        <span>last call {{ lastCall }}</span>
-        <span :class="errors24h > 0 ? 'text-error' : ''"> · {{ errors24h }} error{{ errors24h === 1 ? '' : 's' }} (24h)</span>
+        <!-- The column header says "Last call"; the words stay for screen readers,
+             and the error count shows only when there is one. The link always goes
+             to this server's Activity (errors only when there are some). -->
+        <span class="sr-only">last call </span><span>{{ lastCall }}</span>
+        <span v-if="errors24h > 0" class="text-error"> · {{ errors24h }} error{{ errors24h === 1 ? '' : 's' }} (24h)</span>
+        <span v-else class="sr-only"> · 0 errors (24h)</span>
       </router-link>
     </div>
 
@@ -39,7 +43,7 @@
         type="button"
         @click="runPrimaryAction"
         :disabled="loading"
-        class="btn btn-sm btn-primary server-row__btn"
+        :class="['btn btn-sm server-row__btn', primaryAction === 'approve' ? 'btn-primary' : 'btn-outline']"
         data-test="server-card-primary-action"
       >
         <span v-if="loading" class="loading loading-spinner loading-xs"></span>
@@ -48,7 +52,7 @@
       <router-link
         v-else-if="primaryAction && primaryKind === 'navigate'"
         :to="primaryHref"
-        class="btn btn-sm btn-primary server-row__btn"
+        :class="['btn btn-sm server-row__btn', primaryAction === 'approve' ? 'btn-primary' : 'btn-outline']"
         data-test="server-card-primary-action"
       >
         {{ primaryLabel }}
