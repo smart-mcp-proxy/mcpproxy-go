@@ -69,7 +69,7 @@ unbound ──(re-seal would exceed 1 MiB, FR-011a)──► unbound
 bound(B) ──(snapshot matches B)──► bound(B)
 bound(B) ──(snapshot B' with !Matches(B, B'))──► changed(B→B')
           nothing sent, access token not attached; MCPX_OAUTH_ISSUER_CHANGED
-changed / bound(B) ──(first write bound to B' with !Matches: DCR registration or login)──► bound(B')
+changed / bound(B) ──(first write bound to B' with !Equal — issuer, target, source class, regardless of skip: DCR registration or login)──► bound(B')
           one tx: replace the registration, clear the old tokens and MixUpProtected
 any ──(row undecryptable, Spec 123)──► undecryptable   [checked first]
 ```
