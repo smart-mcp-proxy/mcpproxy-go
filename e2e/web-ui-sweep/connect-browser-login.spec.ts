@@ -47,8 +47,12 @@ test.beforeAll(async () => {
   expect(st.nlink, '.claude.json must not be hard-linked').toBe(1)
   // The effective flag, read from the core's own config (the metadata route also
   // answers 404 on an enabled core reached through a non-loopback listener).
-  const cfg = (await (await fetch(`${BASE}/api/v1/config`, { headers: { 'X-API-Key': KEY } })).json()) as { data: { config: { mcp_oauth_enabled?: boolean; listen?: string } } }
+  const cfg = (await (await fetch(`${BASE}/api/v1/config`, { headers: { 'X-API-Key': KEY } })).json()) as { data: { config: { mcp_oauth_enabled?: boolean; listen?: string; data_dir?: string } } }
   expect(!!cfg.data.config.mcp_oauth_enabled, OFF ? 'feature-off run against a core with mcp_oauth_enabled on' : 'feature-on run against a core with mcp_oauth_enabled off').toBe(!OFF)
+  // The data dir (onboarding state is written there on Connect) must not be inside the real home.
+  const dataDir = cfg.data.config.data_dir ?? ''
+  expect(dataDir.startsWith('/'), 'core reports no data_dir').toBe(true)
+  expect(realpathSync(dataDir).startsWith(realpathSync(userInfo().homedir) + '/'), `data dir ${dataDir} is inside the real home`).toBe(false)
   // The expected address assumes the sweep's plain-HTTP loopback core (a TLS or
   // wildcard listener changes what Connect writes, and is not what this checks).
   expect(cfg.data.config.listen ?? '', 'sweep core must listen on plain 127.0.0.1').toMatch(/^127\.0\.0\.1:\d+$/)
@@ -135,6 +139,7 @@ test.describe(OFF ? 'browser login off' : 'browser login on', () => {
     const shown = JSON.parse(entry) as Record<string, Record<string, unknown>>
     expect(Object.keys(shown)).toHaveLength(1)
     const [name, shownEntry] = Object.entries(shown)[0]
+    expect(name, 'the new entry must not reuse the seeded unrelated server name').not.toBe('other')
     expect(shownEntry.url).toBe(`${ORIGIN}/mcp/oauth/claude-code`)
     expect(shownEntry.type).toBe('http')
     expect(Object.keys(shownEntry).sort()).toEqual(['type', 'url'])
@@ -148,6 +153,8 @@ test.describe(OFF ? 'browser login off' : 'browser login on', () => {
     await t(page, 'connect-claude-code').click()
     await t(page, 'connect-auth-oauth-claude-code').check()
     await expect(t(page, 'client-preview-entry-claude-code')).toContainText('/mcp/oauth/claude-code')
+    // The preview that is confirmed is the one compared to disk below.
+    expect(JSON.parse(await t(page, 'client-preview-entry-claude-code').innerText())).toEqual(shown)
 
     await t(page, 'client-preview-confirm-claude-code').click()
     await expect(t(page, 'connect-backup-path')).toBeVisible() // the file existed, so a backup is named
