@@ -49,7 +49,11 @@
           <dt class="text-base-content/60">Suggested fixes</dt>
           <dd>
             <ul class="list-disc pl-5 space-y-1" data-test="server-facts-fix-steps">
-              <li v-for="(step, i) in server.diagnostic.fix_steps" :key="i">{{ step.label }}<code v-if="step.command" class="ml-1 text-xs break-all">{{ step.command }}</code></li>
+              <li v-for="(step, i) in server.diagnostic.fix_steps" :key="i">
+                <a v-if="step.url && /^https:\/\//.test(step.url)" :href="step.url" class="link link-primary" target="_blank" rel="noopener noreferrer">{{ step.label }}</a>
+                <template v-else>{{ step.label }}</template>
+                <code v-if="step.command" class="ml-1 text-xs break-all">{{ step.command }}</code>
+              </li>
             </ul>
           </dd>
         </div>

@@ -527,6 +527,8 @@ async function confirmDelete() {
     })
     showDeleteConfirmation.value = false
   } catch (error) {
+    // The dialog stays open on failure: keep the keyboard inside it.
+    void nextTick(() => deleteCancel.value?.focus())
     systemStore.addToast({
       type: 'error',
       title: 'Delete Failed',

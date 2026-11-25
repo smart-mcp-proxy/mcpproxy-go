@@ -49,7 +49,7 @@
       <p class="text-xs opacity-70" data-test="viewing-filter-help">{{ TOOLTIP }}</p>
       <div class="form-control">
         <label class="label py-1" for="viewing-profile"><span class="label-text font-medium">Profile</span></label>
-        <select id="viewing-profile" class="select select-bordered select-sm w-full" :value="profileValue" data-test="viewing-profile-select" @change="setParam('profile', ($event.target as HTMLSelectElement).value)">
+        <select id="viewing-profile" class="select select-bordered select-sm w-full" :disabled="profiles.loading" :value="profileValue" data-test="viewing-profile-select" @change="setParam('profile', ($event.target as HTMLSelectElement).value)">
           <option value="">All</option>
           <option v-for="profile in profiles.profiles" :key="profile.name" :value="profile.name">{{ profile.title || profile.name }}</option>
           <option v-if="profileValue && !profiles.byName.has(profileValue)" :value="profileValue">{{ profileValue }}</option>
