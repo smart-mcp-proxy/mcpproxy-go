@@ -172,6 +172,17 @@ func TestOAuthDescribe_VSCodeRegistrationTieBreak(t *testing.T) {
 		fx.seen(map[string]time.Time{name: now.Add(-90 * 24 * time.Hour)})
 		assert.Equal(t, "copilot", fx.suggestFor(name, "").SuggestedClient.ID)
 	})
+	t.Run("equal sightings fall back to the default harness", func(t *testing.T) {
+		fx := newOAuthFx(t)
+		fx.seen(map[string]time.Time{name: now.Add(-time.Hour), "vscode-agent-host": now.Add(-time.Hour)})
+		assert.Equal(t, "copilot", fx.suggestFor(name, "").SuggestedClient.ID)
+	})
+	t.Run("a mixed tier (display name and known name) stays ambiguous", func(t *testing.T) {
+		fx := newOAuthFx(t)
+		fx.mintClient("vscode", "ro", auth.ProfileModeLocked)
+		fx.addCustom("acme", "Visual Studio Code")
+		assert.Nil(t, fx.suggestFor(name, "").SuggestedClient)
+	})
 	t.Run("an unrelated ambiguity stays ambiguous", func(t *testing.T) {
 		fx := newOAuthFx(t)
 		fx.addCustom("acme-a", "Shared Name")

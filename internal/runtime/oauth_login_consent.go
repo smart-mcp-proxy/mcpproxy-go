@@ -509,8 +509,10 @@ func stripTrailingGroup(s string) (string, bool) {
 // without regard to case, with each offered client's id, display name and (for
 // a connect-registry client) known client names. The whole name is tried and,
 // when it ends with a parenthesised suffix, also the part before it. Matches
-// are counted by distinct client id: exactly one client yields a suggestion,
-// none or several yield nil. Pure advice, computed on read, never stored.
+// are counted by distinct client id within a tier (clients with records, then
+// built-ins without): exactly one client yields a suggestion, none yields nil,
+// and several yield nil unless every match is a known client name, which
+// tieBreakSuggestion separates (VS Code, #1971). Pure advice, computed on read, never stored.
 func suggestExistingClient(reported string, clients []ExistingClientView, seen map[string]time.Time, now time.Time) *SuggestedExisting {
 	name := strings.TrimSpace(reported)
 	if name == "" {
