@@ -82,7 +82,7 @@
               </td>
               <td>
                 <template v-if="server.health?.status">
-                  <StatusPill :status="server.health.status" />
+                  <StatusPill :status="server.health.status" :level="server.health.level" />
                   <span
                     v-if="server.health.summary"
                     class="block text-xs text-base-content/70 max-w-xs whitespace-normal break-words"

@@ -20,9 +20,10 @@
          reachable in a compact, keyboard-operable disclosure. -->
     <details class="md:hidden" data-test="footer-links-compact">
       <summary class="cursor-pointer min-h-11 flex items-center justify-center gap-2 font-medium text-base-content/70">
-        <span>MCPProxy<span v-if="displayVersion">&nbsp;{{ displayVersion }}</span></span>
-        <span class="font-normal">· Project links</span>
+        <span class="whitespace-nowrap">MCPProxy<span v-if="shortVersion">&nbsp;{{ shortVersion }}</span></span>
+        <span class="font-normal whitespace-nowrap">· Project links</span>
       </summary>
+      <p v-if="displayVersion" class="text-center break-all" data-test="footer-full-version">MCPProxy {{ displayVersion }}</p>
       <div class="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 pb-2">
         <a
           v-for="link in linkList"
@@ -56,4 +57,7 @@ const displayVersion = computed(() => {
   if (!v) return ''
   return v.startsWith('v') ? v : `v${v}`
 })
+// Phone summary: the release part only ("v0.69.1"); the full build string is
+// inside the disclosure (Spec 134 FR-014).
+const shortVersion = computed(() => displayVersion.value.split(/[-+]/)[0])
 </script>

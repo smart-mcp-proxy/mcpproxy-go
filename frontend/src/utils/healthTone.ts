@@ -19,8 +19,19 @@ export function isKnownHealthStatus(status: string | null | undefined): status i
   return !!status && Object.prototype.hasOwnProperty.call(HEALTH_STATUS_LABELS, status)
 }
 
-export function healthTone(status: string | null | undefined): StatusTone {
-  return isKnownHealthStatus(status) ? TONES[status] : 'neutral'
+/**
+ * Tone of a status. `level` (Spec 109: a severity signal for colouring only,
+ * never printed) raises the tone of `ready` when it is worse than the status
+ * implies: a usable but degraded server keeps a warning (review tone), an
+ * unhealthy one the error tone. The words stay the Spec 109 label.
+ */
+export function healthTone(status: string | null | undefined, level?: string | null): StatusTone {
+  if (!isKnownHealthStatus(status)) return 'neutral'
+  if (status === 'ready') {
+    if (level === 'unhealthy') return 'error'
+    if (level === 'degraded') return 'review'
+  }
+  return TONES[status]
 }
 
 /** The Spec 109 label for a known status, else the raw value (FR-003). */
