@@ -75,7 +75,7 @@
   --on-brand: oklch(100% 0 0);
   --brand-text: oklch(42% 0.158 241.966);
   --brand-soft: oklch(95% 0.03 241.966);
-  --border: oklch(86% 0 0);
+  --ds-border: oklch(86% 0 0);
   --status-ok: oklch(39% 0.194 149.214);
   --status-ok-soft: oklch(95% 0.05 149.214);
   --status-review: oklch(42% 0.14 75);
@@ -113,7 +113,7 @@
   --on-brand: oklch(100% 0 0);
   --brand-text: oklch(78% 0.12 241.966);
   --brand-soft: oklch(32% 0.05 241.966);
-  --border: oklch(38% 0.02 252.42);
+  --ds-border: oklch(38% 0.02 252.42);
   --status-ok: oklch(80% 0.17 149.214);
   --status-ok-soft: oklch(32% 0.07 149.214);
   --status-review: oklch(82% 0.14 85);
@@ -695,15 +695,43 @@ details.dropdown > summary::-webkit-details-marker { display: none; }
 }
 
 /* Spec 134 PR 3: soft status banners and the quiet in-page anchor nav. */
-.soft-banner-wrap { border: 1px solid var(--border); }
+.soft-banner-wrap { border: 1px solid var(--ds-border); }
 .soft-banner-wrap.tone-ok { color: var(--status-ok); background: var(--status-ok-soft); border-color: var(--status-ok); }
 .soft-banner-wrap.tone-review { color: var(--status-review); background: var(--status-review-soft); border-color: var(--status-review); }
 .soft-banner-wrap.tone-error { color: var(--status-error); background: var(--status-error-soft); border-color: var(--status-error); }
 .soft-banner-wrap.tone-busy { color: var(--status-busy); background: var(--status-busy-soft); border-color: var(--status-busy); }
-.part-nav { display: inline-flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.part-nav { display: inline-flex; border: 1px solid var(--ds-border); border-radius: 4px; overflow: hidden; }
 .part-nav__link { min-height: 2.25rem; padding: 0 1rem; font-size: 0.875rem; background: transparent; color: inherit; }
-.part-nav__link + .part-nav__link { border-left: 1px solid var(--border); }
+.part-nav__link + .part-nav__link { border-left: 1px solid var(--ds-border); }
 .part-nav__link[aria-current='true'] { background: var(--brand-soft); color: var(--brand-text); font-weight: 600; }
 .part-nav__link:hover { background: var(--brand-soft); }
 .part-nav__link:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 @media (max-width: 767px) { .touch-44 .part-nav__link { min-height: 2.75rem; } }
+
+/*
+ * Spec 134 FR-001/FR-002: one secondary button look in both themes. A neutral
+ * outline button (and the filter chips built from it) has a 1 px border in the
+ * design-system border colour on base-100 with base-content text, radius 4.
+ * Coloured outline buttons keep their colour. (The token is --ds-border:
+ * daisyUI 5 reads --border as the border WIDTH, so a colour there breaks
+ * every button and badge.)
+ */
+.btn-outline:not(.btn-primary, .btn-secondary, .btn-accent, .btn-info, .btn-success, .btn-warning, .btn-error, .btn-neutral) {
+  --btn-border: var(--ds-border);
+  --btn-bg: var(--color-base-100);
+  --btn-rest-fg: var(--color-base-content);
+  color: var(--color-base-content);
+}
+.btn-outline:not(.btn-primary, .btn-secondary, .btn-accent, .btn-info, .btn-success, .btn-warning, .btn-error, .btn-neutral):is(:hover, .btn-active, [aria-pressed="true"]) {
+  --btn-bg: var(--color-base-200);
+}
+
+/* Spec 134 FR-010: the active sidebar item is brand-soft with brand-text,
+   semibold, not daisyUI's neutral block. */
+[data-test="sidebar-overlay"] .menu {
+  --menu-active-bg: var(--brand-soft);
+  --menu-active-fg: var(--brand-text);
+}
+[data-test="sidebar-overlay"] .menu :where(a.active, a.router-link-active.active) {
+  font-weight: 600;
+}

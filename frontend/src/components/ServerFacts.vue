@@ -1,5 +1,5 @@
 <template>
-  <section class="space-y-2 rounded border bg-base-100 p-3" style="border-color: var(--border)" aria-label="Server facts" data-test="server-facts">
+  <section class="space-y-2 rounded border bg-base-100 p-3" style="border-color: var(--ds-border)" aria-label="Server facts" data-test="server-facts">
     <dl class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-x-6 gap-y-2 text-sm">
       <div class="flex items-center gap-1.5 min-w-0" data-test="fact-identity">
         <dt class="text-base-content/70">Id</dt>
@@ -49,7 +49,7 @@
       </div>
     </dl>
 
-    <ul v-if="lines.length" class="space-y-1 border-t pt-2" style="border-color: var(--border)" data-test="attention-lines">
+    <ul v-if="lines.length" class="space-y-1 border-t pt-2" style="border-color: var(--ds-border)" data-test="attention-lines">
       <li v-for="line in lines" :key="line.id">
         <button type="button" class="link link-hover text-left text-sm min-h-11 sm:min-h-0" :data-test="`attention-${line.id}`" @click="$emit('go', line.id)">{{ line.text }}</button>
       </li>

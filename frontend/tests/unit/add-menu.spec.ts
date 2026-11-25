@@ -63,6 +63,14 @@ describe('AddMenu (Spec 109-i FR-052)', () => {
     document.body.innerHTML = ''
   })
 
+  it('is told apart from the "+" Add server button without text: a caret always, "+" only with the label (Spec 134)', async () => {
+    const { wrapper } = await mountMenu()
+    const button = wrapper.get('[data-test="header-add-menu"]')
+    const caret = button.get('[data-icon="chevronDown"]')
+    expect(caret.classes().join(' ')).not.toMatch(/(^|\s)hidden(\s|$)/)
+    expect(button.get('[data-icon="plus"]').classes()).toContain('hidden')
+  })
+
   it('opens to Server, Client, Token and no Profile without a /profiles route', async () => {
     const { wrapper } = await mountMenu()
     const button = wrapper.get('[data-test="header-add-menu"]')

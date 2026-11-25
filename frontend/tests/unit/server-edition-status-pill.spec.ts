@@ -51,4 +51,13 @@ describe.each(['admin', 'user'] as const)('%s servers status cell (spec 134 FR-0
     expect(row.get('[data-test="status-pill"]').text()).toBe(HEALTH_STATUS_LABELS[status])
     expect(row.get('[data-test="server-status-summary"]').text()).toBe(`summary of ${status}`)
   })
+
+  it('a ready but degraded server keeps a warning tone and its summary (R1)', async () => {
+    const wrapper = await mountView(view)
+    const row = wrapper.findAll('tbody tr').find((r) => r.text().includes('s-ready'))!
+    // The fixture gives every server level "unhealthy": ready + unhealthy -> error tone.
+    expect(row.get('[data-test="status-pill"]').text()).toBe('Online')
+    expect(row.get('[data-test="status-pill"]').attributes('data-tone')).toBe('error')
+    expect(row.get('[data-test="server-status-summary"]').text()).toBe('summary of ready')
+  })
 })

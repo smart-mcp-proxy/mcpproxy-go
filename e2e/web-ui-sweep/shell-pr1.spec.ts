@@ -146,6 +146,39 @@ for (const route of ['/servers', '/tools', '/activity', '/usage', '/clients', '/
   })
 }
 
+test('390px header: menu, logo, search, online, attention and both Add controls are fully visible, 44px tall and do not overlap', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  for (const route of ['/', '/servers', '/activity']) {
+    await open(page, route)
+    const ids = ['header-drawer-toggle', 'header-logo', 'header-search-icon', 'header-status-pill', 'header-attention-pill-button', 'header-add-server', 'header-add-menu']
+    const boxes: Array<{ id: string; x: number; y: number; w: number; h: number }> = []
+    for (const id of ids) {
+      const el = page.locator(`header [data-test="${id}"]`)
+      if (id === 'header-attention-pill-button' && (await el.count()) === 0) continue
+      await expect(el, `${id} on ${route}`).toBeVisible()
+      const b = (await el.boundingBox())!
+      expect(b.x, `${id} left edge on ${route}`).toBeGreaterThanOrEqual(0)
+      expect(b.x + b.width, `${id} right edge on ${route}`).toBeLessThanOrEqual(390)
+      expect(b.height, `${id} height on ${route}`).toBeGreaterThanOrEqual(44)
+      // Nothing is painted over it: the element (or its child) is what the centre hits.
+      const hit = await el.evaluate((node) => {
+        const r = node.getBoundingClientRect()
+        const at = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)
+        return !!at && (at === node || node.contains(at))
+      })
+      expect(hit, `${id} is covered on ${route}`).toBe(true)
+      boxes.push({ id, x: b.x, y: b.y, w: b.width, h: b.height })
+    }
+    for (let i = 0; i < boxes.length; i++) {
+      for (let j = i + 1; j < boxes.length; j++) {
+        const a = boxes[i], c = boxes[j]
+        const overlap = a.x < c.x + c.w - 0.5 && c.x < a.x + a.w - 0.5 && a.y < c.y + c.h - 0.5 && c.y < a.y + a.h - 0.5
+        expect(overlap, `${a.id} overlaps ${c.id} on ${route}`).toBe(false)
+      }
+    }
+  }
+})
+
 for (const route of ROUTES) {
   test(`390px: ${route} has no horizontal page scroll and the shell controls stay in the viewport`, async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
