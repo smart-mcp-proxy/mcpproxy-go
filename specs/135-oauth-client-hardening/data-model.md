@@ -38,6 +38,7 @@ The callback waiter holds `{ch, snapshot, skip}`. It is registered before the au
 
 - `iss` was present and equal;
 - the source is not `synthetic`;
+- `Insecure` is false (a non-loopback `http` issuer or endpoint voids the claim, FR-006a);
 - `Skipped` is false;
 - for `configured`, `Verified` is true.
 
