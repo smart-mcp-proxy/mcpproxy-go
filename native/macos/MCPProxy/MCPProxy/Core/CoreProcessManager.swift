@@ -640,6 +640,10 @@ actor CoreProcessManager {
         attachWatchTask = nil
     }
 
+    /// How long a user-requested stop waits before SIGKILL: the core's 15s grace
+    /// for running calls plus container cleanup. Same as the Go tray.
+    private static let shutdownGrace: TimeInterval = 45.0
+
     /// Gracefully shut down the core process and all connections.
     ///
     /// A core we merely ATTACHED to is left running: we disconnect from it and
@@ -686,12 +690,9 @@ actor CoreProcessManager {
             return
         }
 
-        // Terminate the process if we own it
-        if let process, process.isRunning {
-            // SIGINT first: Go handles it gracefully.
-            process.interrupt()
-        }
-        await terminateManagedProcess(reason: "shutdown")
+        // Terminate the process if we own it. Exactly one signal: the core takes
+        // a second one as "force quit" and skips its cleanup.
+        await terminateManagedProcess(reason: "shutdown", grace: Self.shutdownGrace)
 
         // A launch may have been in flight when we set the flag: it checks the
         // flag before running the binary, but if it got past that check we sweep
@@ -804,7 +805,7 @@ actor CoreProcessManager {
     /// gone. Bumping the generation first means its termination callback — which
     /// lands asynchronously — is recognised as belonging to a launch we have
     /// already abandoned, so it cannot drive a relaunch.
-    private func terminateManagedProcess(reason: String) async {
+    private func terminateManagedProcess(reason: String, grace: TimeInterval = 5.0) async {
         guard let proc = process else { return }
         launchGeneration += 1
         process = nil
@@ -814,7 +815,7 @@ actor CoreProcessManager {
         AppLifecycle.shared.recordCoreTerminated(pid: proc.processIdentifier, reason: reason)
         kill(proc.processIdentifier, SIGTERM)
 
-        let deadline = Date().addingTimeInterval(5.0)
+        let deadline = Date().addingTimeInterval(grace)
         while proc.isRunning && Date() < deadline {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
