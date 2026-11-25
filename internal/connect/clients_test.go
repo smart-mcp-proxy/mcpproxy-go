@@ -25,3 +25,18 @@ func TestOAuthRegistrationNamesAreNotClientInfoNames(t *testing.T) {
 	assert.NotEmpty(t, cp.OAuthRegistrationNames)
 	assert.True(t, cp.PreferredForRegistration)
 }
+
+func TestClientDefs_DoNotAliasOAuthRegistrationNames(t *testing.T) {
+	first := FindClient("copilot")
+	require.NotNil(t, first)
+	require.NotEmpty(t, first.OAuthRegistrationNames)
+	orig := first.OAuthRegistrationNames[0]
+	first.OAuthRegistrationNames[0] = "mutated-by-caller"
+	for _, c := range GetAllClients() {
+		if c.ID == "copilot" {
+			c.OAuthRegistrationNames[0] = "mutated-too"
+		}
+	}
+	again := FindClient("copilot")
+	assert.Equal(t, orig, again.OAuthRegistrationNames[0])
+}

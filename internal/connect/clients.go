@@ -219,6 +219,9 @@ func cloneClientDef(c ClientDef) ClientDef {
 	if c.ClientInfoNames != nil {
 		c.ClientInfoNames = append([]string(nil), c.ClientInfoNames...)
 	}
+	if c.OAuthRegistrationNames != nil {
+		c.OAuthRegistrationNames = append([]string(nil), c.OAuthRegistrationNames...)
+	}
 	return c
 }
 

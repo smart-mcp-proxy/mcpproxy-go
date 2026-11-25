@@ -127,12 +127,11 @@ func (fx *oauthFx) seen(at map[string]time.Time) {
 // recently (clientInfo.name), then by the default harness (#1971).
 func TestOAuthDescribe_VSCodeRegistrationTieBreak(t *testing.T) {
 	const name = "Visual Studio Code"
-	now := time.Now()
 
 	t.Run("records win over presence and default", func(t *testing.T) {
 		fx := newOAuthFx(t)
 		fx.mintClient("vscode", "ro", auth.ProfileModeLocked)
-		fx.seen(map[string]time.Time{"vscode-agent-host": now})
+		fx.seen(map[string]time.Time{"vscode-agent-host": fx.clock.Now()})
 		s := fx.suggestFor(name, "").SuggestedClient
 		require.NotNil(t, s)
 		assert.Equal(t, "vscode", s.ID)
@@ -141,46 +140,52 @@ func TestOAuthDescribe_VSCodeRegistrationTieBreak(t *testing.T) {
 		fx := newOAuthFx(t)
 		fx.mintClient("vscode", "ro", auth.ProfileModeLocked)
 		fx.mintClient("copilot", "ro", auth.ProfileModeLocked)
-		fx.seen(map[string]time.Time{name: now})
+		fx.seen(map[string]time.Time{name: fx.clock.Now()})
 		s := fx.suggestFor(name, "").SuggestedClient
 		require.NotNil(t, s)
 		assert.Equal(t, "vscode", s.ID)
 	})
 	t.Run("local harness seen recently", func(t *testing.T) {
 		fx := newOAuthFx(t)
-		fx.seen(map[string]time.Time{name: now.Add(-time.Hour)})
+		fx.seen(map[string]time.Time{name: fx.clock.Now().Add(-time.Hour)})
 		s := fx.suggestFor(name, "").SuggestedClient
 		require.NotNil(t, s)
 		assert.Equal(t, "vscode", s.ID)
 	})
 	t.Run("copilot harness seen recently", func(t *testing.T) {
 		fx := newOAuthFx(t)
-		fx.seen(map[string]time.Time{"vscode-agent-host": now.Add(-time.Hour)})
+		fx.seen(map[string]time.Time{"vscode-agent-host": fx.clock.Now().Add(-time.Hour)})
 		s := fx.suggestFor(name, "").SuggestedClient
 		require.NotNil(t, s)
 		assert.Equal(t, "copilot", s.ID)
 	})
 	t.Run("both seen: the newer one", func(t *testing.T) {
 		fx := newOAuthFx(t)
-		fx.seen(map[string]time.Time{name: now.Add(-2 * time.Hour), "vscode-agent-host": now.Add(-time.Hour)})
+		fx.seen(map[string]time.Time{name: fx.clock.Now().Add(-2 * time.Hour), "vscode-agent-host": fx.clock.Now().Add(-time.Hour)})
 		assert.Equal(t, "copilot", fx.suggestFor(name, "").SuggestedClient.ID)
-		fx.seen(map[string]time.Time{name: now.Add(-time.Hour), "vscode-agent-host": now.Add(-2 * time.Hour)})
+		fx.seen(map[string]time.Time{name: fx.clock.Now().Add(-time.Hour), "vscode-agent-host": fx.clock.Now().Add(-2 * time.Hour)})
 		assert.Equal(t, "vscode", fx.suggestFor(name, "").SuggestedClient.ID)
+	})
+	t.Run("a sighting in the future is ignored", func(t *testing.T) {
+		fx := newOAuthFx(t)
+		fx.seen(map[string]time.Time{name: fx.clock.Now().Add(48 * time.Hour)})
+		assert.Equal(t, "copilot", fx.suggestFor(name, "").SuggestedClient.ID)
 	})
 	t.Run("old presence is ignored", func(t *testing.T) {
 		fx := newOAuthFx(t)
-		fx.seen(map[string]time.Time{name: now.Add(-90 * 24 * time.Hour)})
+		fx.seen(map[string]time.Time{name: fx.clock.Now().Add(-90 * 24 * time.Hour)})
 		assert.Equal(t, "copilot", fx.suggestFor(name, "").SuggestedClient.ID)
 	})
 	t.Run("equal sightings fall back to the default harness", func(t *testing.T) {
 		fx := newOAuthFx(t)
-		fx.seen(map[string]time.Time{name: now.Add(-time.Hour), "vscode-agent-host": now.Add(-time.Hour)})
+		fx.seen(map[string]time.Time{name: fx.clock.Now().Add(-time.Hour), "vscode-agent-host": fx.clock.Now().Add(-time.Hour)})
 		assert.Equal(t, "copilot", fx.suggestFor(name, "").SuggestedClient.ID)
 	})
 	t.Run("a mixed tier (display name and known name) stays ambiguous", func(t *testing.T) {
 		fx := newOAuthFx(t)
 		fx.mintClient("vscode", "ro", auth.ProfileModeLocked)
 		fx.addCustom("acme", "Visual Studio Code")
+		fx.seen(map[string]time.Time{name: fx.clock.Now()}) // presence must not resolve a mixed tier
 		assert.Nil(t, fx.suggestFor(name, "").SuggestedClient)
 	})
 	t.Run("an unrelated ambiguity stays ambiguous", func(t *testing.T) {

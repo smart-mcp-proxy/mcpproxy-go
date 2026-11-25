@@ -26,7 +26,7 @@ Pending requests, newest first: `[{id, client_label, created_at, expires_at}]`. 
   },
   "existing_clients": [ /* address_kind = generic: {id, display_name, binding, builtin}; builtin=true marks a supported connect-registry client with no records yet, choosable; its record is created when the login is exchanged, not at approval */ ],
   "suggested_new_client": { "id": "acme-agent", "display_name": "Acme Agent" },
-  "suggested_client": { "id": "cursor", "matched": "display_name" }, // generic only; present when the reported name equals exactly one entry of existing_clients (entries with records first, then built-ins; see below) (matched: id | display_name | known_name); absent otherwise
+  "suggested_client": { "id": "cursor", "matched": "display_name" }, // generic only; present when the first tier with a match (entries with records, then built-ins) has exactly one matching entry, or a known-name tie there is broken as described below (matched: id | display_name | known_name); absent otherwise. On a fresh install "Visual Studio Code" yields `copilot`
   "profiles": [ { "name": "dev-readonly" } ],
   "profile_required": true,               // profiles exist and the client has no binding
   "previous_login": { "grant_id": "…", "client_id": "cursor", "approved_at": "…" }, // same registration signed in before: its newest live login

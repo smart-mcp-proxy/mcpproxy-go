@@ -576,8 +576,11 @@ func tieBreakSuggestion(ms []suggestionMatch, seen map[string]time.Time, now tim
 			continue
 		}
 		at := latestSeenForAliases(seen, def.ClientInfoNames)
-		if at == nil || now.Sub(*at) > presenceWindow {
+		if at == nil {
 			continue
+		}
+		if age := now.Sub(*at); age > presenceWindow || age < 0 {
+			continue // too old, or in the future (clock moved back)
 		}
 		switch {
 		case best == nil || at.After(bestAt):
