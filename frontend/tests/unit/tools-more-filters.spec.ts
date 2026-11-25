@@ -51,4 +51,13 @@ describe('Tools More filters', () => {
     await wrapper.find('[data-test="filter-tier"]').setValue('')
     expect(shown(wrapper)).toEqual(['c', 'd', 'u', 'w'])
   })
+
+  it('a same-page deep link to another advanced filter reopens a collapsed panel', async () => {
+    const { wrapper, router } = await mountTools({ api, tools: TOOLS, path: '/tools?tier=read' })
+    await wrapper.find('[data-test="tools-more-filters-toggle"]').trigger('click')
+    expect(wrapper.find('[data-test="filter-status"]').isVisible()).toBe(false)
+    await router.push('/tools?status=disabled')
+    await new Promise(r => setTimeout(r, 0))
+    expect(wrapper.find('[data-test="filter-status"]').isVisible()).toBe(true)
+  })
 })

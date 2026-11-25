@@ -100,4 +100,16 @@ describe('Tools grouped under View as', () => {
     await panel.find('[data-test="tools-show-not_callable"]').trigger('click')
     expect(wrapper.find('[data-test="tool-name"]').text()).toBe('create_issue')
   })
+
+  it('a Show choice is named by an Active filters chip and Clear Filters resets it, even with More filters closed', async () => {
+    const wrapper = await mountAt('/tools?client=cursor')
+    await wrapper.find('[data-test="tools-more-filters-toggle"]').trigger('click')
+    await wrapper.find('[data-test="tools-show-not_callable"]').trigger('click')
+    await wrapper.find('[data-test="tools-more-filters-toggle"]').trigger('click')
+    expect(wrapper.text()).toContain('Show: Not callable')
+    const clear = wrapper.findAll('button').find(b => b.text() === 'Clear Filters')!
+    await clear.trigger('click')
+    expect(wrapper.text()).not.toContain('Show: Not callable')
+    expect(wrapper.findAll('[data-test="tool-row"]')).toHaveLength(2)
+  })
 })

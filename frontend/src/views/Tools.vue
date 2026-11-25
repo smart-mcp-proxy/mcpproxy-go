@@ -261,6 +261,7 @@
           <span v-if="filterTier" class="badge badge-sm badge-outline">Tier: {{ filterTier }}</span>
           <span v-if="filterApproval" class="badge badge-sm badge-outline">Approval: {{ toolApprovalLabel(filterApproval) }}</span>
           <span v-if="onlyExceptions" class="badge badge-sm badge-outline">Only exceptions</span>
+          <span v-if="viewAsAdmin && showFilter !== 'all'" class="badge badge-sm badge-outline">Show: {{ showFilter === 'callable' ? 'Callable' : 'Not callable' }}</span>
         </div>
       </div>
     </div>
@@ -891,6 +892,7 @@ const viewAsBannerText = computed(() => {
     return `${hidden} tool${hidden === 1 ? '' : 's'} hidden by this profile`
   }
   const counts = viewAsCountsFromRows.value
+  const pending = loading.value && allTools.value.length === 0
   let who: string
   if (client) {
     const profileName = clientsStore.clients.find(row => row.id === client)?.profile
@@ -898,6 +900,7 @@ const viewAsBannerText = computed(() => {
   } else {
     who = `Viewing as profile ${profilePhrase(profile ?? '')}`
   }
+  if (pending) return `${who}: loading…`
   return `${who}: ${counts.visible} visible · ${counts.callable} callable · ${counts.hidden} hidden`
 })
 
@@ -954,7 +957,8 @@ const onlyExceptions = ref(false)
 // link has set one of them.
 const moreFiltersOpen = ref(false)
 const advancedFilterCount = computed(() => [filterStatus.value, filterTier.value, filterApproval.value, showFilter.value !== 'all' ? showFilter.value : ''].filter(Boolean).length)
-watch(advancedFilterCount, count => { if (count > 0) moreFiltersOpen.value = true })
+// Any change to one of them (a deep link on the same page included) shows the panel.
+watch([filterStatus, filterTier, filterApproval, showFilter], () => { if (advancedFilterCount.value > 0) moreFiltersOpen.value = true })
 
 // Debounce search
 let searchTimer: ReturnType<typeof setTimeout> | null = null
@@ -1161,7 +1165,7 @@ const availableServers = computed(() => {
 })
 
 const hasActiveFilters = computed(() =>
-  !!searchQuery.value || !!filterServer.value || !!filterStatus.value || !!filterTier.value || !!filterApproval.value || onlyExceptions.value
+  !!searchQuery.value || !!filterServer.value || !!filterStatus.value || !!filterTier.value || !!filterApproval.value || onlyExceptions.value || (viewAsAdmin.value && showFilter.value !== 'all')
 )
 
 // Clickable stat cards (parity with Servers page): each card drives the
@@ -1531,6 +1535,7 @@ function clearFilters() {
   filterTier.value = ''
   filterApproval.value = ''
   onlyExceptions.value = false
+  showFilter.value = 'all'
   currentPage.value = 1
 }
 
@@ -1658,7 +1663,11 @@ watch(requestKey, () => {
   // The rows of the previous subject must not be read as this one's while the
   // new answer is pending, and an open Details would show the old verdict.
   selectedTool.value = null
+  explain.value = null
   allTools.value = []
+  stats.value = null
+  partial.value = false
+  failedServers.value = []
   void loadTools()
 })
 
