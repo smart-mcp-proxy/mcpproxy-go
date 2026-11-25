@@ -319,6 +319,53 @@ func TestApplyImportedServersDaemonModeCarriesOauth(t *testing.T) {
 	require.Equal(t, "https://auth.example.com/.well-known/oauth-authorization-server", gotOAuth.AuthServerMetadataURL)
 }
 
+// The whole reason #1972 carried oauth on this path: a Claude Code import
+// against a running daemon must reach REST with the mapped block, not print
+// "OAuth credentials imported" while the daemon drops it.
+func TestUpstreamImportDaemonModeCarriesClaudeCodeOauth(t *testing.T) {
+	var gotOAuth *config.OAuthConfig
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req cliclient.AddServerRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotOAuth = req.OAuth
+		_, _ = w.Write([]byte(`{"success":true,"data":{}}`))
+	}))
+	defer server.Close()
+
+	content := []byte(`{
+		"mcpServers": {
+			"figma": {
+				"type": "http",
+				"url": "https://mcp.figma.com/mcp",
+				"oauth": {
+					"clientId": "6a0c2f8e-9c1d-4a5a-bd3d-0a4b9a2b1c44",
+					"scopes": "profile email",
+					"callbackPort": 54545,
+					"authServerMetadataUrl": "https://auth.figma.com/.well-known/oauth-authorization-server"
+				}
+			}
+		}
+	}`)
+	result, err := configimport.Import(content, &configimport.ImportOptions{})
+	require.NoError(t, err)
+	require.Len(t, result.Failed, 0)
+	require.Len(t, result.Imported, 1)
+	require.False(t, result.Imported[0].Server.OAuth == nil, "the import must map the oauth block onto the server")
+
+	client := cliclient.NewClientWithAPIKey(server.URL, "scratch-key", nil)
+	applied, failed, err := applyImportedServersDaemonMode(context.Background(), client, result.Imported)
+	require.NoError(t, err)
+	require.Empty(t, failed)
+	require.Len(t, applied, 1)
+
+	require.NotNil(t, gotOAuth, "the daemon request must carry the oauth block")
+	require.Equal(t, "6a0c2f8e-9c1d-4a5a-bd3d-0a4b9a2b1c44", gotOAuth.ClientID)
+	require.Equal(t, []string{"profile", "email"}, gotOAuth.Scopes, "Claude Code scopes are space-separated and must arrive split")
+	require.Equal(t, "https://auth.figma.com/.well-known/oauth-authorization-server", gotOAuth.AuthServerMetadataURL)
+	require.Empty(t, gotOAuth.RedirectURI, "callbackPort has no mcpproxy equivalent, so nothing pins the callback URL")
+	require.Contains(t, strings.Join(result.Imported[0].Warnings, "\n"), "oauth.callbackPort 54545")
+}
+
 func TestApplyImportedServersDaemonModeContinuesAfterFailure(t *testing.T) {
 	var added []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
