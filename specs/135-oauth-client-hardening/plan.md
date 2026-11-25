@@ -51,6 +51,35 @@ Post-design re-check: PASS. Nothing in Phase 1 adds a dependency, a lock or tray
 
 ## Design
 
+### D0. Enforcement architecture: one resolver, one last-hop guard (review round 14)
+
+This section governs the rest of the design. Where an item below names an earlier check, that check exists to fail early with a clear code. The two mechanisms here are what make the rules hold.
+
+- **One policy-aware metadata resolver** (`oauth.ResolveASMetadata(ctx, server, policy) (*Snapshot, error)`). Every consumer of authorization-server metadata goes through it:
+  - the preflight (`config.go:1385-1421`, `:2353-2402`);
+  - the scope discovery `discoverASScopesCached` (`config.go:1095-1109`, `:2329-2342`; `discovery.go:458-506`);
+  - the login metadata validator (`connection_oauth.go:1040`, `:1429`, `:2022`; `discovery.go:725-790`);
+  - the configured URL;
+  - the transport wrapper's refill.
+
+  Each candidate carries the issuer it was derived from, so nothing is inferred from a request URL. The resolver returns a typed rejection (`*MetadataIssuerMismatchError`) that every caller treats as terminal. mcp-go never runs its own candidate loop. The wrapper answers every well-known GET from the resolver's `Snapshot`, and on a rejection it returns a response that makes the library fail rather than look further: an HTTP 502 with a fixed body. The library's "discard error, try next, then default endpoints" path (`mcp-go@v1.0.0 oauth.go:666-683`, `:738-755`) is therefore never reached with an unvalidated document. The `fallback` source is chosen by the resolver, explicitly, only under FR-004a.
+- **`Snapshot`** is immutable and holds:
+  - the binding `{issuer, target, source}`;
+  - `IssSupported`, `Insecure` and `Verified` (for `configured`: the URL equals a candidate derived from the declared issuer, FR-008);
+  - `Skipped` (the metadata comparison was skipped under the opt-out);
+  - the exact authorization, token and registration endpoints.
+- **Per-send context.** Every credential-bearing request carries `oauth.SendContext{Snapshot, Credentials}` in its `context.Context`. `Credentials` lists each credential the request may carry with its binding: the client id/secret or assertion, the refresh token, the code, and the verifier with the registration captured at authorization time.
+  - mcp-go requests: the context is attached by `WithSendContext(ctx)` at the call site.
+  - Direct sends (`refreshTokenWithStoredCredentials`, the broker connector): the context is passed explicitly.
+- **Last-hop guard.** `oauth.GuardedTransport` wraps the inner transport of the OAuth wrapper, the `Gate().HTTPClient` used by `refreshTokenWithStoredCredentials` (`client.go:989-1010`), and the broker's client (`broker/oauth_connector.go:123-130`). For every request to a token or registration endpoint, it does the following:
+  1. requires a `SendContext`, and refuses the request when there is none;
+  2. requires the request URL to equal the snapshot's endpoint exactly;
+  3. parses the final form **and** the `Authorization` header (client_secret_basic);
+  4. checks every credential value found against `Credentials` and their bindings against the snapshot (FR-009, FR-009a);
+  5. applies the credential redirect policy (FR-010).
+
+  The guard is what holds when metadata or the registration changes between a preliminary check and transport. The test `TestGuard_MetadataOrRegistrationChangedBeforeTransport` covers that case.
+
 ### D1. One strict callback parse (FR-001)
 
 - `oauth.ParseCallbackQuery(rawQuery string) (url.Values, error)` parses the query once and rejects:
@@ -61,6 +90,7 @@ Post-design re-check: PASS. Nothing in Phase 1 adds a dependency, a lock or tray
 - It runs first in `handleCallbackWithFailureNotification` (`internal/oauth/config.go:2005`), in the remote callback (it replaces the inline check at `remote_callback.go:68-72`), and in the broker callback (`api/credential_handlers.go:307`).
 - A rejected request does not take a waiter. The remote callback keeps its current rule that "an invalid public request is not an OAuth failure".
 - `CallbackServer.deliver(state, params map[string]string)` becomes `deliver(state, callbackResult{query url.Values, err error})`, and the waiter channel type changes to match. Logging keeps first values only, scrubbed, plus `iss_present`.
+- **One waiter per flow.** URL creation registers the waiter, together with its `ExpectedIssuer`, **before** the URL is exposed. The handle it returns is passed to the consumer, including the async goroutine. Today the goroutine registers the state a second time (`connection_oauth.go:2285`, `:2388-2403`), and a callback arriving in that gap is lost (`config.go:1833-1844`, `:1916-1934`). Every consumed outcome is delivered exactly once: success, refusal, or an accepted provider error. The remote handler hands its parsed query on instead of parsing it again (`remote_callback.go:67-75`). Test: `TestCallback_ArrivesBeforeAsyncConsumer`.
 - The three consumers in `connection_oauth.go` (`:1348`, `:1621`, `:2409`) return `result.err` when it is set. Otherwise they read `code`/`state` from `result.query` and pass the query to `exchangeAuthorizationCode`.
 
 ### D2. Issuer snapshot and the `iss` decision (FR-002–FR-005)
@@ -71,7 +101,7 @@ Post-design re-check: PASS. Nothing in Phase 1 adds a dependency, a lock or tray
   - `DecideAuthorizationResponseIssuer(q url.Values, exp ExpectedIssuer, skip bool) (protected bool, err error)`, which returns `*IssuerMismatchError` (`diagnostics.OAuthIssuerMismatch`).
   - Rules:
     - `len(q["iss"]) == 1` means present, even when the value is empty. An empty value is a mismatch, which is stricter than mcp-go (R6).
-    - `discovered` and `configured` follow FR-003. `protected` is true only when `iss` was present and equal.
+    - `discovered` and `configured` follow FR-003. `protected` is true only when `iss` was present and equal, the snapshot is not `Skipped`, and for `configured` the snapshot is `Verified` (FR-008). Otherwise `configured_issuer_unverified` or `issuer_validation_disabled` is surfaced.
     - `synthetic` follows FR-004, and `protected` is false.
     - With `skip`, mismatches are logged at WARN and accepted.
 - **Where the snapshot comes from.** When the authorization URL is built, the OAuth config builder already holds `asDoc` (`config.go:1385-1421`). It now also returns `ExpectedIssuer`:
@@ -95,7 +125,8 @@ Post-design re-check: PASS. Nothing in Phase 1 adds a dependency, a lock or tray
 - **Wrapper refill.** `roundTripMetadata` (`transport_wrapper.go:491-525`) validates a refilled document against the `ExpectedIssuer` recorded for the endpoint set: the candidate's issuer, or "as declared" for `configured`. A mismatch answers mcp-go with an error and never with a synthetic document.
 - **Library discovery.** Because preflight now treats a mismatch as terminal and serves the URL in every other case, mcp-go never starts PRM discovery on its own while mcpproxy has a URL. For the remaining case (no PRM, no document, no overrides), the wrapper intercepts mcp-go's well-known GETs (they go through the same transport) and applies the same check to the issuer implied by each request URL. `SkipIssuerMetadataValidation` in the mcp-go `OAuthConfig` follows the server's switch.
 - **Per-consumer validation (FR-007).** The document cache keeps raw bytes (`asMetadataDoc.raw`), as it does today, and validation runs on every use. The `metadataPreflight` result cached under `makeDiscoveryKey("metadata-url", …)` gains the policy (strict or skip) in its key, so a strict failure and a skip success never share an entry.
-- **Configured URL (FR-008)**: no derivation compare. The declared issuer is used as is, and a missing one fails.
+- **Configured URL (FR-008)**: no derivation compare. The declared issuer is used as is, and a missing one fails. `Snapshot.Verified` is true only when the configured URL equals one of `metadataCandidates(declaredIssuer)`, built with the same escaped-path builder as discovery.
+- **Opt-out inside the resolver (FR-014)**: under skip, an equality mismatch logs one scrubbed WARN and returns the snapshot with `Skipped=true`. Missing issuers, ambiguous issuers and cross-origin redirects stay terminal in both modes. Callback rules under skip, for every source including `fallback`: a wrong or absent `iss` is accepted with a WARN, and a skipped metadata comparison makes an otherwise matching callback `protected=false`. Test: `TestSkip_MetadataMismatchThenMatchingIss_NotProtected`.
 - **Origin of the document (FR-006a).** A new redirect policy `metadataCheckRedirect` allows only same-origin hops. Unlike `oauthCheckRedirect`, it also blocks cross-origin GETs. It is installed on `httpFetchRaw` (`discovery_cache.go:310-328`) and on the wrapper refill client (`transport_wrapper.go:496`). A blocked redirect is returned as `*MetadataIssuerMismatchError`, and `skip_issuer_validation` does not lift it (FR-014). `insecure_issuer` is computed when the snapshot is built: an `http` scheme on the issuer or any endpoint, with a non-loopback host (`config.IsLoopbackHost`). It is carried on `ExpectedIssuer.Insecure` and surfaced in D7.
 
 ### D4. Issuer-bound rows (FR-009–FR-013)
@@ -112,35 +143,35 @@ Post-design re-check: PASS. Nothing in Phase 1 adds a dependency, a lock or tray
   - Code exchange: the reused registration must match `exp`.
 - **Snapshot lifetime (FR-009b).** `metadataPreflight` stores `expiresAt = min(own TTL, PRM entry expiry, document entry expiry)`, and the cache honours it, so a preflight built on an old PRM entry cannot outlive that entry.
 - **Fallback (FR-004a).** Used only when the selected issuer has no path. `Binding.Matches` compares the source class too (`fallback` vs the rest).
-- **Freshness (FR-009b).** `oauthRefreshOnce`, the refresh manager, login and the 401 handler call `preflightMetadataURL` (cache lookup, re-resolved after the TTL) and, when its validated document differs from `h.GetServerMetadata()`, rebuild the handler with the new snapshot before the FR-009 compare. New invalidations: `globalDiscoveryCache.invalidateServer(serverURL)` on `invalid_grant`/`invalid_client` refresh failures and at the start of an explicit login. Freshness is a UX bound, not part of the security invariant (spec "Protection model"). Detection is tied to discovery. Whenever mcpproxy runs discovery for a server (connect, 401 rediscovery, refresh-failure rediscovery, login), the new snapshot replaces the handler's metadata. If the snapshot names another issuer than the row, the server enters `ISSUER_CHANGED`. A warm handler whose cached metadata still names A sends to A, which is safe: A issued the credentials. `PersistentTokenStore.GetToken` returns `ErrOAuthAuthorizationRequired` wrapped with the code while the server is in `ISSUER_CHANGED`, so the access token stops being attached. The state clears once a discovery resolves the bound issuer again. The discovery cache's success TTL (`discovery_cache.go:21-28`, 1 h) bounds how late a swap at an unchanged PRM URL is noticed. The swap test injects the cache clock (`discoveryCache.now`, added for this) and advances it past the TTL. A second variant fires each invalidation event instead.
-- **Static confidential client (FR-012).** A new bucket `oauth_static_client_bindings` (in the Spec 116 purge set for server delete only) maps the server key to `{fingerprint, issuer, target, source}`, where `fingerprint = sha256(credential)`, one entry per effective client-authentication credential (`client_secret`, `client_assertion`, …). The effective secret is `oauth.client_secret`, overridden by `oauth.extra_params.client_secret` (matched case-insensitively, as `extraParamValue` does). The client id is not part of the fingerprint, because DCR may change it. Client secrets are high-entropy, and the value is sealed under Spec 123 when a key is set. It is written in its own transaction before the first secret-bearing request. Logout and grant clears do not touch it. A config commit whose effective secret differs deletes it, as does server delete. A client-id-only change keeps it. On `ISSUER_CHANGED` with a configured secret, the login is refused before the authorize redirect with health action `configure`. Changing `oauth.client_id`/`client_secret` is already an OAuth clear (`config.OAuthConfigChanged`), so the epoch moves and the next use binds afresh.
+- **Freshness (FR-009b).** `oauthRefreshOnce`, the refresh manager, login and the 401 handler call `preflightMetadataURL` (cache lookup, re-resolved after the TTL) and, when its validated document differs from `h.GetServerMetadata()`, rebuild the handler with the new snapshot before the FR-009 compare. New invalidations: `globalDiscoveryCache.invalidateServer(serverURL)` on `invalid_grant`/`invalid_client` refresh failures and at the start of an explicit login. Freshness is a UX bound, not part of the security invariant (spec "Protection model"). Detection is tied to discovery. Whenever mcpproxy runs discovery for a server (connect, 401 rediscovery, refresh-failure rediscovery, login), the new snapshot replaces the handler's metadata. If the snapshot names another issuer than the row, the server enters `ISSUER_CHANGED`. A warm handler whose cached metadata still names A sends to A, which is safe: A issued the credentials. `PersistentTokenStore.GetToken` returns `ErrOAuthAuthorizationRequired` wrapped with the code while the server is in `ISSUER_CHANGED`, so the access token stops being attached. The state clears once a discovery resolves the bound issuer again. The discovery cache's success TTL (`discovery_cache.go:21-28`, 1 h) bounds how late a swap at an unchanged PRM URL is noticed. The swap test injects the existing cache clock (`discoveryCache.now`, `discovery_cache.go:89-104`) and advances it past the TTL. A second variant fires each invalidation event instead.
+- **Static confidential client (FR-012).** A new bucket `oauth_static_client_bindings` (in the Spec 116 purge set for server delete and replacement only) is keyed by **durable server identity** (the Spec 116 incarnation, not `GenerateServerKey`, which includes the URL) plus each credential's fingerprint. It holds `{issuer, target, source}`, and it is created or compared atomically under the current Spec 116 binding before any send, where `fingerprint = sha256(credential)`, one entry per effective client-authentication credential (`client_secret`, `client_assertion`, …). The effective secret is `oauth.client_secret`, overridden by `oauth.extra_params.client_secret` (matched case-insensitively, as `extraParamValue` does). The client id is not part of the fingerprint, because DCR may change it. Client secrets are high-entropy, and the value is sealed under Spec 123 when a key is set. It is written in its own transaction before the first secret-bearing request. Logout and grant clears do not touch it. A config commit whose effective secret differs deletes only that credential's entry, and server delete or replacement purges them all. A client-id-only edit clears the grant and moves the epoch (`config.go:3433-3445`, `commit.go:1211-1214`), but it does **not** touch this bucket, so the unchanged secret keeps its binding. A URL edit that keeps the server's incarnation keeps it too. Tests: `TestStaticProvenance_{ClientIDOnlyEdit,URLEditSameIncarnation,CompetingFirstUse}`. On `ISSUER_CHANGED` with a configured secret, the login is refused before the authorize redirect with health action `configure`. Changing `oauth.client_id`/`client_secret` is already an OAuth clear (`config.OAuthConfigChanged`), so the epoch moves and the next use binds afresh.
 - **Extras classes (FR-010b, FR-009a).** `oauth.ClassifyExtraParam(key)` normalises the key the same way `logging.go:376-419` does, then checks in precedence order: `flowOwned`, `legacyClientID`, `assertionType`, `clientAuth` (explicit `client_secret`/`client_assertion`/`assertion` and their normalised forms, then the existing normalised matcher), `plain`. The classes are mutually exclusive by construction.
   - `applyExtraParamsToAuthURL` and the wrapper's authorization-query injection pass only `plain` keys.
-  - The token-form injection (`transport_wrapper.go:447-455`) passes `plain` and `clientAuth` keys, and drops `flowOwned` keys with a WARN.
+  - The token-form injection (`transport_wrapper.go:447-455`) passes `plain`, `clientAuth` and `assertionType` keys (`assertionType` carries no provenance). `flowOwned` keys are dropped with a value-free WARN on **every** channel. The authorization-URL paths drop them too, and log the same WARN.
   - `legacyClientID` is folded into the effective registration when the OAuth config is built (`config.go:1491-1503`), so mcp-go puts it in both requests.
   - The FR-009 compare runs in the wrapper's `RoundTrip`, on the final form. When the request goes to a token or registration endpoint, the wrapper looks up the binding of each `clientAuth` value and of the client secret, refresh token and verifier it carries, compares them against the request's snapshot, and refuses the request on any mismatch. This makes the wrapper the single last-hop check. The earlier checks remain, so that failures surface early with a clear code.
 
 - **Redirects (FR-010).** `refreshTokenWithStoredCredentials` (`internal/upstream/core/client.go:989-1010`) builds its client as `&http.Client{Transport: c.Gate().HTTPTransport(), CheckRedirect: oauth.CheckRedirect, Timeout: 30s}`, where `CheckRedirect` is the exported `oauthCheckRedirect`. An AST guard test asserts that every `http.Client` in `internal/oauth` and `internal/upstream/core` that sends a form containing `refresh_token`, `client_secret`, `code_verifier` or `code` has a `CheckRedirect` set. mcp-go's own token and registration requests go through the OAuth transport wrapper's client, which already uses `oauthCheckRedirect`. PR-1 confirms this path, and otherwise installs the policy on the `HTTPClient` passed through `OAuthConfig`.
-- **Trust on first use (FR-011).** Every path that reads an unbound row calls `oauth.EnsureBound(rec, snap)` **before** it releases a credential to an AS. That call commits the binding through `storage.BindOAuthIssuer`. If the commit loses (the revision changed, or a binding appeared), it reloads the row and re-runs FR-009 against its own snapshot: it proceeds only on a match and otherwise aborts without sending. `storage.BindOAuthIssuer(serverKey, binding, observedRevision, b Binding) (bound bool, err error)`:
+- **Trust on first use (FR-011).** Binding happens at the first use of the row, which includes `PersistentTokenStore.GetToken` returning an unexpired access token (`persistent_token_store.go:129-184`, `config.go:1436-1454`). It runs **before** any credential is returned, for every permitted source (discovered, configured, eligible fallback, synthetic). The CAS checks the Spec 116 incarnation and epoch as well as the revision, and the caller then uses the committed or reloaded row. FR-011a: when `encodeOAuthRecord` returns `tokenseal.ErrPlaintextTooLarge` (`oauth_binding.go:166-179`), the transaction rolls back. The code logs one size-only line, the server reports `MCPX_OAUTH_REAUTH_REQUIRED`, and the next explicit login replaces the row through the ordinary login write. Every path that reads an unbound row calls `oauth.EnsureBound(rec, snap)` **before** it releases a credential. That call commits the binding through `storage.BindOAuthIssuer`. If the commit loses (the revision changed, or a binding appeared), it reloads the row and re-runs FR-009 against its own snapshot: it proceeds only on a match and otherwise aborts without sending. `storage.BindOAuthIssuer(serverKey, binding, observedRevision, b Binding) (bound bool, err error)`:
   - runs in one bbolt transaction;
   - re-reads the row and requires `Revision == observedRevision && Issuer == ""`;
   - requires that the row is not undecryptable;
   - re-seals with the configured key, or writes plain JSON without one, as today, and in the same transaction creates `oauth_static_client_bindings` for a configured confidential client when it is absent.
 
   Otherwise it writes nothing. It runs at most once per row, off the hot path, after the use that discovered the issuer.
-- **One issuer per row (FR-012).** `UpdateOAuthClientCredentials*` (`oauth_binding.go:467-499`, the DCR persistence called before the browser opens, `connection_oauth.go:1177-1228`, `:2218-2244`) gains an `issuer` argument. When the row's binding differs from the new one under `Binding.Matches` (issuer, target or source class), the same transaction clears `AccessToken`, `RefreshToken`, `ExpiresAt` and `Scopes`. Those tokens were already refused under FR-009. The login write (`WithLoginClient`) always writes token, registration and issuer together. A failed callback after DCR leaves a registration-only row bound to the new issuer, which is reusable for the next login against that issuer.
+- **One issuer per row (FR-012).** The bound writer is `SaveOAuthClientIfBound` (`oauth_binding.go:467-501`). Its `IfUnsetOrSame` mode, used by `persistDCRRegistration` (`oauth_stale_dcr_client.go:69-87`), rejects a new client id while the old one remains. It gains an **issuer-transition mode**, guarded by the observed revision and the Spec 116 binding, that atomically replaces the registration and clears the old grant's tokens and `MixUpProtected`. Its callers include `connection_oauth.go:1524` and `oauth_stale_dcr_client.go:284`. Test: `TestDCRWrite_IssuerTransitionDifferentID_Concurrent`. The earlier text continues: `UpdateOAuthClientCredentials*` (`oauth_binding.go:467-499`, the DCR persistence called before the browser opens, `connection_oauth.go:1177-1228`, `:2218-2244`) gains an `issuer` argument. When the row's binding differs from the new one under `Binding.Matches` (issuer, target or source class), the same transaction clears `AccessToken`, `RefreshToken`, `ExpiresAt` and `Scopes`. Those tokens were already refused under FR-009. The login write (`WithLoginClient`) always writes token, registration and issuer together. A failed callback after DCR leaves a registration-only row bound to the new issuer, which is reusable for the next login against that issuer.
 - **Opt-out binding (FR-013).** The record always stores the issuer and the target. With skip on, only the target is compared, so a replacement server that declares the old issuer string is still caught by its different target.
 - **Synthetic (FR-004).** The stored issuer is the synthetic issuer (the origin of the authorization endpoint). An override edit is an OAuth clear (`config.OAuthConfigChanged`, `internal/config/config.go:3422`): the epoch moves and the old row is never read under new overrides. So synthetic-to-synthetic comparisons only ever meet the same overrides. A switch from synthetic to discovered (overrides removed) is also an OAuth clear.
 
 ### D5. DCR `application_type` (FR-016)
 
-- After the bump, a table test pins mcp-go's registration body: `native` for `127.0.0.1`, `[::1]` and `localhost`, `web` otherwise (R4). If mcp-go's mapping differs, the transport wrapper, which already sees the registration request (`transport_wrapper.go:408-438`), rewrites the field.
+- After the bump, a table test pins mcp-go's registration body: `native` for `127.0.0.1`, `[::1]` and `localhost`, `web` otherwise (R4). If mcp-go's mapping differs, a new registration-request interception in the transport wrapper rewrites the field. This is new work, because today the wrapper only injects query and form parameters (`transport_wrapper.go:403-438`).
 
 ### D6. Opt-out and broker (FR-014, FR-015, US7)
 
 - `config.OAuthConfig.SkipIssuerValidation bool` (`json:"skip_issuer_validation,omitempty"`) is wired at five points (project config-field rule):
   1. the config struct and validation. It is **excluded** from `config.OAuthConfigChanged`: like `RefreshReplayEnabled` it is request policy, not credential identity, so toggling it never clears a grant or moves the epoch;
-  2. a `ServerFieldMaskDecisions` entry (`internal/oauth/serverconfigfields.go`, not a secret);
+  2. a `ServerFieldMaskDecisions` entry (`internal/oauth/serverfields.go:221`, not a secret);
   3. OAS / `make swagger`;
   4. the Web UI server editor;
   5. the macOS server editor.
@@ -150,9 +181,9 @@ Post-design re-check: PASS. Nothing in Phase 1 adds a dependency, a lock or tray
 
 ### D7. Surfaces (FR-017, FR-018)
 
-- `internal/diagnostics/codes.go` gains `OAuthIssuerMismatch`, `OAuthIssuerChanged` and `OAuthMetadataIssuerMismatch`, with catalog entries and `docs/errors/<CODE>.md` pages (covered by the codes-to-docs test).
+- `internal/diagnostics/codes.go` gains `OAuthIssuerMismatch`, `OAuthIssuerChanged` and `OAuthMetadataIssuerMismatch`, with catalog entries and `docs/errors/<CODE>.md` pages. A new assertion checks that each page exists on disk; the existing catalog test only checks URL strings (`internal/diagnostics/catalog_test.go:114-126`).
 - Health: `ISSUER_CHANGED` → unhealthy, action `login`. `METADATA_ISSUER_MISMATCH` → unhealthy, action `configure`. `ISSUER_MISMATCH` → recorded OAuth failure, action `login`.
-- Doctor: `management.BuildOAuthTokenStorageReport` (Spec 123) gains `issuer_binding` (see `contracts/doctor-issuer-binding.json`), scoped by reach.
+- Doctor: `management.BuildOAuthTokenStorageReport` (Spec 123) takes token-storage state only (`internal/management/diagnostics.go:320-334`). It gains a second input, live per-server issuer status from the runtime (`Runtime.OAuthIssuerStatus`), and with it `issuer_binding` (see `contracts/doctor-issuer-binding.json`), scoped by reach.
 - `auth status`, the OAuth block of `GET /api/v1/servers/{id}`, Web UI ServerDetail and the tray detail show the issuer origin, the source and `mix_up_protected` (from the last login). The login write stores `protected` as `MixUpProtected bool` (`json:"mix_up_protected,omitempty"`) in the record, so the flag survives a restart.
 
 ## Test plan
@@ -184,7 +215,15 @@ Two or three instances (honest H, hostile A, replacement B) cover mix-up and swa
 | `TestDiscovery_PolicyPartition_{StrictFirst,SkipFirst}` + hot reload | FR-007, US6.4 |
 | `TestSwap_NoCredentialReachesNewAS_{Proactive,Reactive,Stored,WarmHandler,Relogin}` | US2, SC-002 |
 | `TestSwap_TokenEndpointCrossOriginRedirectNotFollowed` | FR-010 |
-| `TestCredentialClientsHaveCheckRedirect` (AST guard) | FR-010 |
+| `TestCredentialClientsHaveCheckRedirect` (AST guard, incl. `internal/serveredition/broker`) / `TestBroker_TokenCrossOriginRedirectNotFollowed` (`-tags server`) | FR-010 |
+| `TestGuard_MetadataOrRegistrationChangedBeforeTransport` / `TestGuard_ClientSecretBasicHeaderChecked` | D0, FR-009/009a |
+| `TestResolver_ScopeAndLoginValidatorPathsTerminal` / `TestResolver_LibraryNeverRunsOwnCandidateLoop` | D0, FR-006 |
+| `TestConfigured_VerifiedURLMarkedProtected` | FR-008 positive case |
+| `TestFR015_ConfigRoundTrip_{REST,WebUI,macOS}_EpochUnchanged` | FR-015 |
+| `TestDCR_RejectApplicationType_NoRetry` | FR-016 |
+| `TestFR002_PerFlowSnapshot_LiveHandlers` (all three login paths) | FR-002 |
+| CLI `auth status` + server-detail golden (issuer origin, source, `mix_up_protected`, every warning, `configure` action for confidential static) | FR-017/018 |
+| PR-1 gate: `go list -m github.com/mark3labs/mcp-go` ≥ v1.4.0 and the full existing `internal/oauth` + `internal/upstream/core` OAuth suites green | FR-019 |
 | `TestDCRWriteForNewIssuerClearsOldTokens` / `TestFailedCallbackAfterDCRLeavesBoundRegistration` | FR-012 |
 | `TestSwap_StaticClientIDKept` / `TestSwap_StaticConfidentialSecretNotSentToNewIssuer` | US2.5, US2.10 |
 | `TestDCR_CrossOriginRedirectNotFollowed` | FR-010 DCR |
@@ -228,8 +267,8 @@ Two or three instances (honest H, hostile A, replacement B) cover mix-up and swa
 
 ## Delivery
 
-1. **PR-1 (bump, callback, `iss`, `application_type`)**: FR-019, D1, D2, D5, `ISSUER_MISMATCH`, the fake AS.
-2. **PR-2 (discovery equality, binding, redirects)**: D3, D4, `ISSUER_CHANGED`, `METADATA_ISSUER_MISMATCH`, trust on first use, upgrade tests.
+1. **PR-1 (bump + foundations)**: FR-019, D0 (resolver, `Snapshot`, last-hop guard), D3, D1, the fake AS. No change in behaviour beyond FR-001 and FR-006/FR-006a.
+2. **PR-2 (`iss` + binding)**: D2, D4, D5, `ISSUER_MISMATCH`, `ISSUER_CHANGED`, `METADATA_ISSUER_MISMATCH`, trust on first use, upgrade tests. D2 needs D0's snapshot and D4's login write, so the two land together.
 3. **PR-3 (opt-out, broker, surfaces, docs)**: D6, D7, the e2e script, the provider verification.
 
 PR-2 is the first change that can refuse a provider that works today (metadata equality), so PR-3's opt-out ships in the same release. Each PR is cross-reviewed (opencode `gpt-6.2-sol`, round cap per the operator rules).

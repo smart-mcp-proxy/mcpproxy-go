@@ -30,13 +30,13 @@ All facts about mcp-go v1.4.0 come from its `client/transport/oauth.go` at tag `
 
 ## R4. `application_type` mapping
 
-- **Fact**: OpenID Connect Dynamic Client Registration 1.0 §2 defines `application_type` as `web` (the default) or `native`. Web clients MUST use `https` redirect URIs and MUST NOT use `localhost`. Native clients use custom schemes or loopback `http`. RFC 7591 does not define the field, and plain RFC 7591 servers ignore unknown metadata (§2).
+- **Fact**: OpenID Connect Dynamic Client Registration 1.0 §2 defines `application_type` as `web` (the default) or `native`. Web clients that use the implicit grant MUST use `https` redirect URIs and MUST NOT use `localhost`. The code grant has no such hard rule, but providers commonly apply native-versus-web redirect policy on this field. Native clients use custom schemes or loopback `http`. RFC 7591 does not define the field, and plain RFC 7591 servers ignore unknown metadata (§2).
 - **Decision**: send `native` for loopback or `localhost` redirect hosts and `web` otherwise. PR-1 asserts mcp-go's `applicationType(redirectURI)` (its body is not in `oauth.go`; it lives in another file of the package) against this table. If it disagrees, mcpproxy rewrites the field in the registration body, which the transport wrapper already intercepts.
 - **Issue reply**: the issue's "`web`" proposal would tell strict OIDC providers to refuse the loopback redirect. The gap is real; the value is `native`.
 
 ## R5. Legacy rows: trust on first use or forced re-login
 
-- **Decision**: trust on first use (TOFU), bound at the first use whose discovery source is `discovered` or `configured`.
+- **Decision**: trust on first use (TOFU), bound at the first use, which includes serving an unexpired access token. Every permitted source binds: `discovered`, `configured`, eligible `fallback` and `synthetic` (spec FR-011).
 - **Rationale**: the issuer of a legacy row cannot be proven after the fact. Forcing a re-login would cost every user one sign-in per server and close only one window: a swap that happened before the upgrade and has not been noticed since. mcp-go makes the same choice ("an empty value enables legacy trust on first use").
 - **Spec 123**: the issuer goes inside the sealed body. The additional data (kid ‖ bucket ‖ bucket key) does not change, so the binding write re-seals with the same key and needs no migration step or boot sweep. A row with no issuer marshals to the same bytes as before (`omitempty`), so Spec 123's "same bytes without a key" property holds.
 - **Downgrade**: an older binary ignores the field (unknown JSON keys are dropped by `json.Unmarshal` into the struct), and a rewrite by that binary loses it. The next upgrade goes back through TOFU. Documented, accepted.
@@ -54,7 +54,7 @@ All facts about mcp-go v1.4.0 come from its `client/transport/oauth.go` at tag `
 
 ## R8. Opt-out shape
 
-- **Decision**: per server, `oauth.skip_issuer_validation: bool`, default false. It covers FR-003, FR-005 and FR-006 only. There is no global switch.
+- **Decision**: per server, `oauth.skip_issuer_validation: bool`, default false. It covers the callback `iss` comparison for every source including `fallback` (both a wrong and an absent-while-advertised `iss`), the FR-005 ordering, and FR-006's equality compare. Every login it lets through is `mix_up_protected: false`, including one where only the metadata comparison was skipped. There is no global switch.
 - **Rationale**: one misbehaving provider must not block a user, and must not lower protection for every other server. Credential binding (FR-009) has no legitimate false positive (a changed issuer is a changed server), so it is never skippable. Repeated parameters have no legitimate use either.
 - **Binding identity under skip** (FR-013): the discovery target, meaning the PRM `authorization_servers` entry or the configured metadata URL, and not the document's declared `issuer`. With FR-006 off, the declared issuer is an unchecked claim. A replacement server could declare the old string and inherit the credentials.
 - **Cache isolation** (FR-007): the document cache already stores raw bytes, so validation runs per use. The preflight result, which is a validated URL plus a document, is keyed by policy as well, so a strict failure never blocks a skip server and a skip success is never served to a strict one.
