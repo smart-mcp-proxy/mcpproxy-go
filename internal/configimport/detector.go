@@ -282,7 +282,10 @@ func tryDetectJSON(content []byte) *DetectionResult {
 			_, hasPort := oauth["callbackPort"]
 			_, hasMetadata := oauth["authServerMetadataUrl"]
 			_, scopesString := oauth["scopes"].(string)
-			if !isGemini && (hasPort || hasMetadata || scopesString) {
+			_, clientIDString := oauth["clientId"].(string)
+			_, scopesList := oauth["scopes"].([]interface{})
+			// A scopes array is Gemini's dialect; Claude Code's is a string.
+			if !isGemini && !scopesList && (hasPort || hasMetadata || scopesString || clientIDString) {
 				return &DetectionResult{
 					Format:     FormatClaudeCode,
 					Confidence: "medium",

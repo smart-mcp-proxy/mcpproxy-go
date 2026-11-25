@@ -80,6 +80,20 @@ func TestDetectFormat(t *testing.T) {
 			wantConfidence: "low",
 		},
 		{
+			name: "claude_code_sse_with_client_id_only",
+			content: `{
+				"mcpServers": {
+					"remote": {
+						"type": "sse",
+						"url": "https://example.com/sse",
+						"oauth": {"clientId": "example-client"}
+					}
+				}
+			}`,
+			wantFormat:     FormatClaudeCode,
+			wantConfidence: "medium",
+		},
+		{
 			name: "claude_desktop_stdio_only",
 			content: `{
 				"mcpServers": {
