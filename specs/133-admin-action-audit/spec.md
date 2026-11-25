@@ -57,14 +57,14 @@ A reviewer needs to know who approved a quarantined server, a pending or changed
 
 **Why this priority**: The reporter's second priority. In a deny-by-default setup an approval is the act that widens access.
 
-**Independent Test**: Unquarantine a server through the Web UI and CLI (the `quarantine_security` MCP tool can only quarantine), approve a changed tool through the Web UI, CLI and `quarantine_security`; let a trusted server baseline its tools; let a scan-mode server auto-approve a clean change. Each writes the contract's lines with the right `action`, `caller` and, for automatic approvals, `caller.kind: internal` with `trigger: policy` and a closed `policy`.
+**Independent Test**: Approve a quarantined server's security review through the Web UI and CLI `review approve` (both call `/security/approve`, so they write the review line set of contract §P2, not `server.unquarantine`), unquarantine one through the legacy `/unquarantine` route separately (the `quarantine_security` MCP tool can only quarantine), approve a changed tool through the Web UI, CLI and `quarantine_security`; let a trusted server baseline its tools; let a scan-mode server auto-approve a clean change. Each writes the contract's lines with the right `action`, `caller` and, for automatic approvals, `caller.kind: internal` with `trigger: policy` and a closed `policy`.
 
 **Acceptance Scenarios**:
 
 1. **Given** server `github` is quarantined, **When** an administrator unquarantines it in the Web UI, **Then** one `server.unquarantine` line (plus one `tool.approve` batch if pending tools were promoted, contract §P2) is written with `caller.kind: api_key` (or `session_admin` in the server edition) and `client.surface: web`.
 2. **Given** a tool's description changed and is held, **When** it is approved with `mcpproxy upstream approve`, **Then** one `tool.approve` line names the server and the tool (hashes stay on the activity row: they cover upstream text nothing proves secret-free).
 3. **Given** a security review approves 10 tools and blocks 2 on one server, **Then**, on a first review, five lines are written with one `request_id`: two `server.baseline_set` (`baseline.tools`, `baseline.integrity`), one `tool.block` (`count: 2`), one `tool.approve` (`count: 10`) and one `server.review_approve` (contract §P2 gives the exact set at every failure point; a zero-tool first review of a quarantined server writes three, of an already explicitly unquarantined one two, because `server.review_approve` needs a committed quarantine delta).
-4. **Given** a trusted server connects for the first time, **When** the proxy baselines its 40 tools after a clean scan, **Then** one `tool.approve` line is written with `caller.kind: internal`, `trigger: policy`, `policy: trusted_baseline`, `target.count: 40` and the names (capped at 64, `truncated: true` beyond).
+4. **Given** a trusted server connects for the first time, **When** the proxy baselines its 40 tools after a clean scan, **Then** two lines are written, both `caller.kind: internal`, `trigger: policy`, `policy: trusted_baseline`: one `server.baseline_set` (`baseline.tools`, the durable baseline marker) and one `tool.approve` with `target.count: 40` and the names (capped at 64, `truncated: true` beyond).
 
 ---
 
