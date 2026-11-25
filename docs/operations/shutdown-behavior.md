@@ -130,7 +130,7 @@ Runtime.Close()
     │
     ├─► Stop Supervisor
     │       ├─► Cancel reconciliation context
-    │       ├─► Wait for goroutines to exit
+    │       ├─► Wait for goroutines to exit (10s for actions in progress)
     │       └─► Close upstream adapter
     │
     ├─► ShutdownAll on upstream manager (25s total timeout)

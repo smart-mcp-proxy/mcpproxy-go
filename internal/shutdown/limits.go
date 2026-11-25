@@ -10,6 +10,10 @@ const (
 	// HTTPServer bounds http.Server.Shutdown: CallGrace, plus time for a cancelled handler to return.
 	HTTPServer = CallGrace + 5*time.Second
 
+	// ActionDrain is how long reconcile actions, whose context is already cancelled, may take to
+	// return. Only a wedged one needs it.
+	ActionDrain = 10 * time.Second
+
 	// StdinClose is how long a stdio server may take to exit after its stdin was closed, before it
 	// is signalled. mcp-go uses the same 2s, as do the official TypeScript and Python MCP SDKs.
 	StdinClose = 2 * time.Second
