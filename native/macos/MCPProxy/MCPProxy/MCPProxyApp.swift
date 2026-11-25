@@ -1745,9 +1745,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         // Signals the core once and waits for it. Signalling it here as well
         // would be the second signal the core takes as "force quit".
-        Task {
-            await coreManager?.shutdown()
+        let manager = coreManager
+        let earlierStop = stopTask
+        stopTask = Task {
+            await manager?.shutdown()
             await MainActor.run {
+                // "Start" during the stop put another manager in charge of this state.
+                guard coreManager === manager else { return }
                 appState.coreState = .idle
                 appState.servers = []
                 appState.connectedCount = 0
@@ -1762,8 +1766,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 updateStatusIcon()
                 rebuildMenu()
             }
+            await earlierStop?.value
         }
     }
+
+    /// The last "Stop Core", and those before it that are still running. "Start" replaces
+    /// `coreManager` without waiting for them.
+    private var stopTask: Task<Void, Never>?
 
     @objc private func startCoreAction() {
         Task {
@@ -2296,6 +2305,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         AppLifecycle.shared.note("user chose Quit in the tray menu")
         Task {
             await coreManager?.shutdown()
+            // Quitting now would lose the SIGKILL of a stop that is still running.
+            await stopTask?.value
             try? await Task.sleep(nanoseconds: 200_000_000)
             NSApplication.shared.terminate(nil)
         }
