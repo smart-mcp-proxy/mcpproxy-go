@@ -11,7 +11,7 @@ BASE_URL="http://127.0.0.1:8080"
 API_URL="$BASE_URL/api/v1"
 MCP_URL="$BASE_URL/mcp"
 OUTPUT_DIR=$(mktemp -d)
-REPORT_FILE="$PROJECT_DIR/docs/qa/quarantine-test-report-2026-03-11.html"
+REPORT_FILE="${REPORT_FILE:-$OUTPUT_DIR/quarantine-test-report.html}"
 DATA_DIR="$PROJECT_DIR/test-data-quarantine"
 MCP_SESSION_ID=""
 

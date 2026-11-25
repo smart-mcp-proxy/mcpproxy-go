@@ -329,12 +329,12 @@ mask string.
 # Rotate a Bearer token without touching anything else on the server
 curl -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   -d '{"headers":{"Authorization":"Bearer new-token"}}' \
-  http://127.0.0.1:8080/api/v1/servers/synapbus
+  http://127.0.0.1:8080/api/v1/servers/my-server
 
 # Remove a stale header (the JSON null is the delete signal)
 curl -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   -d '{"headers":{"X-Stale":null}}' \
-  http://127.0.0.1:8080/api/v1/servers/synapbus
+  http://127.0.0.1:8080/api/v1/servers/my-server
 
 # Upsert one env var and delete another in a single round-trip
 curl -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
@@ -366,7 +366,7 @@ it in the keyring under `secret_name`, and rewrites the config field with
 {
   "scope": "header",
   "key": "Authorization",
-  "secret_name": "synapbus-auth"
+  "secret_name": "my-server-auth"
 }
 ```
 
@@ -382,8 +382,8 @@ it in the keyring under `secret_name`, and rewrites the config field with
 {
   "success": true,
   "data": {
-    "message": "header \"Authorization\" on \"synapbus\" now references keyring secret \"synapbus-auth\"",
-    "reference": "${keyring:synapbus-auth}"
+    "message": "header \"Authorization\" on \"my-server\" now references keyring secret \"my-server-auth\"",
+    "reference": "${keyring:my-server-auth}"
   }
 }
 ```
