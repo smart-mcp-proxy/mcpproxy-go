@@ -89,6 +89,7 @@ Post-design re-check: PASS. Nothing in Phase 1 adds a dependency, a lock or tray
 
 ### D3. Discovery issuer equality on every consumed document (FR-006–FR-008)
 
+- **Escaped paths.** Candidates are built from `u.EscapedPath()`, never `u.Path`. `validateIssuerURL` refuses a query, a fragment, `%2F`, `%2E`-encoded or literal dot segments. When PRM names no authorization server, the target is the candidate's issuer (the MCP URL's issuer form).
 - **Candidates carry their issuer.** `BuildRFC8414MetadataURLs` becomes `metadataCandidates(issuerURL) []candidate{url, issuer}`. For a path issuer it builds only path-derived forms: RFC 8414 path insertion, and OIDC `…/{path}/.well-known/openid-configuration` plus insertion. For an origin issuer it builds the origin forms. The no-PRM fallback derives the issuer from the MCP origin.
 - `findWorkingMetadataDoc` (`discovery.go:930-958`) validates `trimOneSlash(doc.Issuer) == trimOneSlash(candidate.issuer)` after it parses each document. A mismatch or a missing `issuer` returns `*MetadataIssuerMismatchError` (`diagnostics.OAuthMetadataIssuerMismatch`) at once. No further candidate is tried. `preflightMetadataURL` propagates it as terminal (no seed, failure TTL) and does not leave `authServerMetadataURL` empty for mcp-go to rediscover on its own.
 - **Wrapper refill.** `roundTripMetadata` (`transport_wrapper.go:491-525`) validates a refilled document against the `ExpectedIssuer` recorded for the endpoint set: the candidate's issuer, or "as declared" for `configured`. A mismatch answers mcp-go with an error and never with a synthetic document.
@@ -184,6 +185,9 @@ Two or three instances (honest H, hostile A, replacement B) cover mix-up and swa
 | `TestFallbackSource_WrongIssRefused` / `TestFallback_NotForPathIssuer` / `TestBoundDiscovered_NoSendToFallback` | FR-004a |
 | `TestStaticSecretProvenance_SurvivesLogoutAndScopesEdit` / `TestUpgrade_UnexpiredTokenSetsSecretProvenance` | FR-012, FR-011, US2.11, US3.7 |
 | `TestSkip_FallbackDiscoveredTransitionsRefused` | FR-013 source class under skip |
+| `TestDiscovery_EscapedPathSiblingNotAccepted` / `TestDiscovery_AmbiguousIssuerRefused` | FR-006 |
+| `TestBinding_NoPRMTarget_PRMAppears{Same,Different}` | FR-013, US4.7 |
+| `TestUpgrade_PathIssuerFallbackRowNotBound` | SC-003, US3.8 |
 | `TestSnapshotExpiry_StaggeredPRMAndPreflight` | FR-009b |
 | `TestRefusedCallback_NoTokenStored_DCRRowBound` | US1 storage, US1.9 |
 | `TestSkip_MetadataCrossOriginRedirectStillRefused` | FR-014 / US6.6 |
