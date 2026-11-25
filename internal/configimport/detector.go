@@ -278,7 +278,11 @@ func tryDetectJSON(content []byte) *DetectionResult {
 			continue
 		}
 		if oauth, hasOAuth := serverMap["oauth"].(map[string]interface{}); hasOAuth {
-			if _, isGemini := oauth["enabled"]; !isGemini {
+			_, isGemini := oauth["enabled"]
+			_, hasPort := oauth["callbackPort"]
+			_, hasMetadata := oauth["authServerMetadataUrl"]
+			_, scopesString := oauth["scopes"].(string)
+			if !isGemini && (hasPort || hasMetadata || scopesString) {
 				return &DetectionResult{
 					Format:     FormatClaudeCode,
 					Confidence: "medium",
