@@ -4,11 +4,11 @@ Checked on the PR head, 2026-11-25, macOS arm64, an isolated instance (own confi
 
 | Check | Command | Result |
 |---|---|---|
-| Frontend unit tests | `cd frontend && npx vitest run` | 3260 passed (362 files) |
+| Frontend unit tests | `cd frontend && npx vitest run` | 3271 passed (362 files) |
 | Type check | `cd frontend && npx vue-tsc --noEmit` | clean |
 | Build | `make frontend-build`; `go build -o mcpproxy ./cmd/mcpproxy`; `go build -tags server ./cmd/mcpproxy` | ok |
 | Release gate Go tests | `go test ./cmd/release-gate/` | ok (the Web UI row is derived from the status pill) |
-| Playwright sweeps, with fixture upstream | `MCPPROXY_BASE_URL=http://127.0.0.1:18734 MCPPROXY_FIXTURE_PATH=<mcpfixture> HOME=<scratch> ./scripts/run-web-smoke.sh` | 180 passed, 3 skipped, 0 failed |
+| Playwright sweeps, with fixture upstream | `MCPPROXY_BASE_URL=http://127.0.0.1:18734 MCPPROXY_FIXTURE_PATH=<mcpfixture> HOME=<scratch> ./scripts/run-web-smoke.sh` | 181 passed, 3 skipped, 0 failed (after merging the PR 1 shared-style fixes `ad6a819ac`) |
 | Playwright sweeps, no fixture | same on `:18735` without `MCPPROXY_FIXTURE_PATH` | 109 passed, 73 skipped (need the fixture), 0 failed |
 
 One earlier full run showed `shell-pr1.spec.ts` "Tab through the header never opens the palette ... Ctrl+K" failing once (`Control+k` did not open the palette); it passed on the three later full runs and alone. It is a PR 1 spec and was not touched here.
