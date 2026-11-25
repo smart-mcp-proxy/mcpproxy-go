@@ -7,7 +7,7 @@
       <li v-for="cred in revocable" :key="credKey(cred)" class="space-y-1">
         <button v-if="cred.kind === 'api_key'" type="button" class="btn btn-sm btn-outline btn-error max-sm:min-h-11" data-test="revoke-api-key" @click="ask({ kind: 'api_key' })">Revoke API key</button>
         <button v-else type="button" class="btn btn-sm btn-outline btn-error max-sm:min-h-11" :data-test="`revoke-login-${cred.grant_id}`" :aria-label="`Revoke this login of ${client.display_name}`" @click="ask({ kind: 'browser_login', cred })">Revoke login of <bdi class="font-mono">{{ cred.reported_name }}</bdi></button>
-        <p class="text-sm text-base-content/70">{{ cred.kind === 'api_key' ? 'Stops the key working; browser logins and the profile binding stay.' : 'Stops this browser login on its next request; other credentials and the profile binding stay.' }}</p>
+        <p class="text-sm text-base-content/70">{{ cred.kind === 'api_key' ? 'Stops the key working; browser logins and the profile binding stay.' : `Stops the login returning to ${cred.redirect_host} on its next request; other credentials and the profile binding stay.` }}</p>
       </li>
     </ul>
     <template v-else>

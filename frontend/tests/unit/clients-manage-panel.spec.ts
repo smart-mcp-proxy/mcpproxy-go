@@ -243,4 +243,36 @@ describe('Clients table and Manage panel (Spec 134 FR-060)', () => {
     expect(wrapper.find('[data-test="client-manage-panel-cursor"]').exists()).toBe(true)
     wrapper.unmount()
   })
+
+  it('keeps the active-session count, and Disconnect only for a connected supported client', async () => {
+    const idle = makeClient('claude-code', { connected: false, state: 'installed', active_sessions: 0, credential_state: 'none' })
+    const { wrapper } = await mountClients([{ ...cursor, active_sessions: 3 }, idle])
+    await wrapper.get('[data-test="client-manage-cursor"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="client-active-sessions-cursor"]').text()).toBe('3 active sessions')
+    expect(wrapper.find('[data-test="client-disconnect-cursor"]').exists()).toBe(true)
+    await wrapper.get('[data-test="client-manage-close"]').trigger('click')
+    await wrapper.get('[data-test="client-manage-claude-code"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="client-disconnect-claude-code"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('a click on the row opens the panel as the old row toggled its details; the button is not double-handled', async () => {
+    const { wrapper } = await mountClients([cursor])
+    await wrapper.get('[data-test="client-name-cursor"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="client-manage-panel-cursor"]').exists()).toBe(true)
+    expect(api.getClient).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('shows the profile and lock facts for a client whose credential cannot be bound', async () => {
+    const adminWithProfile = makeClient('windsurf', { credential_state: 'admin_key', profile: 'work-ro', profile_mode: 'locked' })
+    const { wrapper } = await mountClients([adminWithProfile])
+    await wrapper.get('[data-test="client-manage-windsurf"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="client-manage-use-windsurf"]').text()).toContain('locked')
+    wrapper.unmount()
+  })
 })

@@ -9,10 +9,11 @@
       <tbody class="max-sm:block">
         <template v-for="client in clients" :key="client.id">
           <tr
-            class="max-sm:grid max-sm:grid-cols-[minmax(0,1fr)_auto] max-sm:gap-x-3 max-sm:gap-y-1 max-sm:px-3 max-sm:py-3 max-sm:border-b max-sm:border-base-300"
+            class="cursor-pointer max-sm:grid max-sm:grid-cols-[minmax(0,1fr)_auto] max-sm:gap-x-3 max-sm:gap-y-1 max-sm:px-3 max-sm:py-3 max-sm:border-b max-sm:border-base-300"
             :class="focusedId === client.id && 'bg-primary/10'"
             :data-test="focusedId === client.id ? 'focused-client-row' : `clients-row-${client.id}`"
             :data-client="client.id"
+            @click="onRowClick($event, client.id)"
           >
             <td class="font-medium max-sm:p-0 max-sm:border-0! max-sm:col-start-1 max-sm:row-start-1 break-words" :data-test="`client-name-${client.id}`">{{ client.display_name }}</td>
             <td class="whitespace-nowrap max-sm:p-0 max-sm:border-0! max-sm:col-start-1 max-sm:row-start-2" :data-test="`client-state-${client.id}`">
@@ -76,6 +77,11 @@ const props = defineProps<{
 const emit = defineEmits<{ (e: 'manage', id: string): void; (e: 'clear-error', id: string): void }>()
 const profiles = useProfilesStore()
 
+// The row opens the panel too, as the old row toggled its details; buttons and links keep their own action.
+function onRowClick(event: MouseEvent, id: string) {
+  if ((event.target as HTMLElement).closest('button, a, input, select, summary')) return
+  emit('manage', id)
+}
 function reachOf(client: ClientPresence) { return clientReach(client, name => profiles.byName.get(name) as never) }
 function errorFor(id: string): unknown { return id === props.hideErrorFor ? undefined : props.errors?.[id] }
 function relative(value?: string | null) { return value ? new Date(value).toLocaleString() : 'Never' }
@@ -84,7 +90,7 @@ function stateTone(client: ClientPresence): StatusTone {
     case 'connected_seen': return 'ok'
     case 'connected_never_seen': return 'review'
     case 'installed': return 'busy'
-    default: return 'neutral'
+    default: return 'off'
   }
 }
 </script>

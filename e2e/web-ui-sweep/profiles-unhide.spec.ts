@@ -178,7 +178,7 @@ test('7. layout at 1440, 900 and 390: no page-level horizontal scroll', async ({
     await shot(page, `home-${width}`)
 
     await open(page, '/clients')
-    await page.locator('tbody tr', { hasText: 'E2E laptop' }).first().click()
+    await openManagePanel(page)
     await expect(page.locator(`[data-test="clients-row-link-sessions-${CLIENT_ID}"]`)).toBeVisible()
     await noHorizontalScroll(page, `Clients ${width}`)
     await shot(page, `clients-${width}`)

@@ -40,6 +40,8 @@ describe('client reach (Spec 134 FR-060)', () => {
     expect(isUndetectedSupported({ ...undetected, credential_state: 'client' })).toBe(false)
     expect(isUndetectedSupported({ ...undetected, token_name: 'client-codex' })).toBe(false)
     expect(isUndetectedSupported({ ...undetected, state: 'installed' })).toBe(false)
+    // A browser login (Spec 132) is a credential record too: the row is not hidden.
+    expect(isUndetectedSupported({ ...undetected, credentials: [{ kind: 'browser_login', state: 'active' } as never] })).toBe(false)
     expect(clientStateLabel('connected_never_seen')).toBe('connected never seen')
   })
 })

@@ -1,9 +1,9 @@
 <template>
   <div v-if="section !== 'remove' || hasRecord" class="space-y-3" :data-test="`client-binding-controls-${client.id}${section === 'all' ? '' : `-${section}`}`" @click.stop>
-    <dl v-if="showKey" class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-sm">
-      <div class="flex gap-2"><dt class="opacity-70">Credential</dt><dd>{{ credentialLabel(client.credential_state) }}<template v-if="client.token_name"> (<code class="text-xs">{{ client.token_name }}</code>)</template></dd></div>
+    <dl v-if="showKey || profileFact" class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-sm">
+      <div v-if="showKey" class="flex gap-2"><dt class="opacity-70">Credential</dt><dd>{{ credentialLabel(client.credential_state) }}<template v-if="client.token_name"> (<code class="text-xs">{{ client.token_name }}</code>)</template></dd></div>
       <div v-if="client.expires_at && !lifecycleShown" class="flex gap-2"><dt class="opacity-70">Expires</dt><dd :data-test="`client-expires-${client.id}`">{{ formatDateTimeShort(client.expires_at) }}</dd></div>
-      <div v-if="client.profile && section === 'all'" class="flex gap-2"><dt class="opacity-70">Profile</dt><dd>{{ profiles.titleFor(client.profile) }} <span class="opacity-70">({{ client.profile_mode === 'locked' ? 'locked' : 'switchable' }})</span></dd></div>
+      <div v-if="client.profile && (section === 'all' || profileFact)" class="flex gap-2"><dt class="opacity-70">Profile</dt><dd>{{ profiles.titleFor(client.profile) }} <span class="opacity-70">({{ client.profile_mode === 'locked' ? 'locked' : 'switchable' }})</span></dd></div>
     </dl>
 
     <div v-if="showKey && client.rotation_pending" class="alert alert-info text-sm flex flex-wrap items-center gap-2" :data-test="`client-rotation-pending-${client.id}`" role="status">
@@ -20,7 +20,7 @@
          with one line saying what it does. -->
     <div v-if="showRemove && hasRecord" class="space-y-1">
       <button type="button" class="btn btn-sm btn-outline btn-error max-sm:min-h-11" :data-test="`client-forget-${client.id}`" @click="emit('forget', client)">Forget client&hellip;</button>
-      <p class="text-sm text-base-content/70">Revokes this client's credential; it can no longer call MCPProxy until connected again. You can also remove its config entry.</p>
+      <p class="text-sm text-base-content/70">Revokes this client's credential; it can no longer call MCPProxy until connected again.<template v-if="client.kind === 'supported'"> You can also remove its config entry.</template></p>
     </div>
     <p v-if="actionResult" role="status" aria-live="polite" class="text-sm" :data-test="`client-action-result-${client.id}`">{{ actionResult }}</p>
     <p v-if="actionError" role="alert" class="text-sm text-error" :data-test="`client-action-error-${client.id}`">{{ actionError }}</p>
@@ -68,7 +68,9 @@ const props = withDefaults(defineProps<{ client: ClientPresence; section?: 'all'
 const showAccess = computed(() => props.section === 'all' || props.section === 'access')
 const showKey = computed(() => props.section === 'all' || props.section === 'key')
 // In the Manage panel the lifecycle line above already says when the credential expires.
-const lifecycleShown = computed(() => props.section === 'key' && (props.client.kind === 'custom' || Boolean(props.client.issuer)))
+const lifecycleShown = computed(() => props.section === 'key' && (props.client.kind === 'custom' || Boolean(props.client.issuer)) && !props.client.lease)
+// A client whose credential cannot be bound has no profile chip, so the profile and lock facts the old row showed stay here.
+const profileFact = computed(() => props.section === 'access' && Boolean(props.client.profile) && props.client.credential_state !== 'client')
 const showRemove = computed(() => props.section === 'all' || props.section === 'remove')
 const emit = defineEmits<{
   (e: 'changed'): void

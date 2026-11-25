@@ -1421,7 +1421,12 @@ async function openSequence() {
   await fetchClients()
   const reveal = props.revealClient
   if (reveal && !props.focusClient && clients.value.some(c => c.id === reveal)) {
-    void nextTick(() => document.querySelector(`[data-test="client-row-${reveal}"]`)?.scrollIntoView?.({ block: 'center' }))
+    void nextTick(() => {
+      // This list's own row (the header's Connect dialog may hold a hidden copy), with focus on its first control.
+      const row = (dialogEl.value as HTMLElement | null)?.querySelector(`[data-test="client-row-${reveal}"]`)
+      row?.scrollIntoView?.({ block: 'center' })
+      row?.querySelector<HTMLElement>('button:not([disabled])')?.focus()
+    })
     return
   }
   const id = props.focusClient

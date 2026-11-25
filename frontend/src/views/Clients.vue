@@ -54,7 +54,7 @@
     <CustomClientDialog :open="customOpen" @close="customOpen = false" @created="onCustomCreated" />
     <BulkMoveDialog :open="bulkOpen" :clients="store.clients" @close="bulkOpen = false" @done="refreshSilently" />
     <UpgradeAdminKeyDialog :open="upgradeOpen" @close="upgradeOpen = false" @done="refreshSilently" />
-    <ForgetClientDialog v-if="forgetTarget" :open="true" :client="forgetTarget" @close="forgetTarget = null" @done="refreshSilently" />
+    <ForgetClientDialog v-if="forgetTarget" :open="true" :client="forgetTarget" @close="onForgetClose" @done="refreshSilently" />
     <CredentialOnceDialog :open="!!secret" :credential="secret?.credential ?? ''" :snippet="secret?.snippet" :title="secret?.title" @close="secret = null" />
   </div>
 </template>
@@ -187,7 +187,12 @@ async function openPanel(id: string) {
 }
 async function closePanel() {
   const id = panelId.value
+  // A panel opened on an undetected app revealed its row; once closed the row folds again,
+  // so the fold opens to keep the Manage button where focus returns.
+  const closing = store.clients.find(client => client.id === id)
+  if (closing && isUndetectedSupported(closing)) undetectedOpen.value = true
   panelId.value = ''
+  await nextTick()
   await nextTick()
   // Back to the row's Manage button, or the toolbar when the row no longer exists.
   const trigger = id ? document.querySelector<HTMLElement>(`[data-test="client-manage-${id}"]`) : null
@@ -195,6 +200,13 @@ async function closePanel() {
   ;(trigger ?? fallback)?.focus()
 }
 async function checkConnection(id: string) { await store.loadDetail(id) }
+// Dismissing the Forget dialog with no panel left puts focus back on the toolbar.
+async function onForgetClose() {
+  forgetTarget.value = null
+  if (panelId.value) return
+  await nextTick()
+  document.querySelector<HTMLElement>('[data-test="open-client-connect"]')?.focus()
+}
 function openConnectFor(id: string) { connectReveal.value = id; connectOpen.value = true }
 // The panel's client left the roster (Forget, a refresh): close it and keep focus on the page.
 watch(() => store.clients.some(client => client.id === panelId.value), (present) => { if (panelId.value && !present && !store.loading) void closePanel() })

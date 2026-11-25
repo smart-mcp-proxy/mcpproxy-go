@@ -43,7 +43,8 @@ export function clientReach(c: ClientPresence, profileFor: (name: string) => Pro
 /** Supported apps that are positively not detected fold into one line (FR-060). */
 export function isUndetectedSupported(c: ClientPresence): boolean {
   return c.kind === 'supported' && c.state === 'not_installed' && !c.connected && !c.installed &&
-    (!c.credential_state || c.credential_state === 'none' || c.credential_state === 'unknown') && !c.token_name
+    (!c.credential_state || c.credential_state === 'none' || c.credential_state === 'unknown') && !c.token_name &&
+    (c.credentials ?? []).length === 0
 }
 
 export function clientStateLabel(value: string): string { return value.replaceAll('_', ' ') }
