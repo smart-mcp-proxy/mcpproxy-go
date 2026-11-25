@@ -228,11 +228,12 @@ async function revealHeld() { revealPending = true; await tryReveal() }
 async function tryReveal() {
   if (!revealPending || !review.value) return
   revealPending = false
-  clearFilters()
   const all = review.value.tools
   const index = all.findIndex(t => HELD.includes(t.approval_status))
-  await nextTick()
+  // Nothing held any more (resolved since the line was drawn): leave the operator's filters alone.
   if (index < 0) return
+  clearFilters()
+  await nextTick()
   page.value = Math.floor(index / pageSize.value) + 1
   await nextTick()
   const el = document.querySelector<HTMLElement>(`[data-test="${CSS.escape(`review-tool-${all[index].name}`)}"]`)
@@ -321,20 +322,25 @@ async function requarantine() {
   if (!res.success) { error.value = res.error || 'Quarantine failed'; return }
   await load()
 }
+let fetchSeq = 0
 async function fetchDefinitions() {
-  const server = props.serverName; const visit = visitGeneration
+  const server = props.serverName; const visit = visitGeneration; const attempt = ++fetchSeq
   scanning.value = true; fetchOutcome.value = null
   const res = await api.discoverServerTools(server)
   if (!isCurrent(server, visit)) return
   scanning.value = false
+  const failure = res.success ? '' : (res.error || 'Failed to capture tool definitions')
+  // A trusted server keeps today's handling: a failed attempt is the error panel with Retry.
+  if (failure && review.value && !review.value.server.quarantined) { error.value = failure; return }
+  await load()
+  // Only the newest attempt of this visit reports, and only against the review that load just applied.
+  if (!isCurrent(server, visit) || attempt !== fetchSeq || !review.value) return
   // The attempt's outcome is reported on its own line. It never replaces the review (a failed attempt leaves
   // the screen in the state the last successful load put it in) and it never decides the branch: only the
   // reloaded `definitions_captured` does (Spec 134 FR-032).
-  const failure = res.success ? '' : (res.error || 'Failed to capture tool definitions')
-  await load()
-  if (!isCurrent(server, visit) || !review.value) return
-  if (review.value.server.definitions_captured) fetchOutcome.value = { kind: 'ok', text: 'Tool definitions were captured. Review them before approving.' }
-  else if (failure) fetchOutcome.value = { kind: 'failed', text: `The fetch attempt failed: ${failure}` }
+  const captured = review.value.server.definitions_captured
+  if (failure) fetchOutcome.value = { kind: 'failed', text: `The fetch attempt failed: ${failure}.${captured ? ' The definitions are captured now: review them before approving.' : ' Nothing was enabled or approved.'}` }
+  else if (captured) fetchOutcome.value = { kind: 'ok', text: 'Tool definitions were captured. Review them before approving.' }
   else if (review.value.server.enabled === false) fetchOutcome.value = { kind: 'none', text: 'The server is disabled, so its tools could not be fetched. Nothing was enabled or approved.' }
   else fetchOutcome.value = { kind: 'none', text: 'The attempt finished but no tool definitions were captured. Nothing was enabled or approved.' }
 }

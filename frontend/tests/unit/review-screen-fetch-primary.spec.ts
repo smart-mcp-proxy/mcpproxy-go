@@ -71,4 +71,22 @@ describe('ReviewScreen not-captured branch (Spec 134 FR-032, SC-009)', () => {
     expect(w.find('[data-test="review-no-definitions"]').exists()).toBe(false)
     expect(w.get('[data-test="review-approve-server"]').classes()).toContain('btn-primary')
   })
+
+  it('a trusted server keeps today\'s handling: a failed fetch is the error panel with Retry', async () => {
+    ;(api.getServerReview as any).mockResolvedValue(review(false, { quarantined: false }))
+    ;(api.discoverServerTools as any).mockResolvedValue({ success: false, error: 'boom' })
+    const w = mount(ReviewScreen, { props: { serverName: 'fx' }, ...stubs }); await flushPromises()
+    await w.get('[data-test="review-fetch-definitions"]').trigger('click'); await flushPromises()
+    expect(w.find('.alert-error').text()).toContain('boom')
+    expect(w.find('[data-test="review-fetch-outcome"]').exists()).toBe(false)
+  })
+
+  it('a failed attempt whose reload shows captured definitions reports both facts', async () => {
+    ;(api.getServerReview as any).mockResolvedValueOnce(review(false)).mockResolvedValue(review(true))
+    ;(api.discoverServerTools as any).mockResolvedValue({ success: false, error: 'boom' })
+    const w = mount(ReviewScreen, { props: { serverName: 'fx' }, ...stubs }); await flushPromises()
+    await w.get('[data-test="review-fetch-definitions"]').trigger('click'); await flushPromises()
+    const text = w.get('[data-test="review-fetch-outcome"]').text()
+    expect(text).toContain('boom'); expect(text).toContain('captured now')
+  })
 })
