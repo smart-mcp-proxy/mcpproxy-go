@@ -136,19 +136,20 @@ Add to your `~/.mcpproxy/mcp_config.json`:
 
 ### Init process and stop timeout
 
-mcpproxy starts every isolated container with two defaults:
+mcpproxy starts every isolated container with these defaults:
 
 | Flag | When | Why |
 |------|------|-----|
 | `--init` | The Docker daemon reports a working `docker-init`. Never on Podman. | Runs a small init as PID 1, so the MCP server does not have to be one |
-| `--stop-timeout 3` | Always | Seconds `docker stop` waits before it kills the container. Docker's own default is 10 |
+| `--stop-timeout 10` | Always | Seconds `docker stop` waits before it kills the container. Docker's own default on Linux, set so that mcpproxy can plan for it |
+| `--sig-proxy=false` | Always | Keeps the docker client from passing its own `SIGTERM` on, so the server gets one and not two |
 
 An MCP server is arbitrary third-party software, and few programs are written to run as PID 1. Without an init:
 
-- **Signals are ignored.** Linux drops a signal sent to PID 1 unless the program handles it, so `SIGTERM` does nothing and every stop waits out the whole timeout before the container is killed.
+- **Signals are ignored.** Linux drops a signal sent to PID 1 unless the program handles it, so `SIGTERM` does nothing and a server that ignores its closed stdin takes the whole timeout to stop.
 - **Zombies pile up.** Orphaned child processes are re-parented to PID 1. A server that does not reap them keeps each one as a zombie, holding a process ID until the container ends.
 
-Both defaults come before `extra_args` on the command line and Docker uses the last occurrence of a flag, so a server can override either one:
+The defaults come before `extra_args` on the command line and Docker uses the last occurrence of a flag, so a server can override them:
 
 ```json
 {
@@ -158,7 +159,7 @@ Both defaults come before `extra_args` on the command line and Docker uses the l
       "command": "my-server",
       "isolation": {
         "image": "example/s6-overlay-image",
-        "extra_args": ["--init=false", "--stop-timeout", "8"]
+        "extra_args": ["--init=false", "--stop-timeout", "20"]
       }
     }
   ]
@@ -166,7 +167,7 @@ Both defaults come before `extra_args` on the command line and Docker uses the l
 ```
 
 - Use `--init=false` for images whose own init must be PID 1, such as those built on **s6-overlay** or **systemd**. They refuse to start otherwise (for example `s6-overlay-suexec: fatal: can only run as pid 1`).
-- Raise `--stop-timeout` for a server that needs longer to clean up. When mcpproxy itself shuts down it gives a container about 15 seconds at most, so higher values only help when a single server is stopped or restarted.
+- Raise `--stop-timeout` for a server that needs longer to clean up. When mcpproxy itself shuts down, it stops waiting for its servers after 20 seconds and kills the containers that are still running a few seconds later, so higher values mainly help when a single server is stopped or restarted.
 
 Containers you define yourself (`"command": "docker", "args": ["run", …]`) are not changed: add the flags to `args` if you want them.
 

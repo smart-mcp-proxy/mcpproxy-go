@@ -512,8 +512,9 @@ To turn the watcher off, set `MCPPROXY_NETWORK_RECOVERY=off` in the environment 
 
 When MCPProxy stops, it performs graceful shutdown of all subprocesses:
 
-1. **Graceful Close** (10s): Close MCP connection, wait for process to exit
-2. **Force Kill** (9s): If still running, SIGTERM → poll → SIGKILL
+1. Close the server's stdin and wait 2 seconds for it to exit
+2. Ask it to exit (SIGTERM, `CTRL_BREAK` on Windows, `docker stop` for containers)
+3. Kill it if it is still running
 
 **Process groups**: Child processes (spawned by npm/npx/uvx) are placed in a process group, ensuring all related processes are terminated together.
 
