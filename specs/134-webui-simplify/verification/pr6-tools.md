@@ -4,10 +4,10 @@ Checked on the PR head, 2026-11-25, macOS arm64. Stacked on #2049 (PR 1); PR 1's
 
 | Check | Command | Result |
 |---|---|---|
-| Frontend unit tests | `cd frontend && npx vitest run` | 3,255 passed (364 files) |
+| Frontend unit tests | `cd frontend && npx vitest run` | 3,253 passed (364 files) |
 | Type check | `cd frontend && npx vue-tsc --noEmit` | clean |
 | Build | `cd frontend && npm run build`; `go build ./cmd/mcpproxy`; `go build -tags server ./cmd/mcpproxy` | ok |
-| Playwright sweeps, with fixture upstream | `MCPPROXY_FIXTURE_PATH=<mcpfixture> ./scripts/run-web-smoke.sh` | see "Sweep" below |
+| Playwright sweeps, with fixture upstream | `MCPPROXY_FIXTURE_PATH=<mcpfixture> ./scripts/run-web-smoke.sh` | 170 passed, 3 skipped (fixture-dependent), 0 failed (an earlier run had one unrelated `shell-pr1` palette timing failure that passed on rerun) |
 
 ## What the tests guard
 
