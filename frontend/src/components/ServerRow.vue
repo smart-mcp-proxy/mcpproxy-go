@@ -562,7 +562,7 @@ async function confirmDelete() {
 .server-row__status { overflow: hidden; }
 .server-row__status :deep(.status-pill) { max-width: 100%; overflow: hidden; }
 .server-row__action { display: flex; justify-content: flex-end; }
-.server-row__more { display: flex; justify-content: flex-end; }
+.server-row__more { justify-self: end; }
 @media (max-width: 1199px) {
   .server-row {
     grid-template-columns: minmax(0, 1fr) auto;

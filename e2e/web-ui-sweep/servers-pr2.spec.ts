@@ -177,8 +177,9 @@ test('phone 390x844: the more menu opens by tap, its items are 44 px, Logs navig
     expect((await page.locator(`[data-test="${id}"]`).boundingBox())!.height).toBeGreaterThanOrEqual(44)
   }
   await page.keyboard.press('Escape')
-  await expect(page.locator('[role="dialog"]')).toHaveCount(0)
-  await row.locator('[data-test="server-card-menu-trigger"]').click()
+  await expect(page.locator('[aria-label="Delete server"]')).toHaveCount(0)
+  // Focus went back to the more button, which keeps its menu open.
+  await expect(menu).toBeVisible()
   await row.locator('[data-test="server-card-menu-logs"]').click()
   await expect(page).toHaveURL(/\/ui\/servers\/broken\?tab=logs/)
 })
