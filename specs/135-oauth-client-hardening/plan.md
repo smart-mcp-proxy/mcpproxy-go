@@ -100,7 +100,7 @@ Post-design re-check: PASS. Nothing in Phase 1 adds a dependency, a lock or tray
 ### D4. Issuer-bound rows (FR-009–FR-013)
 
 - **Record.** `storage.OAuthTokenRecord` gains `Issuer` and `IssuerSource` (`omitempty`). They live inside the body that `encodeOAuthRecord` seals (`oauth_binding.go:166`). The additional data does not change, and a row without the fields marshals to the same bytes as before.
-- **Binding = `{Issuer, Target, Source}`** (FR-013). `ExpectedIssuer.Binding()` derives it from a snapshot: for `discovered` the validated issuer plus the PRM entry, for `configured` the declared issuer plus the metadata URL, for `synthetic` the synthetic issuer as both values. `Matches(stored, snap, skip)` compares the target always, and also the issuer when skip is off. Toggling skip never changes the target, so continuity holds in both directions.
+- **Binding = `{Issuer, Target, Source}`** (FR-013). `ExpectedIssuer.Binding()` derives it from a snapshot: for `discovered` the validated issuer plus the PRM entry, for `configured` the declared issuer plus the metadata URL, for `synthetic` the synthetic issuer as both values. `Matches(stored, snap, skip)` always compares the target and the source class (`fallback` versus the rest), and compares the issuer only when skip is off. Toggling skip never changes the target, so continuity holds in both directions.
 - **Handler-held credentials (FR-009).** Every place that puts `ClientID`/`ClientSecret` into an mcp-go `OAuthConfig` (`config.go:1495-1546`) also sets `CredentialsIssuer` from the credential's own binding: the row's for persisted DCR, the flow's `exp` for a fresh DCR, the issuer of the first validated snapshot for a static client. mcp-go v1.3+ then refuses any refresh whose metadata names another issuer (`ErrAuthorizationServerChanged`). On the mcpproxy side, `oauthRefreshOnce` takes the secret from the same credential snapshot whose binding it checked, never from a handler whose binding differs. That rules out the warm-handler case where A and B share a `client_id`.
 - **Code exchange (FR-009).** The pending flow stores the `ExpectedIssuer` captured at authorization time. Before redemption, `exchangeAuthorizationCode` compares `h.GetServerMetadata()` (the handler's current metadata) with the capture: the same issuer and the same token endpoint. If they differ, it aborts with `ISSUER_CHANGED` and restarts the flow, and the code is never sent. mcp-go v1.0.0 caches metadata once per handler (`sync.Once`), and v1.2+ re-discovers after a failure, so this compare is what catches a rediscovery in between.
 - **Snapshot-consistent sends (FR-009).** A new helper `oauth.SendSnapshot(handler) (ExpectedIssuer, *AuthServerMetadata, error)` returns one validated snapshot. Every credential send gets its issuer **and** its endpoint from that one value:
@@ -118,7 +118,7 @@ Post-design re-check: PASS. Nothing in Phase 1 adds a dependency, a lock or tray
   - runs in one bbolt transaction;
   - re-reads the row and requires `Revision == observedRevision && Issuer == ""`;
   - requires that the row is not undecryptable;
-  - re-seals with the configured key, or writes plain JSON without one, as today.
+  - re-seals with the configured key, or writes plain JSON without one, as today, and in the same transaction creates `oauth_static_client_bindings` for a configured confidential client when it is absent.
 
   Otherwise it writes nothing. It runs at most once per row, off the hot path, after the use that discovered the issuer.
 - **One issuer per row (FR-012).** `UpdateOAuthClientCredentials*` (`oauth_binding.go:467-499`, the DCR persistence called before the browser opens, `connection_oauth.go:1177-1228`, `:2218-2244`) gains an `issuer` argument. When the row's `Issuer` is set and differs, the same transaction clears `AccessToken`, `RefreshToken`, `ExpiresAt` and `Scopes`. Those tokens were already refused under FR-009. The login write (`WithLoginClient`) always writes token, registration and issuer together. A failed callback after DCR leaves a registration-only row bound to the new issuer, which is reusable for the next login against that issuer.
@@ -182,7 +182,8 @@ Two or three instances (honest H, hostile A, replacement B) cover mix-up and swa
 | `TestSwap_StaticClientIDKept` / `TestSwap_StaticConfidentialSecretNotSentToNewIssuer` | US2.5, US2.10 |
 | `TestDCR_CrossOriginRedirectNotFollowed` | FR-010 DCR |
 | `TestFallbackSource_WrongIssRefused` / `TestFallback_NotForPathIssuer` / `TestBoundDiscovered_NoSendToFallback` | FR-004a |
-| `TestStaticSecretProvenance_SurvivesLogoutAndScopesEdit` | FR-012, US2.11 |
+| `TestStaticSecretProvenance_SurvivesLogoutAndScopesEdit` / `TestUpgrade_UnexpiredTokenSetsSecretProvenance` | FR-012, FR-011, US2.11, US3.7 |
+| `TestSkip_FallbackDiscoveredTransitionsRefused` | FR-013 source class under skip |
 | `TestSnapshotExpiry_StaggeredPRMAndPreflight` | FR-009b |
 | `TestRefusedCallback_NoTokenStored_DCRRowBound` | US1 storage, US1.9 |
 | `TestSkip_MetadataCrossOriginRedirectStillRefused` | FR-014 / US6.6 |
