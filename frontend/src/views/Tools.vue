@@ -10,7 +10,21 @@
         <div v-if="stats" class="badge badge-outline badge-lg">
           {{ stats.total }} tools
         </div>
-        <button @click="loadTools" class="btn btn-sm btn-ghost" :disabled="loading" aria-label="Refresh tools" title="Refresh tools" data-test="tools-refresh">
+        <!-- Spec 134 FR-055: grouped by server (default) or today's flat table.
+             Two real buttons, so Tab and Enter or Space switch it; the choice is
+             stored in the browser. -->
+        <div class="join" role="group" aria-label="Layout" data-test="tools-layout">
+          <button
+            v-for="option in LAYOUT_OPTIONS"
+            :key="option.value"
+            type="button"
+            class="btn btn-sm btn-outline join-item min-h-11 sm:min-h-8"
+            :aria-pressed="layout === option.value"
+            :data-test="`tools-layout-${option.value}`"
+            @click="setLayout(option.value)"
+          >{{ option.label }}</button>
+        </div>
+        <button @click="loadTools" class="btn btn-sm btn-outline min-h-11 sm:min-h-8" :disabled="loading" aria-label="Refresh tools" title="Refresh tools" data-test="tools-refresh">
           <svg class="w-4 h-4" :class="{ 'animate-spin': loading }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
@@ -19,7 +33,8 @@
     </div>
 
     <!-- Summary Stat Cards -->
-    <div v-if="stats" class="stats shadow bg-base-100 w-full">
+    <!-- Two columns on a phone so the four statistics never scroll sideways. -->
+    <div v-if="stats" class="stats shadow bg-base-100 w-full max-sm:grid max-sm:grid-cols-2 max-sm:[grid-auto-flow:row] max-sm:overflow-visible">
       <button
         type="button"
         :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', activeStatCard === 'total' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
@@ -134,6 +149,32 @@
             </select>
           </div>
 
+          <!-- Spec 134 FR-056: shortcut for every row that carries a label. -->
+          <label class="label cursor-pointer gap-2 py-1 min-h-11 sm:min-h-0 self-end">
+            <input v-model="onlyExceptions" type="checkbox" class="checkbox checkbox-sm" data-test="tools-only-exceptions" />
+            <span class="label-text text-sm">Only exceptions</span>
+          </label>
+
+          <button
+            type="button"
+            class="btn btn-sm btn-outline min-h-11 sm:min-h-8"
+            :aria-expanded="moreFiltersOpen"
+            aria-controls="tools-more-filters"
+            data-test="tools-more-filters-toggle"
+            @click="moreFiltersOpen = !moreFiltersOpen"
+          >More filters<span v-if="advancedFilterCount > 0" class="badge badge-sm ml-1">{{ advancedFilterCount }}</span></button>
+
+          <!-- Clear Filters -->
+          <button v-if="hasActiveFilters" @click="clearFilters" class="btn btn-sm btn-outline min-h-11 sm:min-h-8">
+            Clear Filters
+          </button>
+        </div>
+
+        <!-- Status, Tier and Approval keep their parameters (status, tier with
+             the risk alias, approval). v-show keeps them mounted; the panel
+             opens by itself when a link has set one of them. New filters (for
+             example tool labels) belong in this panel. -->
+        <div v-show="moreFiltersOpen" id="tools-more-filters" class="flex flex-wrap gap-4 items-end mt-3 pt-3 border-t border-[var(--ds-border)]" data-test="tools-more-filters">
           <!-- Status filter -->
           <div class="form-control min-w-[130px]">
             <label class="label py-1">
@@ -179,11 +220,6 @@
               <option value="changed">Changed, needs review</option>
             </select>
           </div>
-
-          <!-- Clear Filters -->
-          <button v-if="hasActiveFilters" @click="clearFilters" class="btn btn-sm btn-ghost">
-            Clear Filters
-          </button>
         </div>
 
         <!-- Spec 108-j J4: the profile/client/token chips (removable), with the
@@ -207,6 +243,7 @@
           <span v-if="filterStatus" class="badge badge-sm badge-outline">Status: {{ filterStatus }}</span>
           <span v-if="filterTier" class="badge badge-sm badge-outline">Tier: {{ filterTier }}</span>
           <span v-if="filterApproval" class="badge badge-sm badge-outline">Approval: {{ toolApprovalLabel(filterApproval) }}</span>
+          <span v-if="onlyExceptions" class="badge badge-sm badge-outline">Only exceptions</span>
         </div>
       </div>
     </div>
@@ -238,14 +275,15 @@
     </div>
 
     <!-- Batch action bar -->
-    <div v-if="selectedKeys.size > 0" class="alert shadow-md" data-test="tools-batch-bar">
+    <!-- Sticky: a selection made far down a long grouped list keeps its bar in view. -->
+    <div v-if="selectedKeys.size > 0" class="alert shadow-md sticky top-2 z-20" data-test="tools-batch-bar">
       <div class="flex items-center gap-3 w-full flex-wrap">
-        <span class="font-medium">{{ selectedKeys.size }} tool{{ selectedKeys.size === 1 ? '' : 's' }} selected</span>
+        <span class="font-medium" data-test="tools-selected-count">{{ selectedKeys.size }} tool{{ selectedKeys.size === 1 ? '' : 's' }} selected on {{ selectedServerCount }} server{{ selectedServerCount === 1 ? '' : 's' }}<template v-if="hiddenSelectedCount > 0"> ({{ hiddenSelectedCount }} not shown on this page)</template></span>
         <button
           @click="batchEnable(true)"
           :disabled="batchLoading || viewAsActive"
           :title="viewAsActive ? LEAVE_VIEW_AS : undefined"
-          class="btn btn-sm btn-success"
+          class="btn btn-sm btn-outline min-h-11 sm:min-h-8"
           data-test="batch-enable"
         >
           <span v-if="batchLoading" class="loading loading-spinner loading-xs"></span>
@@ -255,7 +293,7 @@
           @click="batchEnable(false)"
           :disabled="batchLoading || viewAsActive"
           :title="viewAsActive ? LEAVE_VIEW_AS : undefined"
-          class="btn btn-sm btn-warning"
+          class="btn btn-sm btn-outline min-h-11 sm:min-h-8"
           data-test="batch-disable"
         >
           <span v-if="batchLoading" class="loading loading-spinner loading-xs"></span>
@@ -265,7 +303,7 @@
           @click="batchApproval('approve')"
           :disabled="batchLoading || viewAsActive || !hasApprovableSelection"
           :title="viewAsActive ? LEAVE_VIEW_AS : undefined"
-          class="btn btn-sm btn-primary"
+          class="btn btn-sm btn-primary min-h-11 sm:min-h-8"
           data-test="batch-approve"
         >
           <span v-if="batchLoading" class="loading loading-spinner loading-xs"></span>
@@ -275,13 +313,13 @@
           @click="batchApproval('reject')"
           :disabled="batchLoading || viewAsActive || !hasApprovableSelection"
           :title="viewAsActive ? LEAVE_VIEW_AS : undefined"
-          class="btn btn-sm btn-error"
+          class="btn btn-sm btn-outline min-h-11 sm:min-h-8"
           data-test="batch-reject"
         >
           <span v-if="batchLoading" class="loading loading-spinner loading-xs"></span>
           Reject
         </button>
-        <button @click="selectedKeys.clear()" class="btn btn-sm btn-ghost ml-auto">
+        <button @click="selectedKeys.clear()" class="btn btn-sm btn-outline min-h-11 sm:min-h-8 ml-auto" data-test="batch-clear">
           Clear selection
         </button>
       </div>
@@ -396,7 +434,43 @@
           </div>
         </div>
 
-        <!-- Table -->
+        <!-- Grouped (default): one collapsible section per server, built only
+             from the rows this caller was sent. -->
+        <div v-else-if="layout === 'grouped'" data-test="tools-grouped">
+          <div class="flex flex-wrap items-center gap-3 px-3 py-2 border-b border-[var(--ds-border)]">
+            <label class="flex items-center gap-2 text-sm cursor-pointer min-h-11 sm:min-h-0">
+              <input
+                type="checkbox"
+                class="checkbox checkbox-sm"
+                aria-label="Select all tools on this page"
+                :checked="allPageSelected"
+                :indeterminate="somePageSelected && !allPageSelected"
+                :disabled="viewAsActive"
+                :title="viewAsActive ? LEAVE_VIEW_AS : undefined"
+                data-test="tools-select-all"
+                @change="toggleSelectAll"
+              />
+              <span>Select all tools on this page<span class="text-base-content/60"> (including collapsed sections)</span></span>
+            </label>
+          </div>
+          <ToolGroupSection
+            v-for="group in pageGroups"
+            :key="group.server"
+            :group="group"
+            :info="serverInfoFor(group.server)"
+            :expanded="isSectionExpanded(group)"
+            :selected-keys="selectedKeys"
+            :tool-key="toolKey"
+            :view-as-active="viewAsActive"
+            :view-as-admin="viewAsAdmin"
+            :leave-view-as="LEAVE_VIEW_AS"
+            @toggle="toggleSection(group)"
+            @select="toggleSelect"
+            @details="openDetail"
+          />
+        </div>
+
+        <!-- Flat list: today's table, all seven sort keys. -->
         <div v-else class="overflow-x-auto">
           <table class="table table-sm" data-test="tools-table">
             <thead>
@@ -446,7 +520,7 @@
                 class="hover cursor-pointer"
                 :class="{ 'bg-primary/5': selectedKeys.has(toolKey(tool)), 'bg-base-200/70': viewAsAdmin && !isCallable(tool) }"
                 :data-not-callable="viewAsAdmin && !isCallable(tool) ? 'true' : undefined"
-                @click="openDetail(tool)"
+                @click="openDetail(tool, $event.currentTarget as HTMLElement)"
                 data-test="tool-row"
               >
                 <td @click.stop>
@@ -495,7 +569,7 @@
                        opening the tool (audit F36) — expose the full text on
                        hover/focus instead of losing it entirely. -->
                   <div
-                    class="max-w-xs truncate text-sm text-base-content/70"
+                    class="max-w-[16rem] truncate text-sm text-base-content/70"
                     :title="tool.description || undefined"
                   >
                     {{ tool.description || '—' }}
@@ -531,44 +605,7 @@
                     @click.stop
                   >Review</router-link>
                   <!-- Compact hold evidence: reason icon + TPA ids + overflow. -->
-                  <div
-                    v-if="holdEvidenceFor(tool)"
-                    class="flex items-center gap-1 mt-1 text-xs whitespace-nowrap"
-                    :class="holdEvidenceFor(tool)!.toneClass"
-                    :title="holdEvidenceFor(tool)!.description"
-                    data-test="tool-hold-evidence"
-                  >
-                    <UiIcon :name="holdEvidenceFor(tool)!.icon" class="w-3 h-3" />
-                    <span
-                      v-if="holdEvidenceFor(tool)!.verdict"
-                      class="badge badge-xs"
-                      :class="holdEvidenceFor(tool)!.verdict!.badgeClass"
-                      data-test="tool-hold-verdict"
-                    >
-                      {{ holdEvidenceFor(tool)!.verdict!.label }}
-                    </span>
-                    <!-- The reason reads inline when no signal chips crowd it out;
-                         otherwise it stays available to screen readers. -->
-                    <span :class="holdEvidenceFor(tool)!.signals.length ? 'sr-only' : ''">
-                      {{ holdEvidenceFor(tool)!.label }}
-                    </span>
-                    <span
-                      v-for="signal in holdEvidenceFor(tool)!.signals"
-                      :key="signal.raw"
-                      class="badge badge-xs"
-                      :class="holdEvidenceFor(tool)!.chipClass"
-                      :title="signal.raw"
-                      data-test="tool-hold-signal"
-                    >
-                      {{ signal.label }}
-                    </span>
-                    <span
-                      v-if="holdEvidenceFor(tool)!.collapsedCount > 0"
-                      class="opacity-70"
-                      :title="`${holdEvidenceFor(tool)!.collapsedCount} more matched signal(s)`"
-                      data-test="tool-hold-signal-more"
-                    >+{{ holdEvidenceFor(tool)!.collapsedCount }}</span>
-                  </div>
+                  <ToolHoldEvidence :tool="tool" />
                 </td>
                 <td>
                   <span v-if="tool.config_denied" class="badge badge-sm badge-error">config-denied</span>
@@ -594,11 +631,12 @@
               </tr>
             </tbody>
           </table>
+        </div>
 
           <!-- Pagination -->
-          <div v-if="totalPages > 1" class="flex justify-between items-center px-4 py-3 border-t border-base-300">
+          <div v-if="totalPages > 1 && showResults" class="flex flex-wrap justify-between items-center gap-2 px-4 py-3 border-t border-base-300" data-test="tools-pager">
             <div class="text-sm text-base-content/60">
-              Showing {{ (currentPage - 1) * pageSize + 1 }}–{{ Math.min(currentPage * pageSize, sortedTools.length) }} of {{ sortedTools.length }}
+              Showing {{ (currentPage - 1) * pageSize + 1 }}–{{ Math.min(currentPage * pageSize, orderedTools.length) }} of {{ orderedTools.length }}
             </div>
             <div class="join">
               <button @click="currentPage = 1" :disabled="currentPage === 1" class="join-item btn btn-sm">«</button>
@@ -615,81 +653,47 @@
               </select>
             </div>
           </div>
-        </div>
       </div>
     </div>
 
-    <!-- Tool Detail Modal -->
-    <div v-if="selectedTool" class="modal modal-open" @click.self="selectedTool = null">
+    <!-- Tool Detail dialog: opened by a flat row or by the Details button of a
+         grouped row. Escape closes it and focus returns to what opened it. -->
+    <div
+      v-if="selectedTool"
+      class="modal modal-open"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="tool-details-title"
+      data-test="tool-details-dialog"
+      @click.self="closeDetail"
+      @keydown.esc.stop="closeDetail"
+    >
       <div class="modal-box max-w-3xl">
-        <div class="flex justify-between items-start mb-4">
-          <div>
-            <h3 class="font-bold text-lg">
-              <code class="text-base bg-base-200 px-2 py-1 rounded">{{ selectedTool.name }}</code>
+        <div class="flex justify-between items-start mb-4 gap-2">
+          <div class="min-w-0">
+            <h3 id="tool-details-title" class="font-bold text-lg">
+              <code class="text-base bg-base-200 px-2 py-1 rounded break-all">{{ selectedTool.name }}</code>
             </h3>
             <div class="flex items-center gap-2 mt-2">
-              <router-link :to="serverDetailPath(selectedTool.server_name)" class="link link-primary text-sm">
+              <router-link :to="serverDetailPath(selectedTool.server_name)" class="link link-primary text-sm" data-test="tool-details-server-link">
                 {{ selectedTool.server_name }}
               </router-link>
-              <span class="badge badge-sm" :class="getTierBadgeClass(selectedTool)">{{ getTierLabel(selectedTool) }}</span>
-              <span v-if="selectedTool.config_denied" class="badge badge-sm badge-error">config-denied</span>
-              <span v-else-if="selectedTool.disabled" class="badge badge-sm badge-warning">disabled</span>
-              <span v-else class="badge badge-sm badge-success">enabled</span>
             </div>
           </div>
-          <button class="btn btn-sm btn-circle btn-ghost" @click="selectedTool = null">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-            </svg>
+          <button ref="detailCloseButton" class="btn btn-sm btn-circle btn-ghost min-h-11 min-w-11" aria-label="Close details" data-test="tool-details-close-x" @click="closeDetail">
+            <UiIcon name="x" class="w-5 h-5" />
           </button>
         </div>
 
-        <div class="space-y-4">
-          <div v-if="selectedTool.description">
-            <h4 class="text-sm font-semibold mb-1 text-base-content/70">Description</h4>
-            <p class="text-sm">{{ selectedTool.description }}</p>
-          </div>
-
-          <div class="flex gap-6 text-sm">
-            <div>
-              <span class="text-base-content/60">Usage (30d):</span>
-              <span class="ml-1 font-medium">{{ selectedTool.usage || 0 }}</span>
-            </div>
-            <div v-if="selectedTool.last_used">
-              <span class="text-base-content/60">Last used:</span>
-              <span class="ml-1">{{ formatRelativeTime(selectedTool.last_used) }}</span>
-            </div>
-            <div v-if="selectedTool.approval_status">
-              <span class="text-base-content/60">Approval:</span>
-              <span class="badge badge-sm ml-1 whitespace-nowrap" :class="getApprovalBadgeClass(selectedTool.approval_status)">
-                {{ toolApprovalLabel(selectedTool.approval_status) }}
-              </span>
-            </div>
-          </div>
-
-          <div v-if="selectedTool.annotations && Object.keys(selectedTool.annotations).length > 0">
-            <h4 class="text-sm font-semibold mb-1 text-base-content/70">Annotations</h4>
-            <div class="flex flex-wrap gap-2">
-              <span v-if="selectedTool.annotations.readOnlyHint" class="badge badge-sm badge-info">readOnly</span>
-              <span v-if="selectedTool.annotations.destructiveHint" class="badge badge-sm badge-error">destructive</span>
-              <span v-if="selectedTool.annotations.idempotentHint" class="badge badge-sm badge-ghost">idempotent</span>
-              <span v-if="selectedTool.annotations.openWorldHint" class="badge badge-sm badge-ghost">openWorld</span>
-            </div>
-          </div>
-
-          <div v-if="selectedToolSchema">
-            <h4 class="text-sm font-semibold mb-1 flex items-center gap-2 text-base-content/70">
-              Input Schema
-              <span class="badge badge-sm badge-ghost">JSON</span>
-            </h4>
-            <div class="mockup-code max-h-64 overflow-y-auto">
-              <pre class="text-xs"><code>{{ JSON.stringify(selectedToolSchema, null, 2) }}</code></pre>
-            </div>
-          </div>
-        </div>
+        <ToolDetails
+          :tool="selectedTool"
+          :view-as-admin="viewAsAdmin"
+          :calls-link="toolCallsLink(selectedTool)"
+          @why="whyFromDetails(selectedTool)"
+        />
 
         <div class="modal-action">
-          <button class="btn btn-sm" @click="selectedTool = null">Close</button>
+          <button class="btn btn-sm btn-outline min-h-11 sm:min-h-8" data-test="tool-details-close" @click="closeDetail">Close</button>
         </div>
       </div>
     </div>
@@ -709,11 +713,13 @@
 
 <script setup lang="ts">
 import UiIcon from '@/components/UiIcon.vue'
-import type { UiIconName } from '@/utils/uiIcons'
+import ToolDetails from '@/components/tools/ToolDetails.vue'
+import ToolGroupSection from '@/components/tools/ToolGroupSection.vue'
+import ToolHoldEvidence from '@/components/tools/ToolHoldEvidence.vue'
 import { serverDetailPath, reviewPath } from '@/utils/serverRoute'
 import { tierLabel, toolApprovalLabel } from '@/utils/toolQuarantine'
-import { formatDate } from '@/utils/datetime'
-import { ref, computed, onMounted, watch } from 'vue'
+import { formatRelativeTime, groupToolsByServer, hasToolException, type SectionServerInfo } from '@/utils/toolsGrouping'
+import { ref, computed, nextTick, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { isScopeParamAvailable, useScopeQuery } from '@/composables/useScopeQuery'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
@@ -722,7 +728,6 @@ import ScopeChips from '@/components/scope/ScopeChips.vue'
 import ViewAs from '@/components/ViewAs.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { GlobalTool, GlobalToolsStats, ViewAsCounts } from '@/types/api'
-import { parseHoldEvidence, displaySignals, reasonPresentation, verdictPresentation } from '@/utils/holdEvidence'
 import { accessReasonLabel, accessStateLabel } from '@/utils/accessReason'
 import { tierPhrase } from '@/utils/profiles'
 import { pickScopeParams, scopeParamsKey } from '@/utils/scopeParams'
@@ -955,6 +960,13 @@ const filterServer = ref('')
 const filterStatus = ref('')
 const filterTier = ref('')
 const filterApproval = ref('')
+// Spec 134 FR-056: show only rows that carry an exception label. Page-local.
+const onlyExceptions = ref(false)
+// "More filters" holds Status, Tier and Approval; it opens by itself when a
+// link has set one of them.
+const moreFiltersOpen = ref(false)
+const advancedFilterCount = computed(() => [filterStatus.value, filterTier.value, filterApproval.value].filter(Boolean).length)
+watch(advancedFilterCount, count => { if (count > 0) moreFiltersOpen.value = true })
 
 // Debounce search
 let searchTimer: ReturnType<typeof setTimeout> | null = null
@@ -1156,7 +1168,7 @@ const availableServers = computed(() => {
 })
 
 const hasActiveFilters = computed(() =>
-  !!searchQuery.value || !!filterServer.value || !!filterStatus.value || !!filterTier.value || !!filterApproval.value
+  !!searchQuery.value || !!filterServer.value || !!filterStatus.value || !!filterTier.value || !!filterApproval.value || onlyExceptions.value
 )
 
 // Clickable stat cards (parity with Servers page): each card drives the
@@ -1230,85 +1242,6 @@ function getApprovalBadgeClass(status: string): string {
   return 'badge-ghost'
 }
 
-// ---- Hold evidence (Spec 088 FR-008/FR-009/FR-012) ----
-// This page is a cross-server list, so its evidence stays COMPACT: the reason
-// icon carries the threat-vs-precaution distinction, plus the TPA signature ids
-// and an overflow count. The full badge — descriptions, verdict, scan-report
-// links — belongs to the server detail page, which is one click away.
-
-/** Compact cap: TPA ids are never collapsed by it (utils/holdEvidence). */
-const COMPACT_SIGNAL_CAP = 1
-
-interface CompactHoldEvidence {
-  icon: UiIconName
-  /** Plain-language reason; shown inline when there are no signal chips. */
-  label: string
-  description: string
-  toneClass: string
-  chipClass: string
-  signals: { label: string; raw: string }[]
-  /** Delivered-but-collapsed signals only — never a claim beyond the list. */
-  collapsedCount: number
-  /** FR-009: verdict severity must be visible, or a warnings hold and a
-      dangerous hold with the same signals would look identical. */
-  verdict: { label: string; badgeClass: string } | null
-}
-
-function buildHoldEvidence(tool: GlobalTool): CompactHoldEvidence | null {
-  // FR-012: only a tool still awaiting a decision may show hold evidence, so an
-  // approved/released record never renders stale findings.
-  if (!isApprovable(tool)) return null
-
-  const evidence = parseHoldEvidence(tool)
-  if (!evidence) return null
-  const reason = reasonPresentation(evidence)
-  if (!reason) return null
-
-  const { visible, collapsedCount } = displaySignals(evidence, COMPACT_SIGNAL_CAP)
-
-  return {
-    icon: (reason.tone === 'threat' ? 'alert' : reason.tone === 'precaution' ? 'shield' : 'info') as UiIconName,
-    label: reason.label,
-    description: reason.description,
-    toneClass:
-      reason.tone === 'threat'
-        ? 'text-error'
-        : reason.tone === 'precaution'
-          ? 'text-warning'
-          : 'text-base-content/70',
-    chipClass:
-      reason.tone === 'threat'
-        ? 'badge-error'
-        : reason.tone === 'precaution'
-          ? 'badge-warning'
-          : 'badge-ghost',
-    signals: visible.map(s => ({ label: s.label, raw: s.raw })),
-    collapsedCount,
-    verdict: (() => {
-      const v = verdictPresentation(evidence.verdict)
-      if (!v) return null
-      return {
-        label: v.label,
-        badgeClass: v.tone === 'danger' ? 'badge-error' : v.tone === 'warning' ? 'badge-warning' : 'badge-ghost',
-      }
-    })(),
-  }
-}
-
-// Parsed once per visible page rather than on every template access.
-const holdEvidenceByKey = computed(() => {
-  const map = new Map<string, CompactHoldEvidence>()
-  for (const tool of paginatedTools.value) {
-    const evidence = buildHoldEvidence(tool)
-    if (evidence) map.set(toolKey(tool), evidence)
-  }
-  return map
-})
-
-function holdEvidenceFor(tool: GlobalTool): CompactHoldEvidence | undefined {
-  return holdEvidenceByKey.value.get(toolKey(tool))
-}
-
 // ---- Computed: filtering ----
 // The population the search runs against: every filter EXCEPT the search box.
 // Split out so the empty state can name a scope that is literally true even when
@@ -1335,6 +1268,10 @@ const searchScope = computed(() => {
 
   if (filterApproval.value) {
     tools = tools.filter(t => t.approval_status === filterApproval.value)
+  }
+
+  if (onlyExceptions.value) {
+    tools = tools.filter(hasToolException)
   }
 
   if (viewAsAdmin.value && showFilter.value !== 'all') {
@@ -1417,18 +1354,100 @@ const sortedTools = computed(() => {
 })
 
 // ---- Computed: pagination ----
-const totalPages = computed(() => Math.ceil(sortedTools.value.length / pageSize.value))
+// Grouped: sections ordered like the Servers page, tools by name inside a
+// section. Flat: the sort the column headers chose.
+const groupedOrder = computed(() => {
+  const byName = [...filteredTools.value].sort((a, b) => a.name.localeCompare(b.name))
+  return groupToolsByServer(byName, serverInfoFor).flatMap(group => group.tools)
+})
+const orderedTools = computed(() => (layout.value === 'flat' ? sortedTools.value : groupedOrder.value))
+
+const totalPages = computed(() => Math.ceil(orderedTools.value.length / pageSize.value))
 
 const paginatedTools = computed(() => {
   const start = (currentPage.value - 1) * pageSize.value
-  return sortedTools.value.slice(start, start + pageSize.value)
+  return orderedTools.value.slice(start, start + pageSize.value)
 })
 
-// ---- Computed: modal schema ----
-const selectedToolSchema = computed(() => {
-  if (!selectedTool.value) return null
-  const t = selectedTool.value as any
-  return t.input_schema || t.schema || null
+// ---- Grouped layout (Spec 134 FR-055) ----
+// Sections come from the rows returned to this caller and from nothing else. The
+// server list is read only to look up the health of a server that already has a
+// returned row; a server without one gets no section, and one the caller cannot
+// read health for gets no pill.
+type LayoutMode = 'grouped' | 'flat'
+const LAYOUT_OPTIONS: { value: LayoutMode; label: string }[] = [
+  { value: 'grouped', label: 'Grouped' },
+  { value: 'flat', label: 'Flat list' },
+]
+const LAYOUT_STORAGE_KEY = 'mcpproxy.tools.layout'
+function readLayout(): LayoutMode {
+  try {
+    return window.localStorage.getItem(LAYOUT_STORAGE_KEY) === 'flat' ? 'flat' : 'grouped'
+  } catch {
+    return 'grouped'
+  }
+}
+const layout = ref<LayoutMode>(readLayout())
+function setLayout(value: LayoutMode) {
+  layout.value = value
+  try {
+    window.localStorage.setItem(LAYOUT_STORAGE_KEY, value)
+  } catch {
+    // Private windows may refuse storage; the choice still holds for this visit.
+  }
+}
+watch(layout, () => { currentPage.value = 1 })
+
+const serverInfoByName = computed(() => {
+  const map = new Map<string, SectionServerInfo>()
+  for (const server of serversStore.servers) {
+    map.set(server.name, {
+      enabled: server.enabled,
+      quarantined: server.quarantined,
+      status: server.health?.status ?? null,
+      level: server.health?.level ?? null,
+      usable: server.health?.usable ?? null,
+    })
+  }
+  return map
+})
+function serverInfoFor(name: string): SectionServerInfo | undefined {
+  return serverInfoByName.value.get(name)
+}
+
+const showResults = computed(() => !scopeConflict.value && !scopeError.value && !error.value && !(loading.value && allTools.value.length === 0) && filteredTools.value.length > 0)
+
+const totalByServer = computed(() => {
+  const map = new Map<string, number>()
+  for (const tool of filteredTools.value) map.set(tool.server_name, (map.get(tool.server_name) ?? 0) + 1)
+  return map
+})
+const pageGroups = computed(() =>
+  groupToolsByServer(paginatedTools.value, serverInfoFor).map(group => ({
+    ...group,
+    total: totalByServer.value.get(group.server) ?? group.tools.length,
+  }))
+)
+
+// Collapse state is per session (not stored). Without a choice of the user's, a
+// server that is not usable starts collapsed, unless a search or filter is on:
+// then every section with a match is open so a match is never hidden.
+const sectionChoice = ref(new Map<string, boolean>())
+const filtering = computed(() => hasActiveFilters.value || viewAsActive.value || showFilter.value !== 'all')
+function isSectionExpanded(group: { server: string; rank: number }): boolean {
+  const chosen = sectionChoice.value.get(group.server)
+  if (chosen !== undefined) return chosen
+  return filtering.value || group.rank === 1
+}
+function toggleSection(group: { server: string; rank: number }) {
+  sectionChoice.value.set(group.server, !isSectionExpanded(group))
+}
+
+// The batch bar counts what is selected, collapsed or not, and across pages.
+const selectedServerCount = computed(() => new Set(allTools.value.filter(t => selectedKeys.value.has(toolKey(t))).map(t => t.server_name)).size)
+const hiddenSelectedCount = computed(() => {
+  const onPage = new Set(paginatedTools.value.map(toolKey))
+  return [...selectedKeys.value].filter(k => !onPage.has(k)).length
 })
 
 // ---- Methods ----
@@ -1491,8 +1510,28 @@ async function loadTools() {
   }
 }
 
-function openDetail(tool: GlobalTool) {
+// ---- Detail dialog (Spec 134 FR-056) ----
+const detailCloseButton = ref<HTMLElement | null>(null)
+let detailOpener: HTMLElement | null = null
+
+function openDetail(tool: GlobalTool, opener?: HTMLElement) {
   selectedTool.value = tool
+  detailOpener = opener ?? null
+  void nextTick(() => detailCloseButton.value?.focus())
+}
+
+function closeDetail() {
+  selectedTool.value = null
+  const opener = detailOpener
+  detailOpener = null
+  // Focus returns to what opened the dialog while that element still exists.
+  void nextTick(() => { if (opener && opener.isConnected) opener.focus() })
+}
+
+// "Why?" opens its own explainer; the details dialog steps aside first.
+function whyFromDetails(tool: GlobalTool) {
+  closeDetail()
+  openWhy(tool)
 }
 
 function clearFilters() {
@@ -1501,26 +1540,18 @@ function clearFilters() {
   filterStatus.value = ''
   filterTier.value = ''
   filterApproval.value = ''
+  onlyExceptions.value = false
   currentPage.value = 1
 }
 
-function formatRelativeTime(ts: string): string {
-  const diff = Date.now() - new Date(ts).getTime()
-  if (diff < 60_000) return 'just now'
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`
-  if (diff < 30 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d ago`
-  return formatDate(ts)
-}
-
 // Reset page when filters/sort change
-watch([filterServer, filterStatus, filterTier, filterApproval, sortColumn, sortDirection, showFilter], () => {
+watch([filterServer, filterStatus, filterTier, filterApproval, sortColumn, sortDirection, showFilter, onlyExceptions], () => {
   currentPage.value = 1
 })
 
 // A shrinking result (another view-as subject, a refresh) must never strand the
 // table on a page past the end: zero rows and no pager (F2.2).
-watch(() => Math.ceil(sortedTools.value.length / pageSize.value), (pages) => {
+watch(() => Math.ceil(orderedTools.value.length / pageSize.value), (pages) => {
   if (currentPage.value > pages) currentPage.value = Math.max(1, pages)
 })
 

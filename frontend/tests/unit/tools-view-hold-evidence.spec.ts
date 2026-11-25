@@ -46,6 +46,9 @@ async function rowFor(wrapper: ReturnType<typeof mountView>, name: string) {
   return row!
 }
 
+// Spec 134 PR 6: these cases read the flat table; the page opens grouped by default.
+window.localStorage.setItem('mcpproxy.tools.layout', 'flat')
+
 describe('Tools view — compact hold evidence on held rows', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
