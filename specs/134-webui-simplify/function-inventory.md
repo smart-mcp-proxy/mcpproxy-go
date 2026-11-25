@@ -199,13 +199,13 @@ Files: `views/Home.vue`, `components/AttentionList.vue`, `UsageSummaryStrip.vue`
 | P4-13 | Get started: Connect a client (`/clients`), done tick when connected | Home.vue:50-51 | Same | home-getting-started.spec.ts |
 | P4-14 | Get started: Run setup wizard (opens dialog) | Home.vue:55 | Same | home-getting-started.spec.ts |
 | P4-15 | Setup wizard auto-opens on first load when `should_show_wizard`; dialog over Home | Home.vue:842-846 | Unchanged | home-pr4.spec.ts wizard |
-| P4-16 | Strip: calls, blocked, errors figures with `—` until loaded | UsageSummaryStrip.vue | Same | usage-summary-strip-link.spec.ts |
+| P4-16 | Strip: calls, blocked, errors figures with `—` until loaded | UsageSummaryStrip.vue | Same; refreshes every 30 s (it no longer remounts when attention changes) | usage-summary-strip-link.spec.ts |
 | P4-17 | Strip filters: calls `view=calls&from=-24h`, blocked adds `status=blocked`, errors adds `status=error`, scope carried | UsageSummaryStrip.vue | Same links | usage-summary-strip-link.spec.ts |
 | P4-18 | Strip: View usage link to `/usage` (scope carried) | UsageSummaryStrip.vue | Same | usage-summary-strip-link.spec.ts |
 | P4-19 | Strip window label: says "calls today" but the window is a rolling 24 hours | UsageSummaryStrip.vue | "calls, last 24 hours" and a window note "Rolling 24 hours" | home-pr4.spec.ts |
 | P4-20 | Strip position: below topology with attention items, above it when empty; held until attention and servers loaded; never for tenant or first-run | Home.vue:63,417 | One position, after the attention list; same conditions | home-attention.spec.ts; dashboard-tenant-gating.spec.ts |
 | P4-21 | Recent activity (new on Home): five latest records, type icon, server:tool, relative time, status; View all link to `/activity`; loading, error, empty; not for tenant, not first-run | RecentActivity.vue | After the strip | home-pr4.spec.ts |
-| P4-22 | Usable-tool count (tools on servers whose `health.usable`) and routing mode, with the pending-mode notice; `—` until servers load; hidden for tenant | HeaderStatus.vue (was) | One line after recent activity: `home-fleet-line` | home-pr4.spec.ts; header-status*.spec.ts (no longer assert them) |
+| P4-22 | Usable-tool count (tools on servers whose `health.usable`) and routing mode, with the pending-mode notice; `—` until servers load; hidden for tenant | HeaderStatus.vue (was) | One line after recent activity: `home-fleet-line`; "Loading servers…" or "Servers unavailable" (`home-fleet-state`) until the list is known; also on first run | home-pr4.spec.ts; header-status*.spec.ts (no longer assert them) |
 | P4-23 | Routing mode label and hover detail; pending notice "Restart pending: /mcp will serve X after the next start" in text | HeaderStatus.vue | `home-fleet-mode`, `home-fleet-pending` | home-pr4.spec.ts |
 | P4-24 | Header online link keeps loading, unavailable, awaiting review, offline, compact `n/total`, aria-label and title | HeaderStatus.vue | Same; no tools or mode text | header-status.spec.ts, header-status-awaiting-review.spec.ts |
 | P4-25 | Shortcut Connect Clients (`/clients`), admin only | Home.vue:117 | Shortcut row | home-pr4.spec.ts; e2e |
@@ -213,7 +213,7 @@ Files: `views/Home.vue`, `components/AttentionList.vue`, `UsageSummaryStrip.vue`
 | P4-27 | Shortcut Recent Sessions (`/sessions`), admin only | Home.vue:126 | Shortcut row | home-pr4.spec.ts; e2e |
 | P4-28 | Shortcut Add Server (`/add-server`), admin only | Home.vue:314 | Shortcut row | home-pr4.spec.ts; e2e |
 | P4-29 | Shortcut Browse catalog (`/repositories`) | Home.vue:320 | Shortcut row | home-pr4.spec.ts; e2e |
-| P4-30 | Security Scan link (`/security`) with "Run first scan" or "N issues" badge | Home.vue:326-333 | Security scan summary section | home-pr4.spec.ts |
+| P4-30 | Security Scan link (`/security`) with "Run first scan" or "N issues" badge | Home.vue:326-333 | Security scan summary section; no new "no issues" claim | home-pr4.spec.ts |
 | P4-31 | Token savings chip: percentage, "smaller tool context per request", estimate badge, explainer title; only when percentage over 0 | Home.vue:185-206 | Token savings section header | home-token-savings-estimate.spec.ts |
 | P4-32 | Chip opens the breakdown and scrolls to it | Home.vue:646 | Same | home-pr4.spec.ts |
 | P4-33 | Details: saved badge with estimate marker, tokens saved per request, full tool list, typical query | Home.vue:339-381 | Token savings section | home-token-savings-estimate.spec.ts |
@@ -227,6 +227,6 @@ Files: `views/Home.vue`, `components/AttentionList.vue`, `UsageSummaryStrip.vue`
 | P4-41 | Activity Log link (`/activity`) | Home.vue:256 | Inside topology | home-pr4.spec.ts |
 | P4-42 | Servers card: connected count, tools available, disabled count, link to `/servers`; `—` until loaded | Home.vue:271-293 | Inside topology | first-load-unknown-state.spec.ts |
 | P4-43 | Quarantine count card to `/servers` | Home.vue:296-310 | Inside topology | home-pr4.spec.ts |
-| P4-44 | CLI hints panel (copyable commands) | Home.vue:413 | Same panel, last | home-pr4.spec.ts |
+| P4-44 | CLI hints panel (copyable commands) | Home.vue:413 | Same panel, last on the page, outside the collapsed topology; its two headers are now keyboard-operable (`role=button`, Enter, Space) | home-pr4.spec.ts; e2e keyboard |
 | P4-45 | Tenant: no sessions, connect status, docker, config, token stats, scanner, strip, shortcuts that are admin doors | Home.vue loaders | Same guards | dashboard-tenant-gating.spec.ts |
 | P4-46 | 30 s refresh of clients, tokens, sessions, security, scanner, attention | Home.vue:820 | Same | existing |

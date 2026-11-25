@@ -56,7 +56,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useScopeQuery } from '@/composables/useScopeQuery'
 import api from '@/services/api'
@@ -85,7 +85,16 @@ const load = async () => {
   }
 }
 
-onMounted(load)
+// The strip is mounted once for every attention state, so it refreshes itself
+// (and retries a failed first load) instead of relying on a remount.
+let timer: ReturnType<typeof setInterval> | null = null
+onMounted(() => {
+  load()
+  timer = setInterval(load, 30000)
+})
+onUnmounted(() => {
+  if (timer) clearInterval(timer)
+})
 
 defineExpose({ load })
 </script>

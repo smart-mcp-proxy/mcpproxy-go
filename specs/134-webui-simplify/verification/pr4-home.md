@@ -42,3 +42,20 @@ Instances were isolated: own `--config`, `--data-dir`, `HOME`, ports 18941 to 18
 - Auto-open of the first-run wizard is unchanged code; its screenshot is attached but no test newly asserts it.
 - Server edition (`/my/*`, `/admin/*`) Home as a tenant: covered by unit tests only (`dashboard-tenant-gating.spec.ts`, `home-pr4.spec.ts`), not driven in a browser.
 - Dark theme primary buttons render daisyUI cyan rather than brand blue in the attention list and header (PR 1 tokens); not changed here.
+
+## Cross-model review (opencode `github-copilot/gpt-6.2-astra`, high, 1 round)
+
+Brief: which existing function the diff removes, hides without a named place, or makes unreachable at 390 px or by keyboard, against the merge-base `ad6a819ac`. Verified each finding against the code:
+
+| Finding | Verdict | Action |
+|---|---|---|
+| Fleet line hidden on first run, where the header showed it | real | Shown on first run too |
+| Mode shown before the server list is known | real | "Loading servers…" / "Servers unavailable" until loaded |
+| CLI hints moved inside the collapsed topology; their disclosure was click-only | real | Hints panel is last on the page again; its two headers got `role=button`, Enter and Space |
+| Scan summary "Loading…" never resolves for a tenant | real | No loading text; link only |
+| "No issues found" claims more than a scan count shows | real | Removed; only "Run first scan" and the issue count, as before |
+| Single usage strip no longer remounts, so no refresh | real | Strip refreshes itself every 30 s |
+| Nine `data-test` hooks removed | accepted | Moved elements: `home-usage-strip`, `home-shortcut-*`, header tools/mode moved to `home-fleet-*`; tests moved (FR-073) |
+| Loading/failed attention branches now render text | intended (P4-09) | none |
+
+Round 2 not run: no design change after round 1 beyond the fixes above.

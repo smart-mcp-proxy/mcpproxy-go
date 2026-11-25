@@ -67,8 +67,9 @@
          spec 134 FR-011). Usable = tools on servers whose health.usable is
          true; the topology below keeps its separately labelled "tools
          available" total. -->
-    <p v-if="authStore.principalKind !== 'tenant' && !showGettingStarted" class="text-sm flex flex-wrap items-baseline gap-x-2 gap-y-1" data-test="home-fleet-line">
-      <span><span class="font-bold tabular-nums" data-test="home-fleet-tools">{{ serversStore.loaded ? usableTools : '—' }}</span> usable {{ usableTools === 1 && serversStore.loaded ? 'tool' : 'tools' }}</span>
+    <p v-if="authStore.principalKind !== 'tenant' && !serversStore.loaded" class="text-sm text-base-content/70" data-test="home-fleet-state">{{ serversStore.loading.error ? 'Servers unavailable' : 'Loading servers…' }}</p>
+    <p v-else-if="authStore.principalKind !== 'tenant'" class="text-sm flex flex-wrap items-baseline gap-x-2 gap-y-1" data-test="home-fleet-line">
+      <span><span class="font-bold tabular-nums" data-test="home-fleet-tools">{{ usableTools }}</span> usable {{ usableTools === 1 ? 'tool' : 'tools' }}</span>
       <span class="text-base-content/50" aria-hidden="true">·</span>
       <span>Routing mode: <span class="font-medium" data-test="home-fleet-mode" :title="modeMeta.detail">{{ modeMeta.label }}</span></span>
       <span v-if="systemStore.routingRestartRequired" class="rounded border px-2 py-0.5 text-xs" style="background: var(--status-review-soft); color: var(--status-review); border-color: var(--status-review)" data-test="home-fleet-pending">Restart pending: /mcp will serve {{ pendingModeLabel }} after the next start</span>
@@ -93,10 +94,11 @@
         <div class="flex items-center gap-2 min-w-0">
           <UiIcon name="shield" class="w-5 h-5 shrink-0" />
           <span class="font-medium">Security scan</span>
-          <span v-if="!securityScannerLoaded" class="text-sm text-base-content/70">Loading…</span>
-          <span v-else-if="securityTotalScans === 0" class="text-sm" style="color: var(--status-review)">Run first scan</span>
-          <span v-else-if="securityTotalFindings > 0" class="text-sm font-medium" style="color: var(--status-review)">{{ securityTotalFindings }} issue{{ securityTotalFindings === 1 ? '' : 's' }}</span>
-          <span v-else class="text-sm text-base-content/70">No issues found</span>
+          <!-- Same facts as before: "Run first scan" or the issue count; no
+               "clean" claim, because a scan count that includes running jobs
+               cannot show that nothing was found. -->
+          <span v-if="securityScannerLoaded && securityTotalScans === 0" class="text-sm" style="color: var(--status-review)">Run first scan</span>
+          <span v-else-if="securityScannerLoaded && securityTotalFindings > 0" class="text-sm font-medium" style="color: var(--status-review)">{{ securityTotalFindings }} issue{{ securityTotalFindings === 1 ? '' : 's' }}</span>
         </div>
         <router-link to="/security" class="btn btn-sm btn-outline max-sm:min-h-11" data-test="home-security-scan-link">Open security scan</router-link>
       </div>
@@ -401,11 +403,11 @@
 
       </div>
         </div>
-
-        <!-- Hints Panel -->
-        <CollapsibleHintsPanel :hints="dashboardHints" />
       </div>
     </section>
+
+    <!-- CLI and agent hints: the last panel, outside the collapsed topology. -->
+    <CollapsibleHintsPanel :hints="dashboardHints" />
 
     <!-- Modals -->
     <OnboardingWizard :show="onboardingStore.wizardOpen" @close="onboardingStore.closeWizard" />

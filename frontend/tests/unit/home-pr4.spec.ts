@@ -244,12 +244,22 @@ describe('fleet line (P4-22, P4-23): usable tools and routing mode moved from th
     expect(wrapper.get(T('home-fleet-pending')).text()).toContain('Restart pending: /mcp will serve Direct after the next start')
   })
 
-  it('shows a dash before servers load and nothing for a tenant', async () => {
+  it('says it is loading before servers load, and shows nothing for a tenant', async () => {
     h.servers.mockReturnValue(new Promise(() => {}))
     let m = await mountHome()
-    expect(m.wrapper.get(T('home-fleet-tools')).text()).toBe('—')
+    expect(m.wrapper.get(T('home-fleet-state')).text()).toBe('Loading servers…')
+    expect(m.wrapper.find(T('home-fleet-mode')).exists()).toBe(false)
     m = await mountHome({ tenant: true })
     expect(m.wrapper.find(T('home-fleet-line')).exists()).toBe(false)
+    expect(m.wrapper.find(T('home-fleet-state')).exists()).toBe(false)
+  })
+
+  it('is also shown on a fresh instance (first run), where the header used to show it', async () => {
+    h.attention.mockResolvedValue({ success: true, data: { count: 0, items: [] } })
+    h.servers.mockResolvedValue({ success: true, data: { servers: [] } })
+    const { wrapper } = await mountHome()
+    expect(wrapper.find(T('home-getting-started')).exists()).toBe(true)
+    expect(wrapper.get(T('home-fleet-tools')).text()).toBe('0')
   })
 })
 
@@ -280,6 +290,9 @@ describe('shortcuts and scan summary (P4-25..P4-30)', () => {
     h.scan.findings = 2
     m = await mountHome()
     expect(m.wrapper.get(T('home-security-scan')).text()).toContain('2 issues')
+    h.scan.findings = 0
+    m = await mountHome()
+    expect(m.wrapper.get(T('home-security-scan')).text()).not.toContain('No issues')
   })
 })
 
