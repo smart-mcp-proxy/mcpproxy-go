@@ -52,20 +52,20 @@
           </p>
           <!-- Spec 134 FR-036: a table; below md each row stacks and the headers move into the cells. -->
           <div v-else ref="skillList" class="border border-base-300 rounded-lg lg:max-h-[65vh] lg:overflow-y-auto" data-test="skills-list">
-            <table class="table w-full text-sm" aria-label="Skills">
+            <table class="table w-full text-sm" :class="stacked ? 'block' : 'max-md:block'" aria-label="Skills">
               <thead :class="stacked ? 'hidden' : 'hidden md:table-header-group'">
                 <tr><th scope="col">Skill</th><th scope="col">Description</th><th scope="col">State</th><th scope="col">Scan result</th><th scope="col">Files</th><th scope="col"><span class="sr-only">Action</span></th></tr>
               </thead>
-              <tbody>
+              <tbody :class="stacked ? 'block' : 'max-md:block'">
                 <tr v-for="s in visibleSkills" :key="s.path" class="border-b border-base-200" :class="[rowCls, s.path === selectedPath ? 'bg-base-200' : '']" :data-test="`skill-tr-${s.path}`">
                   <td class="min-w-0" :class="cellCls">
-                    <span class="font-medium break-all" v-text="s.name || s.path"></span>
+                    <span class="font-medium [overflow-wrap:anywhere]" v-text="s.name || s.path"></span>
                     <span class="block text-xs text-base-content/70">{{ s.available ? 'Offered to agents' : 'Not offered' }}</span>
                   </td>
-                  <td class="min-w-0 md:max-w-xs" :class="cellCls"><span class="block text-base-content/80 line-clamp-2 break-words" v-text="s.description || 'No description'"></span></td>
+                  <td class="min-w-0 md:max-w-xs" :class="cellCls"><span class="block text-base-content/80 line-clamp-2 [overflow-wrap:anywhere]" v-text="s.description || 'No description'"></span></td>
                   <td :class="cellCls">
                     <StateTag :tone="skillStateTone(s)" :data-test="`skill-chip-${s.path}`"><span v-text="skillStateChip(s).label"></span></StateTag>
-                    <span v-if="s.unusable_reason" class="block text-xs text-base-content/70 break-words" :data-test="`skill-unusable-${s.path}`">Unusable: <span v-text="s.unusable_reason"></span></span>
+                    <span v-if="s.unusable_reason" class="block text-xs text-base-content/70 [overflow-wrap:anywhere]" :data-test="`skill-unusable-${s.path}`">Unusable: <span v-text="s.unusable_reason"></span></span>
                   </td>
                   <td class="text-base-content/80" :class="cellCls"><span :class="stacked ? '' : 'md:hidden'">Scan: </span><span v-text="s.scan?.verdict || 'not scanned'"></span></td>
                   <td class="text-base-content/80" :class="cellCls">{{ s.files?.length ?? 0 }} file{{ (s.files?.length ?? 0) === 1 ? '' : 's' }}</td>
