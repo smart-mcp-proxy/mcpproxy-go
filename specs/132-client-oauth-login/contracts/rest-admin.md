@@ -24,7 +24,7 @@ Pending requests, newest first: `[{id, client_label, created_at, expires_at}]`. 
     "has_api_key": true, "logins": 1,
     "binding": { "profile": "dev-readonly", "mode": "locked", "revision": "b1f3…" }
   },
-  "existing_clients": [ /* address_kind = generic: {id, display_name, binding} */ ],
+  "existing_clients": [ /* address_kind = generic: {id, display_name, binding, builtin}; builtin=true marks a supported connect-registry client with no records yet, choosable and created on approval */ ],
   "suggested_new_client": { "id": "acme-agent", "display_name": "Acme Agent" },
   "suggested_client": { "id": "cursor", "matched": "display_name" }, // generic only; present when the reported name equals exactly one entry of existing_clients (matched: id | display_name | known_name); absent otherwise
   "profiles": [ { "name": "dev-readonly" } ],

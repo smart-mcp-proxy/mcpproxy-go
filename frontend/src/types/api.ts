@@ -1626,7 +1626,8 @@ export interface OAuthAuthorizationClient {
   binding?: OAuthBindingView
 }
 
-export interface OAuthExistingClient { id: string; display_name: string; binding?: OAuthBindingView }
+/** `builtin`: a supported built-in client with no API key or login yet; approving creates its record. */
+export interface OAuthExistingClient { id: string; display_name: string; binding?: OAuthBindingView; builtin?: boolean }
 
 export interface OAuthGuardVerdict { code: string; bindings: BindingRef[]; fixes: GuardFix[] }
 

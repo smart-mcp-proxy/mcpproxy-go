@@ -181,6 +181,14 @@ func (s *OAuthLoginService) hasClientRecords(clientID string) bool {
 	return err == nil && b != nil
 }
 
+// builtinClient is the supported connect-registry client with this id, or nil.
+func (s *OAuthLoginService) builtinClient(clientID string) *connect.ClientDef {
+	if def := connect.FindClient(clientID); def != nil && def.Supported {
+		return def
+	}
+	return nil
+}
+
 // --- views ---------------------------------------------------------------------------
 
 // BindingView is a client's binding and its revision.
@@ -205,6 +213,9 @@ type ExistingClientView struct {
 	ID          string       `json:"id"`
 	DisplayName string       `json:"display_name"`
 	Binding     *BindingView `json:"binding,omitempty"`
+	// Builtin marks a supported built-in client that has no API key and no
+	// login yet: choosing it creates its record, like the per-client address.
+	Builtin bool `json:"builtin,omitempty"`
 }
 
 // SuggestedClient is the new-client suggestion derived from the reported name.
@@ -425,6 +436,14 @@ func (s *OAuthLoginService) Describe(ctx context.Context, requestID string) (*Au
 				ev.Binding = b
 			}
 			v.ExistingClients = append(v.ExistingClients, ev)
+		}
+		// Supported built-in clients with no records yet are choosable too
+		// (#1971): the same set a per-client address could already fix.
+		for _, def := range connect.GetAllClients() {
+			if !def.Supported || ids[def.ID] {
+				continue
+			}
+			v.ExistingClients = append(v.ExistingClients, ExistingClientView{ID: def.ID, DisplayName: def.Name, Builtin: true})
 		}
 		v.ProfileRequired = len(v.Profiles) > 0
 		v.SuggestedNewClient = s.suggestNewClient(reg.ReportedName, ids)
@@ -720,10 +739,16 @@ func (s *OAuthLoginService) resolveChoice(req mcplogin.Request, c ApprovalChoice
 		}
 		rc.clientID, rc.newClient, rc.display = n.ID, true, n.DisplayName
 	case c.Client.ID != "":
-		if !s.hasClientRecords(c.Client.ID) {
-			return nil, ErrOAuthClientUnknown
-		}
 		rc.clientID = c.Client.ID
+		if !s.hasClientRecords(rc.clientID) {
+			// A supported built-in client without records is created by this
+			// approval, exactly as on its per-client address.
+			def := s.builtinClient(rc.clientID)
+			if def == nil {
+				return nil, ErrOAuthClientUnknown
+			}
+			rc.newClient, rc.display = true, def.Name
+		}
 	default:
 		rc.complete = false
 	}
