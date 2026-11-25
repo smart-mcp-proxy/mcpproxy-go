@@ -32,6 +32,9 @@ async function open(page: Page, route: string, theme?: string) {
   await page.waitForTimeout(600)
 }
 
+/** First calls row that is a fixture-server call (internal calls such as retrieve_tools may sit above it). */
+const serverRow = (page: Page) => page.locator('[data-test="activity-row"]').filter({ has: page.locator('[data-test="activity-tool-label"]', { hasText: `${SERVER}:` }) }).first()
+
 async function shot(page: Page, name: string) {
   const dir = process.env.SWEEP_SCREENSHOT_DIR
   if (!dir) return
@@ -71,7 +74,7 @@ test('1280 px: five data columns and one action column, no horizontal scroll, no
   await open(page, '/activity')
   const headers = (await page.locator('[data-test="activity-table"] thead th').allInnerTexts()).map((t) => t.replace(/[↑↓]/g, '').trim())
   expect(headers).toEqual(['Time', 'Tool', 'Result', 'Client', 'Duration', 'Open details'])
-  const first = page.locator('[data-test="activity-row"]').first()
+  const first = serverRow(page)
   await expect(first.locator('[data-test="activity-tool-label"]')).toContainText(`${SERVER}:`)
   await expect(first.locator('button[data-test^="activity-open-"]')).toHaveCount(1)
   const m = await page.evaluate(() => {
@@ -88,7 +91,7 @@ test('1280 px: five data columns and one action column, no horizontal scroll, no
 test('row detail opens from the keyboard and holds type, details, server link and attribution; Escape closes', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await open(page, '/activity')
-  const btn = page.locator('[data-test="activity-row"] button[data-test^="activity-open-"]').first()
+  const btn = serverRow(page).locator('button[data-test^="activity-open-"]')
   await btn.focus()
   await page.keyboard.press('Enter')
   const panel = page.locator('[data-test="activity-detail-panel"]')
@@ -98,8 +101,16 @@ test('row detail opens from the keyboard and holds type, details, server link an
   await expect(panel.locator('[data-test="activity-drawer-attribution"]')).toBeVisible()
   await page.waitForTimeout(600)
   await shot(page, 'detail-1440-light')
+  // focus is inside the panel: Tab reaches the server link without crossing the table
+  await expect(panel).toBeFocused()
+  for (let i = 0; i < 12; i++) {
+    await page.keyboard.press('Tab')
+    if (await panel.locator(`a[href$="/servers/${SERVER}"]`).first().evaluate((n) => n === document.activeElement)) break
+  }
+  await expect(panel.locator(`a[href$="/servers/${SERVER}"]`).first()).toBeFocused()
   await page.keyboard.press('Escape')
   await expect(panel.locator('[data-test="activity-detail-type"]')).toHaveCount(0)
+  await expect(btn).toBeFocused()
 })
 
 test('Sort control: every key in both directions, by keyboard', async ({ page }) => {
@@ -215,7 +226,7 @@ test('390 px: the calls table fits, the row detail is a full-width panel, the po
   expect(box.x + box.width).toBeLessThanOrEqual(390.5)
   await shot(page, 'popover-390-light')
   await page.keyboard.press('Escape')
-  await page.locator('[data-test="activity-row"] button[data-test^="activity-open-"]').first().click()
+  await serverRow(page).locator('button[data-test^="activity-open-"]').click()
   await page.waitForTimeout(600)
   const panel = (await page.locator('[data-test="activity-detail-panel"]').boundingBox())!
   expect(panel.width).toBeGreaterThanOrEqual(389)

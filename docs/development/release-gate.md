@@ -130,6 +130,8 @@ page disagree):
   sidebar and `+ Add`, the Viewing chip across pages, Clients-row and
   agent-token-row links, `/servers?profile=`, a Spec 108 warning surfacing as a
   needs-attention item, layout and keyboard order).
+- `shell-pr1.spec.ts`: the Spec 134 shell (skip link, phone menu, footer disclosure, header Add server, View as in filter rows).
+- `activity-pr5.spec.ts`: the Activity calls view (Spec 134 PR 5): five data columns, row detail, Sort control, filter popover over the results, chip overflow at 390 px, Group repeats default.
 - `demo-ux-fixes.spec.ts`: the layout findings of the live Web UI demo, measured
   at 1440 and 900 px: the token Profile chip is one line inside its cell, and
   radio labels sit next to their radios in the create-profile, custom-client and

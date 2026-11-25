@@ -90,12 +90,12 @@
       toggle. Active filters stay visible as dismissable chips even collapsed,
       so the list is never silently narrowed.
     -->
-    <div v-show="activeView !== 'sessions'" ref="filterStripEl" class="card bg-base-100 shadow-sm relative" data-test="activity-filter-strip">
+    <div ref="filterStripEl" class="card bg-base-100 shadow-sm relative" data-test="activity-filter-strip">
       <div class="card-body py-3 gap-1">
         <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
           <!-- Counts: total muted; only non-zero error/blocked/rejected speak up. -->
           <div
-            v-if="summaryParts.length > 0"
+            v-if="summaryParts.length > 0 && activeView !== 'sessions'"
             data-test="activity-compact-summary"
             class="flex flex-wrap items-center gap-x-2 gap-y-1"
           >
@@ -139,8 +139,9 @@
           -->
           <button
             type="button"
+            v-show="activeView !== 'sessions'"
             data-test="activity-group-toggle"
-            class="btn btn-sm max-sm:min-h-11 btn-outline gap-2 max-sm:min-h-11 border-[var(--ds-border)]"
+            class="btn btn-sm btn-outline gap-2 max-sm:min-h-11 border-[var(--ds-border)]"
             :disabled="!groupingApplies"
             :aria-pressed="groupRepeats && groupingApplies"
             :title="groupingApplies
@@ -162,14 +163,14 @@
             </span>
           </button>
 
-          <ActivitySortControl :column="sortColumn" :direction="sortDirection" @update="setSort" />
+          <ActivitySortControl v-show="activeView !== 'sessions'" :column="sortColumn" :direction="sortDirection" @update="setSort" />
 
           <!-- Filters toggle — opens ONE popover with every filter setter. -->
           <button
             type="button"
             data-test="activity-filters-toggle"
             ref="filtersToggleEl"
-            class="btn btn-sm max-sm:min-h-11 btn-outline gap-2 max-sm:min-h-11 border-[var(--ds-border)]"
+            class="btn btn-sm btn-outline gap-2 max-sm:min-h-11 border-[var(--ds-border)]"
             aria-haspopup="dialog"
             aria-controls="activity-filter-popover"
             :aria-expanded="showFilterPanel"
@@ -200,8 +201,8 @@
           <!-- Export is not a filter — it belongs on the strip, not inside the grid.
                Spec 107 FR-041/T088: /activity/export is the core (admin-only)
                door; a tenant principal has no export target yet. -->
-          <div v-if="authStore.principalKind !== 'tenant'" class="dropdown dropdown-end">
-            <div tabindex="0" role="button" class="btn btn-sm max-sm:min-h-11 btn-outline max-sm:min-h-11 border-[var(--ds-border)]">
+          <div v-if="authStore.principalKind !== 'tenant' && activeView !== 'sessions'" class="dropdown dropdown-end">
+            <div tabindex="0" role="button" class="btn btn-sm btn-outline max-sm:min-h-11 border-[var(--ds-border)]">
               <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
               </svg>
@@ -216,7 +217,7 @@
 
         <!-- Active filters: one row of removable chips, fixed height, with an
              overflow list (Spec 134 FR-047). -->
-        <ActivityFilterChips :chips="activeChips" @remove="clearChip" @clear-all="clearFilters" />
+        <ActivityFilterChips v-show="activeView !== 'sessions'" :scope-active="scopeChipsVisible" :chips="activeChips" @remove="clearChip" @clear-all="clearFilters" />
       </div>
 
       <!--
@@ -232,6 +233,7 @@
         aria-label="Activity filters"
         tabindex="-1"
         data-test="activity-filter-popover"
+        @focusout="onPopoverFocusOut"
         class="absolute left-0 right-0 top-full mt-1 z-[var(--z-dropdown)] bg-base-100 border border-[var(--ds-border)] rounded-box shadow-lg max-h-[75vh] overflow-y-auto p-4 space-y-4"
       >
         <div v-if="summary" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2" data-test="activity-tiles">
@@ -562,24 +564,24 @@
           <!-- table-fixed below sm: with only Time/Details/Status left, fixed columns
                guarantee the row fits a 390px viewport instead of letting one long
                tool name push Status off the edge (F14). -->
-          <table class="table table-sm w-full" :class="isCalls ? 'table-auto max-sm:[&_td]:px-1.5 max-sm:[&_th]:px-1.5' : 'table-fixed sm:table-auto'" data-test="activity-table">
+          <table class="table table-sm w-full" :class="isCalls ? 'table-fixed max-sm:[&_td]:px-1.5 max-sm:[&_th]:px-1.5' : 'table-fixed sm:table-auto'" data-test="activity-table">
             <caption class="sr-only">
               Activity log — one row per proxied call, newest first. Updates automatically.
             </caption>
             <thead>
               <tr>
-                <th class="cursor-pointer hover:bg-base-200" @click="sortBy('timestamp')">
+                <th class="cursor-pointer hover:bg-base-200" :class="isCalls ? 'w-[4.75rem] sm:w-[9.5rem]' : ''" @click="sortBy('timestamp')">
                   Time {{ getSortIndicator('timestamp') }}
                 </th>
                 <!-- Calls view (Spec 134 FR-045): time, tool, result, client, duration
                      and the row-open action. Everything else is in the row detail. -->
                 <template v-if="isCalls">
                   <th data-test="activity-col-tool">Tool</th>
-                  <th class="cursor-pointer hover:bg-base-200 sm:min-w-[5.5rem]" data-test="activity-col-result" @click="sortBy('status')">
+                  <th class="cursor-pointer hover:bg-base-200 w-[5rem] sm:w-24 xl:w-40" data-test="activity-col-result" @click="sortBy('status')">
                     Result {{ getSortIndicator('status') }}
                   </th>
-                  <th class="hidden md:table-cell" data-test="activity-col-client">Client</th>
-                  <th class="hidden sm:table-cell cursor-pointer hover:bg-base-200 whitespace-nowrap" data-test="activity-col-duration" @click="sortBy('duration_ms')">
+                  <th class="hidden md:table-cell md:w-44 xl:w-56" data-test="activity-col-client">Client</th>
+                  <th class="hidden sm:table-cell sm:w-28 cursor-pointer hover:bg-base-200 whitespace-nowrap" data-test="activity-col-duration" @click="sortBy('duration_ms')">
                     Duration {{ getSortIndicator('duration_ms') }}
                   </th>
                 </template>
@@ -612,7 +614,7 @@
                 </template>
                 <!-- Row-open chevron. Kept at every width: it is the actual
                      named, keyboard-operable control for the row (F30). -->
-                <th class="w-8"><span class="sr-only">Open details</span></th>
+                <th class="w-12 max-sm:w-14"><span class="sr-only">Open details</span></th>
               </tr>
             </thead>
             <!--
@@ -684,6 +686,7 @@
                     >{{ credentialLifecycleSummary(row.activity.metadata) }}</span>
                     <span v-else-if="row.activity.metadata?.action" class="text-sm truncate">{{ row.activity.metadata.action }}</span>
                     <span v-else-if="!isCallType(row.activity)" class="text-sm truncate" data-test="activity-tool-type">{{ formatType(row.activity.type) }}</span>
+                    <code v-else-if="isCodeExecutionActivity(row.activity)" class="text-sm bg-base-200 px-2 py-1 rounded truncate">code_execution</code>
                     <span v-else class="text-base-content/40">-</span>
                     <button
                       v-if="row.runCount > 1"
@@ -962,10 +965,11 @@
                     :title="`${row.activity.max_severity || 'unknown'}-severity sensitive data detected`"
                   >
                     <UiIcon :name="getSeverityIcon(row.activity.max_severity)" class="w-4 h-4" />
-                    <span class="sr-only">{{ row.activity.max_severity || 'unknown' }}-severity sensitive data detected</span>
+                    <span class="text-xs ml-0.5" aria-hidden="true">{{ row.activity.detection_types?.length || 0 }}</span>
+                    <span class="sr-only">{{ row.activity.max_severity || 'unknown' }}-severity sensitive data detected, {{ row.activity.detection_types?.length || 0 }} detection types</span>
                   </span>
                 </td>
-                <td v-if="isCalls" class="hidden md:table-cell max-w-[15rem]" data-test="activity-cell-client">
+                <td v-if="isCalls" class="hidden md:table-cell" data-test="activity-cell-client">
                   <AttributionChips :record="row.activity" :test-id="row.activity.id" client-only stacked />
                 </td>
                 <td class="whitespace-nowrap" :class="isCalls ? 'hidden sm:table-cell' : durationColumnClass">
@@ -978,7 +982,7 @@
                   </span>
                   <span v-else class="text-base-content/40">-</span>
                 </td>
-                <td class="w-8">
+                <td class="w-12 max-sm:w-14">
                   <button
                     class="btn btn-xs max-sm:min-h-11 btn-ghost max-sm:min-h-11 max-sm:min-w-11"
                     :aria-label="`Open details for ${formatType(row.activity.type)} at ${formatTimestamp(row.activity.timestamp)}`"
@@ -1074,7 +1078,7 @@
       <input id="activity-detail-drawer" type="checkbox" class="drawer-toggle" v-model="showDetailDrawer" />
       <div class="drawer-side z-50">
         <label for="activity-detail-drawer" aria-label="close sidebar" class="drawer-overlay"></label>
-        <div class="bg-base-100 w-full max-w-[500px] min-h-full p-6" data-test="activity-detail-panel">
+        <div ref="detailPanelEl" tabindex="-1" class="bg-base-100 w-full max-w-[500px] min-h-full p-6 focus:outline-none" data-test="activity-detail-panel">
           <div v-if="selectedActivity" class="space-y-4">
             <!-- Header -->
             <div class="flex justify-between items-start">
@@ -1178,7 +1182,7 @@
             <!-- Spec 108-j J10/J8/J9: who made the call, under which profile, and
                  for a blocked call the two ways forward. Below md this is the
                  only place the chips and the actions appear. -->
-            <div v-if="hasAttribution(selectedActivity) || canExplain(selectedActivity) || isCallType(selectedActivity)" class="space-y-2" data-test="activity-drawer-attribution">
+            <div class="space-y-2" data-test="activity-drawer-attribution">
               <h4 class="text-sm font-semibold text-base-content/70">Attribution</h4>
               <AttributionChips :record="selectedActivity" :test-id="`drawer-${selectedActivity.id}`" />
               <div v-if="canExplain(selectedActivity) || profileAction(selectedActivity)" class="flex flex-wrap items-center gap-2">
@@ -1243,6 +1247,10 @@
                     <span class="badge" :class="getSeverityBadgeClass(selectedActivity.max_severity)">
                       <UiIcon :name="getSeverityIcon(selectedActivity.max_severity)" class="w-3 h-3 inline" /> {{ selectedActivity.max_severity || 'unknown' }}
                     </span>
+                  </div>
+                  <div class="flex items-center gap-2" data-test="activity-detail-sensitive-count">
+                    <span class="font-semibold">Detections on this row:</span>
+                    <span>{{ selectedActivity.detection_types?.length || 0 }}</span>
                   </div>
                   <div v-if="selectedActivity.detection_types && selectedActivity.detection_types.length > 0" class="flex flex-col gap-1">
                     <span class="font-semibold">Detection Types:</span>
@@ -2185,19 +2193,23 @@ const readFilterPanelPref = (): boolean => {
 
 const showFilterPanel = ref(readFilterPanelPref())
 
-watch(showFilterPanel, expanded => {
+/** Written only when the user opens or closes the popover on purpose (toggle,
+ * Done, Escape), never by a light dismissal such as an outside click. */
+function persistFilterPanelPref(expanded: boolean) {
   try {
     window.localStorage.setItem(FILTER_PANEL_STORAGE_KEY, expanded ? 'true' : 'false')
   } catch {
     // Preference is a convenience; never let a storage failure break the page.
   }
-})
+}
+
 const filtersToggleEl = ref<HTMLElement | null>(null)
 const filterPopoverEl = ref<HTMLElement | null>(null)
 const filterStripEl = ref<HTMLElement | null>(null)
 
 function closeFilterPopover(returnFocus = false) {
   showFilterPanel.value = false
+  persistFilterPanelPref(false)
   if (returnFocus) void nextTick(() => filtersToggleEl.value?.focus())
 }
 
@@ -2205,7 +2217,16 @@ function closeFilterPopover(returnFocus = false) {
 // choice reopens it on load), so Tab continues through its controls.
 function toggleFilterPopover() {
   showFilterPanel.value = !showFilterPanel.value
+  persistFilterPanelPref(showFilterPanel.value)
   if (showFilterPanel.value) void nextTick(() => filterPopoverEl.value?.focus())
+}
+
+/** Tabbing out of the popover dismisses it (no focus move): it must not stay open over the results focus enters. */
+function onPopoverFocusOut(event: FocusEvent) {
+  const next = event.relatedTarget as Node | null
+  if (next && filterPopoverEl.value && !filterPopoverEl.value.contains(next) && next !== filtersToggleEl.value) {
+    showFilterPanel.value = false
+  }
 }
 
 function onDocumentClick(event: MouseEvent) {
@@ -2978,14 +2999,34 @@ const getSortIndicator = (column: SortColumn): string => {
 }
 
 // Select activity for detail view
+let detailOpener: HTMLElement | null = null
+const detailPanelEl = ref<HTMLElement | null>(null)
 const selectActivity = (activity: ActivityRecord) => {
+  // Remember the control that opened the detail, so closing returns focus to it
+  // and, opening, focus enters the panel (the server, session and profile links
+  // now live there, so the keyboard path must reach them).
+  const active = document.activeElement
+  if (active instanceof HTMLElement && active !== document.body) detailOpener = active
   selectedActivity.value = activity
   showDetailDrawer.value = true
+  // The drawer reveals itself with a visibility transition, and a hidden
+  // element cannot take focus: retry until it can.
+  let attempts = 0
+  const focusPanel = () => {
+    const panel = detailPanelEl.value
+    if (!panel || !showDetailDrawer.value) return
+    panel.focus()
+    if (document.activeElement !== panel && ++attempts < 12) setTimeout(focusPanel, 50)
+  }
+  void nextTick(focusPanel)
 }
 
 const closeDetailDrawer = () => {
   showDetailDrawer.value = false
   selectedActivity.value = null
+  const opener = detailOpener
+  detailOpener = null
+  if (opener && opener.isConnected) void nextTick(() => opener.focus())
 }
 
 /**
@@ -3247,7 +3288,7 @@ const handleKeydown = (event: KeyboardEvent) => {
   // The access explainer opened from the drawer owns Escape while it is open:
   // closing the drawer too would unmount the "Why?" button the dialog returns
   // focus to and drop focus on <body> (Spec 108-j live QA).
-  if (event.key === 'Escape' && showFilterPanel.value && !showDetailDrawer.value) {
+  if (event.key === 'Escape' && showFilterPanel.value && !showDetailDrawer.value && explain.value === null) {
     closeFilterPopover(true)
     return
   }

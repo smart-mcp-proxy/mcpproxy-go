@@ -169,6 +169,82 @@ describe('A5-20..A5-26 row detail (FR-049)', () => {
   })
 })
 
+describe('review round 1 fixes', () => {
+  it('focus enters the detail panel on open and returns to the row button on close', async () => {
+    const w = await mountAt()
+    const btn = rowFor(w, 'github:list_repos').find('[data-test="activity-open-ok-1"]')
+    ;(btn.element as HTMLElement).focus()
+    await btn.trigger('click')
+    await flushPromises()
+    expect(document.activeElement).toBe(w.find('[data-test="activity-detail-panel"]').element)
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await flushPromises()
+    expect(document.activeElement).toBe(btn.element)
+  })
+
+  it('keeps the numeric detection count in the row and in the detail', async () => {
+    const w = await mountAt()
+    expect(rowFor(w, 'github:list_repos').find('[data-test="activity-sensitive-mark"]').text()).toContain('1')
+    await rowFor(w, 'github:list_repos').find('[data-test="activity-open-ok-1"]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-test="activity-detail-sensitive-count"]').text()).toContain('1')
+  })
+
+  it('names a metadata-only code_execution parent', async () => {
+    state.rows = [{ id: 'ce-1', type: 'internal_tool_call', status: 'success', timestamp: '2026-08-21T10:00:00Z', request_id: 'rq', metadata: { internal_tool_name: 'code_execution' } }]
+    const w = await mountAt()
+    expect(rows(w)[0].text()).toContain('code_execution')
+    expect(rows(w)[0].find('[data-test="activity-parent-badge"]').exists()).toBe(true)
+  })
+
+  it('the calls table uses fixed column widths so a long raw status cannot push the action off', async () => {
+    state.rows = [{ ...OK, id: 'raw-1', status: 'awaiting_external_administrator_confirmation', has_sensitive_data: false }]
+    const w = await mountAt()
+    expect(w.find('[data-test="activity-table"]').classes()).toContain('table-fixed')
+    expect(rows(w)[0].find('[data-test="activity-status"]').classes()).toContain('truncate')
+    expect(rows(w)[0].find('[data-test="activity-status"]').attributes('title')).toContain('awaiting_external')
+  })
+
+  it('an event with no attribution still shows its dash in the detail', async () => {
+    const w = await mountAt('/activity?view=calls&type=config_change')
+    await rowFor(w, 'server_added').find('[data-test="activity-open-cfg-1"]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-test="activity-drawer-attribution"] [data-test="attribution-none"]').text()).toBe('—')
+  })
+})
+
+describe('review round 2 fixes (filters)', () => {
+  it('Sessions keeps the filters toggle and its popover (token setter included)', async () => {
+    const w = await mountAt('/activity?view=sessions')
+    const toggle = w.find('[data-test="activity-filters-toggle"]')
+    expect(toggle.isVisible()).toBe(true)
+    await toggle.trigger('click')
+    expect(w.find('[data-test="activity-filter-popover"]').exists()).toBe(true)
+    expect(w.find('[data-test="activity-sort-control"]').isVisible()).toBe(false)
+  })
+
+  it('an outside click closes the popover without changing the stored choice; Done does', async () => {
+    const w = await mountAt()
+    await w.find('[data-test="activity-filters-toggle"]').trigger('click')
+    expect(window.localStorage.getItem('mcpproxy.activity.filtersExpanded')).toBe('true')
+    document.body.click()
+    await flushPromises()
+    expect(w.find('[data-test="activity-filter-popover"]').exists()).toBe(false)
+    expect(window.localStorage.getItem('mcpproxy.activity.filtersExpanded')).toBe('true')
+    await w.find('[data-test="activity-filters-toggle"]').trigger('click')
+    await w.find('[data-test="activity-filters-toggle"]').trigger('click')
+    expect(window.localStorage.getItem('mcpproxy.activity.filtersExpanded')).toBe('false')
+  })
+
+  it('tabbing out of the popover dismisses it', async () => {
+    const w = await mountAt()
+    await w.find('[data-test="activity-filters-toggle"]').trigger('click')
+    const outside = rows(w)[0].find('button').element as HTMLElement
+    await w.find('[data-test="activity-filter-popover"]').trigger('focusout', { relatedTarget: outside })
+    expect(w.find('[data-test="activity-filter-popover"]').exists()).toBe(false)
+  })
+})
+
 describe('A5-11 sort control (FR-046)', () => {
   it('offers all five keys in both directions and sorts', async () => {
     const w = await mountAt()

@@ -25,7 +25,7 @@
       </div>
 
       <!-- Shown when the chips do not fit: lists every active filter and removes each. -->
-      <div v-if="overflowing" ref="overflowEl" class="shrink-0">
+      <div v-if="overflowing" ref="overflowEl" class="shrink-0" @keydown.esc.stop="closeOverflow(true)">
         <button
           type="button"
           data-test="activity-filter-overflow"
@@ -39,8 +39,7 @@
           role="dialog"
           aria-label="Active filters"
           data-test="activity-filter-overflow-list"
-          class="absolute left-0 right-0 sm:left-auto sm:w-96 top-full mt-1 max-h-72 overflow-y-auto p-2 bg-base-100 border border-[var(--ds-border)] rounded-box shadow-lg z-[var(--z-dropdown)] space-y-1"
-          @keydown.esc.stop="closeOverflow(true)"
+          class="absolute left-0 right-0 sm:left-auto sm:w-96 top-full mt-1 max-h-72 overflow-y-auto p-2 bg-base-100 border border-[var(--ds-border)] rounded-box shadow-lg z-[calc(var(--z-dropdown)+1)] space-y-1"
         >
           <div v-for="chip in chips" :key="chip.key" class="flex items-center gap-2">
             <span class="text-sm flex-1 min-w-0 break-words">{{ chip.label }}</span>
@@ -49,7 +48,7 @@
               :data-test="`activity-overflow-chip-${chip.kind}`"
               class="btn btn-xs btn-outline max-sm:min-h-11 shrink-0 border-[var(--ds-border)]"
               :aria-label="`Remove filter ${chip.label}`"
-              @click="emit('remove', chip)"
+              @click="removeFromList(chip)"
             >Remove</button>
           </div>
         </div>
@@ -62,7 +61,7 @@
         @click="emit('clear-all')"
       >Clear all</button>
     </template>
-    <span v-else class="text-xs text-base-content/60" data-test="activity-active-filters-empty">No filters applied</span>
+    <span v-else class="text-xs text-base-content/60" data-test="activity-active-filters-empty">{{ scopeActive ? 'No other filters applied' : 'No filters applied' }}</span>
   </div>
 </template>
 
@@ -73,7 +72,7 @@ import type { ActiveFilterChip } from '@/utils/activity'
 
 // Spec 134 FR-047: the active filters as removable chips in one row, with an
 // overflow control that lists and removes every one of them when they do not fit.
-const props = defineProps<{ chips: ActiveFilterChip[] }>()
+const props = defineProps<{ chips: ActiveFilterChip[]; scopeActive?: boolean }>()
 const emit = defineEmits<{ (e: 'remove', chip: ActiveFilterChip): void; (e: 'clear-all'): void }>()
 
 const rowEl = ref<HTMLElement | null>(null)
@@ -89,6 +88,15 @@ function measure() {
   const el = rowEl.value
   overflowing.value = Boolean(el) && el!.scrollWidth > el!.clientWidth + 1
   if (!overflowing.value) overflowOpen.value = false
+}
+
+function removeFromList(chip: ActiveFilterChip) {
+  emit('remove', chip)
+  // The removed button is gone: keep focus in the control (or Clear all when the list closes).
+  void nextTick(() => {
+    const target = rowEl.value?.parentElement?.querySelector<HTMLElement>('[data-test="activity-filter-overflow"], [data-test="activity-clear-all"]')
+    target?.focus()
+  })
 }
 
 function closeOverflow(returnFocus = false) {
