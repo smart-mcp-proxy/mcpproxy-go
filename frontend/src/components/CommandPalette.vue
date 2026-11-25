@@ -1,6 +1,6 @@
 <template>
-  <!-- Spec 109 FR-054: the command palette. Cmd/Ctrl+K or "/" opens it; the
-       header search field opens it on focus. One <dialog> driven through
+  <!-- Spec 109 FR-054: the command palette. Cmd/Ctrl+K or "/" opens it, and
+       so does the header search button (never focus or Tab, Spec 134 FR-013). One <dialog> driven through
        useDialogOpen (showModal → top layer, FR-055). -->
   <dialog
     ref="dialogEl"

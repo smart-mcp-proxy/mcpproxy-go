@@ -12,6 +12,12 @@
     <div role="tablist" class="tabs tabs-boxed w-fit" data-test="clients-tabs">
       <button v-for="item in tabs" :key="item.id" class="tab" :class="tab === item.id && 'tab-active'" @click="selectTab(item.id)">{{ item.label }}</button>
     </div>
+    <!-- Spec 134 FR-016: View as and its chips in the filter row of the Clients
+         and Tokens tabs (the Endpoint tab applies no scope). -->
+    <div v-if="tab !== 'endpoint'" class="flex flex-wrap items-center gap-2 empty:hidden" data-test="clients-view-as">
+      <ViewAs />
+      <ScopeChips v-if="tab === 'clients'" page="clients" :scope-query="scopeQuery" :disabled="scopeNotApplied" :unavailable="scopeUnavailable" />
+    </div>
     <section v-if="tab === 'clients'" class="space-y-3">
       <ClientsWarningsBanner :warnings="store.warnings" @upgrade="upgradeOpen = true" @move="moveClient" />
       <div v-if="store.loading" class="py-12 text-center"><span class="loading loading-spinner loading-lg" /></div>
@@ -56,6 +62,8 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import ViewAs from '@/components/ViewAs.vue'
+import ScopeChips from '@/components/scope/ScopeChips.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useClientsStore } from '@/stores/clients'
 import CredentialLifecycle from '@/components/clients/CredentialLifecycle.vue'
@@ -101,6 +109,17 @@ const forgetTarget = ref<ClientPresence | null>(null)
 const hasAdminKeyWarning = computed(() => store.warnings.some(warning => warning.code === 'client_holds_admin_key'))
 const scopeQuery = useScopeQuery('clients')
 const clientScopeAvailable = computed(() => isScopeParamAvailable('client'))
+// Spec 134 FR-016: every carried view-as value stays visible and removable here.
+// A tenant's list is never narrowed by them; a value the build does not list is
+// marked "Filter unavailable on this server".
+const TENANT_SCOPE_NOTE = 'your account sees its own clients'
+const scopeNotApplied = computed<Record<string, string>>(() => {
+  const out: Record<string, string> = {}
+  if (authStore.principalKind === 'tenant') { out.profile = TENANT_SCOPE_NOTE; out.client = TENANT_SCOPE_NOTE }
+  return out
+})
+const scopeUnavailable = computed(() =>
+  (['profile', 'client'] as const).filter((name) => typeof route.query[name] === 'string' && route.query[name] !== '' && !isScopeParamAvailable(name)))
 const snippetCopied = ref(false)
 // Endpoint copy + descriptions moved here from the retired header dropdown
 // (Spec 109-i). Descriptions are keyed by endpoint name from GET /routing.

@@ -47,12 +47,15 @@ test('Tab through the header never opens the palette; the search button, Ctrl+K 
   await expect(page.locator('dialog[open]')).toHaveCount(0)
   await page.keyboard.press('Enter')
   await expect(page.locator('dialog[data-test="command-palette"][open]')).toHaveCount(1)
+  await expect(page.locator('[data-test="palette-input"]')).toBeFocused()
   await page.keyboard.press('Escape')
   await expect(page.locator('dialog[open]')).toHaveCount(0)
   await expect(page.locator('[data-test="header-search-input"]')).toBeFocused()
   await page.locator('main').click({ position: { x: 5, y: 5 } })
   await page.keyboard.press('/')
   await expect(page.locator('dialog[data-test="command-palette"][open]')).toHaveCount(1)
+  // Escape as a user would: once the palette's field has focus.
+  await expect(page.locator('[data-test="palette-input"]')).toBeFocused()
   await page.keyboard.press('Escape')
   await expect(page.locator('dialog[open]')).toHaveCount(0)
   await page.keyboard.press('Control+k')
@@ -131,7 +134,7 @@ test('theme menu is keyboard-operable: Enter opens, choice by Enter, Escape clos
   await page.evaluate(() => localStorage.setItem('mcpproxy-theme', 'system'))
 })
 
-for (const route of ['/servers', '/tools', '/activity', '/usage']) {
+for (const route of ['/servers', '/tools', '/activity', '/usage', '/clients', '/clients?tab=tokens']) {
   test(`"View as" sits in the filter row of ${route} when something can be filtered, never in the header`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 })
     await open(page, route)
@@ -156,6 +159,17 @@ for (const route of ROUTES) {
     }
   })
 }
+
+test('a view-as value carried onto a page with no scope shows a removable "not applied on this page" chip', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await open(page, '/settings?profile=e2e-carried')
+  const chip = page.locator('[data-test="carried-scope-chip-profile"]')
+  await expect(chip).toContainText('not applied on this page')
+  await page.locator('[data-test="carried-scope-remove-profile"]').focus()
+  await page.keyboard.press('Enter')
+  await expect(chip).toHaveCount(0)
+  await expect(page).not.toHaveURL(/profile=/)
+})
 
 test('no link in the shell or the sidebar leads to the not-found page', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })

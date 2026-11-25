@@ -166,7 +166,9 @@ describe('Servers page — profile scope (Spec 109-l)', () => {
     expect(getServers).not.toHaveBeenCalled()
     const chip = wrapper.find('[data-test="scope-chip-profile"]')
     expect(chip.text()).toContain('Unattributed applies to Activity and Usage only')
-    expect(chip.attributes('aria-disabled')).toBe('true')
+    // Spec 134: a not-applied chip is marked, not aria-disabled: its remove button works.
+    expect(chip.attributes('data-not-applied')).toBe('true')
+    expect(chip.attributes('aria-disabled')).toBeUndefined()
     expect(shownNames(wrapper, ServerCard)).toEqual(['filesystem', 'github', 'notion'])
   })
 

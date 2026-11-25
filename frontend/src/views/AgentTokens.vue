@@ -30,6 +30,11 @@
       </div>
     </div>
 
+    <!-- Spec 134 FR-016: the profile/token filters this tab applies, as
+         removable chips ("Viewing as <name>"); a carried client is marked
+         "not applied on this page". View as sits in the Clients filter row. -->
+    <ScopeChips v-if="scopeQuery" page="tokens" :scope-query="scopeQuery" :unavailable="scopeUnavailable" />
+
     <!-- Summary Stats — clickable cards drive the token filter (issue #436) -->
     <div class="stats shadow bg-base-100 w-full">
       <button
@@ -461,6 +466,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import ScopeChips from '@/components/scope/ScopeChips.vue'
 import { useRoute, useRouter } from 'vue-router'
 import apiClient from '@/services/api'
 import { formatDateTimeShort } from '@/utils/datetime'
@@ -478,6 +484,9 @@ import type { ApiError } from '@/services/api'
 import type { AgentTokenInfo, CreateAgentTokenRequest, Server } from '@/types'
 
 const route = useRoute()
+// Spec 134 FR-016: a carried value the build does not list stays visible and removable.
+const scopeUnavailable = computed(() =>
+  (['profile', 'token'] as const).filter((name) => typeof route?.query[name] === 'string' && route.query[name] !== '' && !isScopeParamAvailable(name)))
 const router = useRouter()
 const systemStore = useSystemStore()
 const serversStore = useServersStore()

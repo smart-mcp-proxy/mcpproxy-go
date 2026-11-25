@@ -66,11 +66,13 @@ describe('ScopeChips (Spec 108-j J4)', () => {
     expect(router.currentRoute.value.query).toEqual({ status: 'blocked' })
   })
 
-  it('rule 5: a sticky param the page does not register renders as a disabled "not applicable here" chip (token on Tools)', async () => {
+  it('rule 5: a sticky param the page does not register renders as a removable "not applied on this page" chip (token on Tools, spec 134 FR-016)', async () => {
     const { wrapper, router } = await mountChips('/tools?token=ro-bot&client=cursor', 'tools')
     const na = wrapper.get('[data-test="scope-chip-na-token"]')
-    expect(na.attributes('aria-disabled')).toBe('true')
-    expect(na.text()).toContain('not applicable here')
+    // Spec 134: a not-applied chip is marked, not aria-disabled: its remove button works.
+    expect(na.attributes('data-not-applied')).toBe('true')
+    expect(na.attributes('aria-disabled')).toBeUndefined()
+    expect(na.text()).toContain('not applied on this page')
     expect(wrapper.find('[data-test="scope-chip-client"]').exists()).toBe(true)
     await wrapper.get('[data-test="scope-chip-remove-token"]').trigger('click')
     await flushPromises()
@@ -80,7 +82,10 @@ describe('ScopeChips (Spec 108-j J4)', () => {
   it('a disabled explanation renders the chip disabled with the sentence in visible text', async () => {
     const { wrapper } = await mountChips('/tools?client=-', 'tools', { disabled: { client: 'Unattributed applies to Activity and Usage only' } })
     const chip = wrapper.get('[data-test="scope-chip-client"]')
-    expect(chip.attributes('aria-disabled')).toBe('true')
+    // Spec 134: a not-applied chip is marked, not aria-disabled: its remove button works.
+    expect(chip.attributes('data-not-applied')).toBe('true')
+    expect(chip.attributes('aria-disabled')).toBeUndefined()
+    expect(chip.text()).toContain('not applied on this page')
     expect(chip.text()).toContain('Unattributed applies to Activity and Usage only')
   })
 

@@ -28,6 +28,7 @@
              header. Key on authEpoch ONLY -- folding in the route path would
              remount ServerDetail on every :serverName change and break the
              Dashboard's single instance across /, /usage and /overview. -->
+        <CarriedScopeChips v-if="authStore.shellPresented" />
         <router-view :key="systemStore.authEpoch" />
       </main>
 
@@ -62,6 +63,7 @@ import { isNavigationFailure, NavigationFailureType, useRouter } from 'vue-route
 import SidebarNav from '@/components/SidebarNav.vue'
 import TopHeader from '@/components/TopHeader.vue'
 import AppFooter from '@/components/AppFooter.vue'
+import CarriedScopeChips from '@/components/scope/CarriedScopeChips.vue'
 import ToastContainer from '@/components/ToastContainer.vue'
 import ConnectionStatus from '@/components/ConnectionStatus.vue'
 import AuthErrorModal from '@/components/AuthErrorModal.vue'

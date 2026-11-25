@@ -70,7 +70,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import UiIcon from '@/components/UiIcon.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -159,6 +159,8 @@ function load() {
   if (isTenant.value) return
   if ((!auth.isTeamsEdition || auth.canLoadCore) && !profiles.loaded && !profiles.loading) void profiles.fetchProfiles()
 }
-onMounted(load)
+// After the host page's own mount, so a page that loads profiles itself is not
+// asked twice (the loaded/loading guard above sees its request).
+onMounted(() => { void nextTick(load) })
 watch(() => system.authEpoch, () => { if (!isTenant.value && (!auth.isTeamsEdition || auth.canLoadCore)) void profiles.fetchProfiles() })
 </script>

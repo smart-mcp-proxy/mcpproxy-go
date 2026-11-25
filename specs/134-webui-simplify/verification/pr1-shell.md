@@ -4,10 +4,10 @@ Checked on the PR head, 2026-11-25, macOS arm64.
 
 | Check | Command | Result |
 |---|---|---|
-| Frontend unit tests | `cd frontend && npx vitest run` | 3182 passed |
+| Frontend unit tests | `cd frontend && npx vitest run` | 3187 passed |
 | Type check | `cd frontend && npx vue-tsc --noEmit` | clean |
 | Build | `cd frontend && npm run build`; `go build ./cmd/mcpproxy`; `go build -tags server ./cmd/mcpproxy` | ok |
-| Playwright sweeps, with fixture upstream | `MCPPROXY_BASE_URL=http://127.0.0.1:18647 MCPPROXY_FIXTURE_PATH=<mcpfixture> ./scripts/run-web-smoke.sh` | 165 passed, 3 skipped, 0 failed |
+| Playwright sweeps, with fixture upstream | `MCPPROXY_BASE_URL=http://127.0.0.1:18647 MCPPROXY_FIXTURE_PATH=<mcpfixture> ./scripts/run-web-smoke.sh` | 168 passed, 0 failed |
 | Playwright sweeps, no fixture | same without `MCPPROXY_FIXTURE_PATH` | 96 passed, 73 skipped (need the fixture), 0 failed |
 
 New guards:

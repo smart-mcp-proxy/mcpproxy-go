@@ -5,7 +5,7 @@
       :key="item.name"
       class="badge badge-sm gap-1 h-auto min-h-6 py-1 whitespace-normal text-left"
       :class="item.note ? 'badge-ghost' : item.conflicting ? 'badge-warning' : 'badge-outline'"
-      :aria-disabled="item.note ? 'true' : undefined"
+      :data-not-applied="item.note ? 'true' : undefined"
       :data-conflicting="item.conflicting ? 'true' : undefined"
       :data-test="item.na ? `scope-chip-na-${item.name}` : `scope-chip-${item.name}`"
     >
@@ -93,7 +93,9 @@ const items = computed<Item[]>(() => {
     out.push({
       name,
       label: chipLabel(name, chip.value),
-      note: props.disabled?.[name],
+      // Spec 134 FR-016: a carried value this page does not apply is always
+      // marked the same way, with the page's own reason when it has one.
+      note: props.disabled?.[name] ? `not applied on this page: ${props.disabled[name]}` : undefined,
       conflicting: props.conflicting?.includes(name),
       remove: chip.remove,
     })
@@ -107,7 +109,7 @@ const items = computed<Item[]>(() => {
     out.push({
       name,
       label: chipLabel(name, value),
-      note: 'not applicable here',
+      note: 'not applied on this page',
       na: true,
       remove: () => props.scopeQuery.clear([name]),
     })
