@@ -242,7 +242,7 @@
               data-test="quarantine-action-approve"
               @click="handleApproveClick"
               :disabled="actionLoading"
-              class="btn btn-sm btn-warning"
+              class="btn btn-sm btn-outline"
             >
               <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
               Review &amp; approve
@@ -412,7 +412,7 @@
                   data-test="quarantine-approve-all"
                   @click="approveAllTools"
                   :disabled="approvalLoading"
-                  class="btn btn-sm btn-warning"
+                  class="btn btn-sm btn-outline"
                 >
                   <span v-if="approvalLoading" class="loading loading-spinner loading-xs"></span>
                   Review all tools

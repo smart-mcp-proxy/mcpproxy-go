@@ -4,10 +4,10 @@ Checked on the PR head, 2026-11-25, macOS arm64. Isolated instances only (`scrip
 
 | Check | Command | Result |
 |---|---|---|
-| Frontend unit tests | `cd frontend && npx vitest run` | 3212 passed |
+| Frontend unit tests | `cd frontend && npx vitest run` | 3223 passed |
 | Type check | `cd frontend && npx vue-tsc --noEmit` | clean |
 | Build | `npm run build`; `go build ./cmd/mcpproxy`; `go build -tags server ./cmd/mcpproxy` | ok |
-| Playwright sweeps with fixture upstream | `MCPPROXY_FIXTURE_PATH=<mcpfixture> ./scripts/run-web-smoke.sh` | 182 passed, 0 failed, 3 skipped (need a client or a skill fixture) |
+| Playwright sweeps with fixture upstream | `MCPPROXY_FIXTURE_PATH=<mcpfixture> ./scripts/run-web-smoke.sh` | 183 passed, 0 failed, 3 skipped (need a client or a skill fixture) |
 | Skills sweep (Spec 125 scenarios + the new 390 px test) | `MCPPROXY_BINARY_PATH=./mcpproxy ./scripts/run-skills-tab-sweep.sh` | 12 passed |
 
 ## What the new tests cover
@@ -57,3 +57,9 @@ Fixed after looking (follow-up request from the design session):
 - Admin state "Enabled" no longer renders magenta in dark; the scan and review parts no longer show a browser focus outline after an anchor jump.
 
 Left to the PR 1 session (shared styles, per the request): the 1 px outline buttons and chips (the heavy black outline buttons such as Full diagnostic and Actions are the current shared `btn-outline`), the sidebar active item. Merge `claude/134-webui-pr1-shell-f30c09` when it reports.
+
+## After merging the PR 1 shared-style fixes (`ad6a819ac`)
+
+`claude/134-webui-pr1-shell-f30c09` is merged in; my uses of the border colour are `--ds-border` (the token was renamed because daisyUI 5 reads `--border` as a width). Screenshots retaken from the same seeded instance and replaced in `pr3-screenshots/`. Fixed after the second look: the banner buttons ("Review & approve", "Review all tools") were solid yellow, now outline (the header Review is the page's one primary); the hold-evidence verdict chip in dark was invisible (neutral outline badge), now plain text colour. Dialog confirm buttons stay `btn-warning` (they confirm a risky action).
+
+Seen, not in this PR: `ScanHistory` status chips ("completed") are solid saturated green with poor contrast, on the review screen and the Review queue (belongs to the Review queue page work); the review screen's tier and verdict chips use `badge` styles of their own (Review page).
