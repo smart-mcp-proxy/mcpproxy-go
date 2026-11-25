@@ -2870,7 +2870,7 @@ func (s *Server) stopServer(run *serverRun) error {
 		s.logger.Info("STOPSERVER - Shutting down HTTP server gracefully")
 		_ = s.logger.Sync()
 
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // above requestShutdownGrace
 		defer cancel()
 
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
@@ -3359,7 +3359,7 @@ func (s *Server) extendedDeadline(d time.Duration, next http.Handler) http.Handl
 
 // requestShutdownGrace is how long http.Server.Shutdown lets in-flight requests finish before
 // their context is cancelled.
-const requestShutdownGrace = 5 * time.Second
+const requestShutdownGrace = 15 * time.Second
 
 // cancelRequestsOnShutdown makes srv.Shutdown cancel the requests still open once only event
 // streams are left, and after grace at the latest. Event streams never end on their own, so

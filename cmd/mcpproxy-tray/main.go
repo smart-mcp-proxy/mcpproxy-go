@@ -1798,13 +1798,13 @@ func (cpl *CoreProcessLauncher) handleShutdown() {
 			"pid", pid,
 			"status", cpl.processMonitor.GetStatus())
 
-		// NEW: Create timeout for core shutdown (30 seconds total)
-		shutdownTimeout := time.After(30 * time.Second)
+		// Backstop: above the process monitor's own 45s stop-then-kill limit.
+		shutdownTimeout := time.After(50 * time.Second)
 		shutdownDone := make(chan struct{})
 		shutdownStarted := time.Now()
 
 		go func() {
-			cpl.processMonitor.Shutdown() // This already has 10s SIGTERM + SIGKILL logic
+			cpl.processMonitor.Shutdown() // stops gracefully, then force kills after 45s
 			close(shutdownDone)
 		}()
 
