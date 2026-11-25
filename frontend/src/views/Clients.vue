@@ -41,6 +41,7 @@
     <section v-else-if="tab === 'endpoint'" class="card bg-base-100 border border-base-300"><div class="card-body"><h2 class="card-title">Endpoint &amp; mode</h2><p class="text-sm text-base-content/70">Choose the MCP surface this instance serves. Changes are saved immediately and apply after restart.</p><ModeSwitcher /><dl v-if="store.routing" class="grid gap-1 text-sm" data-test="endpoint-list"><div v-for="(endpoint, name) in store.routing.endpoints" :key="name" class="flex items-start justify-between gap-3 rounded-lg px-2 py-1.5 hover:bg-base-200" :data-test="`endpoint-${name}`"><div class="min-w-0"><dt class="font-medium">{{ name }} <span v-if="name === 'default'" class="badge badge-xs badge-primary">default</span></dt><dd><code>{{ endpoint }}</code></dd><dd class="text-xs text-base-content/60" :data-test="`endpoint-description-${name}`">{{ endpointDescription(name) }}</dd></div><button v-if="systemStore.listenAddr" type="button" class="btn btn-ghost btn-xs shrink-0" :data-test="`copy-endpoint-${name}`" :aria-label="`Copy ${name} endpoint URL`" @click="copyEndpoint(name, endpoint)">{{ copiedEndpoint === name ? 'Copied' : 'Copy URL' }}</button></div></dl><p v-if="store.routing?.restart_required" class="alert alert-warning text-sm">Restart MCPProxy to apply {{ store.routing.pending_routing_mode }} mode.</p></div></section>
     <AgentTokens v-else />
     <ClientManagePanel
+      :key="panelClient?.id ?? 'none'"
       :client="panelClient"
       :move-request="moveRequest"
       @close="closePanel"
@@ -157,6 +158,8 @@ async function copyOtherClientSnippet() {
   }
 }
 function selectTab(id: string) { tab.value = id }
+// The panel belongs to the Clients tab: leaving it (a tab, the palette, a link) closes it and its dialogs.
+watch(tab, (value) => { if (value !== 'clients' && panelId.value) panelId.value = '' })
 watch(tab, value => {
   if (route.path !== '/clients') return
   const query = { ...route.query }
