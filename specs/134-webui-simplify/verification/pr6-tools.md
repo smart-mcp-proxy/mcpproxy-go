@@ -7,7 +7,7 @@ Checked on the PR head, 2026-11-25, macOS arm64. Stacked on #2049 (PR 1); PR 1's
 | Frontend unit tests | `cd frontend && npx vitest run` | 3,253 passed (364 files) |
 | Type check | `cd frontend && npx vue-tsc --noEmit` | clean |
 | Build | `cd frontend && npm run build`; `go build ./cmd/mcpproxy`; `go build -tags server ./cmd/mcpproxy` | ok |
-| Playwright sweeps, with fixture upstream | `MCPPROXY_FIXTURE_PATH=<mcpfixture> ./scripts/run-web-smoke.sh` | 170 passed, 3 skipped (fixture-dependent), 0 failed (an earlier run had one unrelated `shell-pr1` palette timing failure that passed on rerun) |
+| Playwright sweeps, with fixture upstream | `MCPPROXY_FIXTURE_PATH=<mcpfixture> ./scripts/run-web-smoke.sh` | Full launcher run: 175 passed, 3 failed, 3 skipped; the 3 failures were mistakes in the new `tools-pr6.spec.ts` (a header locator, a focus-trap loop, a layout reset on reload), fixed, and the spec then passed 8 of 8 against a scratch core (`playwright test tools-pr6.spec.ts`). Every other spec passed. The spec had first been left out of the launcher list, so earlier runs did not include it; it is in now, with the docs the release-gate guard requires. |
 
 ## What the tests guard
 

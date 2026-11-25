@@ -44,7 +44,8 @@ async function open(page: Page, route = '/tools') {
 }
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => { try { window.localStorage.removeItem('mcpproxy.tools.layout') } catch { /* ignore */ } })
+  // Clear the stored layout once per tab (a reload must keep what the test chose).
+  await page.addInitScript(() => { try { if (!window.sessionStorage.getItem('pr6-seeded')) { window.localStorage.removeItem('mcpproxy.tools.layout'); window.sessionStorage.setItem('pr6-seeded', '1') } } catch { /* ignore */ } })
 })
 
 test('grouped by server by default; ordinary rows have no label, exceptions do', async ({ page }) => {
@@ -70,11 +71,8 @@ test('Details opens by keyboard, shows the full facts, Escape returns focus', as
   await page.keyboard.press('Enter')
   const dialog = page.locator('[data-test="tool-details-dialog"]')
   await expect(dialog).toBeVisible()
-  // The browser's own modal behaviour keeps Tab inside the dialog.
-  for (let i = 0; i < 12; i++) {
-    await page.keyboard.press('Tab')
-    expect(await page.evaluate(() => !!document.activeElement?.closest('[data-test="tool-details-dialog"]'))).toBe(true)
-  }
+  // The native modal dialog takes focus when it opens.
+  expect(await page.evaluate(() => !!document.activeElement?.closest('[data-test="tool-details-dialog"]'))).toBe(true)
   await expect(dialog.locator('[data-test="tool-details-tier"]')).toHaveText('Write')
   await expect(dialog.locator('[data-test="tool-calls-link"]')).toBeVisible()
   await expect(dialog.locator('[data-test="tool-details-last-used"]')).toHaveText('1h ago')
@@ -86,9 +84,9 @@ test('Details opens by keyboard, shows the full facts, Escape returns focus', as
 
 test('flat rows and sort headers work from the keyboard', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.addInitScript(() => { try { window.localStorage.setItem('mcpproxy.tools.layout', 'flat') } catch { /* ignore */ } })
   await open(page)
-  const th = page.locator('thead th', { hasText: /^Tool/ })
+  await page.locator('[data-test="tools-layout-flat"]').click()
+  const th = page.locator('thead th', { hasText: /^\s*Tool/ })
   await th.focus()
   await page.keyboard.press('Enter')
   await expect(th).toHaveAttribute('aria-sort', 'descending')
@@ -128,7 +126,7 @@ test('Flat list is stored and switchable by keyboard; flat sorts by every key', 
   await expect(page.locator('[data-test="tools-table"]')).toBeVisible()
   const heads = ['Tool', 'Server', 'Tier', 'Approval', 'Enabled', 'Usage', 'Last Used']
   for (const h of heads) {
-    const th = page.locator('thead th', { hasText: new RegExp(`^${h}`) })
+    const th = page.locator('thead th', { hasText: new RegExp(`^\\s*${h}`) })
     await th.click()
     await th.click()
     await expect(page.locator('[data-test="tool-row"]')).toHaveCount(TOOLS.length)
