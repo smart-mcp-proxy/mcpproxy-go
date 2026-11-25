@@ -4,7 +4,7 @@ Checked on the PR head, 2026-11-25, macOS arm64. Isolated instances only (`scrip
 
 | Check | Command | Result |
 |---|---|---|
-| Frontend unit tests | `cd frontend && npx vitest run` | 3206 passed |
+| Frontend unit tests | `cd frontend && npx vitest run` | 3211 passed |
 | Type check | `cd frontend && npx vue-tsc --noEmit` | clean |
 | Build | `npm run build`; `go build ./cmd/mcpproxy`; `go build -tags server ./cmd/mcpproxy` | ok |
 | Playwright sweeps with fixture upstream | `MCPPROXY_FIXTURE_PATH=<mcpfixture> ./scripts/run-web-smoke.sh` | 182 passed, 0 failed, 3 skipped (need a client or a skill fixture) |
@@ -33,3 +33,13 @@ The Trust mode selector note (`opacity-60`, 4.43:1) on the Configuration tab fai
 - No human visual review of screenshots beyond the sweeps' assertions (contrast, overflow, 44 px, keyboard); no screenshot attached.
 - A skill row's "Unblock" opens the card where the guarded Unblock button is; there is no write from the table.
 - The server edition build was compiled; the detail page is personal-edition only, so no server-edition sweep was run.
+
+## Cross-model reviews
+
+Reviewer `github-copilot/gpt-6.2-astra` (high), diffed against the merge-base `98dd89738`, three chunks:
+
+- Detail tabs: 10 findings. Fixed: direct `?tab=security` focus before the server loaded; Retry scan racing a second status read (the report is loaded only on tab entry, as the Security tab click did); Edit URL primary action now opens the endpoint editor in place; Actions menu clipped at 390 px; Review link did not move focus; scan part did not refresh on Scans; quarantined servers with scan warnings got no summary line; "Next step" focus target; the Health tile repeated the summary. Not changed: query-only in-page navigation not re-read (`?tab=` writes the URL but is never read back; present before this PR).
+- Review screen: 4 findings, all fixed (failure plus captured both reported; trusted-server fetch failure keeps the error panel with Retry; newest attempt only reports; a stale held-tool link leaves the operator's filters alone).
+- Skills: 1 finding, fixed (a long unbroken word could widen the stacked table at 390 px).
+
+Reviewer `github-copilot/gpt-6.2-sol` (high), approval paths only: neither the header primary action (approve opens the review part) nor the skills table row action (including Unblock) writes anything. Two observations, not changed: the review screen now stays mounted while the scan part is shown, so it keeps its review-change listeners (before, returning from Security remounted it); a tenant could already reach the review screen through `?tab=review` before this PR, and the backend answers 403.
