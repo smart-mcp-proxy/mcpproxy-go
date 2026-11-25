@@ -10,5 +10,5 @@
     "not_mix_up_protected": ["provider-without-iss"],
     "insecure_issuer": ["lan-provider"]
   },
-  "warnings_added": ["issuer_validation_disabled", "issuer_changed", "insecure_issuer", "configured_issuer_cross_origin"]
+  "warnings_added": ["issuer_validation_disabled", "issuer_changed", "insecure_issuer", "configured_issuer_unverified"]
 }
