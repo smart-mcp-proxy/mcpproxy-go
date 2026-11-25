@@ -640,9 +640,9 @@ actor CoreProcessManager {
         attachWatchTask = nil
     }
 
-    /// How long a user-requested stop waits before SIGKILL: the core's 15s grace
-    /// for running calls plus container cleanup. Same as the Go tray.
-    private static let shutdownGrace: TimeInterval = 45.0
+    /// How long a user-requested stop waits before SIGKILL: above the core's own
+    /// 60s hard deadline, so that it only catches a wedged core. Same as the Go tray.
+    private static let shutdownGrace: TimeInterval = 65.0
 
     /// Gracefully shut down the core process and all connections.
     ///
@@ -805,8 +805,15 @@ actor CoreProcessManager {
     /// gone. Bumping the generation first means its termination callback — which
     /// lands asynchronously — is recognised as belonging to a launch we have
     /// already abandoned, so it cannot drive a relaunch.
+    ///
+    /// `process` is cleared before the wait, so a caller that finds none joins a
+    /// stop that is still running: Quit during "Stop Core" must not terminate
+    /// the app, and lose the SIGKILL below, while the core is still draining.
     private func terminateManagedProcess(reason: String, grace: TimeInterval = 5.0) async {
-        guard let proc = process else { return }
+        guard let proc = process else {
+            await runningStop?.value
+            return
+        }
         launchGeneration += 1
         process = nil
 
@@ -815,16 +822,24 @@ actor CoreProcessManager {
         AppLifecycle.shared.recordCoreTerminated(pid: proc.processIdentifier, reason: reason)
         kill(proc.processIdentifier, SIGTERM)
 
-        let deadline = Date().addingTimeInterval(grace)
-        while proc.isRunning && Date() < deadline {
-            try? await Task.sleep(nanoseconds: 100_000_000)
+        let stop = Task {
+            let deadline = Date().addingTimeInterval(grace)
+            while proc.isRunning && Date() < deadline {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            if proc.isRunning {
+                NSLog("[MCPProxy] PID %d ignored SIGTERM — SIGKILL", proc.processIdentifier)
+                kill(proc.processIdentifier, SIGKILL)
+                proc.waitUntilExit()
+            }
         }
-        if proc.isRunning {
-            NSLog("[MCPProxy] PID %d ignored SIGTERM — SIGKILL", proc.processIdentifier)
-            kill(proc.processIdentifier, SIGKILL)
-            proc.waitUntilExit()
-        }
+        runningStop = stop
+        await stop.value
     }
+
+    /// The last stop `terminateManagedProcess` began. Awaiting a finished one
+    /// returns at once.
+    private var runningStop: Task<Void, Never>?
 
     /// Start the clock on a core that holds the socket but will not answer.
     ///
