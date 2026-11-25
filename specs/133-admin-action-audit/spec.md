@@ -61,7 +61,7 @@ A reviewer needs to know who approved a quarantined server, a pending or changed
 
 **Acceptance Scenarios**:
 
-1. **Given** server `github` is quarantined, **When** an administrator unquarantines it in the Web UI, **Then** one `server.unquarantine` line is written with `caller.kind: api_key` (or `session_admin` in the server edition) and `client.surface: web`.
+1. **Given** server `github` is quarantined, **When** an administrator unquarantines it in the Web UI, **Then** one `server.unquarantine` line (plus one `tool.approve` batch if pending tools were promoted, contract §P2) is written with `caller.kind: api_key` (or `session_admin` in the server edition) and `client.surface: web`.
 2. **Given** a tool's description changed and is held, **When** it is approved with `mcpproxy upstream approve`, **Then** one `tool.approve` line names the server and the tool (hashes stay on the activity row: they cover upstream text nothing proves secret-free).
 3. **Given** a security review approves 10 tools and blocks 2 on one server, **Then**, on a first review, five lines are written with one `request_id`: two `server.baseline_set` (`baseline.tools`, `baseline.integrity`), one `tool.block` (`count: 2`), one `tool.approve` (`count: 10`) and one `server.review_approve` (contract §P2 gives the exact set at every failure point; a zero-tool first review writes three).
 4. **Given** a trusted server connects for the first time, **When** the proxy baselines its 40 tools after a clean scan, **Then** one `tool.approve` line is written with `caller.kind: internal`, `trigger: policy`, `policy: trusted_baseline`, `target.count: 40` and the names (capped at 64, `truncated: true` beyond).
