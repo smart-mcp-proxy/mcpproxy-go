@@ -4,7 +4,7 @@ Checked on the PR head, 2026-11-25, macOS arm64. Isolated instances only (`scrip
 
 | Check | Command | Result |
 |---|---|---|
-| Frontend unit tests | `cd frontend && npx vitest run` | 3223 passed |
+| Frontend unit tests | `cd frontend && npx vitest run` | 3265 passed |
 | Type check | `cd frontend && npx vue-tsc --noEmit` | clean |
 | Build | `npm run build`; `go build ./cmd/mcpproxy`; `go build -tags server ./cmd/mcpproxy` | ok |
 | Playwright sweeps with fixture upstream | `MCPPROXY_FIXTURE_PATH=<mcpfixture> ./scripts/run-web-smoke.sh` | 183 passed, 0 failed, 3 skipped (need a client or a skill fixture) |
@@ -63,3 +63,13 @@ Left to the PR 1 session (shared styles, per the request): the 1 px outline butt
 `claude/134-webui-pr1-shell-f30c09` is merged in; my uses of the border colour are `--ds-border` (the token was renamed because daisyUI 5 reads `--border` as a width). Screenshots retaken from the same seeded instance and replaced in `pr3-screenshots/`. Fixed after the second look: the banner buttons ("Review & approve", "Review all tools") were solid yellow, now outline (the header Review is the page's one primary); the hold-evidence verdict chip in dark was invisible (neutral outline badge), now plain text colour. Dialog confirm buttons stay `btn-warning` (they confirm a risky action).
 
 Seen, not in this PR: `ScanHistory` status chips ("completed") are solid saturated green with poor contrast, on the review screen and the Review queue (belongs to the Review queue page work); the review screen's tier and verdict chips use `badge` styles of their own (Review page).
+
+## Error-state review (second visual review)
+
+Seeded states added: Error (`errsrv`, exits before initialize), Needs review (`fx-quarantined`), Connecting (`slowsrv`) and Disabled (`offsrv`); screenshots `state-error|needsreview|connecting|disabled-light|dark|m.png` in `pr3-screenshots/` (after only; no "before" set was kept).
+
+- The diagnostic panel (`ErrorPanel.vue`) uses the soft tones: soft background, 1 px tone border, body text in the base colour, heading and severity tag in the tone, the error code plain monospace. Error uses error tones, warning and the reconnecting state review tones, info busy tones.
+- The reason beside the pill is `serverReason()` from PR 2 (`utils/serverReason.ts`, `tests/unit/server-reason.spec.ts`), copied unchanged from `claude/134-webui-pr2-servers-011f39` together with the two files it needs, `utils/serversList.ts` and `tests/unit/servers-list.spec.ts` (unchanged). For a quarantined server, whose connection fault is shown as by design, the reason is the core's summary. The raw error stays in the Full diagnostic.
+- The launch line (or URL) is a full-width monospace row with Copy under the facts; Transport reads "stdio, not connected".
+- "How to fix this" replaces the fix-steps label; the activity link reads "Last 24 h: N calls, M errors" (the same `activity/summary` the Servers list reads) and "Calls in Activity" until loaded.
+- At 390 px the diagnostic panel no longer overflows ("Hide steps" and the docs URL wrap); the breadcrumb's last item is no longer clipped.

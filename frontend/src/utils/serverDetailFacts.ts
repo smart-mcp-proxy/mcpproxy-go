@@ -98,6 +98,6 @@ export function attentionLines(server: Server, opts: { primaryAction?: string; p
   if (server.security_scan && (server.security_scan.status === 'dangerous' || server.security_scan.status === 'failed' || server.security_scan.status === 'warnings')) {
     lines.push({ id: 'scan', text: `${scan?.text ?? 'Scan needs a look'}. Open scan results` })
   }
-  if (opts.primaryAction && opts.primaryLabel) lines.push({ id: 'health-action', text: `See the fix steps for ${opts.primaryLabel.toLowerCase()}` })
+  if (opts.primaryAction && opts.primaryLabel) lines.push({ id: 'health-action', text: 'How to fix this' })
   return lines
 }

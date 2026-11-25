@@ -40,7 +40,7 @@
            reason, primary action; every other action lives in Actions. -->
       <div class="flex flex-col lg:flex-row lg:justify-between lg:items-start gap-4">
         <div class="min-w-0">
-          <div class="breadcrumbs text-sm mb-2">
+          <div class="breadcrumbs text-sm mb-2 overflow-y-visible">
             <ul>
               <li><router-link to="/servers">Servers</router-link></li>
               <li>{{ displayName }}</li>
@@ -1638,6 +1638,7 @@ import FindingChip from '@/components/FindingChip.vue'
 import FlaggedToolsPanel from '@/components/FlaggedToolsPanel.vue'
 import ReviewScreen from '@/components/ReviewScreen.vue'
 import StatusPill from '@/components/StatusPill.vue'
+import { serverReason } from '@/utils/serverReason'
 import ServerFacts from '@/components/ServerFacts.vue'
 import type { AttentionTarget } from '@/utils/serverDetailFacts'
 import SkillsPanel from '@/components/skills/SkillsPanel.vue'
@@ -1930,9 +1931,10 @@ async function runPrimaryAction() {
 const reasonLine = computed(() => {
   const s = server.value
   if (!s) return ''
+  // The same pure function as the Servers table (FR-022): a short plain sentence, never the raw error.
   const label = s.health?.status ? healthStatusLabel(s.health.status) : statusBadgeText.value
-  const pick = s.health?.summary || s.diagnostic?.user_message || (s.last_error ? s.last_error.split('\n')[0] : '') || ''
-  const line = pick.length > 160 ? `${pick.slice(0, 157)}...` : pick
+  // A quarantined server's connection fault is by design (the page suppresses it): its reason is the core's summary.
+  const line = quarantineSuppressesFaultAlerts.value ? (s.health?.summary || label) : serverReason(s)
   return line && line.toLowerCase() !== label.toLowerCase() ? line : ''
 })
 

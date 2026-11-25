@@ -106,6 +106,49 @@ describe('header (FR-030)', () => {
   })
 })
 
+describe('error server: reason, launch line, labels, soft panel (second visual review)', () => {
+  const errServer = () => ({
+    command: '/bin/sh', args: ['-c', 'exit 3'], connected: false,
+    last_error: 'failed to connect: stdio transport (command="/bin/sh", docker_isolation=false): server process exited before completing the MCP initialize handshake',
+    error_code: 'MCPX_STDIO_EXIT_BEFORE_INITIALIZE',
+    diagnostic: { code: 'MCPX_STDIO_EXIT_BEFORE_INITIALIZE', severity: 'error', user_message: 'The stdio server process exited before completing the MCP initialize handshake.', cause: 'raw cause' },
+    health: { level: 'unhealthy', admin_state: 'enabled', summary: 'failed to connect: stdio transport (command="/b', status: 'error', usable: false, actions: ['restart'] },
+  })
+
+  it('the reason beside the pill is the short plain sentence, never the raw error', async () => {
+    serverExtra = errServer()
+    const { wrapper } = await mountDetail()
+    expect(wrapper.get('[data-test="server-detail-reason"]').text()).toBe('Server exited during startup')
+  })
+
+  it('the launch line has its own row with Copy; Transport stays short', async () => {
+    serverExtra = errServer()
+    const { wrapper } = await mountDetail()
+    expect(wrapper.get('[data-test="fact-transport"]').text()).toBe('Transportstdio, not connected')
+    expect(wrapper.get('[data-test="fact-launch"] [data-test="fact-endpoint"]').text()).toBe("/bin/sh -c 'exit 3'")
+    expect(wrapper.find('[data-test="fact-launch-copy"]').exists()).toBe(true)
+  })
+
+  it('the activity link says "Calls in Activity" until the numbers load, then names them', async () => {
+    const api = (await import('@/services/api')).default as any
+    api.getActivitySummary = vi.fn(() => Promise.resolve({ success: true, data: { per_server: [{ name: 'github', calls: 12, errors: 5, last_call_at: '' }] } }))
+    const { wrapper } = await mountDetail()
+    expect(wrapper.get('[data-test="fact-activity-link"]').text()).toBe('Last 24 h: 12 calls, 5 errors')
+    delete api.getActivitySummary
+    const b = await mountDetail()
+    expect(b.wrapper.get('[data-test="fact-activity-link"]').text()).toBe('Calls in Activity')
+  })
+
+  it('the diagnostic panel uses the soft error tone and the summary line reads "How to fix this"', async () => {
+    serverExtra = errServer()
+    const { wrapper } = await mountDetail()
+    const panel = wrapper.get('[role="alert"]')
+    expect(panel.classes()).toContain('tone-error')
+    expect(panel.classes()).not.toContain('alert-error')
+    expect(wrapper.get('[data-test="attention-health-action"]').text()).toBe('How to fix this')
+  })
+})
+
 describe('facts on the first screen (FR-020, FR-030)', () => {
   it('shows id vs title, transport state, trust, scan verdict and held counts on every tab', async () => {
     serverExtra = { title: 'GitHub tools', trust_mode: 'manual', quarantine: { pending_count: 2, changed_count: 1, blocked_count: 0 }, security_scan: { status: 'warnings', finding_counts: { dangerous: 0, warning: 3, info: 0 } } }

@@ -9,10 +9,9 @@
           <dd data-test="fact-title">{{ server.title }}</dd>
         </template>
       </div>
-      <div class="flex items-center gap-1.5 min-w-0" data-test="fact-transport">
+      <div class="flex items-center gap-1.5" data-test="fact-transport">
         <dt class="text-base-content/70">Transport</dt>
-        <dd class="min-w-0 break-all">{{ server.protocol }}<span class="text-base-content/70">, {{ connectionText }}</span>
-          <code v-if="endpoint" class="ml-1 text-xs" data-test="fact-endpoint">{{ endpoint }}</code></dd>
+        <dd>{{ server.protocol }}<span class="text-base-content/70">, {{ connectionText }}</span></dd>
       </div>
       <div v-if="adminState" class="flex items-center gap-1.5" data-test="fact-admin-state">
         <dt class="text-base-content/70">State</dt>
@@ -41,17 +40,24 @@
         </dd>
       </div>
       <div class="flex items-center gap-1.5" data-test="fact-activity">
-        <dt class="text-base-content/70">Last 24 h</dt>
-        <dd><router-link :to="activityLink" class="link link-hover" data-test="fact-activity-link">calls and errors in Activity</router-link></dd>
+        <dt class="sr-only">Activity</dt>
+        <dd><router-link :to="activityLink" class="link link-hover" data-test="fact-activity-link">{{ activityText }}</router-link></dd>
       </div>
       <div class="flex items-center">
         <button type="button" class="btn btn-sm btn-outline min-h-11" data-test="open-diagnostic" aria-haspopup="dialog" @click="openDiagnostic">Full diagnostic</button>
       </div>
     </dl>
 
+    <!-- The launch line (or URL) on its own row: monospace, wraps cleanly, with Copy. -->
+    <div v-if="launchLine" class="flex flex-wrap items-start gap-2 border-t pt-2 text-sm" style="border-color: var(--ds-border)" data-test="fact-launch">
+      <span class="text-base-content/70 shrink-0">{{ server.command ? 'Launch line' : 'URL' }}</span>
+      <code class="min-w-0 flex-1 basis-60 break-all whitespace-pre-wrap font-mono text-xs bg-base-200 rounded px-2 py-1" data-test="fact-endpoint">{{ launchLine }}</code>
+      <button type="button" class="btn btn-xs min-h-11 sm:min-h-0" data-test="fact-launch-copy" @click="copyLaunch">{{ launchCopied ? 'Copied' : 'Copy' }}</button>
+    </div>
+
     <ul v-if="lines.length" class="space-y-1 border-t pt-2" style="border-color: var(--ds-border)" data-test="attention-lines">
       <li v-for="line in lines" :key="line.id">
-        <button type="button" class="link link-hover text-left text-sm min-h-11 sm:min-h-0" :data-test="`attention-${line.id}`" @click="$emit('go', line.id)">{{ line.text }}</button>
+        <button type="button" class="link link-primary text-left text-sm min-h-11 sm:min-h-0" :data-test="`attention-${line.id}`" @click="$emit('go', line.id)">{{ line.text }}</button>
       </li>
     </ul>
 
@@ -75,7 +81,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import api from '@/services/api'
+import { formatLaunchCommand } from '@/utils/reviewPresentation'
 import type { Server } from '@/types'
 import StateTag from '@/components/StateTag.vue'
 import UiIcon from '@/components/UiIcon.vue'
@@ -102,8 +110,36 @@ const connectionText = computed(() => {
   if (s.connecting) return 'connecting'
   return 'not connected'
 })
-const endpoint = computed(() => props.server.url || props.server.command || 'No endpoint')
-const activityLink = computed(() => ({ path: '/activity', query: { server: props.server.name } }))
+const launchLine = computed(() => props.server.command ? formatLaunchCommand(props.server.command, props.server.args ?? []) : (props.server.url || ''))
+const launchCopied = ref(false)
+async function copyLaunch() {
+  try { await navigator.clipboard.writeText(launchLine.value) } catch { /* the line is selectable */ }
+  launchCopied.value = true
+  setTimeout(() => { launchCopied.value = false }, 1500)
+}
+
+// The 24 h numbers come from the same summary the Servers list reads; until they load the link says so plainly.
+const calls24h = ref<{ calls: number; errors: number } | null>(null)
+let statsSeq = 0
+async function loadActivityStats() {
+  const seq = ++statsSeq
+  calls24h.value = null
+  if (typeof api.getActivitySummary !== 'function') return
+  try {
+    const res = await api.getActivitySummary('24h')
+    if (seq !== statsSeq || !res?.success) return
+    const entry = (res.data?.per_server ?? []).find(e => e.name === props.server.name)
+    calls24h.value = { calls: entry?.calls ?? 0, errors: entry?.errors ?? 0 }
+  } catch { /* the fallback label stays */ }
+}
+onMounted(loadActivityStats)
+watch(() => props.server.name, loadActivityStats)
+const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`
+const activityText = computed(() => calls24h.value ? `Last 24 h: ${plural(calls24h.value.calls, 'call')}, ${plural(calls24h.value.errors, 'error')}` : 'Calls in Activity')
+const activityLink = computed(() => {
+  const base = `/activity?server=${encodeURIComponent(props.server.name)}&from=-24h`
+  return (calls24h.value?.errors ?? 0) > 0 ? `${base}&status=error` : base
+})
 
 // The text is rendered only while the dialog is open, so a closed dialog adds nothing to the page.
 async function openDiagnostic(e: Event) {

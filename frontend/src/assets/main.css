@@ -735,3 +735,13 @@ details.dropdown > summary::-webkit-details-marker { display: none; }
 [data-test="sidebar-overlay"] .menu :where(a.active, a.router-link-active.active) {
   font-weight: 600;
 }
+
+/* Spec 134 PR 3: the diagnostic panel in the soft tones: soft background, 1 px tone border, body text in the
+   base colour, only the heading and the severity tag in the tone. */
+.soft-panel { border: 1px solid var(--ds-border); color: var(--color-base-content, inherit); }
+.soft-panel.tone-error { background: var(--status-error-soft); border-color: var(--status-error); }
+.soft-panel.tone-review { background: var(--status-review-soft); border-color: var(--status-review); }
+.soft-panel.tone-busy { background: var(--status-busy-soft); border-color: var(--status-busy); }
+.soft-panel.tone-error .soft-panel__title { color: var(--status-error); }
+.soft-panel.tone-review .soft-panel__title { color: var(--status-review); }
+.soft-panel.tone-busy .soft-panel__title { color: var(--status-busy); }
