@@ -8,7 +8,7 @@ Run each package whole, not filtered by test name, so that every gate named in t
 go list -m github.com/mark3labs/mcp-go            # must be >= v1.4.0 (FR-019)
 go test -race ./internal/oauth/... ./internal/upstream/core/... ./internal/storage/... ./internal/config/... ./internal/diagnostics/... ./internal/management/...
 go test -race -tags server ./internal/serveredition/broker/... ./internal/serveredition/api/...
-cd frontend && npm run test:unit                   # skip_issuer_validation editor field, issuer status line
+cd frontend && npx vitest run                  # skip_issuer_validation editor field, issuer status line
 ```
 
 These suites contain: the last-hop guard, the final-token-form and extras-classification tests, the broker redirect test, the callback matrix, the resolver tests, the surface goldens and the AST guards.
