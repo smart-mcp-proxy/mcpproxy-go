@@ -1,0 +1,12 @@
+{
+  "$comment": "New object inside contracts.OAuthTokenStorageReport (Spec 123 doctor section). Scoped callers: counts and lists limited to servers in reach.",
+  "issuer_binding": {
+    "bound": 3,
+    "unbound": 1,
+    "changed": [
+      { "server": "notion", "bound_issuer_origin": "https://auth.notion.example", "current_issuer_origin": "https://other.example" }
+    ],
+    "validation_disabled": ["legacy-provider"]
+  },
+  "warnings_added": ["issuer_validation_disabled", "issuer_changed"]
+}
