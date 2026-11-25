@@ -26,6 +26,14 @@ func MarkSuspended(cmd *exec.Cmd) {
 	cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED | windows.CREATE_NEW_PROCESS_GROUP
 }
 
+// RequestExit asks the process group led by pid, a process started through
+// MarkSuspended, to exit. It is the closest Windows has to SIGTERM: CTRL_BREAK
+// ends a program that does not handle it. It fails when the caller does not
+// share a console with the group.
+func RequestExit(pid int) error {
+	return windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(pid))
+}
+
 // IsSuspended reports whether cmd was marked to start suspended.
 func IsSuspended(cmd *exec.Cmd) bool {
 	return cmd != nil && cmd.SysProcAttr != nil &&

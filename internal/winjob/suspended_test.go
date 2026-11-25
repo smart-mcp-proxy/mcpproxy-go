@@ -3,6 +3,7 @@
 package winjob
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -31,8 +32,11 @@ func TestMain(m *testing.M) {
 	case "parent":
 		os.Exit(breakParent())
 	case "child":
+		_, _ = os.Stdout.WriteString(childReady)
 		time.Sleep(time.Minute)
 		os.Exit(0)
+	case "requester":
+		os.Exit(requestChildExit())
 	}
 	os.Exit(m.Run())
 }
@@ -41,41 +45,118 @@ func TestMain(m *testing.M) {
 // to its own console group ("parent"), or as a child it started ("child").
 const breakHelperEnv = "MCPPROXY_WINJOB_BREAK"
 
-// breakParent starts a child the way the core starts its stdio upstreams, sends
-// CTRL_BREAK to its own group and returns 0 when the child outlives it.
+const childReady = "ready"
+
+// startReady starts cmd and waits until it runs its own code.
+func startReady(cmd *exec.Cmd, afterStart func() error) (exited <-chan struct{}, ok bool) {
+	out, err := cmd.StdoutPipe()
+	if err != nil || cmd.Start() != nil || (afterStart != nil && afterStart() != nil) {
+		return nil, false
+	}
+	line := make([]byte, len(childReady))
+	if _, err := io.ReadFull(out, line); err != nil || string(line) != childReady {
+		return nil, false
+	}
+	done := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(done) }()
+	return done, true
+}
+
+func breakChild() *exec.Cmd {
+	cmd := exec.Command(os.Args[0], "-test.run=^$") //nolint:gosec // re-executes the test binary
+	cmd.Env = append(os.Environ(), breakHelperEnv+"=child")
+	return cmd
+}
+
+// breakParent starts a child the way the core starts its stdio upstreams and a control child in its
+// own group, sends CTRL_BREAK to that group and returns 0 when it ends only the control child.
 func breakParent() int {
 	got := make(chan os.Signal, 1)
 	signal.Notify(got, os.Interrupt)
-	child := exec.Command(os.Args[0], "-test.run=^$") //nolint:gosec // re-executes the test binary
-	child.Env = append(os.Environ(), breakHelperEnv+"=child")
-	MarkSuspended(child)
 	job, err := New()
-	if err != nil || child.Start() != nil || job.AssignAndResume(child.Process.Pid) != nil {
+	if err != nil {
 		return 3
 	}
-	exited := make(chan struct{})
-	go func() { _ = child.Wait(); close(exited) }()
-	time.Sleep(700 * time.Millisecond) // let the child start
+	child, control := breakChild(), breakChild()
+	MarkSuspended(child)
+	childExited, ok := startReady(child, func() error { return job.AssignAndResume(child.Process.Pid) })
+	if !ok {
+		return 3
+	}
+	controlExited, ok := startReady(control, nil)
+	if !ok {
+		return 3
+	}
 	if windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(os.Getpid())) != nil {
 		return 4
 	}
-	select {
-	case <-got:
-	case <-time.After(5 * time.Second):
-		return 5
+	for _, c := range []<-chan struct{}{controlExited, asDone(got)} {
+		select {
+		case <-c:
+		case <-time.After(10 * time.Second):
+			return 5
+		}
 	}
+	// The same event ended the control child, so it would have reached this one by now.
 	select {
-	case <-exited:
+	case <-childExited:
 		return 6
-	case <-time.After(time.Second):
+	case <-time.After(500 * time.Millisecond):
 	}
 	_ = job.Close() // still contained: closing the job ends it
 	select {
-	case <-exited:
+	case <-childExited:
 		return 0
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		return 7
 	}
+}
+
+func asDone(sig <-chan os.Signal) <-chan struct{} {
+	done := make(chan struct{})
+	go func() { <-sig; close(done) }()
+	return done
+}
+
+// requestChildExit starts a child that never exits by itself, asks it to with RequestExit and
+// returns 0 when only the child ends.
+func requestChildExit() int {
+	got := make(chan os.Signal, 1)
+	signal.Notify(got, os.Interrupt)
+	job, err := New()
+	if err != nil {
+		return 3
+	}
+	defer job.Close()
+	child := breakChild()
+	MarkSuspended(child)
+	exited, ok := startReady(child, func() error { return job.AssignAndResume(child.Process.Pid) })
+	if !ok {
+		return 3
+	}
+	if RequestExit(child.Process.Pid) != nil {
+		return 4
+	}
+	select {
+	case <-exited:
+	case <-time.After(10 * time.Second):
+		return 5
+	}
+	select {
+	case <-got:
+		return 6
+	case <-time.After(300 * time.Millisecond):
+		return 0
+	}
+}
+
+// Windows has no SIGTERM, so this is the second step of the MCP stdio shutdown there.
+func TestRequestExit_EndsOnlyTheChild(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^$") //nolint:gosec // re-executes the test binary
+	cmd.Env = append(os.Environ(), breakHelperEnv+"=requester")
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_NO_WINDOW}
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "exit codes: 3 setup, 4 send, 5 child stayed, 6 parent got the signal; output: %s", out)
 }
 
 // The tray stops the core with CTRL_BREAK. Upstream children must not get it, or
@@ -85,7 +166,7 @@ func TestMarkSuspended_ChildDoesNotGetTheParentsCtrlBreak(t *testing.T) {
 	cmd.Env = append(os.Environ(), breakHelperEnv+"=parent")
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_NO_WINDOW}
 	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "exit codes: 3 setup, 4 send, 5 parent got no signal, 6 child died, 7 child survived its job; output: %s", out)
+	require.NoError(t, err, "exit codes: 3 setup, 4 send, 5 control child or parent got no signal, 6 child died, 7 child survived its job; output: %s", out)
 }
 
 func markerChild(t *testing.T, marker string) *exec.Cmd {

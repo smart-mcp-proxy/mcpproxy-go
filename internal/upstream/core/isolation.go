@@ -5,13 +5,16 @@ import (
 	"fmt"
 	"math/big"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/dockernaming"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shutdown"
 )
 
 // Command and package manager constants
@@ -513,9 +516,9 @@ func imageHasRegistryHost(image string) bool {
 	return strings.ContainsAny(host, ".:") || host == "localhost"
 }
 
-// containerStopTimeout is how many seconds `docker stop` waits before SIGKILL. With the docker
-// calls around it, it must stay below the 5s disconnect phase of Manager.ShutdownAll.
-const containerStopTimeout = "3"
+// containerStopTimeout is how many seconds `docker stop` waits before SIGKILL, set explicitly
+// because Manager.ShutdownAll's disconnect phase has to outlast it.
+var containerStopTimeout = strconv.Itoa(int(shutdown.ContainerStop / time.Second))
 
 // BuildDockerArgs constructs Docker run arguments for isolation
 func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, runtimeType string) ([]string, error) {
@@ -557,7 +560,9 @@ func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, r
 	}
 
 	// ExtraArgs come later on the command line, so a server can override these.
-	args := []string{"run", "--rm", "-i", "--stop-timeout", containerStopTimeout}
+	// Without --sig-proxy=false the docker client would pass its own SIGTERM on, and the server
+	// would get two: many programs take the second one as "force quit".
+	args := []string{"run", "--rm", "-i", "--sig-proxy=false", "--stop-timeout", containerStopTimeout}
 
 	// Add container name for easier identification
 	containerName := generateContainerName(serverConfig.Name)

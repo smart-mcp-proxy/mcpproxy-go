@@ -9,6 +9,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/qahooks"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shutdown"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 
@@ -23,6 +24,7 @@ const (
 	dockerCleanupTimeout = 30 * time.Second
 
 	// Subprocess shutdown timeouts
+	stdinCloseGrace = shutdown.StdinClose
 	// mcpClientCloseTimeout is the max time to wait for graceful MCP client close
 	mcpClientCloseTimeout = 10 * time.Second
 	// processGracefulTimeout is the max time to wait after SIGTERM before SIGKILL
