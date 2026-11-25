@@ -206,8 +206,8 @@ Registration: upstream_servers mcp.go:1786, quarantine_security :1863, set_profi
 | update | handleUpdateUpstream :6728 (mergeUpstreamPatch) | commitUpstreamWriter.updateServer mcp_upstream_writer.go:71 -> Runtime.Commit("mcp_update_server") | **No config_change.** Only internal_tool_call with args.config_diff = redactedConfigDiff (mcp.go:4906-4911) | N |
 | patch | handlePatchUpstream :6803 | same writer.updateServer | same: **No config_change**, only internal_tool_call.config_diff | N |
 | enable / disable | handleEnableUpstream :5652 | mgmtSvc.EnableServer(mcpActorContext) :5661 -> lifecycle.go:2418/2437 | config_change server_enabled/disabled (BUS) + internal_tool_call | Y |
-| restart | handleRestartUpstream :5693 | mgmtSvc.RestartServer(mcpActorContext) :5702 | internal_tool_call only | N |
-| refresh | handleRefreshUpstream :5731 | DiscoverServerTools | internal_tool_call only | N |
+| restart | handleRestartUpstream :5693 | mgmtSvc.RestartServer(mcpActorContext) :5702 → same funnel as REST restart (management/service.go:747-758) | internal_tool_call; plus config_change server_enabled when it restarts a disabled server (lifecycle.go:2707-2711), with the MCP actor context | partial |
+| refresh | handleRefreshUpstream :5731 | RefreshServerTools (mcp.go:5737-5744, lifecycle.go:556-570) | internal_tool_call; plus tool_quarantine_change rows when the discovery pass writes approval records (tool_quarantine.go:1965-1970) | N for tool rows |
 | add_from_registry | handleAddServerFromRegistry :4698 | AddServerFromRegistryRef(mcpActorContext) :4721 -> Server.AddServer :2379 | config_change server_added (BUS) + internal_tool_call | Y |
 | list, tail_log | read-only | | n/a | n/a |
 
