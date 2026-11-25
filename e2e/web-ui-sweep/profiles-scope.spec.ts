@@ -272,7 +272,7 @@ for (const width of [1440, 1280, 1100, 1024, 900, 768, 390]) {
         const rowWhy = page.locator('[data-test^="activity-row-why-"]').first()
         if (width >= 1280) await expect(rowWhy).toBeVisible()
         else await expect(rowWhy).toBeHidden()
-        const status = page.locator('[data-test="activity-row"]').first().locator('.badge').last()
+        const status = page.locator('[data-test="activity-row"]').first().locator('[data-test="activity-status"]')
         const statusBox = await status.boundingBox()
         expect(statusBox, `status badge at ${width}`).not.toBeNull()
         expect(statusBox!.x + statusBox!.width, `status badge at ${width} inside the viewport`).toBeLessThanOrEqual(width)

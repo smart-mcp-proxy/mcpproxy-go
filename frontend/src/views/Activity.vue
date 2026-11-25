@@ -577,7 +577,7 @@
                      and the row-open action. Everything else is in the row detail. -->
                 <template v-if="isCalls">
                   <th data-test="activity-col-tool">Tool</th>
-                  <th class="cursor-pointer hover:bg-base-200 w-[5rem] sm:w-24 xl:w-40" data-test="activity-col-result" @click="sortBy('status')">
+                  <th class="cursor-pointer hover:bg-base-200 w-[5rem] sm:w-24 xl:w-32" data-test="activity-col-result" @click="sortBy('status')">
                     Result {{ getSortIndicator('status') }}
                   </th>
                   <th class="hidden md:table-cell md:w-44 xl:w-56" data-test="activity-col-client">Client</th>
@@ -673,7 +673,7 @@
                       :title="quarantineBatchSummary(row.activity, row.runCount)"
                       data-test="activity-quarantine-batch-summary"
                     >{{ quarantineBatchSummary(row.activity, row.runCount) }}</span>
-                    <code v-else-if="row.activity.tool_name" class="text-sm bg-base-200 px-2 py-1 rounded truncate min-w-0 max-sm:max-w-full max-sm:whitespace-normal max-sm:break-all max-sm:overflow-visible" :title="toolLabel(row.activity)" data-test="activity-tool-label">{{ toolLabel(row.activity) }}</code>
+                    <code v-else-if="row.activity.tool_name" class="text-sm bg-base-200 px-2 py-1 rounded min-w-0 max-w-full break-all" :title="toolLabel(row.activity)" data-test="activity-tool-label">{{ toolLabel(row.activity) }}</code>
                     <span
                       v-else-if="isPreflightActivity(row.activity) && formatPreflightSummary(row.activity.metadata)"
                       class="text-sm truncate"
