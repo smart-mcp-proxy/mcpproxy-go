@@ -42,6 +42,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shutdown"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tlslocal"
@@ -1634,7 +1635,7 @@ func (s *Server) Shutdown() error {
 	// Gracefully shutdown HTTP server first to stop accepting new connections
 	if httpServer != nil {
 		s.logger.Info("Gracefully shutting down HTTP server...")
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), shutdown.HTTPServer)
 		defer cancel()
 
 		if err := httpServer.Shutdown(ctx); err != nil {
@@ -2870,7 +2871,7 @@ func (s *Server) stopServer(run *serverRun) error {
 		s.logger.Info("STOPSERVER - Shutting down HTTP server gracefully")
 		_ = s.logger.Sync()
 
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // above requestShutdownGrace
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdown.HTTPServer)
 		defer cancel()
 
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
@@ -3359,7 +3360,7 @@ func (s *Server) extendedDeadline(d time.Duration, next http.Handler) http.Handl
 
 // requestShutdownGrace is how long http.Server.Shutdown lets in-flight requests finish before
 // their context is cancelled.
-const requestShutdownGrace = 15 * time.Second
+const requestShutdownGrace = shutdown.CallGrace
 
 // cancelRequestsOnShutdown makes srv.Shutdown cancel the requests still open once only event
 // streams are left, and after grace at the latest. Event streams never end on their own, so

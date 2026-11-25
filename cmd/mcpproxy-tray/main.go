@@ -33,6 +33,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy-tray/internal/state"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shutdown"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tray"
 )
@@ -1798,13 +1799,13 @@ func (cpl *CoreProcessLauncher) handleShutdown() {
 			"pid", pid,
 			"status", cpl.processMonitor.GetStatus())
 
-		// Backstop: above the process monitor's own 45s stop-then-kill limit.
-		shutdownTimeout := time.After(50 * time.Second)
+		// Backstop: above the process monitor's own stop-then-kill limit.
+		shutdownTimeout := time.After(shutdown.Tray + 5*time.Second)
 		shutdownDone := make(chan struct{})
 		shutdownStarted := time.Now()
 
 		go func() {
-			cpl.processMonitor.Shutdown() // stops gracefully, then force kills after 45s
+			cpl.processMonitor.Shutdown() // stops gracefully, then force kills after shutdown.Tray
 			close(shutdownDone)
 		}()
 

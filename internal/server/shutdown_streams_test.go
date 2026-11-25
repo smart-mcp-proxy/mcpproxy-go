@@ -70,19 +70,37 @@ func TestCancelRequestsOnShutdown(t *testing.T) {
 				body, _ := io.ReadAll(resp.Body)
 				return string(body)
 			}
-			go do(http.MethodGet)
-			<-started
+			// A request that fails before its handler runs must fail the test, not hang it.
+			stream := make(chan string, 1)
 			call := make(chan string, 1)
+			waitStarted := func(what string, result <-chan string) {
+				t.Helper()
+				select {
+				case <-started:
+				case res := <-result:
+					t.Fatalf("%s ended before its handler ran: %s", what, res)
+				case <-time.After(5 * time.Second):
+					t.Fatalf("%s handler did not start", what)
+				}
+			}
+			go func() { stream <- do(http.MethodGet) }()
+			waitStarted("stream", stream)
 			if tt.call {
 				go func() { call <- do(http.MethodPost) }()
-				<-started
+				waitStarted("call", call)
 			}
 
 			begin := time.Now()
 			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 			defer cancel()
 			require.NoError(t, srv.Config.Shutdown(ctx))
-			lived := (<-streamEnded).Sub(begin)
+			var ended time.Time
+			select {
+			case ended = <-streamEnded:
+			case <-time.After(5 * time.Second):
+				t.Fatal("stream handler did not end")
+			}
+			lived := ended.Sub(begin)
 			require.GreaterOrEqual(t, lived, tt.streamMin)
 			require.Less(t, lived, 2*time.Second)
 			if tt.call {

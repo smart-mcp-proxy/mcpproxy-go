@@ -26,6 +26,7 @@ import (
 
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shutdown"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 	// "github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/cli" // replaced by in-process OAuth
 )
@@ -740,7 +741,7 @@ func (a *App) onReady() {
 						select {
 						case <-a.ctx.Done():
 							a.logger.Info("Tray context cancelled, quit handler exiting")
-						case <-time.After(60 * time.Second): // above the tray's 50s limit for stopping the core
+						case <-time.After(shutdown.Tray + 15*time.Second): // above the limits for stopping the core
 							a.logger.Warn("Tray shutdown timed out, forcing systray quit")
 							systray.Quit()
 						}
