@@ -2,9 +2,12 @@ package runtime
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 )
 
 // A built-in client with no API key and no login yet (#1971: VS Code reports
@@ -14,9 +17,14 @@ func TestOAuthDescribe_BuiltinClientWithoutRecordsIsOfferedAndSuggested(t *testi
 	fx := newOAuthFx(t)
 
 	v := fx.suggestFor("visual studio code", "")
+	// VS Code registers as "Visual Studio Code" on both harnesses, so the name
+	// is ambiguous between vscode (Local harness) and copilot (the default
+	// harness); with no other evidence the default harness is suggested.
 	require.NotNil(t, v.SuggestedClient)
-	assert.Equal(t, "vscode", v.SuggestedClient.ID)
+	assert.Equal(t, "copilot", v.SuggestedClient.ID)
 	assert.Equal(t, "known_name", v.SuggestedClient.Matched)
+	assert.True(t, hasExisting(v, "vscode"), "both stay choosable")
+	assert.True(t, hasExisting(v, "copilot"))
 
 	var found *ExistingClientView
 	for i := range v.ExistingClients {
@@ -76,8 +84,8 @@ func TestOAuthDescribe_RecordedClientBeatsBuiltinInSuggestion(t *testing.T) {
 	fx.addCustom("my-vscode", "VS Code")
 
 	s := fx.suggestFor("Visual Studio Code", "").SuggestedClient
-	require.NotNil(t, s) // control: only the built-in matches this spelling
-	assert.Equal(t, "vscode", s.ID)
+	require.NotNil(t, s) // control: only built-ins match this spelling; the default harness wins
+	assert.Equal(t, "copilot", s.ID)
 
 	s = fx.suggestFor("VS Code", "").SuggestedClient
 	require.NotNil(t, s)
@@ -93,4 +101,81 @@ func TestOAuthApprove_StaleRevisionForVanishedBuiltinIsRefused(t *testing.T) {
 	_, err := fx.svc.Approve(fx.ctx(), id, ApprovalChoice{
 		Client: ClientChoice{ID: "vscode"}, Profile: oauthStrp(""), BindingRevision: "some-revision"})
 	assert.ErrorIs(t, err, ErrOAuthBindingChanged)
+}
+
+func hasExisting(v *AuthorizationView, id string) bool {
+	for _, c := range v.ExistingClients {
+		if c.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// seen installs a presence reading for the suggestion tie-break.
+func (fx *oauthFx) seen(at map[string]time.Time) {
+	fx.t.Helper()
+	m := map[string]time.Time{}
+	for name, when := range at {
+		m[sanitizeClientName(name)] = when
+	}
+	fx.svc.presence = func() map[string]time.Time { return m }
+}
+
+// The registration name does not tell the two VS Code harnesses apart, so the
+// tie is broken by records, then by which harness this installation saw
+// recently (clientInfo.name), then by the default harness (#1971).
+func TestOAuthDescribe_VSCodeRegistrationTieBreak(t *testing.T) {
+	const name = "Visual Studio Code"
+	now := time.Now()
+
+	t.Run("records win over presence and default", func(t *testing.T) {
+		fx := newOAuthFx(t)
+		fx.mintClient("vscode", "ro", auth.ProfileModeLocked)
+		fx.seen(map[string]time.Time{"vscode-agent-host": now})
+		s := fx.suggestFor(name, "").SuggestedClient
+		require.NotNil(t, s)
+		assert.Equal(t, "vscode", s.ID)
+	})
+	t.Run("both recorded: presence decides", func(t *testing.T) {
+		fx := newOAuthFx(t)
+		fx.mintClient("vscode", "ro", auth.ProfileModeLocked)
+		fx.mintClient("copilot", "ro", auth.ProfileModeLocked)
+		fx.seen(map[string]time.Time{name: now})
+		s := fx.suggestFor(name, "").SuggestedClient
+		require.NotNil(t, s)
+		assert.Equal(t, "vscode", s.ID)
+	})
+	t.Run("local harness seen recently", func(t *testing.T) {
+		fx := newOAuthFx(t)
+		fx.seen(map[string]time.Time{name: now.Add(-time.Hour)})
+		s := fx.suggestFor(name, "").SuggestedClient
+		require.NotNil(t, s)
+		assert.Equal(t, "vscode", s.ID)
+	})
+	t.Run("copilot harness seen recently", func(t *testing.T) {
+		fx := newOAuthFx(t)
+		fx.seen(map[string]time.Time{"vscode-agent-host": now.Add(-time.Hour)})
+		s := fx.suggestFor(name, "").SuggestedClient
+		require.NotNil(t, s)
+		assert.Equal(t, "copilot", s.ID)
+	})
+	t.Run("both seen: the newer one", func(t *testing.T) {
+		fx := newOAuthFx(t)
+		fx.seen(map[string]time.Time{name: now.Add(-2 * time.Hour), "vscode-agent-host": now.Add(-time.Hour)})
+		assert.Equal(t, "copilot", fx.suggestFor(name, "").SuggestedClient.ID)
+		fx.seen(map[string]time.Time{name: now.Add(-time.Hour), "vscode-agent-host": now.Add(-2 * time.Hour)})
+		assert.Equal(t, "vscode", fx.suggestFor(name, "").SuggestedClient.ID)
+	})
+	t.Run("old presence is ignored", func(t *testing.T) {
+		fx := newOAuthFx(t)
+		fx.seen(map[string]time.Time{name: now.Add(-90 * 24 * time.Hour)})
+		assert.Equal(t, "copilot", fx.suggestFor(name, "").SuggestedClient.ID)
+	})
+	t.Run("an unrelated ambiguity stays ambiguous", func(t *testing.T) {
+		fx := newOAuthFx(t)
+		fx.addCustom("acme-a", "Shared Name")
+		fx.addCustom("acme-b", "Shared Name")
+		assert.Nil(t, fx.suggestFor("Shared Name", "").SuggestedClient)
+	})
 }
