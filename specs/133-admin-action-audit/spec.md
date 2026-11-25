@@ -57,7 +57,7 @@ A reviewer needs to know who approved a quarantined server, a pending or changed
 
 **Why this priority**: The reporter's second priority. In a deny-by-default setup an approval is the act that widens access.
 
-**Independent Test**: Approve a quarantined server's security review through the Web UI and CLI `review approve` (both call `/security/approve`, so they write the review line set of contract §P2, not `server.unquarantine`), unquarantine one through the legacy `/unquarantine` route separately (the `quarantine_security` MCP tool can only quarantine), approve a changed tool through the Web UI, CLI and `quarantine_security`; let a trusted server baseline its tools; let a scan-mode server auto-approve a clean change. Each writes the contract's lines with the right `action`, `caller` and, for automatic approvals, `caller.kind: internal` with `trigger: policy` and a closed `policy`.
+**Independent Test**: Approve a quarantined server's security review through the Web UI and CLI `review approve` (for a quarantined server both call `/security/approve`, so they write the review line set of contract §P2, not `server.unquarantine`; on an unquarantined server `review approve` calls `/tools/approve` and writes manual `tool.approve` lines), unquarantine one through the legacy `/unquarantine` route separately (the `quarantine_security` MCP tool can only quarantine), approve a changed tool through the Web UI, CLI and `quarantine_security`; let a trusted server baseline its tools; let a scan-mode server auto-approve a clean change. Each writes the contract's lines with the right `action`, `caller` and, for automatic approvals, `caller.kind: internal` with `trigger: policy` and a closed `policy`.
 
 **Acceptance Scenarios**:
 
