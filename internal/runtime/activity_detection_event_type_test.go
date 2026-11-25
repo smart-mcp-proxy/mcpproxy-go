@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientrelay"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -15,12 +17,14 @@ import (
 
 type recordingDetectionEmitter struct {
 	mu    sync.Mutex
+	ids   []string
 	types []storage.ActivityType
 }
 
-func (e *recordingDetectionEmitter) EmitSensitiveDataDetected(_ string, activityType storage.ActivityType, _ int, _ string, _ []string, _ string) {
+func (e *recordingDetectionEmitter) EmitSensitiveDataDetected(id string, activityType storage.ActivityType, _ int, _ string, _ []string, _ string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.ids = append(e.ids, id)
 	e.types = append(e.types, activityType)
 }
 
@@ -41,6 +45,9 @@ func TestRunAsyncDetection_EventCarriesActivityType(t *testing.T) {
 			"server_name": "github", "action": "load", "outcome": SkillAccessSuccess, "tool": "load_skill",
 			"skill_id": "github:s", "detection_text": "key " + awsKey,
 		}}, storage.ActivityTypeSkillAccess},
+		{"client request", Event{Type: EventTypeActivityClientRequest, Timestamp: time.Now().UTC(), Payload: clientRequestPayload(clientrelay.Event{
+			Server: "github", Method: mcp.MethodElicitationCreate, Params: map[string]any{"message": "key " + awsKey},
+		})}, storage.ActivityTypeClientRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, cleanup := setupTestStorage(t)
@@ -57,6 +64,10 @@ func TestRunAsyncDetection_EventCarriesActivityType(t *testing.T) {
 			defer emitter.mu.Unlock()
 			require.Len(t, emitter.types, 1)
 			assert.Equal(t, tc.want, emitter.types[0])
+			// The emitted type is the type of the row the emitted id names.
+			saved, err := store.GetActivity(emitter.ids[0])
+			require.NoError(t, err)
+			assert.Equal(t, saved.Type, emitter.types[0])
 		})
 	}
 }

@@ -69,6 +69,10 @@ func TestSSE_SensitiveDataDetectedHidesAdminOnlyRows(t *testing.T) {
 	var wg sync.WaitGroup
 	var adminFrames, agentFrames []sseEvent
 	deadline := time.Now().Add(15 * time.Second)
+	// readSSEFramesUntil checks the deadline only between reads; closing both
+	// streams at the deadline bounds a stalled read too.
+	bound := time.AfterFunc(time.Until(deadline), func() { adminClose(); agentClose() })
+	defer bound.Stop()
 	wg.Add(2)
 	go func() { defer wg.Done(); adminFrames = readSSEFramesUntil(t, adminBody, deadline, isSentinel) }()
 	go func() { defer wg.Done(); agentFrames = readSSEFramesUntil(t, agentBody, deadline, isSentinel) }()
