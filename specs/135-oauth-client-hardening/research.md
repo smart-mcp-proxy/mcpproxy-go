@@ -18,13 +18,13 @@ All facts about mcp-go v1.4.0 come from its `client/transport/oauth.go` at tag `
 
 - **Fact**: it needs the `AuthorizationTransaction` that the handler records when it builds the authorization URL. It checks state, then `iss` against the transaction's metadata snapshot, then `error`, then `code`. It skips the `iss` check when mcp-go itself guessed the metadata. With no transaction it fails with `no authorization transaction found; restore it with SetAuthorizationTransaction`.
 - **mcpproxy**: all three login paths build the URL and exchange the code on the **same** `*OAuthHandler` instance (`connection_oauth.go`: `handleOAuthAuthorization`, `handleOAuthAuthorizationWithResult`, `getAuthorizationURLQuick` → `waitForOAuthCallbackAsync`). So the in-memory transaction is there, and no `Set/GetAuthorizationTransaction` round trip is needed.
-- **Decision**: use `ProcessAuthorizationCallback(ctx, q, verifier)` when the source is `discovered` or `configured` and skip is off. Use `ProcessAuthorizationResponse` otherwise. In both cases mcpproxy's own check has already run (plan D2).
+- **Decision**: use `ProcessAuthorizationCallback(ctx, q, verifier)` when the source is `discovered` or `configured` and skip is off. Use `ProcessAuthorizationResponse` otherwise. In both cases mcpproxy's own decision has already run in the callback handler (plan D2). mcp-go treats an empty `iss` as absent, and mcpproxy treats it as a mismatch (R6). Because mcpproxy's check runs first, the stricter rule wins.
 - **Gap to check in PR-1**: mcp-go's snapshot comes from the document the transport wrapper serves. For a synthetic document mcp-go does **not** know it is guessed, and would compare `iss` with the synthetic issuer. That is why the synthetic source keeps the legacy call. A test pins this.
 
 ## R3. Where the check and the failure page live
 
 - **Fact**: `handleCallbackWithFailureNotification` (`internal/oauth/config.go:2005-2085`) writes the success page right after `deliver` succeeds, before the flow exchanges the code. The flow's result never reaches the page.
-- **Decision**: the waiter carries `ExpectedIssuer` and the skip switch, and the handler runs FR-001 and FR-003 itself before choosing the page (plan D2). The flow repeats the check.
+- **Decision**: the waiter carries `ExpectedIssuer` and the skip switch. The handler runs the strict parse (FR-001) and the issuer decision (FR-003) itself, before it reports a provider error or chooses the page (plan D2). The flow repeats the check.
 - **Remote callback**: it keeps its policy that "an invalid public request must not mark a healthy upstream as failed" (`remote_callback.go:73-75`). Repeated parameters are refused without using up the waiter and without `RecordOAuthFailure`. An `iss` mismatch on a request that carried the right `state` **does** use up the waiter and records the failure: only a party that holds the state can produce one, and an `iss` mismatch is exactly the attack being reported.
 - **Alternative**: add a step where the page waits for the flow's verdict (rejected for this spec: it changes how long the browser waits on every login and touches the #975 routing).
 
@@ -43,19 +43,21 @@ All facts about mcp-go v1.4.0 come from its `client/transport/oauth.go` at tag `
 
 ## R6. String comparison rules
 
-- **`iss`**: exact string compare (RFC 9207 §2.4 refers to RFC 3986 §6.2.1 simple string comparison).
+- **`iss`**: exact string compare (RFC 9207 §2.4 refers to RFC 3986 §6.2.1 simple string comparison). A parameter that is present with an empty value is a mismatch, not an absence. Only a parameter that is missing altogether counts as absent.
 - **Metadata issuer against the fetched-for URL**: ignore one trailing `/` on either side, matching mcp-go's `strings.TrimSuffix(…, "/")`. Real providers differ on the trailing slash between PRM and metadata, and the check exists to catch a different server, not a different spelling of the same one.
 - **Stored issuer against the current one**: exact compare. Both values come from metadata documents that passed R6's metadata rule.
 
 ## R7. Synthetic and guessed metadata
 
 - **Fact**: with Spec 113 endpoint overrides, the transport wrapper serves a synthetic document whose `issuer` is the origin of the authorization endpoint (`transport_wrapper.go:608-616`). mcp-go v1.4.0 marks its own fallback endpoints as `guessed` and skips the `iss` check for them.
-- **Decision**: source `synthetic`. An absent `iss` is accepted. A present `iss` is recorded as the credential issuer, with a WARN line when it differs from the synthetic one. The response is not refused on that difference alone, because mcpproxy cannot vouch for an issuer it made up. The operator who set the overrides pinned the endpoints, and that pin is the trust anchor.
+- **Decision**: source `synthetic`. An absent `iss` is accepted. A present `iss` is logged, with a WARN line when it differs from the synthetic issuer. It is **not** persisted as provenance, because it is an unauthenticated claim. The credential issuer is always the synthetic issuer, which is derived from config. The response is not refused on that difference alone, because mcpproxy cannot vouch for an issuer it made up. The operator who set the overrides pinned the endpoints, and that pin is the trust anchor. An override edit is an OAuth clear (`config.OAuthConfigChanged`), so a synthetic row is only ever compared under the overrides it was written with.
 
 ## R8. Opt-out shape
 
 - **Decision**: per server, `oauth.skip_issuer_validation: bool`, default false. It covers FR-003, FR-005 and FR-006 only. There is no global switch.
 - **Rationale**: one misbehaving provider must not block a user, and must not lower protection for every other server. Credential binding (FR-009) has no legitimate false positive (a changed issuer is a changed server), so it is never skippable. Repeated parameters have no legitimate use either.
+- **Binding identity under skip** (FR-013): the discovery target, meaning the PRM `authorization_servers` entry or the configured metadata URL, and not the document's declared `issuer`. With FR-006 off, the declared issuer is an unchecked claim. A replacement server could declare the old string and inherit the credentials.
+- **Cache isolation** (FR-007): the document cache already stores raw bytes, so validation runs per use. The preflight result, which is a validated URL plus a document, is keyed by policy as well, so a strict failure never blocks a skip server and a skip success is never served to a strict one.
 - **Alternatives**: a three-state `issuer_validation: strict|lenient|off` (rejected: the middle state has no clear meaning); a global flag (rejected).
 
 ## R9. Server-edition broker
@@ -63,6 +65,9 @@ All facts about mcp-go v1.4.0 come from its `client/transport/oauth.go` at tag `
 - **Fact**: `ConnectorConfig` (`internal/serveredition/broker/oauth_connector.go:36-60`) has static endpoints. There is no discovery and no DCR, and the callback reads `state`/`code`/`error` with `q.Get` (`api/credential_handlers.go:307-323`).
 - **Decision**: an optional `issuer` in `auth_broker` config. When it is set, the callback applies FR-001 and FR-003 with source `configured` and `IssSupported=false`: a wrong `iss` is refused and a missing one accepted. When it is not set, the callback applies FR-001 only. The broker's credential store (`bbolt_aes.go`) is per user and keyed per server, with operator-pinned endpoints, so FR-009 binding is not added there (follow-up if the broker ever gains discovery).
 
-## R10. Mix-up coverage on `main` today
+## R10. Mix-up: what `iss` does and does not cover
 
-- `state` routing (#975) delivers a callback only to the flow that minted it, and PKCE binds the code to that flow. Together they prevent cross-flow replay. They do not prove which issuer produced a response, which is RFC 9207's job (FR-003). FR-006 keeps the issuer that `iss` is compared against honest. FR-009 covers the attack that needs no user at all: a refresh sent to a swapped AS.
+- **Attack** (RFC 9700 §4.4.1): a flow for issuer A, where A is hostile. A's metadata points its authorization endpoint at honest H, using a client registration at H whose redirect URI is mcpproxy's loopback callback. Loopback redirect URIs belong to nobody, so anyone can register them, and per-server callback ports give no protection. H redirects back with `state_A` and `code_H`. Without `iss`, mcpproxy sends `code_H` **and the PKCE verifier** to A's token endpoint, and A redeems them at H. `state` routing (#975) and PKCE do not stop this.
+- **Defence**: FR-003 refuses any `iss` that differs from A. H sends `iss=H`, so the response is refused **whatever A advertises**. The advertised flag matters only for an absent `iss`, which A could fake.
+- **Residual**: if H does not send `iss`, the client cannot tell. RFC 9207 lets clients accept an absent `iss` from servers that do not advertise it. The only other client-side defence in RFC 9700 §4.4.2 is per-AS redirect URIs, and it fails here for the reason above. mcpproxy therefore marks such logins `mix_up_protected: false` and shows it (FR-018).
+- **Swap without a user** (FR-009/FR-010): covered by issuer binding and the redirect policy, independently of `iss`.

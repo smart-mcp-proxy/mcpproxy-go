@@ -8,14 +8,16 @@
 Bump `github.com/mark3labs/mcp-go` from v1.0.0 to the latest v1.x (at least v1.4.0, target v1.6.x), then wire the three fixes through mcpproxy's own seams. The mcp-go fixes alone do not engage there, because mcpproxy:
 
 - feeds mcp-go an explicit metadata URL,
-- exchanges codes through `ProcessAuthorizationResponse`, which does not check `iss`, and
-- refreshes stored credentials with its own HTTP request.
+- exchanges codes through `ProcessAuthorizationResponse`, which does not check `iss`,
+- writes the callback page before the exchange, and
+- refreshes stored credentials with its own HTTP request, which follows redirects.
 
-The work comes in four parts:
+The work comes in five parts:
 
-- an issuer snapshot attached to each pending flow, with an `iss` check owned by mcpproxy at the single code-exchange seam;
-- an issuer-equality check in the discovery preflight;
-- `issuer` and `issuer_source` fields inside the sealed `OAuthTokenRecord` body, checked before every use of a stored credential, with trust-on-first-use (TOFU) binding of rows written before this change;
+- one strict callback parse and an `iss` decision made in the callback handler against the issuer snapshot of the flow that the `state` selects;
+- issuer equality on every metadata document mcpproxy or mcp-go acts on, validated per consumer;
+- `issuer` / `issuer_source` / `mix_up_protected` inside the sealed `OAuthTokenRecord` body, checked from one validated snapshot before every credential send, with trust-on-first-use (TOFU) binding of rows written before this change, and one issuer per row;
+- no cross-origin redirects for credential-bearing requests;
 - the right `application_type` sent at registration.
 
 Delivered as three PRs (see "Delivery").
@@ -49,139 +51,148 @@ Post-design re-check: PASS. Nothing in Phase 1 adds a dependency, a lock or tray
 
 ## Design
 
-### D1. Callback delivers `url.Values` (FR-001)
+### D1. One strict callback parse (FR-001)
 
-- `CallbackServer.deliver(state, params map[string]string)` (`internal/oauth/config.go`) changes to `deliver(state, query url.Values)`. The waiter channel type changes the same way. Logging stays as it is (first values, scrubbed), with one added `iss_present` bool.
-- A new helper `oauth.RejectRepeatedParams(q url.Values) error` rejects a repeated `code`, `state`, `iss` or `error`. It runs in `handleCallbackWithFailureNotification` **before** `deliver`, so a malformed request cannot use up the waiter. The remote callback's inline check (`remote_callback.go:69`) is replaced by the same helper, and its check that `code` and `error` are not both set is kept.
-- The three consumers in `connection_oauth.go` (`:1348`, `:1621`, `:2409`) read `q.Get("code")` and `q.Get("state")`, and pass `q` into `exchangeAuthorizationCode`.
+- `oauth.ParseCallbackQuery(rawQuery string) (url.Values, error)` parses the query once and rejects:
+  - a repeated `code`, `state`, `iss` or `error`;
+  - `code` and `error` together;
+  - neither `code` nor `error`;
+  - a missing or empty `state`.
+- It runs first in `handleCallbackWithFailureNotification` (`internal/oauth/config.go:2005`), in the remote callback (it replaces the inline check at `remote_callback.go:68-72`), and in the broker callback (`api/credential_handlers.go:307`).
+- A rejected request does not take a waiter. The remote callback keeps its current rule that "an invalid public request is not an OAuth failure".
+- `CallbackServer.deliver(state, params map[string]string)` becomes `deliver(state, callbackResult{query url.Values, err error})`, and the waiter channel type changes to match. Logging keeps first values only, scrubbed, plus `iss_present`.
+- The three consumers in `connection_oauth.go` (`:1348`, `:1621`, `:2409`) return `result.err` when it is set. Otherwise they read `code`/`state` from `result.query` and pass the query to `exchangeAuthorizationCode`.
 
-### D2. Issuer snapshot and `iss` check (FR-002–FR-005)
+### D2. Issuer snapshot and the `iss` decision (FR-002–FR-005)
 
 - New file `internal/oauth/issuer.go`:
-  - `type IssuerSource string` with values `discovered`, `configured`, `synthetic`.
-  - `type ExpectedIssuer struct { Issuer string; Source IssuerSource; IssSupported bool }`.
-  - `func CheckAuthorizationResponseIssuer(q url.Values, exp ExpectedIssuer, skip bool) (recorded string, err error)`. It returns `*IssuerMismatchError`, which wraps `diagnostics.OAuthIssuerMismatch`.
-  - Rules: an empty `iss` counts as absent. `discovered` and `configured` follow FR-003. `synthetic` follows FR-004 and returns the received `iss` as `recorded`. With `skip`, the function logs at WARN and returns the issuer it expected.
-- The issuer snapshot is captured when the authorization URL is built. `CreateOAuthConfig…` already resolves `authServerMetadataURL` and `asDoc` (`config.go:1385-1421`). It now also returns `ExpectedIssuer` with these fields:
-  - `Issuer`: `asDoc.meta.Issuer`
-  - `IssSupported`: `asDoc.meta.AuthorizationResponseIssParameterSupported` (a new field on the local `discovery.go` metadata struct)
-  - `Source`: `configured` when `ov.metadataURL != ""`, `synthetic` when the transport wrapper serves a synthetic document (`transport_wrapper.go:608-616`) or when no document was found, `discovered` otherwise.
-- The snapshot is stored with the flow state, in the same struct that already holds `state` and `codeVerifier`. That struct is `OAuthStartResult` / the waiter context in `connection_oauth.go`.
-- `exchangeAuthorizationCode(ctx, h, cb, q url.Values, exp ExpectedIssuer, verifier)` works in this order:
-  1. `CheckAuthorizationResponseIssuer`
-  2. the provider `error` (FR-005)
-  3. for `discovered`/`configured` without skip: `h.ProcessAuthorizationCallback(ctx, q, verifier)`, so mcp-go runs its own check as well
-  4. otherwise: `h.ProcessAuthorizationResponse(ctx, code, state, verifier)`
-  5. the issuer used is passed to the token write (D4).
+  - `IssuerSource` (`discovered` | `configured` | `synthetic`)
+  - `ExpectedIssuer{Issuer, Source, IssSupported, Target}`. `Target` is the discovery target URL (FR-013).
+  - `DecideAuthorizationResponseIssuer(q url.Values, exp ExpectedIssuer, skip bool) (protected bool, err error)`, which returns `*IssuerMismatchError` (`diagnostics.OAuthIssuerMismatch`).
+  - Rules:
+    - `len(q["iss"]) == 1` means present, even when the value is empty. An empty value is a mismatch, which is stricter than mcp-go (R6).
+    - `discovered` and `configured` follow FR-003. `protected` is true only when `iss` was present and equal.
+    - `synthetic` follows FR-004, and `protected` is false.
+    - With `skip`, mismatches are logged at WARN and accepted.
+- **Where the snapshot comes from.** When the authorization URL is built, the OAuth config builder already holds `asDoc` (`config.go:1385-1421`). It now also returns `ExpectedIssuer`:
+  - `Issuer` is `asDoc.meta.Issuer`, which D3 has already validated.
+  - `IssSupported` is the new `AuthorizationResponseIssParameterSupported` field on the local metadata struct (`discovery.go:27`).
+  - `Source` is `configured` when `ov.metadataURL != ""`, `synthetic` when the wrapper served or will serve a synthetic document (`transport_wrapper.go:607-627`), and `discovered` otherwise.
+  - If there is no validated document and no synthetic one, the login does not start (D3 makes that terminal).
+- **The decision runs in the callback handler** (R3). The waiter for a `state` carries `{ch, exp ExpectedIssuer, skip bool}`. After D1, the handler:
+  1. takes the waiter atomically, once;
+  2. calls `DecideAuthorizationResponseIssuer`;
+  3. on failure, delivers `callbackResult{err}` (no exchange), writes the FR-018 page and calls `RecordOAuthFailure(server, err)`;
+  4. on success with `error` set, writes the provider-error page as today (FR-005 order);
+  5. otherwise delivers the query and writes the success page.
+- `exchangeAuthorizationCode(ctx, h, cb, q url.Values, exp, verifier)` repeats the decision as defence in depth. For `discovered`/`configured` without skip it calls `h.ProcessAuthorizationCallback(ctx, q, verifier)`, so that mcp-go's own RFC 9207 check also runs. Otherwise it calls `h.ProcessAuthorizationResponse`. It passes the issuer and `protected` to the login write (D4).
 
-  Research R2 confirms that `ProcessAuthorizationCallback` works with the handler's in-memory transaction on all three paths. If it does not on one path, that path keeps the legacy call. mcpproxy's own check is the requirement either way.
-- Callback page and failure record. Today the callback handler writes the success page as soon as it has delivered the query, before the exchange (`config.go:2082`), and there is no step that waits for a verdict. So the check also has to run **in the callback handler**, before the page is written:
-  - The waiter registered for a `state` now carries its `ExpectedIssuer` and the server's skip switch (`waiters map[string]*callbackWaiter{ch, exp, skip}`).
-  - `handleCallbackWithFailureNotification` takes the waiter (still atomically, once), runs `RejectRepeatedParams` and `CheckAuthorizationResponseIssuer`, and on failure:
-    - delivers a `callbackResult{err}` to the flow, so the flow ends with the typed error and does no exchange;
-    - writes the FR-016 page;
-    - calls `RecordOAuthFailure(server, err)` with the code. On the remote callback this happens only when the request passed FR-001; see R3.
-  - The flow repeats the check in `exchangeAuthorizationCode`, as defence in depth and for the broker, which has no callback server.
+### D3. Discovery issuer equality on every consumed document (FR-006–FR-008)
 
-  Research R3 records this.
+- **Candidates carry their issuer.** `BuildRFC8414MetadataURLs` becomes `metadataCandidates(issuerURL) []candidate{url, issuer}`. For a path issuer it builds only path-derived forms: RFC 8414 path insertion, and OIDC `…/{path}/.well-known/openid-configuration` plus insertion. For an origin issuer it builds the origin forms. The no-PRM fallback derives the issuer from the MCP origin.
+- `findWorkingMetadataDoc` (`discovery.go:930-958`) validates `trimOneSlash(doc.Issuer) == trimOneSlash(candidate.issuer)` after it parses each document. A mismatch or a missing `issuer` returns `*MetadataIssuerMismatchError` (`diagnostics.OAuthMetadataIssuerMismatch`) at once. No further candidate is tried. `preflightMetadataURL` propagates it as terminal (no seed, failure TTL) and does not leave `authServerMetadataURL` empty for mcp-go to rediscover on its own.
+- **Wrapper refill.** `roundTripMetadata` (`transport_wrapper.go:491-525`) validates a refilled document against the `ExpectedIssuer` recorded for the endpoint set: the candidate's issuer, or "as declared" for `configured`. A mismatch answers mcp-go with an error and never with a synthetic document.
+- **Library discovery.** Because preflight now treats a mismatch as terminal and serves the URL in every other case, mcp-go never starts PRM discovery on its own while mcpproxy has a URL. For the remaining case (no PRM, no document, no overrides), the wrapper intercepts mcp-go's well-known GETs (they go through the same transport) and applies the same check to the issuer implied by each request URL. `SkipIssuerMetadataValidation` in the mcp-go `OAuthConfig` follows the server's switch.
+- **Per-consumer validation (FR-007).** The document cache keeps raw bytes (`asMetadataDoc.raw`), as it does today, and validation runs on every use. The `metadataPreflight` result cached under `makeDiscoveryKey("metadata-url", …)` gains the policy (strict or skip) in its key, so a strict failure and a skip success never share an entry.
+- **Configured URL (FR-008)**: no derivation compare. The declared issuer is used as is, and a missing one fails.
 
-### D3. Discovery issuer equality (FR-006, FR-007)
+### D4. Issuer-bound rows (FR-009–FR-013)
 
-- In `findWorkingMetadataDoc(env, issuerURL, …)` (`internal/oauth/discovery.go`), after a document parses, compare `trimOneSlash(doc.Issuer)` with `trimOneSlash(expectedIssuerFor(candidateURL, issuerURL))`. The expected issuer is the PRM `authorization_servers[0]` value when PRM produced it. Otherwise it is the issuer URL that the candidate well-known URL was built from: `authorizationServerMetadataURLs` builds each candidate from one issuer URL, so the mapping is known.
-- On mismatch, return `*MetadataIssuerMismatchError` (`diagnostics.OAuthMetadataIssuerMismatch`) at once. Do not try the next candidate. Do not write the seed into the cache (`preflightMetadataURL` already discards seeds on error). The result is cached with `discoveryFailureTTL`, like any other discovery failure.
-- A missing `issuer` is a failure in every source (FR-007), except for synthetic documents, which mcpproxy builds itself.
-- `skip_issuer_validation` bypasses the equality compare only (WARN line). Keep `SkipIssuerMetadataValidation` in the mcp-go `OAuthConfig` in step with the server's switch, for the paths where mcp-go fetches metadata itself.
+- **Record.** `storage.OAuthTokenRecord` gains `Issuer` and `IssuerSource` (`omitempty`). They live inside the body that `encodeOAuthRecord` seals (`oauth_binding.go:166`). The additional data does not change, and a row without the fields marshals to the same bytes as before.
+- **Snapshot-consistent sends (FR-009).** A new helper `oauth.SendSnapshot(handler) (ExpectedIssuer, *AuthServerMetadata, error)` returns one validated snapshot. Every credential send gets its issuer **and** its endpoint from that one value:
+  - `refreshWithStoredCredentials` takes `metadata.TokenEndpoint` from the snapshot, then checks `CheckStoredIssuer(rec, snap)`, then sends.
+  - `oauthRefreshOnce` / `oauthRefreshFunc` (`oauth_refresh.go:66-110`) check before calling the library refresh. They also set `OAuthConfig.CredentialsIssuer = rec.Issuer` when it is bound, so mcp-go's v1.3+ refresh refuses a different issuer by its own rule (`ErrAuthorizationServerChanged`). It is mapped to the same code.
+  - `RefreshManager` attempts go through the same check.
+  - Login reuse (`config.go:1189-1196`, `:1505-1514`): a stored `client_id` whose issuer differs from the flow's `ExpectedIssuer` is not used. This is the same branch as a Spec 022 stale registration.
+  - Code exchange: the reused registration must match `exp`.
+- **Freshness.** Detection is tied to discovery. Whenever mcpproxy runs discovery for a server (connect, 401 rediscovery, refresh-failure rediscovery, login), the new snapshot replaces the handler's metadata. If the snapshot names another issuer than the row, the server enters `ISSUER_CHANGED`. A warm handler whose cached metadata still names A sends to A, which is safe: A issued the credentials. `PersistentTokenStore.GetToken` returns `ErrOAuthAuthorizationRequired` wrapped with the code while the server is in `ISSUER_CHANGED`, so the access token stops being attached. The state clears once a discovery resolves the bound issuer again.
+- **Redirects (FR-010).** `refreshTokenWithStoredCredentials` (`internal/upstream/core/client.go:989-1010`) builds its client as `&http.Client{Transport: c.Gate().HTTPTransport(), CheckRedirect: oauth.CheckRedirect, Timeout: 30s}`, where `CheckRedirect` is the exported `oauthCheckRedirect`. An AST guard test asserts that every `http.Client` in `internal/oauth` and `internal/upstream/core` that sends a form containing `refresh_token`, `client_secret`, `code_verifier` or `code` has a `CheckRedirect` set. mcp-go's own token and registration requests go through the OAuth transport wrapper's client, which already uses `oauthCheckRedirect`. PR-1 confirms this path, and otherwise installs the policy on the `HTTPClient` passed through `OAuthConfig`.
+- **Trust on first use (FR-011).** `storage.BindOAuthIssuer(serverKey, binding, observedRevision, issuer, source) (bound bool, err error)`:
+  - runs in one bbolt transaction;
+  - re-reads the row and requires `Revision == observedRevision && Issuer == ""`;
+  - requires that the row is not undecryptable;
+  - re-seals with the configured key, or writes plain JSON without one, as today.
 
-### D4. Issuer-bound rows (FR-008–FR-011)
+  Otherwise it writes nothing. It runs at most once per row, off the hot path, after the use that discovered the issuer.
+- **One issuer per row (FR-012).** `UpdateOAuthClientCredentials*` (`oauth_binding.go:467-499`, the DCR persistence called before the browser opens, `connection_oauth.go:1177-1228`, `:2218-2244`) gains an `issuer` argument. When the row's `Issuer` is set and differs, the same transaction clears `AccessToken`, `RefreshToken`, `ExpiresAt` and `Scopes`. Those tokens were already refused under FR-009. The login write (`WithLoginClient`) always writes token, registration and issuer together. A failed callback after DCR leaves a registration-only row bound to the new issuer, which is reusable for the next login against that issuer.
+- **Opt-out binding (FR-013).** With `skip`, the stored `Issuer` is `exp.Target` (the PRM `authorization_servers` entry or the configured metadata URL), and `IssuerSource` is `discovered` or `configured`. The comparison uses the same target from the current snapshot.
+- **Synthetic (FR-004).** The stored issuer is the synthetic issuer (the origin of the authorization endpoint). An override edit is an OAuth clear (`config.OAuthConfigChanged`, `internal/config/config.go:3422`): the epoch moves and the old row is never read under new overrides. So synthetic-to-synthetic comparisons only ever meet the same overrides. A switch from synthetic to discovered (overrides removed) is also an OAuth clear.
 
-- `storage.OAuthTokenRecord` gains `Issuer string \`json:"issuer,omitempty"\`` and `IssuerSource string \`json:"issuer_source,omitempty"\``. Both go inside the body that `encodeOAuthRecord` seals, so the AAD does not change and Spec 123 needs no change. Records with empty fields keep producing the same JSON bytes, so the "same bytes without a key" property of Spec 123 still holds.
-- Writers:
-  - The login write (`WithLoginClient` / `persistCompletedDCRCredentials`, `UpdateOAuthClientCredentials*`) takes the issuer from the exchange (D2).
-  - `PersistentTokenStore.SaveToken` copies `Token.Issuer` from mcp-go v1.3+ when it is set. Otherwise it keeps the row's existing issuer and never clears it.
-  - `PersistentTokenStore.GetToken` returns `Token.Issuer` from the row, because mcp-go requires the store to preserve it.
-- A new guard, `oauth.CheckStoredIssuer(rec, current ExpectedIssuer) (bindNow bool, err error)`, applies these rules in order:
-  - an undecryptable row is handled first, as today;
-  - `rec.Issuer == ""` with `current.Source` in {discovered, configured} → TOFU, `bindNow = true`;
-  - an equal issuer → ok;
-  - a synthetic row compared with a synthetic issuer → ok when equal. They cannot differ in practice, because `config.OAuthConfigChanged` (`internal/config/config.go:3422`) already counts every endpoint-override and metadata-URL edit as an OAuth clear: the epoch moves and the old row is never read under the new overrides;
-  - otherwise → `*IssuerChangedError` (`diagnostics.OAuthIssuerChanged`).
-- Call sites, all **before** any request is sent:
-  - `refreshWithStoredCredentials` (`internal/upstream/core/oauth_refresh.go:124`), before `refreshTokenWithStoredCredentials`
-  - `oauthRefreshOnce` / `oauthRefreshFunc` (`:66-104`), where the token endpoint is taken
-  - `RefreshManager` attempt entry (`internal/oauth/refresh_manager.go`)
-  - DCR reuse in `config.go:1189-1196` and `:1505-1514`: an issuer change is treated like the Spec 022 stale-registration case. The stored `client_id` is not used. The row is not deleted here; the next login write replaces it (FR-011).
-  - the code-exchange path (a reused registration must match the issuer just checked)
-- To set the mcp-go `OAuthConfig.CredentialsIssuer`, use the row's issuer when one is bound, and leave it empty otherwise, which gives mcp-go's legacy TOFU. This lines up mcp-go's own v1.3 refresh check with ours.
-- TOFU write: a record-only, binding-conditional write (`storage.BindOAuthIssuer(serverKey, binding, revision, issuer, source)`) that runs only if `Revision` is unchanged and the row is not undecryptable. It re-seals with the configured key. Without a key, it writes plaintext JSON as today. It is never part of a hot read path, and it runs at most once per row.
-- An access token from an issuer-changed row is not attached to upstream requests. `PersistentTokenStore.GetToken` returns `ErrOAuthAuthorizationRequired` wrapped with the code, so mcp-go stops and health shows "login".
+### D5. DCR `application_type` (FR-016)
 
-### D5. DCR `application_type` (FR-014)
+- After the bump, a table test pins mcp-go's registration body: `native` for `127.0.0.1`, `[::1]` and `localhost`, `web` otherwise (R4). If mcp-go's mapping differs, the transport wrapper, which already sees the registration request (`transport_wrapper.go:408-438`), rewrites the field.
 
-- After the bump, assert that mcp-go's `applicationType(redirectURI)` returns `native` for `127.0.0.1`, `[::1]` and `localhost` hosts, and `web` otherwise. Research R4 records the check. If mcp-go's mapping differs, mcpproxy's transport wrapper (which already intercepts registration for Spec 113 overrides, `transport_wrapper.go:408-438`) rewrites the field on the outgoing registration body. A test pins the value either way.
+### D6. Opt-out and broker (FR-014, FR-015, US7)
 
-### D6. Opt-out (FR-012, FR-013)
+- `config.OAuthConfig.SkipIssuerValidation bool` (`json:"skip_issuer_validation,omitempty"`) is wired at five points (project config-field rule):
+  1. the config struct and validation. It is **excluded** from `config.OAuthConfigChanged`: like `RefreshReplayEnabled` it is request policy, not credential identity, so toggling it never clears a grant or moves the epoch;
+  2. a `ServerFieldMaskDecisions` entry (`internal/oauth/serverconfigfields.go`, not a secret);
+  3. OAS / `make swagger`;
+  4. the Web UI server editor;
+  5. the macOS server editor.
 
-- `config.OAuthConfig.SkipIssuerValidation bool \`json:"skip_issuer_validation,omitempty"\``, wired through these 5 points (project memory: config-field wiring):
-  1. config struct and validation, and **excluded** from `config.OAuthConfigChanged`. Like `RefreshReplayEnabled` it is request policy, not credential identity, so toggling it never clears a grant or moves the epoch.
-  2. a `ServerFieldMaskDecisions` entry (`internal/oauth/serverconfigfields.go`, non-secret), so the redaction walk test passes
-  3. OAS / `make swagger`
-  4. Web UI server editor OAuth section
-  5. macOS server editor
+  It also hot-reloads. The FR-007 cache partition makes a reload back to strict take effect at the next discovery.
+- Broker (`//go:build server`): `config.AuthBrokerConfig.Issuer` → `ConnectorConfig.Issuer`. The handler runs D1, and then, when an issuer is set, runs `DecideAuthorizationResponseIssuer` with `{Source: configured, IssSupported: false}` **before** the `error` branch (`credential_handlers.go:315`). A refusal is reported as `connect_failed` and `conn.Deny(state, "issuer_mismatch")`.
 
-  It also hot-reloads.
-- The broker (`//go:build server`) gets `ConnectorConfig.Issuer string` from `config.AuthBrokerConfig.Issuer`. `Complete` gains a `q url.Values` overload, and the handler calls `RejectRepeatedParams` and then `CheckAuthorizationResponseIssuer` with source `configured` and `IssSupported=false`, so a wrong `iss` is refused and a missing one is accepted.
+### D7. Surfaces (FR-017, FR-018)
 
-### D7. Surfaces (FR-015–FR-018)
-
-- `internal/diagnostics/codes.go`: `OAuthIssuerMismatch`, `OAuthIssuerChanged`, `OAuthMetadataIssuerMismatch`, with their catalog entries (title, health level, action) and `docs/errors/<CODE>.md` pages. The pages are checked by the existing docs-coverage test for codes.
-- Health mapping (`internal/upstream/types` / the health calculator): `ISSUER_CHANGED` → level unhealthy, action `login` (same as `REAUTH_REQUIRED`). `METADATA_ISSUER_MISMATCH` → action `configure`. `ISSUER_MISMATCH` → recorded OAuth failure, action `login`.
-- Doctor: `management.BuildOAuthTokenStorageReport` (Spec 123) gains `issuer_binding {bound, unbound, changed: [server], validation_disabled: [server]}`. Scoped callers get counts limited to their reach.
-- `auth status`, `GET /api/v1/servers/{id}` OAuth block, Web UI ServerDetail, tray detail: `issuer` (shown as origin) and `issuer_source`.
+- `internal/diagnostics/codes.go` gains `OAuthIssuerMismatch`, `OAuthIssuerChanged` and `OAuthMetadataIssuerMismatch`, with catalog entries and `docs/errors/<CODE>.md` pages (covered by the codes-to-docs test).
+- Health: `ISSUER_CHANGED` → unhealthy, action `login`. `METADATA_ISSUER_MISMATCH` → unhealthy, action `configure`. `ISSUER_MISMATCH` → recorded OAuth failure, action `login`.
+- Doctor: `management.BuildOAuthTokenStorageReport` (Spec 123) gains `issuer_binding` (see `contracts/doctor-issuer-binding.json`), scoped by reach.
+- `auth status`, the OAuth block of `GET /api/v1/servers/{id}`, Web UI ServerDetail and the tray detail show the issuer origin, the source and `mix_up_protected` (from the last login). The login write stores `protected` as `MixUpProtected bool` (`json:"mix_up_protected,omitempty"`) in the record, so the flag survives a restart.
 
 ## Test plan
 
-**Fake authorization server**: `internal/oauth/oauthtest/fakeas.go` (test-only package). It is one `httptest.Server` that can act as a protected resource (PRM), an AS (RFC 8414 + openid-configuration), and registration, authorize and token endpoints. Its switches are:
+**Fake authorization server** `internal/oauth/oauthtest/fakeas.go` (test-only): one `httptest.Server` that serves PRM, RFC 8414 and OIDC metadata, registration, authorize (302 to the redirect URI, so the real callback server is exercised) and token. Its switches:
 
-- `AdvertiseIss bool`
-- `IssMode {Correct, Omit, Wrong, Repeat, Empty}`
-- `MetadataIssuer string` (overrides the declared issuer)
-- `PRMAuthServers []string`, which can be changed at run time to simulate a swap
-- `RejectApplicationType bool`
-- a request log of every registration body and every token request (grant type, client id, refresh token)
+- `AdvertiseIss`
+- `IssMode {Correct, Omit, Empty, Wrong, Repeat}`
+- `MetadataIssuer` (declared issuer independent of the serving URL)
+- `PathIssuer`
+- `AuthorizeRedirectsTo` (mix-up: hand the browser to another instance)
+- `PRMAuthServers`, which can change at run time
+- `TokenRedirect` (307 to another origin)
+- `RejectApplicationType`
+- a request log of every registration body and token request (grant, client id, refresh token, verifier)
 
-The authorize endpoint returns a 302 to the redirect URI, so the real callback server is exercised end to end. Two instances (AS-A and AS-B) behind one PRM cover the swap and mix-up cases.
+Two or three instances (honest H, hostile A, replacement B) cover mix-up and swap.
 
 | Test | Covers |
 |---|---|
-| `TestIssCheck_Matrix` (unit, `issuer_test.go`) | FR-003/004/005: every combination of source × advertised flag × iss mode × skip |
-| `TestCallback_RepeatedParamsRejectedBeforeDeliver` (loopback + remote) | FR-001, the waiter is not used up |
-| `TestLogin_IssMismatch_NoTokenRequest` (fake AS, real callback, `internal/upstream/core`) | US1.2/1.3, SC-001, page text, failure code |
-| `TestLogin_IssAbsentNotAdvertised_Succeeds` | US1.4 |
-| `TestLogin_ErrorResponseWrongIss` | US1.6 |
-| `TestDiscovery_MetadataIssuerMismatch_{PRM,Fallback,OIDC}` | US4, FR-006, no cache seed |
-| `TestDiscovery_ConfiguredMetadataURL_IssuerAsDeclared` | FR-007 |
-| `TestSwap_NoCredentialReachesNewAS` (proactive, reactive, stored-credential refresh, re-login) | US2, SC-002 |
-| `TestSwap_StaticClientIDKept` | US2.4 |
-| `TestUpgrade_LegacyRowsBindOnFirstUse_{Plain,Sealed}` | US3, SC-003, the sealed row stays sealed with the same AAD |
-| `TestUpgrade_DiscoveryFailsLeavesUnbound` | US3.2 |
-| `TestUndecryptableBeforeIssuer` | US2.5 |
-| `TestDCR_ApplicationType_{IPv4,IPv6,Localhost,Remote}` | US5, FR-014 |
-| `TestSkipIssuerValidation_DoesNotSkipBinding` | US6.2, FR-012 |
-| `TestBroker_Iss_{Set,Unset}` (`-tags server`) | US7 |
+| `TestDecideIssuer_Matrix` (unit) | FR-003/004/005/014: source × flag × iss mode (incl. empty) × skip → refused / protected |
+| `TestParseCallbackQuery_Strict` (loopback, remote, broker) | FR-001; remote waiter not taken |
+| `TestCallback_DecisionBeforePage` | the page reflects the refusal; `RecordOAuthFailure` carries the code |
+| `TestMixUp_HonestIssRefusedInHostileFlow` | US1.5: A's token endpoint receives nothing |
+| `TestLogin_IssAbsentNotAdvertised_UnprotectedFlag` | US1.4, FR-018 |
+| `TestLogin_ErrorResponseWrongIss` | FR-005 |
+| `TestDiscovery_Issuer_{PRMOrigin,PRMPath,OriginOnlyForPath,Fallback,OIDCOnly,Missing}` | FR-006, terminal, no fallback |
+| `TestDiscovery_WrapperRefillValidated` / `TestDiscovery_NoLibraryRediscoveryAfterMismatch` | FR-006 "wherever obtained" |
+| `TestDiscovery_PolicyPartition_{StrictFirst,SkipFirst}` + hot reload | FR-007, US6.4 |
+| `TestSwap_NoCredentialReachesNewAS_{Proactive,Reactive,Stored,WarmHandler,Relogin}` | US2, SC-002 |
+| `TestSwap_TokenEndpointCrossOriginRedirectNotFollowed` | FR-010 |
+| `TestCredentialClientsHaveCheckRedirect` (AST guard) | FR-010 |
+| `TestDCRWriteForNewIssuerClearsOldTokens` / `TestFailedCallbackAfterDCRLeavesBoundRegistration` | FR-012 |
+| `TestSwap_StaticClientIDKept` | US2.5 |
+| `TestUpgrade_LegacyRowsBindOnFirstUse_{Plain,Sealed}` / `TestUpgrade_LegacyRowFirstUseSeesOtherAS` / `TestUpgrade_DiscoveryFailsLeavesUnbound` | US3, FR-011, SC-003 |
+| `TestBindOAuthIssuer_RevisionRace` (concurrent bind and login) | FR-011 |
+| `TestSkip_BindsToDiscoveryTarget` | FR-013, US6.2/6.3 |
+| `TestUndecryptableBeforeIssuer` | US2.6 |
+| `TestDCR_ApplicationType_{IPv4,IPv6,Localhost,Remote}` | FR-016 |
+| `TestBroker_Iss_{Set,Unset,ErrorWithWrongIss}` (`-tags server`) | US7 |
 | `TestRecordJSONUnchangedWithoutIssuer` | Spec 123 byte stability |
-| `TestOAuthIssuerChecks_AllExchangePaths` (AST guard, as Spec 126 does) | every caller of `ProcessAuthorizationResponse` / `ProcessAuthorizationCallback` in `internal/` goes through `exchangeAuthorizationCode` |
-| Doctor/diagnostics golden + scoped variant | FR-017 |
-| `scripts/test-oauth-client-hardening-e2e.sh` | built binary against the fake AS run as a stand-alone helper (`cmd/fakeas` under `internal/oauth/oauthtest/cmd`, test build only): login, swap, upgrade from a seeded v-previous `config.db` |
+| `TestOAuthIssuerChecks_AllExchangePaths` (AST guard) | every `ProcessAuthorization*` call goes through `exchangeAuthorizationCode` |
+| Doctor/diagnostics golden + scoped variant | FR-018 |
+| `scripts/test-oauth-client-hardening-e2e.sh` | built binary against the fake AS as a helper binary (`internal/oauth/oauthtest/cmd/fakeas`): login, mix-up, swap, upgrade from a seeded previous-version `config.db` |
 
-**Real-provider check** (manual, recorded in `specs/135-oauth-client-hardening/verification/providers.md`): sign in with default settings against the providers in the existing OAuth docs examples (Cloudflare, Smithery, GitHub-MCP, Notion, Atlassian, Sentry). Record whether each one advertises `iss` support, whether it sends `iss`, its declared issuer against its URL, and its DCR answer to `application_type`. SC-004 is met when none of them needs the opt-out, or each one that does is documented.
+**Real-provider check** (manual, `verification/providers.md`): Cloudflare, Smithery, GitHub MCP, Notion, Atlassian and Sentry. For each, record the advertised flag, whether `iss` is sent, the declared issuer against its URL, and the DCR answer to `application_type`. SC-004 gate.
 
 ## Delivery
 
-1. **PR-1 (bump + `iss` + `application_type`)**: mcp-go bump with regression fixes (FR-019), D1, D2, D5, the `ISSUER_MISMATCH` code, the fake AS. Behaviour change: only callbacks that are actually wrong get refused.
-2. **PR-2 (binding + discovery equality)**: D3, D4, `ISSUER_CHANGED` and `METADATA_ISSUER_MISMATCH`, TOFU, the upgrade tests.
-3. **PR-3 (surfaces + opt-out + broker)**: D6, D7, docs, e2e script, provider verification.
+1. **PR-1 (bump, callback, `iss`, `application_type`)**: FR-019, D1, D2, D5, `ISSUER_MISMATCH`, the fake AS.
+2. **PR-2 (discovery equality, binding, redirects)**: D3, D4, `ISSUER_CHANGED`, `METADATA_ISSUER_MISMATCH`, trust on first use, upgrade tests.
+3. **PR-3 (opt-out, broker, surfaces, docs)**: D6, D7, the e2e script, the provider verification.
 
-PR-1 and PR-2 can each ship alone. PR-3's opt-out should land in the same release as PR-2, because PR-2 is the first change that can refuse a provider which works today (metadata equality). Each PR is cross-reviewed (opencode `gpt-6.2-sol`), with the round cap from the operator rules.
+PR-2 is the first change that can refuse a provider that works today (metadata equality), so PR-3's opt-out ships in the same release. Each PR is cross-reviewed (opencode `gpt-6.2-sol`, round cap per the operator rules).
 
 ## Project Structure
 
@@ -204,11 +215,11 @@ specs/135-oauth-client-hardening/
 ### Source Code (repository root)
 
 ```text
-internal/oauth/          issuer.go (new), config.go (callback, preflight), discovery.go, remote_callback.go,
+internal/oauth/          issuer.go (new), config.go (callback, preflight), discovery.go, discovery_cache.go, remote_callback.go,
                          persistent_token_store.go, refresh_manager.go, serverconfigfields.go,
-                         transport_wrapper.go (only if R4 needs it), oauthtest/ (new, test-only)
-internal/upstream/core/  connection_oauth.go (exchange seam, waiters), oauth_refresh.go
-internal/storage/        models.go (2 fields), oauth_binding.go (BindOAuthIssuer)
+                         transport_wrapper.go (refill validation; R4 rewrite only if needed), oauthtest/ (new, test-only)
+internal/upstream/core/  connection_oauth.go (exchange seam, waiters), oauth_refresh.go, client.go (CheckRedirect)
+internal/storage/        models.go (3 fields), oauth_binding.go (BindOAuthIssuer, issuer-aware DCR write)
 internal/diagnostics/    codes.go + catalog
 internal/management/     doctor OAuth section
 internal/config/         OAuthConfig.SkipIssuerValidation, AuthBrokerConfig.Issuer
@@ -224,5 +235,5 @@ docs/                    features/oauth-authentication.md, errors/*.md (3), conf
 
 | Item | Why needed | Simpler alternative rejected because |
 |---|---|---|
-| Own `iss` check in addition to mcp-go's | mcp-go cannot tell synthetic metadata apart, and the broker does not use mcp-go | Relying on mcp-go alone would refuse logins through Spec 113 overrides and leave the broker unchecked |
+| Own `iss` decision in the callback handler in addition to mcp-go's | The page is written before the exchange; mcp-go cannot tell synthetic metadata apart; the broker does not use mcp-go | Relying on mcp-go alone would show success pages for refused logins, refuse Spec 113 override logins, and leave the broker unchecked |
 | TOFU binding write | No forced re-login (US3) | Re-login for every server on upgrade was rejected in the spec |

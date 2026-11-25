@@ -6,7 +6,8 @@
     "changed": [
       { "server": "notion", "bound_issuer_origin": "https://auth.notion.example", "current_issuer_origin": "https://other.example" }
     ],
-    "validation_disabled": ["legacy-provider"]
+    "validation_disabled": ["legacy-provider"],
+    "not_mix_up_protected": ["provider-without-iss"]
   },
   "warnings_added": ["issuer_validation_disabled", "issuer_changed"]
 }
