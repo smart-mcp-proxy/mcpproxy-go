@@ -238,6 +238,9 @@ jobs:
 
     env:
       GO111MODULE: "on"
+      # Build the stdlib regexp without race instrumentation, a third of the test time.
+      # Our code stays race-checked, except a []byte that only regexp itself reads.
+      GOFLAGS: "-gcflags=regexp/...=-race=false"
 
     strategy:
       matrix:
@@ -513,6 +516,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GO111MODULE: "on"
+      # Build the stdlib regexp without race instrumentation, a third of the test time.
+      # Our code stays race-checked, except a []byte that only regexp itself reads.
+      GOFLAGS: "-gcflags=regexp/...=-race=false"
 
     steps:
       - name: Checkout code
