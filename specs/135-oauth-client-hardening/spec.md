@@ -26,7 +26,7 @@ All three gaps are real. Two of them need more than the dependency bump, because
 ### Gap 2: stored credentials are not bound to the issuer. CONFIRMED, plus two sub-gaps
 
 - A stored row is keyed by `GenerateServerKey(name, url)` = `name + "_" + first 16 hex characters of sha256(name|url)` (`internal/oauth/persistent_token_store.go:96-105`). The row (`storage.OAuthTokenRecord`, `internal/storage/models.go:628-657`) holds the access token, refresh token, DCR `client_id`/`client_secret`, callback port, redirect URI, `OAuthEpoch` and `Revision`. **There is no issuer.**
-- Spec 116's `CredentialBinding` is `{Incarnation, OAuthEpoch}` (`internal/commitview/commitview.go:47-50`). Apart from a server's creation and the projection repair (`internal/runtime/configsvc/generations.go:175-184`), the epoch moves only when a config commit clears that server's OAuth state (`:198-227`). An upstream whose Protected Resource Metadata (PRM) starts naming another authorization server, or whose metadata document changes, does not commit config, so the binding does not move.
+- Spec 116's `CredentialBinding` is `{Incarnation, OAuthEpoch}` (`internal/commitview/commitview.go:47-50`). Apart from a server's creation or explicit replacement (`internal/runtime/configsvc/generations.go:173-184`), the epoch moves only when a config commit clears that server's OAuth state (`:207-209`). During projection repair (`:198-206`), an unchanged stamped entry keeps its epoch (`:211-213`). An upstream whose Protected Resource Metadata (PRM) starts naming another authorization server, or whose metadata document changes, does not commit config, so the binding does not move.
 - The Spec 022 hygiene read (`internal/oauth/config.go:1189-1196`) keeps the stored `client_id`, port and redirect URI. The credential read (`:1505-1514`) loads `client_id` and `client_secret` for reuse against whatever discovery resolves now.
 - `refreshWithStoredCredentials` (`internal/upstream/core/oauth_refresh.go:124-139`) takes `TokenEndpoint` from the handler's metadata, which may be cached. It then posts the stored **refresh token and client secret** with mcpproxy's own HTTP request (`internal/upstream/core/client.go:989-1010`). mcp-go's v1.3.0 binding does not cover this path.
 - **Sub-gap: redirects.** That request uses `Gate().HTTPClient` (`client.go:1009`, `internal/upstream/dialgate/gate.go:473-477`). Its default redirect policy re-sends a POST body on a 307/308, even to another origin. The OAuth redirect policy `oauthCheckRedirect` (`internal/oauth/discovery_cache.go:363-379`), which refuses a cross-origin POST redirect, is not installed on it.
@@ -61,6 +61,10 @@ All three gaps are real. Two of them need more than the dependency bump, because
   - The defence is `iss`. A response whose `iss` differs from the flow's expected issuer is refused (FR-003). This protects a flow whenever the honest H sends `iss`, whatever A's metadata claims, because a mismatch is refused regardless of the advertised flag.
   - When H does not send `iss`, RFC 9207 lets the client accept the response, and mcpproxy does. **Such a flow is not mix-up protected.** Doctor and the server detail say so for each server (FR-018). No other countermeasure is available to a client in that case.
 - **Credential replay to a swapped server**. A row bound to issuer A never sends its refresh token, client secret or DCR client id to a different issuer (FR-009). Credential-bearing requests never follow a cross-origin redirect (FR-010). The trust anchor is the issuer's metadata document fetched over TLS from the issuer's well-known URL. Anyone who controls that document controls the issuer itself. This spec does not try to tell a legitimate endpoint change at an unchanged issuer apart from a compromise of that issuer, and a change of who controls an unchanged, validly authenticated URL cannot be detected by any issuer check.
+- **What authenticates a metadata document.** A matching `issuer` string proves nothing on its own. The document must also have come from the issuer's origin over HTTPS. Two rules enforce this (FR-006a):
+  - A metadata fetch follows only same-origin redirects. A document reached through a cross-origin redirect is treated as an issuer mismatch.
+  - An issuer, or a token, registration or authorization endpoint, that uses plain `http` on a non-loopback host is **not refused**, because that would break LAN providers that work today. Instead it is reported as `insecure_issuer` in doctor and in the server detail, and every claim in this section is void for that server.
+- **Detection timing.** Detection is a user-experience bound, not part of the security invariant. The invariant: any metadata a credential-bearing request uses was validated, and was compared with the credential's binding in the same snapshot. A handler that still holds issuer A's metadata sends to A, which issued the credentials, and that is safe. How soon a swap is *noticed* depends on discovery: at most the discovery cache's success TTL (1 h today), and immediately after any event that already invalidates that cache (a 401 that advertises a new PRM URL, a refresh failure, an explicit login, a config change).
 - **Rows written before this feature** are bound by trust on first use (FR-011). Until a row is bound, it has no replay protection. Binding happens on the row's first use after the upgrade, normally the first connect. A swap that happened before the upgrade, or between the upgrade and the first use, is bound in rather than caught. This is a recorded decision (Assumption 2), not an oversight.
 
 ## User Scenarios & Testing *(mandatory)*
@@ -92,7 +96,7 @@ A server was signed in through authorization server A. Later its PRM names autho
 
 **Why this priority**: a refresh token and a client secret are long-lived. Today a metadata swap hands both to the new server on the next refresh, with no user action.
 
-**Independent Test**: log in against fake AS-A. Switch the fake resource's PRM to fake AS-B **while the connection stays up and the handler stays warm**. Trigger a proactive refresh, a reactive refresh after a 401, a stored-credential refresh, and a re-login. Assert that AS-B's token and registration endpoints never receive A's refresh token, client id or secret, and that the server shows `MCPX_OAUTH_ISSUER_CHANGED` with the login action.
+**Independent Test**: log in against fake AS-A. Switch the fake resource's PRM to fake AS-B at the same PRM URL **while the connection stays up and the handler stays warm**, then advance the injected clock past the discovery TTL, or fire one of the invalidation events. Trigger a proactive refresh, a reactive refresh after a 401, a stored-credential refresh, and a re-login. Assert that AS-B's token and registration endpoints never receive A's refresh token, client id or secret, and that the server shows `MCPX_OAUTH_ISSUER_CHANGED` with the login action.
 
 **Acceptance Scenarios**:
 
@@ -103,6 +107,8 @@ A server was signed in through authorization server A. Later its PRM names autho
 5. **Given** an operator-configured static `client_id`, **When** the issuer changes, **Then** the stored tokens are refused, but the configured client id is neither cleared nor treated as A's.
 6. **Given** a row that cannot be decrypted (Spec 123), **When** it is read, **Then** it is reported as undecryptable, as today. The issuer check is never reached.
 7. **Given** the token endpoint answers a credential-bearing request with a redirect to another origin, **When** any path sends a refresh, code exchange or registration, **Then** the redirect is not followed.
+8. **Given** discovery changes between the authorization request and the callback, with no stored row, **When** the code is exchanged, **Then** it is redeemed only at the endpoint captured with the request, or the login is aborted and restarted. It is never redeemed at the new server.
+9. **Given** A and B issue the same `client_id` with different secrets, and a handler from A is still warm, **When** the row and the snapshot are B's, **Then** the A-held secret is not sent.
 
 ---
 
@@ -116,11 +122,12 @@ A user upgrades with several OAuth servers signed in. None of them is asked to s
 
 **Acceptance Scenarios**:
 
-1. **Given** a pre-upgrade row, **When** it is first used and a validated discovery resolves an issuer (source `discovered` or `configured`), **Then** the row is used as today and the issuer is recorded in it (trust on first use).
+1. **Given** a pre-upgrade row, **When** it is first used and a validated discovery resolves an issuer, or overrides yield a synthetic one, **Then** the binding is committed first and the row is then used as today (trust on first use).
+6. **Given** two first uses of the same unbound row that resolve different issuers concurrently, **Then** exactly one binding commits, and the other caller sends nothing unless the committed binding matches its own snapshot.
 2. **Given** a pre-upgrade row, **When** discovery for that use fails, **Then** nothing is recorded, the use behaves as a discovery failure does today, and the row stays unbound.
 3. **Given** a sealed pre-upgrade row, **When** the issuer is recorded, **Then** the row is re-sealed with the same key and the same additional data (key id, bucket, bucket key), and the issuer sits inside the sealed body.
 4. **Given** a pre-upgrade row whose first post-upgrade discovery resolves a *different* server than the one that issued it, **When** it is used, **Then** it is bound to that server. This is the accepted trust-on-first-use risk. The test pins the behaviour so that any later change to it is deliberate.
-5. **Given** a row bound by the new version, **When** an older mcpproxy runs on the same `config.db`, **Then** it reads and uses the row. If it rewrites the row, the issuer is lost, and on the next upgrade the row goes through US3.1 again.
+5. **Given** a row bound by the new version, **When** an older mcpproxy runs on the same `config.db`, **Then** it reads and uses the row. An ordinary token or registration save by the older binary drops the binding, and on the next upgrade the row goes through US3.1 again. Spec 123's envelope-only rewrites (seal or decrypt in place) keep unknown fields, so they keep the binding.
 
 ---
 
@@ -208,21 +215,22 @@ A brokered upstream (`ConnectorConfig`, static endpoints, no discovery) can now 
 
 **Discovery (RFC 8414 §3.3)**
 
+- **FR-006a**: Metadata fetches MUST NOT follow a cross-origin redirect. Doing so is an issuer mismatch, under the same code. An `http` (non-loopback) issuer or endpoint MUST be reported as `insecure_issuer` (doctor warning, server detail) and is otherwise left as it is today.
 - **FR-006**: Every metadata document that mcpproxy or mcp-go acts on MUST have a declared `issuer` equal (one trailing `/` ignored) to the issuer URL its candidate URL was derived from, wherever it was fetched (preflight, transport-wrapper refill, library discovery). Each candidate MUST carry the issuer it was derived from. For a PRM path issuer, only candidates derived from the full issuer are valid. A mismatch or a missing `issuer` MUST be terminal for that discovery: no further candidates, no synthetic or default-endpoint fallback, nothing cached as a success.
 - **FR-007**: Validation MUST be per consumer. The discovery cache MUST NOT let one server's validation policy decide another server's result. Either cache raw documents and validate on use, or partition validated results and failures by policy.
 - **FR-008**: A configured `oauth.auth_server_metadata_url` MUST skip the derivation compare of FR-006. Its declared issuer is used with source `configured`, and a missing `issuer` fails.
 
 **Issuer-bound credentials**
 
-- **FR-009**: Before sending a stored refresh token, client secret or DCR `client_id` to an authorization server, every path MUST compare the row's issuer with the issuer of the validated snapshot it will use for that request, and MUST build the request from that same snapshot. The paths are: library refresh through the token store, `refreshWithStoredCredentials`, the refresh manager, login reuse of a registration, and the code exchange. On inequality the path MUST NOT send, MUST stop attaching the row's access token to upstream requests, and MUST report `MCPX_OAUTH_ISSUER_CHANGED`. An issuer change is detected whenever discovery runs for that server (connect, 401, refresh, login), and its effect clears if discovery later resolves the bound issuer again.
+- **FR-009**: Before sending a refresh token, client secret, DCR `client_id`, authorization code or PKCE verifier to an authorization server, every path MUST compare the binding of the credentials it will send with the validated snapshot it will use for that request, and MUST build the request from that same snapshot. This applies to every credential the request carries, whether it comes from the stored row or is held in a live handler's config. Each handler that holds client credentials MUST carry their binding, and a handler whose binding differs from the snapshot MUST NOT send. A code exchange MUST use the endpoints and client registration captured with its authorization request (FR-002). If the handler's metadata no longer matches that capture, the exchange MUST be aborted with `MCPX_OAUTH_ISSUER_CHANGED` and the login started again. It MUST NOT be redeemed elsewhere. The paths are: library refresh through the token store, `refreshWithStoredCredentials`, the refresh manager, login reuse of a registration, and the code exchange. On inequality the path MUST NOT send, MUST stop attaching the row's access token to upstream requests, and MUST report `MCPX_OAUTH_ISSUER_CHANGED`. An issuer change is detected whenever discovery runs for that server (connect, 401, refresh, login), and its effect clears if discovery later resolves the bound issuer again.
 - **FR-010**: Requests that carry a client secret, refresh token, authorization code or PKCE verifier (token, refresh, registration) MUST NOT follow a redirect to another origin on any path. This includes the `Gate().HTTPClient` used by `refreshTokenWithStoredCredentials`.
-- **FR-011**: A row with no issuer MUST be used as today and bound, on its first use, to the issuer of a validated discovery (source `discovered` or `configured`). The binding write MUST compare the revision it read and an empty issuer inside the same transaction, and MUST otherwise do nothing.
+- **FR-011**: A row with no binding MUST be used as today and bound on its first use to the snapshot of that use, for every source: `discovered` or `configured` bind to the validated issuer and target, and `synthetic` binds to the synthetic issuer derived from config. The binding MUST be committed **before** any of the row's credentials are released to an authorization server. The write compares the revision it read and an empty binding inside one transaction. When that comparison fails, the caller MUST reload the row and validate it against its own snapshot under FR-009, or abort. It MUST NOT send the credentials it read.
 - **FR-012**: Every row write MUST store the issuer that issued what it writes, inside the record body (sealed with the rest under Spec 123, with unchanged additional data). A row MUST never hold a registration from one issuer and tokens from another: the first write bound to a new issuer, typically the DCR registration persisted before the browser opens, MUST remove the tokens bound to the old issuer in the same transaction. A configured static `client_id` is never cleared.
-- **FR-013**: With `skip_issuer_validation` on, the binding identity MUST be the discovery target (PRM `authorization_servers` entry, or configured metadata URL), not the document's declared `issuer`.
+- **FR-013**: Every binding MUST record both the issuer and the **discovery target**: the PRM `authorization_servers` entry, the configured metadata URL, or for `synthetic` the synthetic issuer. In strict mode the comparison checks both. With `skip_issuer_validation` on, only the target is compared, because the declared issuer is then an unchecked claim. Toggling the switch therefore keeps continuity in both directions: the target is unchanged, and in strict mode a validated issuer that equals the stored one is required. No row is ever re-bound to a different target without a login.
 
 **Strictness and opt-out**
 
-- **FR-014**: A per-server `oauth.skip_issuer_validation` (default `false`) MUST disable FR-003's `iss` comparison, FR-005 and FR-006's equality compare for that server only, with a WARN line on each skipped check. It MUST NOT disable FR-001, FR-009, FR-010, FR-011 or FR-012. There is no global switch.
+- **FR-014**: A per-server `oauth.skip_issuer_validation` (default `false`) MUST disable FR-003's `iss` comparison, FR-005, FR-006's equality compare and FR-006a's cross-origin-redirect rule for that server only, with a WARN line on each skipped check. It MUST NOT disable FR-001, FR-009, FR-010, FR-011, FR-012 or FR-013's target comparison. There is no global switch.
 - **FR-015**: The field MUST be wired like other OAuth fields: config load and validation, hot reload, OAS, Web UI server editor, macOS server editor, and the redaction field decisions (it is not a secret). Changing it MUST NOT clear stored OAuth state or move the OAuth epoch.
 
 **DCR**
@@ -235,7 +243,7 @@ A brokered upstream (`ConnectorConfig`, static endpoints, no discovery) can now 
   - `MCPX_OAUTH_ISSUER_MISMATCH`: a response was refused. It is recorded as an OAuth failure, with health action "login".
   - `MCPX_OAUTH_ISSUER_CHANGED`: stored credentials belong to another issuer. Health action "login".
   - `MCPX_OAUTH_METADATA_ISSUER_MISMATCH`: health action "configure".
-- **FR-018**: The callback failure page for FR-003 and FR-005 MUST say that the response could not be confirmed as coming from the expected authorization server, that nothing was signed in, and how to retry. It MUST NOT echo the received `iss`. Doctor, `GET /api/v1/diagnostics`, `mcpproxy auth status` and the server's OAuth detail MUST show the bound issuer origin, its source, and whether the last login was mix-up protected. Doctor MUST also list servers with `ISSUER_CHANGED` and servers with `skip_issuer_validation`, and count the unbound rows. Scoped callers see only servers in their reach.
+- **FR-018**: The callback failure page for FR-003 and FR-005 MUST say that the response could not be confirmed as coming from the expected authorization server, that nothing was signed in, and how to retry. It MUST NOT echo the received `iss`. Doctor, `GET /api/v1/diagnostics`, `mcpproxy auth status` and the server's OAuth detail MUST show the bound issuer origin, its source, and whether the last login was mix-up protected. Doctor MUST also list servers with `ISSUER_CHANGED`, servers with `skip_issuer_validation`, servers with `insecure_issuer`, and count the unbound rows. Scoped callers see only servers in their reach.
 
 **Dependency**
 
@@ -244,8 +252,9 @@ A brokered upstream (`ConnectorConfig`, static endpoints, no discovery) can now 
 ### Key Entities
 
 - **Expected issuer** (per pending flow, in memory): issuer, source, the `iss`-supported flag, and the snapshot it came from.
-- **OAuth token record** (`storage.OAuthTokenRecord`): gains `issuer`, `issuer_source` and `mix_up_protected`. They are empty on legacy rows and sit inside the sealed body.
+- **OAuth token record** (`storage.OAuthTokenRecord`): gains `issuer`, `discovery_target`, `issuer_source` and `mix_up_protected`. They are empty on legacy rows and sit inside the sealed body.
 - **Issuer-changed state** (per server): derived from the row and the current validated snapshot. Not stored.
+- **Binding**: `{issuer, target, source}` stored in the row (`discovery_target` is the new field).
 
 ## Success Criteria *(mandatory)*
 
@@ -253,7 +262,7 @@ A brokered upstream (`ConnectorConfig`, static endpoints, no discovery) can now 
 
 - **SC-001**: In the fake-AS matrix (callback surface × issuer source × advertised flag × `iss` mode × opt-out), every case that must be refused produces zero token requests and the specified page and health result.
 - **SC-002**: For rows bound to an issuer, AS-B receives zero requests that carry A's refresh token, client id or client secret, across proactive refresh, reactive refresh, stored-credential refresh, a warm-handler swap and re-login, including when the token endpoint answers with a cross-origin redirect.
-- **SC-003**: Upgrading a `config.db` with N signed-in servers (plaintext and sealed) forces zero re-logins. After one successful connect each, all N rows carry an issuer.
+- **SC-003**: Upgrading a `config.db` with N signed-in servers (plaintext and sealed, discovered, configured and synthetic) forces zero re-logins. After one successful connect each, all N rows carry a binding.
 - **SC-004**: Every provider in the real-provider check list that signs in today still signs in with default settings. Any provider that needs `skip_issuer_validation` is named in the docs with the reason.
 - **SC-005**: A user who hits any of the three new codes is told what happened and what to do, without reading logs.
 

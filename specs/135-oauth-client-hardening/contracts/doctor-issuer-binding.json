@@ -7,7 +7,8 @@
       { "server": "notion", "bound_issuer_origin": "https://auth.notion.example", "current_issuer_origin": "https://other.example" }
     ],
     "validation_disabled": ["legacy-provider"],
-    "not_mix_up_protected": ["provider-without-iss"]
+    "not_mix_up_protected": ["provider-without-iss"],
+    "insecure_issuer": ["lan-provider"]
   },
-  "warnings_added": ["issuer_validation_disabled", "issuer_changed"]
+  "warnings_added": ["issuer_validation_disabled", "issuer_changed", "insecure_issuer"]
 }

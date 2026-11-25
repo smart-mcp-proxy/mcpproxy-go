@@ -65,6 +65,12 @@ All facts about mcp-go v1.4.0 come from its `client/transport/oauth.go` at tag `
 - **Fact**: `ConnectorConfig` (`internal/serveredition/broker/oauth_connector.go:36-60`) has static endpoints. There is no discovery and no DCR, and the callback reads `state`/`code`/`error` with `q.Get` (`api/credential_handlers.go:307-323`).
 - **Decision**: an optional `issuer` in `auth_broker` config. When it is set, the callback applies FR-001 and FR-003 with source `configured` and `IssSupported=false`: a wrong `iss` is refused and a missing one accepted. When it is not set, the callback applies FR-001 only. The broker's credential store (`bbolt_aes.go`) is per user and keyed per server, with operator-pinned endpoints, so FR-009 binding is not added there (follow-up if the broker ever gains discovery).
 
+## R11. Non-HTTPS issuers and metadata redirects
+
+- **Decision**: metadata fetches follow same-origin redirects only (FR-006a). A non-loopback `http` issuer or endpoint is reported as `insecure_issuer`, not refused.
+- **Rationale**: an issuer string matched over plain HTTP, or after a hop to another origin, authenticates nothing. Refusing `http` outright would break LAN providers that work today, with no security gain over telling the operator. The spec's protection claims are stated as void for such servers.
+- **Alternative**: require HTTPS with a loopback exception (rejected for compatibility; can be revisited behind the same opt-out).
+
 ## R10. Mix-up: what `iss` does and does not cover
 
 - **Attack** (RFC 9700 §4.4.1): a flow for issuer A, where A is hostile. A's metadata points its authorization endpoint at honest H, using a client registration at H whose redirect URI is mcpproxy's loopback callback. Loopback redirect URIs belong to nobody, so anyone can register them, and per-server callback ports give no protection. H redirects back with `state_A` and `code_H`. Without `iss`, mcpproxy sends `code_H` **and the PKCE verifier** to A's token endpoint, and A redeems them at H. `state` routing (#975) and PKCE do not stop this.
