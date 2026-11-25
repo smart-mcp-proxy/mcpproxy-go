@@ -516,8 +516,8 @@ func imageHasRegistryHost(image string) bool {
 	return strings.ContainsAny(host, ".:") || host == "localhost"
 }
 
-// containerStopTimeout is how many seconds `docker stop` waits before SIGKILL, set explicitly
-// because Manager.ShutdownAll's disconnect phase has to outlast it.
+// containerStopTimeout is how many seconds `docker stop` waits before SIGKILL: what a native server
+// gets, instead of Docker's 10s.
 var containerStopTimeout = strconv.Itoa(int(shutdown.ContainerStop / time.Second))
 
 // BuildDockerArgs constructs Docker run arguments for isolation

@@ -45,7 +45,7 @@ For stdio-based MCP servers (processes started via `command`), MCPProxy follows 
 | Step | Native, Linux and macOS | Native, Windows | Docker isolation |
 |------|-------------------------|-----------------|------------------|
 | 1. Close stdin and wait | 2s | 2s | 2s |
-| 2. Ask it to exit and wait | SIGTERM, 3s | `CTRL_BREAK`, 3s | `docker stop` (SIGTERM), 10s |
+| 2. Ask it to exit and wait | SIGTERM, 3s | `CTRL_BREAK`, 3s | `docker stop` (SIGTERM), 3s |
 | 3. Kill | SIGKILL | The whole process tree | SIGKILL, by `docker stop` |
 
 Windows has no SIGTERM. `CTRL_BREAK` is the closest to it: it ends a program that does not handle it.
@@ -60,10 +60,10 @@ A server that is removed, replaced, disabled or quarantined is different: a nati
 | `mcpClientCloseTimeout` | 10s | Max time for the whole sequence of a native server |
 | `processGracefulTimeout` | 9s | Fallback when that did not end it: time after SIGTERM to the process group before SIGKILL |
 | `processTerminationPollInterval` | 100ms | How often to check if process exited |
-| `containerStopTimeout` | 10s | `--stop-timeout` of isolated containers |
+| `containerStopTimeout` | 3s | `--stop-timeout` of isolated containers |
 | `dockerCleanupTimeout` | 30s | Max time for Docker container cleanup |
 
-All servers are stopped in parallel. MCPProxy waits up to 20 seconds for all of them together. A server that is still stopping then keeps its own time, but MCPProxy no longer waits for it: it stops, and 5 seconds later kills, the containers that are left.
+All servers are stopped in parallel. MCPProxy waits up to 10 seconds for all of them together. A server that is still stopping then keeps its own time, but MCPProxy no longer waits for it: it stops, and 5 seconds later kills, the containers that are left.
 
 ## Docker Container Shutdown
 
@@ -133,7 +133,7 @@ Runtime.Close()
     │       ├─► Wait for goroutines to exit
     │       └─► Close upstream adapter
     │
-    ├─► ShutdownAll on upstream manager (35s total timeout)
+    ├─► ShutdownAll on upstream manager (25s total timeout)
     │       └─► For each server (parallel):
     │               ├─► Close stdin (2s)
     │               ├─► SIGTERM, CTRL_BREAK or docker stop

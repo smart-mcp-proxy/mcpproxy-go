@@ -13,15 +13,16 @@ const (
 	// StdinClose is how long a stdio server may take to exit after its stdin was closed, before it
 	// is signalled. mcp-go uses the same 2s, as do the official TypeScript and Python MCP SDKs.
 	StdinClose = 2 * time.Second
-	// ContainerStop is the --stop-timeout of isolated containers: Docker's own default on Linux.
-	ContainerStop = 10 * time.Second
+	// ContainerStop is the --stop-timeout of isolated containers: how long a server may take to exit
+	// after SIGTERM. mcp-go gives a native server the same 3s.
+	ContainerStop = 3 * time.Second
 	// Disconnect is how long all upstream servers together, which stop in parallel, may take.
-	Disconnect = 20 * time.Second
+	Disconnect = 10 * time.Second
 	// Sweep and SweepKill bound stopping, then killing, the containers Disconnect left behind.
 	Sweep     = 5 * time.Second
 	SweepKill = 5 * time.Second
 	// Upstreams bounds stopping the upstream servers as a whole.
-	Upstreams = 35 * time.Second
+	Upstreams = 25 * time.Second
 
 	// Core is when the core gives up and exits by itself.
 	Core = 60 * time.Second

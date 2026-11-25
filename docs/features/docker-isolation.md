@@ -134,7 +134,7 @@ mcpproxy starts every isolated container with these defaults:
 | Flag | When | Why |
 |------|------|-----|
 | `--init` | The Docker daemon reports a working `docker-init`. Never on Podman. | Runs a small init as PID 1, so the MCP server does not have to be one |
-| `--stop-timeout 10` | Always | Seconds `docker stop` waits before it kills the container. Docker's own default on Linux, set so that mcpproxy can plan for it |
+| `--stop-timeout 3` | Always | Seconds `docker stop` waits before it kills the container: the same as for a server that does not run in a container. Docker's own default is 10 |
 | `--sig-proxy=false` | Always | Keeps the docker client from passing its own `SIGTERM` on, so the server gets one and not two |
 
 An MCP server is arbitrary third-party software, and few programs are written to run as PID 1. Without an init:
@@ -152,15 +152,15 @@ The defaults come before `extra_args` on the command line and Docker uses the la
       "command": "my-server",
       "isolation": {
         "image": "example/s6-overlay-image",
-        "extra_args": ["--init=false", "--stop-timeout", "20"]
+        "extra_args": ["--init=false", "--stop-timeout", "10"]
       }
     }
   ]
 }
 ```
 
-- Use `--init=false` for images whose own init must be PID 1, such as those built on **s6-overlay** or **systemd**. They refuse to start otherwise (for example `s6-overlay-suexec: fatal: can only run as pid 1`).
-- Raise `--stop-timeout` for a server that needs longer to clean up. When mcpproxy itself shuts down, it stops waiting for its servers after 20 seconds and kills the containers that are still running a few seconds later, so higher values mainly help when a single server is stopped or restarted.
+- Use `--init=false` for images whose own init must be PID 1, such as those built on **s6-overlay** or **systemd**. They refuse to start otherwise (for example `s6-overlay-suexec: fatal: can only run as pid 1`). Their own shutdown can take longer than 3 seconds, so consider a higher `--stop-timeout` as well.
+- Raise `--stop-timeout` for a server that needs longer to clean up. When mcpproxy itself shuts down, it stops waiting for its servers after 10 seconds and kills the containers that are still running a few seconds later, so higher values mainly help when a single server is stopped or restarted.
 
 Containers you define yourself (`"command": "docker", "args": ["run", …]`) are not changed: add the flags to `args` if you want them.
 
@@ -383,7 +383,7 @@ When a Docker-isolated server starts:
 When MCPProxy stops, containers are cleaned up with a 30-second timeout:
 
 1. **Close stdin**: the server gets 2 seconds to exit on its own, as the MCP specification asks
-2. **Graceful Stop**: `docker stop` (sends SIGTERM to the container, then SIGKILL after its [stop timeout](#init-process-and-stop-timeout), 10 seconds by default)
+2. **Graceful Stop**: `docker stop` (sends SIGTERM to the container, then SIGKILL after its [stop timeout](#init-process-and-stop-timeout), 3 seconds by default)
 3. **Force Kill**: `docker kill` if `docker stop` fails
 
 Containers are labeled with `com.mcpproxy.managed=true` for identification
