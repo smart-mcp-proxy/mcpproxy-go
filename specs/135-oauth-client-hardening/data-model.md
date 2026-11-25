@@ -2,7 +2,7 @@
 
 ## Binding (value type)
 
-A binding is `{issuer, target, source}`. `Binding.Matches(stored, current, skip)` compares:
+A binding is `{issuer, target, source}`. A **write** that decides whether to clear an old grant uses `Binding.Equal`, which compares all three fields regardless of skip. A **send** is checked with `Binding.Matches(stored, current, skip)`, which compares:
 
 - **source class** (`fallback` versus every other source): always (FR-004a, FR-013).
 - **target**: always.
