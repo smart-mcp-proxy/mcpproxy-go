@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 // Spec 132 (issue #1971): the Connect dialog's browser-login choice, driven in a
@@ -9,11 +9,12 @@ import { join } from 'node:path'
 // SAFETY: Connect writes the client's real config file under the core's HOME
 // (~/.claude.json for Claude Code). Run this only against a core started with a
 // scratch HOME (the launcher's smoke core uses the real HOME, so this spec skips
-// unless MCPPROXY_SWEEP_SCRATCH_HOME=1 is exported to confirm the isolation).
+// unless MCPPROXY_SWEEP_SCRATCH_HOME names that scratch HOME, and the core must
+// report its Claude Code config path inside it).
 //
 // Environment:
 //   MCPPROXY_BASE_URL / MCPPROXY_API_KEY   the scratch core (browser login ON)
-//   MCPPROXY_SWEEP_SCRATCH_HOME=1          assert the core's HOME is a scratch dir
+//   MCPPROXY_SWEEP_SCRATCH_HOME=<dir>      the core's scratch HOME (absolute path)
 //   SWEEP_SCREENSHOT_DIR                   optional: keep a PNG of every step
 //   SWEEP_BROWSER_LOGIN_OFF=1              run the feature-off checks instead
 const BASE = process.env.MCPPROXY_BASE_URL || ''
@@ -23,7 +24,21 @@ const shotDir = process.env.SWEEP_SCREENSHOT_DIR || ''
 
 test.describe.configure({ mode: 'serial' })
 test.skip(!BASE || !KEY, 'MCPPROXY_BASE_URL and MCPPROXY_API_KEY are required')
-test.skip(process.env.MCPPROXY_SWEEP_SCRATCH_HOME !== '1', 'needs a core with a scratch HOME (Connect writes client configs); set MCPPROXY_SWEEP_SCRATCH_HOME=1')
+const HOME_DIR = (process.env.MCPPROXY_SWEEP_SCRATCH_HOME || '').replace(/\/+$/, '')
+test.skip(!HOME_DIR.startsWith('/'), 'needs a core with a scratch HOME (Connect writes client configs); set MCPPROXY_SWEEP_SCRATCH_HOME=<absolute dir>')
+
+// The core itself must say its Claude Code config lives inside the scratch HOME
+// and the feature must be in the state this run expects; otherwise fail before
+// any click, so a stray flag cannot let the spec touch a real config.
+test.beforeAll(async () => {
+  const res = await fetch(`${BASE}/api/v1/clients`, { headers: { 'X-API-Key': KEY } })
+  const body = (await res.json()) as { data: { clients: { id: string; config_path: string }[] } }
+  const cc = body.data.clients.find((c) => c.id === 'claude-code')
+  expect(cc?.config_path.startsWith(HOME_DIR + '/'), `core config path ${cc?.config_path} is not inside ${HOME_DIR}`).toBe(true)
+  const served = (await fetch(`${BASE}/.well-known/oauth-authorization-server`)).status === 200
+  expect(served, OFF ? 'feature-off run against a core that serves browser login' : 'feature-on run against a core that does not serve browser login').toBe(!OFF)
+})
+const CLAUDE_JSON = `${HOME_DIR}/.claude.json`
 
 const t = (page: Page, id: string) => page.locator(`[data-test="${id}"]`)
 
@@ -54,6 +69,7 @@ test.describe(OFF ? 'browser login off' : 'browser login on', () => {
     test.skip(OFF, 'feature-off run')
     const errors: string[] = []
     page.on('pageerror', (e) => errors.push(e.message))
+    const original = readFileSync(CLAUDE_JSON, 'utf8')
     await openConnect(page)
 
     // Only a client with a recorded real-client check shows the choice.
@@ -76,8 +92,10 @@ test.describe(OFF ? 'browser login off' : 'browser login on', () => {
     // Cancel writes nothing; a second preview works.
     await t(page, 'client-preview-cancel-claude-code').click()
     await expect(t(page, 'client-preview-claude-code')).toHaveCount(0)
+    expect(readFileSync(CLAUDE_JSON, 'utf8')).toBe(original) // Cancel wrote nothing
     await t(page, 'connect-claude-code').click()
     await t(page, 'connect-auth-oauth-claude-code').check()
+    await expect(t(page, 'client-preview-entry-claude-code')).toContainText('/mcp/oauth/claude-code')
 
     await t(page, 'client-preview-confirm-claude-code').click()
     await expect(t(page, 'connect-backup-path').or(t(page, 'connect-no-backup'))).toBeVisible()
@@ -86,6 +104,9 @@ test.describe(OFF ? 'browser login off' : 'browser login on', () => {
 
     // The client row now reads connected with Disconnect; the file holds the address.
     await expect(t(page, 'connect-disconnect-claude-code')).toBeVisible()
+    const written = readFileSync(CLAUDE_JSON, 'utf8')
+    expect(written).toContain('/mcp/oauth/claude-code')
+    expect(written).not.toMatch(/mcp_cli_|mcp_agt_|X-API-Key|Authorization|scratch-key/i)
 
     // Undo restores the pre-connect state.
     await t(page, 'connect-undo').click()
@@ -94,6 +115,7 @@ test.describe(OFF ? 'browser login off' : 'browser login on', () => {
     await t(page, 'connect-undo-confirm').click()
     await expect(t(page, 'connect-claude-code')).toBeVisible()
     await shot(page, '05-after-undo')
+    expect(readFileSync(CLAUDE_JSON, 'utf8')).toBe(original) // Undo restored the file
     expect(errors).toEqual([])
   })
 
