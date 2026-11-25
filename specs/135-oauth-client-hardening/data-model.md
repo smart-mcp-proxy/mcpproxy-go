@@ -5,7 +5,7 @@
 | Field | Type | Rule |
 |---|---|---|
 | `Issuer` | string | The `issuer` of the metadata document used to build the authorization URL. Empty only for `synthetic` with no document. |
-| `Source` | enum `discovered` \| `configured` \| `synthetic` | `configured` when `oauth.auth_server_metadata_url` is set. `synthetic` when the transport wrapper made the document up, or mcp-go fell back to origin-derived endpoints. `discovered` otherwise. |
+| `Source` | enum `discovered` \| `configured` \| `fallback` \| `synthetic` | `configured` when `oauth.auth_server_metadata_url` is set. `synthetic` when the transport wrapper made the document up from operator overrides. `fallback` when no document and no override exist, and mcp-go's default endpoints are used (FR-004a). `discovered` otherwise. |
 | `IssSupported` | bool | `authorization_response_iss_parameter_supported` from the same document. |
 | `Insecure` | bool | Non-loopback `http` issuer or endpoint; surfaced as `insecure_issuer` (FR-006a). |
 | `Target` | string | The discovery target: the PRM `authorization_servers` entry, or the configured metadata URL. It is the binding identity when `skip_issuer_validation` is on (FR-013). |

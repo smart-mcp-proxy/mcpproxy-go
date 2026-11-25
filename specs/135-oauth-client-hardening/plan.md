@@ -66,7 +66,7 @@ Post-design re-check: PASS. Nothing in Phase 1 adds a dependency, a lock or tray
 ### D2. Issuer snapshot and the `iss` decision (FR-002–FR-005)
 
 - New file `internal/oauth/issuer.go`:
-  - `IssuerSource` (`discovered` | `configured` | `synthetic`)
+  - `IssuerSource` (`discovered` | `configured` | `fallback` | `synthetic`). `fallback` is mcp-go's default endpoints when no document and no override exist (FR-004a): `iss` rules as for `discovered` with `IssSupported=false`.
   - `ExpectedIssuer{Issuer, Source, IssSupported, Target}`. `Target` is the discovery target URL (FR-013).
   - `DecideAuthorizationResponseIssuer(q url.Values, exp ExpectedIssuer, skip bool) (protected bool, err error)`, which returns `*IssuerMismatchError` (`diagnostics.OAuthIssuerMismatch`).
   - Rules:
@@ -78,7 +78,7 @@ Post-design re-check: PASS. Nothing in Phase 1 adds a dependency, a lock or tray
   - `Issuer` is `asDoc.meta.Issuer`, which D3 has already validated.
   - `IssSupported` is the new `AuthorizationResponseIssParameterSupported` field on the local metadata struct (`discovery.go:27`).
   - `Source` is `configured` when `ov.metadataURL != ""`, `synthetic` when the wrapper served or will serve a synthetic document (`transport_wrapper.go:607-627`), and `discovered` otherwise.
-  - If there is no validated document and no synthetic one, the login does not start (D3 makes that terminal).
+  - If there is no document at all and no override, `Source` is `fallback` with the discovery-selected issuer (FR-004a). A document that fails validation is terminal (D3), never `fallback`.
 - **The decision runs in the callback handler** (R3). The waiter for a `state` carries `{ch, exp ExpectedIssuer, skip bool}`. After D1, the handler:
   1. takes the waiter atomically, once;
   2. calls `DecideAuthorizationResponseIssuer`;
@@ -95,7 +95,7 @@ Post-design re-check: PASS. Nothing in Phase 1 adds a dependency, a lock or tray
 - **Library discovery.** Because preflight now treats a mismatch as terminal and serves the URL in every other case, mcp-go never starts PRM discovery on its own while mcpproxy has a URL. For the remaining case (no PRM, no document, no overrides), the wrapper intercepts mcp-go's well-known GETs (they go through the same transport) and applies the same check to the issuer implied by each request URL. `SkipIssuerMetadataValidation` in the mcp-go `OAuthConfig` follows the server's switch.
 - **Per-consumer validation (FR-007).** The document cache keeps raw bytes (`asMetadataDoc.raw`), as it does today, and validation runs on every use. The `metadataPreflight` result cached under `makeDiscoveryKey("metadata-url", …)` gains the policy (strict or skip) in its key, so a strict failure and a skip success never share an entry.
 - **Configured URL (FR-008)**: no derivation compare. The declared issuer is used as is, and a missing one fails.
-- **Origin of the document (FR-006a).** A new redirect policy `metadataCheckRedirect` allows only same-origin hops. Unlike `oauthCheckRedirect`, it also blocks cross-origin GETs. It is installed on `httpFetchRaw` (`discovery_cache.go:310-328`) and on the wrapper refill client (`transport_wrapper.go:496`). A blocked redirect is returned as `*MetadataIssuerMismatchError`. `insecure_issuer` is computed when the snapshot is built: an `http` scheme on the issuer or any endpoint, with a non-loopback host (`config.IsLoopbackHost`). It is carried on `ExpectedIssuer.Insecure` and surfaced in D7.
+- **Origin of the document (FR-006a).** A new redirect policy `metadataCheckRedirect` allows only same-origin hops. Unlike `oauthCheckRedirect`, it also blocks cross-origin GETs. It is installed on `httpFetchRaw` (`discovery_cache.go:310-328`) and on the wrapper refill client (`transport_wrapper.go:496`). A blocked redirect is returned as `*MetadataIssuerMismatchError`, and `skip_issuer_validation` does not lift it (FR-014). `insecure_issuer` is computed when the snapshot is built: an `http` scheme on the issuer or any endpoint, with a non-loopback host (`config.IsLoopbackHost`). It is carried on `ExpectedIssuer.Insecure` and surfaced in D7.
 
 ### D4. Issuer-bound rows (FR-009–FR-013)
 
@@ -109,7 +109,8 @@ Post-design re-check: PASS. Nothing in Phase 1 adds a dependency, a lock or tray
   - `RefreshManager` attempts go through the same check.
   - Login reuse (`config.go:1189-1196`, `:1505-1514`): a stored `client_id` whose issuer differs from the flow's `ExpectedIssuer` is not used. This is the same branch as a Spec 022 stale registration.
   - Code exchange: the reused registration must match `exp`.
-- **Freshness.** Freshness is a UX bound, not part of the security invariant (spec "Protection model"). Detection is tied to discovery. Whenever mcpproxy runs discovery for a server (connect, 401 rediscovery, refresh-failure rediscovery, login), the new snapshot replaces the handler's metadata. If the snapshot names another issuer than the row, the server enters `ISSUER_CHANGED`. A warm handler whose cached metadata still names A sends to A, which is safe: A issued the credentials. `PersistentTokenStore.GetToken` returns `ErrOAuthAuthorizationRequired` wrapped with the code while the server is in `ISSUER_CHANGED`, so the access token stops being attached. The state clears once a discovery resolves the bound issuer again. The discovery cache's success TTL (`discovery_cache.go:21-28`, 1 h) bounds how late a swap at an unchanged PRM URL is noticed. The swap test injects the cache clock (`discoveryCache.now`, added for this) and advances it past the TTL. A second variant fires each invalidation event instead.
+- **Freshness (FR-009b).** `oauthRefreshOnce`, the refresh manager, login and the 401 handler call `preflightMetadataURL` (cache lookup, re-resolved after the TTL) and, when its validated document differs from `h.GetServerMetadata()`, rebuild the handler with the new snapshot before the FR-009 compare. New invalidations: `globalDiscoveryCache.invalidateServer(serverURL)` on `invalid_grant`/`invalid_client` refresh failures and at the start of an explicit login. Freshness is a UX bound, not part of the security invariant (spec "Protection model"). Detection is tied to discovery. Whenever mcpproxy runs discovery for a server (connect, 401 rediscovery, refresh-failure rediscovery, login), the new snapshot replaces the handler's metadata. If the snapshot names another issuer than the row, the server enters `ISSUER_CHANGED`. A warm handler whose cached metadata still names A sends to A, which is safe: A issued the credentials. `PersistentTokenStore.GetToken` returns `ErrOAuthAuthorizationRequired` wrapped with the code while the server is in `ISSUER_CHANGED`, so the access token stops being attached. The state clears once a discovery resolves the bound issuer again. The discovery cache's success TTL (`discovery_cache.go:21-28`, 1 h) bounds how late a swap at an unchanged PRM URL is noticed. The swap test injects the cache clock (`discoveryCache.now`, added for this) and advances it past the TTL. A second variant fires each invalidation event instead.
+- **Static confidential client (FR-012).** The first validated use of a configured `client_secret` stores its binding in the row (registration fields stay empty). On `ISSUER_CHANGED` with a configured secret, the login is refused before the authorize redirect with health action `configure`. Changing `oauth.client_id`/`client_secret` is already an OAuth clear (`config.OAuthConfigChanged`), so the epoch moves and the next use binds afresh.
 - **Redirects (FR-010).** `refreshTokenWithStoredCredentials` (`internal/upstream/core/client.go:989-1010`) builds its client as `&http.Client{Transport: c.Gate().HTTPTransport(), CheckRedirect: oauth.CheckRedirect, Timeout: 30s}`, where `CheckRedirect` is the exported `oauthCheckRedirect`. An AST guard test asserts that every `http.Client` in `internal/oauth` and `internal/upstream/core` that sends a form containing `refresh_token`, `client_secret`, `code_verifier` or `code` has a `CheckRedirect` set. mcp-go's own token and registration requests go through the OAuth transport wrapper's client, which already uses `oauthCheckRedirect`. PR-1 confirms this path, and otherwise installs the policy on the `HTTPClient` passed through `OAuthConfig`.
 - **Trust on first use (FR-011).** Every path that reads an unbound row calls `oauth.EnsureBound(rec, snap)` **before** it releases a credential to an AS. That call commits the binding through `storage.BindOAuthIssuer`. If the commit loses (the revision changed, or a binding appeared), it reloads the row and re-runs FR-009 against its own snapshot: it proceeds only on a match and otherwise aborts without sending. `storage.BindOAuthIssuer(serverKey, binding, observedRevision, b Binding) (bound bool, err error)`:
   - runs in one bbolt transaction;
@@ -176,7 +177,12 @@ Two or three instances (honest H, hostile A, replacement B) cover mix-up and swa
 | `TestSwap_TokenEndpointCrossOriginRedirectNotFollowed` | FR-010 |
 | `TestCredentialClientsHaveCheckRedirect` (AST guard) | FR-010 |
 | `TestDCRWriteForNewIssuerClearsOldTokens` / `TestFailedCallbackAfterDCRLeavesBoundRegistration` | FR-012 |
-| `TestSwap_StaticClientIDKept` | US2.5 |
+| `TestSwap_StaticClientIDKept` / `TestSwap_StaticConfidentialSecretNotSentToNewIssuer` | US2.5, US2.10 |
+| `TestDCR_CrossOriginRedirectNotFollowed` | FR-010 DCR |
+| `TestFallbackSource_WrongIssRefused` | FR-004a |
+| `TestRefusedCallback_NoTokenStored_DCRRowBound` | US1 storage, US1.9 |
+| `TestSkip_MetadataCrossOriginRedirectStillRefused` | FR-014 / US6.6 |
+| `TestDetection_TTLExpiryAndNewInvalidators` | FR-009b |
 | `TestUpgrade_LegacyRowsBindOnFirstUse_{Plain,Sealed}` / `TestUpgrade_LegacyRowFirstUseSeesOtherAS` / `TestUpgrade_DiscoveryFailsLeavesUnbound` | US3, FR-011, SC-003 |
 | `TestBindOAuthIssuer_RevisionRace` / `TestFirstUse_CompetingIssuers_{Plain,Sealed}` | FR-011: the CAS loser sends nothing unless it matches |
 | `TestExchange_DiscoveryChangedSinceAuthorize_Aborts` | FR-009 code exchange |
