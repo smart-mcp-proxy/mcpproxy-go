@@ -532,9 +532,28 @@ func suggestExistingClient(reported string, clients []ExistingClientView) *Sugge
 		}
 		return false
 	}
-	var found *SuggestedExisting
+	// Clients with records are tried first; built-ins without records only when
+	// none of those matched, so offering them never removes an older suggestion.
+	for _, builtin := range []bool{false, true} {
+		found, matched := suggestAmong(clients, builtin, eq)
+		if matched > 1 {
+			return nil // several distinct clients in this tier
+		}
+		if found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+// suggestAmong counts matches among the clients whose Builtin flag equals
+// builtin, and how many distinct clients matched.
+func suggestAmong(clients []ExistingClientView, builtin bool, eq func(string) bool) (found *SuggestedExisting, matches int) {
 	for i := range clients {
 		c := &clients[i]
+		if c.Builtin != builtin {
+			continue
+		}
 		matched := ""
 		switch {
 		case eq(c.ID):
@@ -554,12 +573,12 @@ func suggestExistingClient(reported string, clients []ExistingClientView) *Sugge
 		if matched == "" {
 			continue
 		}
-		if found != nil {
-			return nil // several distinct clients
+		matches++
+		if found == nil {
+			found = &SuggestedExisting{ID: c.ID, Matched: matched}
 		}
-		found = &SuggestedExisting{ID: c.ID, Matched: matched}
 	}
-	return found
+	return found, matches
 }
 
 // suggestNewClient derives an id from the reported name: lower-case slug of

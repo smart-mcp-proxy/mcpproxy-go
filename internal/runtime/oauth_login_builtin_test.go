@@ -66,3 +66,19 @@ func TestOAuthApprove_UnknownIDStillRefused(t *testing.T) {
 	_, err = fx.svc.Approve(fx.ctx(), id, ApprovalChoice{Client: ClientChoice{New: &NewClientChoice{ID: "vscode"}}, Profile: oauthStrp("ro")})
 	assert.ErrorIs(t, err, ErrOAuthReservedIdentity)
 }
+
+// A recorded client wins over a built-in without records when both match the
+// reported name, so adding built-in candidates never silences a suggestion that
+// was made before.
+func TestOAuthDescribe_RecordedClientBeatsBuiltinInSuggestion(t *testing.T) {
+	fx := newOAuthFx(t)
+	fx.addCustom("my-vscode", "VS Code")
+
+	s := fx.suggestFor("Visual Studio Code", "").SuggestedClient
+	require.NotNil(t, s) // control: only the built-in matches this spelling
+	assert.Equal(t, "vscode", s.ID)
+
+	s = fx.suggestFor("VS Code", "").SuggestedClient
+	require.NotNil(t, s)
+	assert.Equal(t, "my-vscode", s.ID)
+}
