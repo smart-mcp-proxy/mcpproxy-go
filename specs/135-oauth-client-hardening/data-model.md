@@ -38,6 +38,16 @@ any ──(row undecryptable, Spec 123)──► undecryptable          [checked
 
 `changed` is not stored. It is recomputed from the row and the current discovery each time, so it clears itself if the upstream goes back to `I`.
 
+## Static client binding (bbolt `oauth_static_client_bindings`, new)
+
+| Field | Rule |
+|---|---|
+| key | server key (`GenerateServerKey`) |
+| `fingerprint` | sha256(client_id ‖ 0x00 ‖ client_secret) of the configured static credentials |
+| `issuer`, `target`, `source` | binding of the secret's first validated use |
+
+Sealed under Spec 123 when a key is set. It survives logout and grant clears. It is deleted when the configured credentials change (fingerprint mismatch at the next commit) or the server is deleted.
+
 ## Config
 
 | Path | Type | Default | Notes |
