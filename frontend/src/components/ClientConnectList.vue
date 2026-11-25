@@ -622,6 +622,9 @@ interface Props {
   // client credential" / "Reconnect" call to action): its preview opens at
   // once, so the profile picker is in front of the operator.
   focusClient?: string
+  // Spec 134 FR-060: the Manage panel opens the list on one client WITHOUT starting
+  // a preview: the row is scrolled into view and nothing is fetched or written.
+  revealClient?: string
 }
 
 interface Emits {
@@ -1416,6 +1419,11 @@ async function loadRequireMcpAuth() {
 
 async function openSequence() {
   await fetchClients()
+  const reveal = props.revealClient
+  if (reveal && !props.focusClient && clients.value.some(c => c.id === reveal)) {
+    void nextTick(() => document.querySelector(`[data-test="client-row-${reveal}"]`)?.scrollIntoView?.({ block: 'center' }))
+    return
+  }
   const id = props.focusClient
   if (!id || !clients.value.some(c => c.id === id)) return
   await startConnect(id)

@@ -1,28 +1,33 @@
 <template>
-  <div class="space-y-3" :data-test="`client-binding-controls-${client.id}`" @click.stop>
-    <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-sm">
+  <div v-if="section !== 'remove' || hasRecord" class="space-y-3" :data-test="`client-binding-controls-${client.id}${section === 'all' ? '' : `-${section}`}`" @click.stop>
+    <dl v-if="showKey" class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-sm">
       <div class="flex gap-2"><dt class="opacity-70">Credential</dt><dd>{{ credentialLabel(client.credential_state) }}<template v-if="client.token_name"> (<code class="text-xs">{{ client.token_name }}</code>)</template></dd></div>
-      <div v-if="client.expires_at" class="flex gap-2"><dt class="opacity-70">Expires</dt><dd :data-test="`client-expires-${client.id}`">{{ formatDateTimeShort(client.expires_at) }}</dd></div>
-      <div v-if="client.profile" class="flex gap-2"><dt class="opacity-70">Profile</dt><dd>{{ profiles.titleFor(client.profile) }} <span class="opacity-70">({{ client.profile_mode === 'locked' ? 'locked' : 'switchable' }})</span></dd></div>
+      <div v-if="client.expires_at && !lifecycleShown" class="flex gap-2"><dt class="opacity-70">Expires</dt><dd :data-test="`client-expires-${client.id}`">{{ formatDateTimeShort(client.expires_at) }}</dd></div>
+      <div v-if="client.profile && section === 'all'" class="flex gap-2"><dt class="opacity-70">Profile</dt><dd>{{ profiles.titleFor(client.profile) }} <span class="opacity-70">({{ client.profile_mode === 'locked' ? 'locked' : 'switchable' }})</span></dd></div>
     </dl>
 
-    <div v-if="client.rotation_pending" class="alert alert-info text-sm flex flex-wrap items-center gap-2" :data-test="`client-rotation-pending-${client.id}`" role="status">
+    <div v-if="showKey && client.rotation_pending" class="alert alert-info text-sm flex flex-wrap items-center gap-2" :data-test="`client-rotation-pending-${client.id}`" role="status">
       <span class="badge badge-sm badge-info">Rotation pending</span>
       <span class="flex-1">Both secrets work for 24 h.</span>
-      <button type="button" class="btn btn-xs" :disabled="bindings.busy[client.id]" :data-test="`client-finalize-${client.id}`" @click="finalize">Finalize now</button>
+      <button type="button" class="btn btn-sm max-sm:min-h-11" :disabled="bindings.busy[client.id]" :data-test="`client-finalize-${client.id}`" @click="finalize">Finalize now</button>
     </div>
 
     <div class="flex flex-wrap gap-2">
-      <button type="button" class="btn btn-xs btn-outline" :data-test="`client-explain-${client.id}`" @click="explainOpen = true">Explain access&hellip;</button>
-      <button v-if="client.credential_state === 'client'" type="button" class="btn btn-xs btn-outline" :data-test="`client-rotate-${client.id}`" @click="startRotate">Rotate credential&hellip;</button>
-      <button v-if="hasRecord" type="button" class="btn btn-xs btn-outline btn-error" :data-test="`client-forget-${client.id}`" @click="emit('forget', client)">Forget client&hellip;</button>
+      <button v-if="showAccess" type="button" class="btn btn-sm btn-outline max-sm:min-h-11" :data-test="`client-explain-${client.id}`" @click="explainOpen = true">Explain access&hellip;</button>
+      <button v-if="showKey && client.credential_state === 'client'" type="button" class="btn btn-sm btn-outline max-sm:min-h-11" :data-test="`client-rotate-${client.id}`" @click="startRotate">Rotate credential&hellip;</button>
+    </div>
+    <!-- Spec 134 FR-060: Forget sits in the closed "Disconnect or remove" group
+         with one line saying what it does. -->
+    <div v-if="showRemove && hasRecord" class="space-y-1">
+      <button type="button" class="btn btn-sm btn-outline btn-error max-sm:min-h-11" :data-test="`client-forget-${client.id}`" @click="emit('forget', client)">Forget client&hellip;</button>
+      <p class="text-sm text-base-content/70">Revokes this client's credential; it can no longer call MCPProxy until connected again. You can also remove its config entry.</p>
     </div>
     <p v-if="actionResult" role="status" aria-live="polite" class="text-sm" :data-test="`client-action-result-${client.id}`">{{ actionResult }}</p>
     <p v-if="actionError" role="alert" class="text-sm text-error" :data-test="`client-action-error-${client.id}`">{{ actionError }}</p>
 
-    <AccessExplainer :open="explainOpen" :subject="{ kind: 'client', name: client.id }" @close="explainOpen = false" />
+    <AccessExplainer v-if="showAccess" :open="explainOpen" :subject="{ kind: 'client', name: client.id }" @close="explainOpen = false" />
 
-    <BaseDialog :open="rotateOpen" :title="`Rotate ${client.display_name} credential`" test-id="rotate-client-dialog" @close="closeRotate">
+    <BaseDialog v-if="showKey" :open="rotateOpen" :title="`Rotate ${client.display_name} credential`" test-id="rotate-client-dialog" @close="closeRotate">
       <template v-if="isCustom">
         <p class="text-sm">A new credential is issued and shown once. The old one keeps working for 24 hours, or until you finalize the rotation.</p>
       </template>
@@ -56,7 +61,15 @@ import type { ClientPresence, ConnectPreview } from '@/types/api'
 
 // Spec 108-i I6/I13: the credential controls of an expanded Clients row -
 // credential details, Explain access, staged Rotate, Finalize and Forget.
-const props = defineProps<{ client: ClientPresence }>()
+// Spec 134 FR-060: the Manage panel mounts one part per group - `access` (Explain),
+// `key` (credential, rotation, Rotate) and `remove` (Forget). Without `section` the
+// component renders everything, as before.
+const props = withDefaults(defineProps<{ client: ClientPresence; section?: 'all' | 'access' | 'key' | 'remove' }>(), { section: 'all' })
+const showAccess = computed(() => props.section === 'all' || props.section === 'access')
+const showKey = computed(() => props.section === 'all' || props.section === 'key')
+// In the Manage panel the lifecycle line above already says when the credential expires.
+const lifecycleShown = computed(() => props.section === 'key' && (props.client.kind === 'custom' || Boolean(props.client.issuer)))
+const showRemove = computed(() => props.section === 'all' || props.section === 'remove')
 const emit = defineEmits<{
   (e: 'changed'): void
   // The forget dialog lives on the page, not in the row: a forgotten custom

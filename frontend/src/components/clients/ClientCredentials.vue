@@ -1,6 +1,16 @@
 <template>
-  <section v-if="visible" class="space-y-2" :data-test="`client-credentials-${client.id}`">
-    <h3 class="text-sm font-semibold">Credentials</h3>
+  <section v-if="visible && (section !== 'revoke' || revocable.length)" class="space-y-2" :data-test="`client-credentials-${client.id}${section === 'revoke' ? '-revoke' : ''}`">
+    <h3 v-if="section === 'all'" class="text-sm font-semibold">Credentials</h3>
+    <!-- Spec 134 FR-060: in the Manage panel's closed "Disconnect or remove" group each
+         revocation is a button with one line saying what it does. -->
+    <ul v-if="section === 'revoke'" class="space-y-3">
+      <li v-for="cred in revocable" :key="credKey(cred)" class="space-y-1">
+        <button v-if="cred.kind === 'api_key'" type="button" class="btn btn-sm btn-outline btn-error max-sm:min-h-11" data-test="revoke-api-key" @click="ask({ kind: 'api_key' })">Revoke API key</button>
+        <button v-else type="button" class="btn btn-sm btn-outline btn-error max-sm:min-h-11" :data-test="`revoke-login-${cred.grant_id}`" :aria-label="`Revoke this login of ${client.display_name}`" @click="ask({ kind: 'browser_login', cred })">Revoke login of <bdi class="font-mono">{{ cred.reported_name }}</bdi></button>
+        <p class="text-sm text-base-content/70">{{ cred.kind === 'api_key' ? 'Stops the key working; browser logins and the profile binding stay.' : 'Stops this browser login on its next request; other credentials and the profile binding stay.' }}</p>
+      </li>
+    </ul>
+    <template v-else>
     <p v-if="client.browser_login_disabled" class="text-xs opacity-70" data-test="browser-login-disabled">
       Browser login is disabled. Existing logins are still listed and can be revoked; none can sign in until it is turned on again.
     </p>
@@ -12,8 +22,10 @@
           <code v-if="cred.kind === 'api_key' && cred.prefix" class="text-xs">{{ cred.prefix }}…</code>
           <span class="badge badge-sm" :class="stateClass(cred.state)" :data-test="`credential-state-${cred.kind === 'api_key' ? 'api_key' : cred.grant_id}`">{{ cred.state }}</span>
           <span class="grow" />
-          <button v-if="cred.kind === 'api_key' && cred.state !== 'revoked'" type="button" class="btn btn-ghost btn-xs text-error" data-test="revoke-api-key" @click="ask({ kind: 'api_key' })">Revoke API key</button>
-          <button v-if="cred.kind === 'browser_login' && cred.state !== 'revoked'" type="button" class="btn btn-ghost btn-xs text-error" :data-test="`revoke-login-${cred.grant_id}`" :aria-label="`Revoke this login of ${client.display_name}`" @click="ask({ kind: 'browser_login', cred })">Revoke login</button>
+          <template v-if="section === 'all'">
+            <button v-if="cred.kind === 'api_key' && cred.state !== 'revoked'" type="button" class="btn btn-ghost btn-xs text-error" data-test="revoke-api-key" @click="ask({ kind: 'api_key' })">Revoke API key</button>
+            <button v-if="cred.kind === 'browser_login' && cred.state !== 'revoked'" type="button" class="btn btn-ghost btn-xs text-error" :data-test="`revoke-login-${cred.grant_id}`" :aria-label="`Revoke this login of ${client.display_name}`" @click="ask({ kind: 'browser_login', cred })">Revoke login</button>
+          </template>
         </div>
         <div class="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-xs opacity-80">
           <span v-if="cred.kind === 'browser_login'">Approved {{ when(cred.approved_at) }}</span>
@@ -28,7 +40,9 @@
       </li>
     </ul>
 
-    <BaseDialog :open="!!pending" :title="dialogTitle" test-id="revoke-credential-dialog" @close="cancel">
+    </template>
+
+    <BaseDialog v-if="section !== 'status'" :open="!!pending" :title="dialogTitle" test-id="revoke-credential-dialog" @close="cancel">
       <template v-if="pending">
         <p v-if="pending.kind === 'api_key'" class="text-sm">
           This revokes the client's API key. Its browser logins and its profile binding stay. A client configured with the key can no longer call MCPProxy.
@@ -65,7 +79,10 @@ import type { ClientCredential, ClientPresence } from '@/types/api'
 // itself: they are rendered as text inside <bdi>, never as HTML.
 type Pending = { kind: 'api_key' } | { kind: 'browser_login'; cred: ClientCredential }
 
-const props = defineProps<{ client: Pick<ClientPresence, 'id' | 'display_name' | 'credentials' | 'browser_login_disabled'> }>()
+// `section` (Spec 134 FR-060): `status` lists the credentials without revoke buttons
+// (group "How it connects"), `revoke` shows only the revoke actions (group
+// "Disconnect or remove"); `all` is the whole section as before.
+const props = withDefaults(defineProps<{ client: Pick<ClientPresence, 'id' | 'display_name' | 'credentials' | 'browser_login_disabled'>; section?: 'all' | 'status' | 'revoke' }>(), { section: 'all' })
 const emit = defineEmits<{ (e: 'changed'): void }>()
 
 const pending = ref<Pending | null>(null)
@@ -74,6 +91,7 @@ const error = ref('')
 
 const visible = computed(() => props.client.credentials !== undefined || props.client.browser_login_disabled !== undefined)
 const credentials = computed(() => props.client.credentials ?? [])
+const revocable = computed(() => credentials.value.filter(cred => cred.state !== 'revoked'))
 const dialogTitle = computed(() => pending.value?.kind === 'api_key' ? 'Revoke API key?' : 'Revoke browser login?')
 
 function credKey(cred: ClientCredential) { return cred.kind === 'api_key' ? 'api_key' : `login-${cred.grant_id}` }
