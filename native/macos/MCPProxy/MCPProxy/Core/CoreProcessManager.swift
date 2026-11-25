@@ -701,6 +701,9 @@ actor CoreProcessManager {
             await terminateManagedProcess(reason: "shutdown sweep")
         }
 
+        // "Start" during the wait above put a new manager in charge of the
+        // shared state: leave it alone.
+        guard !superseded else { return }
         await transitionState(to: .idle)
     }
 

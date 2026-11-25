@@ -19,7 +19,8 @@ import (
 // A container our own docker commands may not find must still get the docker client's SIGTERM.
 func TestDockerIsolation_SigProxyOffOnlyOnOurOwnDaemon(t *testing.T) {
 	const host = "DOCKER_HOST"
-	unix := runtime.GOOS != osWindows // Windows has no login shell
+	// Windows has no login shell, and macOS runs docker directly (dockerDaemonEnvGuaranteed).
+	unix := runtime.GOOS != osWindows && runtime.GOOS != osDarwin
 	tests := []struct {
 		name  string
 		own   string
