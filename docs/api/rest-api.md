@@ -1939,7 +1939,8 @@ read door uses):
 | `active_profile.changed` | **Yes**, but the slug is rendered per subscriber exactly as `GET /api/v1/profiles/active` answers it: `""` unless the profile is one the caller may select (a pinned token: its own pin; an unpinned scoped token: a profile its `allowed_servers` reaches). |
 | `config.reloaded`, `config.saved`, `secrets.changed` | **No.** They announce mutations of the admin config document, which `GET /api/v1/config` already answers `403` for this caller. |
 | `profiles.changed`, `client.binding_changed`, `credentials.changed` | **No.** They name profiles, clients and bindings a scoped caller may not reach. `profiles.changed {name, change: create|update|delete|anonymous, previous_name?}` is an invalidation, not a log: refetch `GET /api/v1/profiles`. One event per changed profile, published after the new configuration is live, for service writes and hand edits alike. |
-| Everything else (`activity.system.*`, `sensitive_data.detected`, `security.scanner_changed`, …) | **Yes**, unchanged: no server identity to scope. |
+| `sensitive_data.detected` (`{server_name, activity_id, activity_type, detection_count, max_severity, detection_types}`) | **Only** when the server is in scope **and** the scanned row is one the caller may read. A detection on an administrator-only row (`skill_access`, `client_request`, `skill_quarantine_change`) or one whose `activity_type` is missing is dropped, so the event never names a row the activity endpoints hide. |
+| Everything else (`activity.system.*`, `security.scanner_changed`, …) | **Yes**, unchanged: no server identity to scope. |
 
 ## Error Responses
 
