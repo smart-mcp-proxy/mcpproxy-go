@@ -54,6 +54,29 @@ describe('StatusPill (spec 134 FR-003)', () => {
   })
 })
 
+describe('StatusPill severity (spec 134 FR-003, health.level)', () => {
+  it('ready + degraded keeps the label "Online" in the review tone', () => {
+    const pill = mount(StatusPill, { props: { status: 'ready', level: 'degraded' } }).get('[data-test="status-pill"]')
+    expect(pill.text()).toBe('Online')
+    expect(pill.attributes('data-tone')).toBe('review')
+    expect(healthTone('ready', 'degraded')).toBe('review')
+  })
+
+  it('ready + unhealthy keeps the label "Online" in the error tone', () => {
+    const pill = mount(StatusPill, { props: { status: 'ready', level: 'unhealthy' } }).get('[data-test="status-pill"]')
+    expect(pill.text()).toBe('Online')
+    expect(pill.attributes('data-tone')).toBe('error')
+  })
+
+  it('a level never softens a worse status, and healthy keeps the FR-003 tone', () => {
+    expect(healthTone('ready', 'healthy')).toBe('ok')
+    expect(healthTone('error', 'degraded')).toBe('error')
+    expect(healthTone('disabled', 'degraded')).toBe('off')
+    expect(healthTone('needs_review', 'unhealthy')).toBe('review')
+    expect(healthTone('connecting', 'unhealthy')).toBe('busy')
+  })
+})
+
 describe('StateTag', () => {
   it('prints slot text in a status tone', () => {
     const wrapper = mount(StateTag, { props: { tone: 'review' }, slots: { default: 'Awaiting review' } })
