@@ -167,17 +167,17 @@ Examples:
   # remove all arguments
   mcpproxy upstream patch sqlite --clear-args
 
-  # rotate the Authorization header on the synapbus server
-  mcpproxy upstream patch synapbus --header "Authorization: Bearer new-token"
+  # rotate the Authorization header on the my-server server
+  mcpproxy upstream patch my-server --header "Authorization: Bearer new-token"
 
   # add a custom header without disturbing existing ones
-  mcpproxy upstream patch synapbus --header "X-Trace: on"
+  mcpproxy upstream patch my-server --header "X-Trace: on"
 
   # remove a header
-  mcpproxy upstream patch synapbus --header-remove "X-Stale"
+  mcpproxy upstream patch my-server --header-remove "X-Stale"
 
   # set + remove in a single round-trip
-  mcpproxy upstream patch synapbus --header "X-New: v" --header-remove "X-Old"
+  mcpproxy upstream patch my-server --header "X-New: v" --header-remove "X-Old"
 
   # update env vars on a stdio server
   mcpproxy upstream patch obsidian-pilot --env "LOG_LEVEL=debug" --env-remove "OLD_VAR"

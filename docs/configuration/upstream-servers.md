@@ -266,16 +266,16 @@ literal, so converted headers are visually distinct.
 
 ```bash
 # Upsert one or more headers
-mcpproxy upstream patch synapbus --header "X-Trace: on"
+mcpproxy upstream patch my-server --header "X-Trace: on"
 
 # Rotate Authorization in place
-mcpproxy upstream patch synapbus --header "Authorization: Bearer new-token"
+mcpproxy upstream patch my-server --header "Authorization: Bearer new-token"
 
 # Delete one
-mcpproxy upstream patch synapbus --header-remove "X-Stale"
+mcpproxy upstream patch my-server --header-remove "X-Stale"
 
 # Mix set + delete in a single round-trip
-mcpproxy upstream patch synapbus --header "X-New: v" --header-remove "X-Old"
+mcpproxy upstream patch my-server --header "X-New: v" --header-remove "X-Old"
 
 # Env vars (stdio servers)
 mcpproxy upstream patch obsidian-pilot --env "LOG_LEVEL=debug"
@@ -293,7 +293,7 @@ for the full flag reference.
 ```bash
 curl -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   -d '{"headers":{"X-New":"value","X-Stale":null}}' \
-  http://127.0.0.1:8080/api/v1/servers/synapbus
+  http://127.0.0.1:8080/api/v1/servers/my-server
 ```
 
 - non-null string value → upsert

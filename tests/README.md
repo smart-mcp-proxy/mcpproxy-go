@@ -53,9 +53,4 @@ Runs 16 automated scenarios covering:
 4. MCP protocol integration (retrieve_tools filtering, call_tool blocking)
 5. Web UI endpoints (quarantine panel data availability)
 
-Generates an HTML report at `docs/qa/quarantine-test-report-2026-03-11.html`.
-
-## QA Artifacts
-
-- `docs/qa/quarantine-test-report-2026-03-11.html` - HTML test report from the 16-scenario run
-- `docs/qa/quarantine-ux-walkthrough.gif` - Chrome walkthrough of the quarantine Web UI
+Generates an HTML report in a temporary directory (override with `REPORT_FILE=/path/report.html`).
