@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
-import { lstatSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
+import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname } from 'node:path'
 import { join } from 'node:path'
@@ -47,6 +47,9 @@ test.beforeAll(async () => {
   // answers 404 on an enabled core reached through a non-loopback listener).
   const cfg = (await (await fetch(`${BASE}/api/v1/config`, { headers: { 'X-API-Key': KEY } })).json()) as { data: { config: { mcp_oauth_enabled?: boolean; listen?: string } } }
   expect(!!cfg.data.config.mcp_oauth_enabled, OFF ? 'feature-off run against a core with mcp_oauth_enabled on' : 'feature-on run against a core with mcp_oauth_enabled off').toBe(!OFF)
+  // The expected address assumes the sweep's plain-HTTP loopback core (a TLS or
+  // wildcard listener changes what Connect writes, and is not what this checks).
+  expect(cfg.data.config.listen ?? '', 'sweep core must listen on plain 127.0.0.1').toMatch(/^127\.0\.0\.1:\d+$/)
   ORIGIN = `http://${cfg.data.config.listen}`
   if (!OFF) {
     expect((await fetch(`${BASE}/.well-known/oauth-authorization-server`)).status, 'browser login is not served').toBe(200)
@@ -56,6 +59,11 @@ test.beforeAll(async () => {
 // origin the browser used.
 let ORIGIN = ''
 const CLAUDE_JSON = `${HOME_DIR}/.claude.json`
+// Restore the fixture after every test so a failed assertion cannot leave the
+// client connected for a retry.
+let pristine = ''
+test.beforeEach(() => { pristine = readFileSync(CLAUDE_JSON, 'utf8') })
+test.afterEach(() => { writeFileSync(CLAUDE_JSON, pristine) })
 
 const t = (page: Page, id: string) => page.locator(`[data-test="${id}"]`)
 
