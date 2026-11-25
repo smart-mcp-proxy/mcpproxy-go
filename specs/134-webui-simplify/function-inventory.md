@@ -177,3 +177,74 @@ Files: `App.vue`, `TopHeader.vue`, `StatusPill.vue` (becomes `HeaderStatus.vue`)
 | P1-20 | `health.status` printed as a word in shared places; the server-edition status cells print `summary` first (Spec 109 precedence) | views/teams/AdminServers.vue, views/teams/UserServers.vue | `StatusPill.vue` prints the label, `health.summary` beside it as detail (`server-status-summary`); no-status fallback and "disabled by you" unchanged. ServerCard and ServerDetail move in PRs 2 and 3 | status-pill.spec.ts, server-edition-status-pill.spec.ts, status-text-precedence-consistency.spec.ts, *-status-fallback.spec.ts |
 | P1-21 | Skip to content | absent | First tab stop in `App.vue`, targets `<main id=main-content tabindex=-1>` | skip-link-palette.spec.ts |
 | P1-22 | Theme tokens: corporate and dark AA overrides (`--tone-*`) | main.css | Kept; brand and status tokens added | contrast.spec.ts, shell-pr1.spec.ts contrast |
+
+## PR 2: Servers (from the code as it is, 2026-11-25)
+
+Files: `views/Servers.vue`, `components/ServerCard.vue` (replaced by `ServerRow.vue`), new `utils/serverReason.ts`, `utils/serversList.ts`, `utils/serverFacts.ts`, `components/ServerFacts.vue` (added to the first screen of `views/ServerDetail.vue`). "Row" = a Servers table row; "Detail" = the first screen of server detail, reached from the server name. Test file names are under `frontend/tests/unit/` unless marked `e2e`.
+
+### Page (Servers.vue)
+
+| # | Function or fact today | Code | Place after | Test |
+|---|---|---|---|---|
+| P2-01 | Title "Servers", subtitle "Manage upstream MCP servers" | Servers.vue:6-7 | Same | servers-page.spec.ts |
+| P2-02 | Refresh button (disabled and spinner while loading, "Refreshing..."), refetches list, scoped list and activity summary | Servers.vue:10-20,668 | Same, header | servers-page.spec.ts 'refresh' |
+| P2-03 | Scan All (only with enabled scanners; spinner; success toast "Batch Scan Started"; error toasts); fleet-wide, not profile-local | Servers.vue:21-32,674 | Same, header | servers-page.spec.ts 'scan all' |
+| P2-04 | Profile select (`servers-profile-select`: All profiles, each profile by title or name, orphan value), shown when `profile` scope is available; picking writes `?profile=` | Servers.vue:40-55,522 | The "View as" control in the filter row (maintainer decision: the profile picker is View as): its profile select, same options, orphan value kept | servers-profile-scope.spec.ts; view-as.spec.ts; e2e profiles-unhide |
+| P2-05 | `ViewAs` and `ScopeChips` (profile chip, `-` disabled chip "Unattributed applies to Activity and Usage only", unavailable-profile chip) | Servers.vue:56-57 | Same, filter row | servers-profile-scope.spec.ts |
+| P2-06 | Stat tile "Total Servers" (count, "N enabled"), click sets filter All | Servers.vue:67-77 | "All" chip with its count; the totals line prints "N servers, N enabled" (`servers-totals`) | servers-page.spec.ts 'chips and totals' |
+| P2-07 | Stat tile "Connected" (count, "X of Y enabled online"), click toggles the Connected filter, `aria-pressed` | Servers.vue:79-97 | "More filters" > Connected with count (`kpi-card-connected`); the totals line prints "X of Y enabled online" (`servers-connected-denominator`) | servers-page.spec.ts 'more filters'; servers-scope.spec.ts |
+| P2-08 | Stat tile "Quarantined" (count, "Need security review"), click toggles the filter | Servers.vue:99-109 | "More filters" > Quarantined with count (`kpi-card-quarantined`) | servers-page.spec.ts 'more filters' |
+| P2-09 | Stat tile "Total Tools" = tools of enabled, not quarantined servers of the shown list, "Available across all servers" | Servers.vue:111-115,568 | Totals line "N tools available" (`kpi-card-total-tools`), same formula, same scope | servers-page.spec.ts 'totals' |
+| P2-10 | Filter pills All, Connected, Enabled, Quarantined with counts | Servers.vue:119-145 | Chips Not online, All, Online, Disabled with counts; Connected, Enabled, Quarantined, Needs review under "More filters" with counts | servers-list.spec.ts; servers-page.spec.ts |
+| P2-11 | Search box (`servers-search`, matches name, url, command; `?q=`) | Servers.vue:147-156,655 | Same, filter row | servers-page.spec.ts 'search'; servers-scope.spec.ts |
+| P2-12 | `?status=all|connected|enabled|quarantined|needs_review` read on mount and on route change; unknown values ignored | Servers.vue:378,429 | Same meanings; `status` wins over `filter` when both are present; a chip click clears `status` | servers-list.spec.ts 'legacy status'; servers-scope.spec.ts |
+| P2-13 | Filter and search written back to the URL (`status` absent for All, `q`) | Servers.vue:596 | Chip click writes `?filter=` (explicit `all` too) and removes `status`; More filters writes `status`; `q` and `profile` kept; default view writes nothing | servers-page.spec.ts 'url' |
+| P2-14 | Refresh-failed warning with last known list and Retry | Servers.vue:163-176 | Same | servers-page.spec.ts 'stale list retry' |
+| P2-15 | Loading state "Loading servers..." (also while a scoped list loads) | Servers.vue:179-182 | Same | servers-page.spec.ts 'states' |
+| P2-16 | Profile not found + Clear; scoped error + Try Again | Servers.vue:186-193 | Same | servers-profile-scope.spec.ts |
+| P2-17 | Load failed with nothing to show: "Failed to load servers" + Try Again (hidden while auth is required) | Servers.vue:199-213 | Same | servers-page.spec.ts 'states' |
+| P2-18 | First run: "No servers yet", Add Server, Browse catalog, Import from your AI client configs (opens wizard on Home) | Servers.vue:220-259 | Same | servers-first-run-empty.spec.ts |
+| P2-19 | "Not yet" spinner before the first list arrives | Servers.vue:267-273 | Same | servers-first-run-empty.spec.ts |
+| P2-20 | No-match state: "No servers in this profile" + Clear, "No servers found", search text, Clear Search, Show all servers | Servers.vue:276-293 | Same; "Show all servers" selects the All chip | servers-page.spec.ts 'no match' |
+| P2-21 | Grid of cards, memoised per server, list transition | Servers.vue:296-351 | Table of rows, fixed row height, no transition | servers-page.spec.ts; e2e servers-pr2 |
+| P2-22 | Per-server activity summary (`GET /activity/summary?period=24h`, best effort) | Servers.vue:397 | Same | servers-page.spec.ts 'last call' |
+| P2-23 | Scoped list for `?profile=` (page-local, debounced SSE refresh, profiles-changed event, no-flash wait for scope features, `-` not applied) | Servers.vue:441-554,572-587 | Same | servers-profile-scope.spec.ts |
+| P2-24 | CLI hints panel (add server, manage servers, LLM prompts) | Servers.vue:354,703 | Same | servers-page.spec.ts 'hints' |
+| P2-25 | Chrome has no data attribute for the order; order is store order | Servers.vue:633 | FR-024 total order: error tones, review, unknown, busy, usable, disabled, then title, then id | servers-list.spec.ts 'order' |
+
+### Row (ServerCard.vue)
+
+| # | Function or fact today | Code | Place after | Test |
+|---|---|---|---|---|
+| P2-30 | Title: display title (`title` else name), `name` in tooltip | ServerCard.vue:6-10 | Row: name link to Detail; the id is on Detail when it differs from the title (`server-facts-id`) | server-row.spec.ts; server-facts.spec.ts |
+| P2-31 | Transport chip (`protocol`) | ServerCard.vue:12 | Row: transport under the name | server-row.spec.ts |
+| P2-32 | Trust-mode shield: effective mode, invalid configured value marked, tooltip, `role=img` + `aria-label` | ServerCard.vue:29-40,268-301 | Detail facts: trust mode with the shield and its label text (`server-trust-mode`); Row more menu keeps "Trust mode: <label>" | server-facts.spec.ts; server-row.spec.ts |
+| P2-33 | More menu trigger (`aria-label`, `aria-haspopup`) | ServerCard.vue:45-57 | Row: same, 44 px at 390 px | server-row.spec.ts |
+| P2-34 | Menu: Review (quarantined servers only), links to review screen | ServerCard.vue:70-75 | Same | server-row.spec.ts; server-card-quarantined-oauth-login.spec.ts |
+| P2-35 | Menu: Enable / Disable (in place, toasts, disabled while busy) | ServerCard.vue:76-80,626 | Same | server-row.spec.ts |
+| P2-36 | Menu: Scan (enabled scanners; link to Detail security tab; greyed with reason when the server is disabled) | ServerCard.vue:81-94,459 | Same | server-row.spec.ts; scanner-gate-wording.spec.ts |
+| P2-37 | Menu: Restart (in place, toasts) | ServerCard.vue:95-97,675 | Same | server-row.spec.ts |
+| P2-38 | Menu: Logs (Detail logs tab) | ServerCard.vue:98-100 | Same | server-row.spec.ts |
+| P2-39 | Menu: Edit (Detail config tab) | ServerCard.vue:101-103 | Same | server-row.spec.ts |
+| P2-40 | Menu: "Trust mode: <label>" (Detail config tab) | ServerCard.vue:104-109 | Same | server-row.spec.ts |
+| P2-41 | Menu: Logout (HTTP servers holding a token, connected or token-valid) | ServerCard.vue:110-112,602,717 | Same | server-row.spec.ts; oauth-signin.spec.ts |
+| P2-42 | Menu: Sign in / Sign in again (guard `canStartOAuthLogin`, undecryptable rows have none) | ServerCard.vue:113-115,695 | Same | oauth-manual-signin.spec.ts; oauth-undecryptable-signin.spec.ts |
+| P2-43 | Menu: Delete, confirmation dialog naming the server, Cancel, Delete Server, toasts | ServerCard.vue:116-124,192-223,737 | Same | server-row.spec.ts |
+| P2-44 | Status chip: status text (label table, "Sign-in required" for OAuth states, legacy words without health), tone from level / admin state | ServerCard.vue:139,303-346 | `StatusPill` from `health.status`; without `health` the legacy chip (Connected, Connecting, Disconnected, Sign-in required) as today | server-row.spec.ts; health-status-labels.spec.ts; oauth-signin.spec.ts; sc003-forbidden-renderings.spec.ts |
+| P2-45 | Status detail: summary (enabled), else diagnostic user message, else last error root cause | ServerCard.vue:140,355-366 | Reason column, one line, ellipsis; FR-022 order (`serverReason`); full text on Detail | server-reason.spec.ts; server-row.spec.ts |
+| P2-46 | Tooltip with `health.detail` or the raw `last_error` | ServerCard.vue:370-374 | Detail: "Full diagnostic" control (`server-facts-diagnostic`) opens `health.detail`, the raw error and the structured diagnostic, untruncated; the row keeps a tooltip too (never the only place) | server-facts.spec.ts |
+| P2-47 | Tool count "N tools" | ServerCard.vue:151 | Row: tools cell | server-row.spec.ts |
+| P2-48 | Scan verdict line (Clean, N warnings, Dangerous, Scan failed, Scanning, "Clean scan · N tools held"; quarantined servers get the subordinated note) | ServerCard.vue:152,491-556 | Detail facts (`server-facts-security`), same text and tone | server-facts.spec.ts; server-card-quarantine-scan-headline.spec.ts; security-badge-hold.spec.ts |
+| P2-49 | Pending and changed tool counts text | ServerCard.vue:153,465-489 | Detail facts (`server-facts-held`), same text | server-facts.spec.ts |
+| P2-50 | "last call <age>", ticking every 30 s; "never" | ServerCard.vue:154,563-592 | Row: last call cell | server-row.spec.ts |
+| P2-51 | "N errors (24h)", error tone; whole stats line links to Activity `?server=&from=-24h` plus `&status=error` when errors | ServerCard.vue:146-156,594-600 | Row: last-call cell is the link (`server-card-stats-line`), same query | server-row.spec.ts |
+| P2-52 | Primary action: `health.actions[0]` else `health.action`, old-core login fallback, stale-login guard (disabled server shows Enable); label table; executes login / restart / enable in place, navigates for approve (review screen), set_secret (`/secrets`), configure, edit_url (`&focus=endpoint`), view_logs | ServerCard.vue:381-456 | Row action cell, same | server-row.spec.ts; server-card-next-action.spec.ts; server-card-approve-review-navigation.spec.ts |
+| P2-53 | No primary button when `actions` is empty (ready servers) | ServerCard.vue:161-181 | Same, cell empty | server-card-next-action.spec.ts |
+| P2-54 | "Details" link to server detail | ServerCard.vue:182-188 | Removed by maintainer decision; the server name is the link (`server-detail-link` on the name) | server-row.spec.ts |
+| P2-55 | Card keyed by name, `v-memo` over the fields it reads | Servers.vue:302-349 | Row component keyed by name; memo over the same fields | servers-page.spec.ts 'live update' |
+
+### Detail first screen additions (ServerDetail.vue)
+
+| # | Fact | Place after | Test |
+|---|---|---|---|
+| P2-60 | Server id when it differs from the display title; trust mode with shield and label; scan verdict; pending and changed counts; control that opens the full diagnostic | `ServerFacts.vue` mounted under the Detail header, above the tabs (PR 3 restructures the page; this block is small and marked `Spec 134 PR 2`) | server-facts.spec.ts |
