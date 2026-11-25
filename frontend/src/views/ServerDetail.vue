@@ -47,7 +47,6 @@
             </ul>
           </div>
           <h1 class="text-3xl font-bold break-words" :title="server.name">{{ displayName }}</h1>
-          <p class="text-base-content/70 mt-1 break-all">{{ server.protocol }} • {{ server.url || server.command || 'No endpoint' }}</p>
           <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
             <span data-test="server-status-badge">
               <StatusPill v-if="server.health?.status" :status="server.health.status" />
@@ -118,78 +117,7 @@
         </div>
       </div>
 
-      <ServerFacts :server="server" :primary-action="alertsRegionHasContent ? primaryAction : ''" :primary-label="primaryLabel" @go="goToAttention" />
-
-      <!-- Status Cards -->
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <div class="stats shadow bg-base-100">
-          <div class="stat">
-            <div class="stat-figure text-primary">
-              <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-              </svg>
-            </div>
-            <div class="stat-title">Tools</div>
-            <div class="stat-value">{{ serverTools.length }}</div>
-            <div
-              class="stat-desc"
-              :class="blockedToolCount > 0 ? 'text-error' : ''"
-            >
-              {{ blockedToolCount > 0 ? `${blockedToolCount} disabled` : 'available tools' }}
-            </div>
-          </div>
-        </div>
-
-        <!-- Audit F11: this row used to speak three vocabularies at once
-             (Enabled/Active + Online/Offline + the Disconnected badge), one of
-             them green on a server that was down. It now carries exactly two
-             axes: the admin state you set, and the health we observe. -->
-        <div class="stats shadow bg-base-100">
-          <div class="stat">
-            <!-- A power symbol, not the Tools tile's gear: this is the on/off
-                 decision you made, not a configuration detail. -->
-            <div class="stat-figure" :class="adminStateTone">
-              <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.636 5.636a9 9 0 1012.728 0M12 3v9" />
-              </svg>
-            </div>
-            <div class="stat-title">Admin state</div>
-            <div class="stat-value text-sm" data-test="server-admin-state">{{ adminStateLabel }}</div>
-            <!-- Audit F10: quarantine-on-add is the DEFAULT for a newly added
-                 server, so "set by you" was false in exactly the case where the
-                 user most needs to know why their client cannot reach it. -->
-            <div class="stat-desc" data-test="server-admin-state-desc">{{ adminStateDesc }}</div>
-          </div>
-        </div>
-
-        <div class="stats shadow bg-base-100">
-          <div class="stat">
-            <div class="stat-figure text-info">
-              <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
-            </div>
-            <div class="stat-title">Protocol</div>
-            <div class="stat-value text-sm">{{ server.protocol }}</div>
-            <div class="stat-desc">communication type</div>
-          </div>
-        </div>
-
-        <div class="stats shadow bg-base-100">
-          <div class="stat">
-            <div class="stat-figure" :class="healthLevelTone">
-              <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-            </div>
-            <div class="stat-title">Health</div>
-            <div class="stat-value text-sm" :class="healthLevelTone" data-test="server-health-level">
-              {{ healthLevelLabel }}
-            </div>
-            <div class="stat-desc [overflow-wrap:anywhere]" data-test="server-health-summary">{{ server.health?.detail || '' }}</div>
-          </div>
-        </div>
-      </div>
+      <ServerFacts :server="server" :admin-state="adminStateLabel" :admin-state-desc="adminStateDesc" :admin-tone="adminStateTone" :tool-count="serverTools.length" :disabled-tools="blockedToolCount" :primary-action="alertsRegionHasContent ? primaryAction : ''" :primary-label="primaryLabel" @go="goToAttention" />
 
       <!-- Alerts -->
       <div class="space-y-4" id="server-alerts" ref="alertsRegion" tabindex="-1" data-test="server-alerts">
@@ -244,7 +172,7 @@
         <div
           v-if="quarantineBanner"
           data-test="security-quarantine-banner"
-          class="alert"
+          class="soft-banner-wrap flex flex-col sm:flex-row sm:items-center gap-3 rounded px-4 py-3"
           :class="quarantineBannerAlertClass"
         >
           <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -425,7 +353,7 @@
             />
 
             <!-- Tool Quarantine Panel (Spec 032) -->
-            <div v-if="quarantinedTools.length > 0" data-test="tool-quarantine-banner" class="alert alert-warning shadow-lg mb-4">
+            <div v-if="quarantinedTools.length > 0" data-test="tool-quarantine-banner" class="soft-banner-wrap tone-review flex flex-col sm:flex-row sm:items-center gap-3 rounded px-4 py-3 mb-4">
               <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
@@ -633,7 +561,7 @@
                 </button>
                 <button
                   v-if="hasEnabledTool"
-                  class="btn btn-sm btn-warning"
+                  class="btn btn-sm btn-outline"
                   :disabled="bulkToolToggleLoading"
                   @click="bulkToggleAllTools(false)"
                   data-test="tools-disable-all"
@@ -1338,14 +1266,14 @@
 
         <!-- Security Tab (Spec 039) -->
         <div v-if="reviewScansActive" class="space-y-10" data-test="review-and-scans">
-          <nav class="flex flex-wrap gap-2" aria-label="Review and scans sections" data-test="review-scans-nav">
-            <button type="button" class="btn btn-sm min-h-11" :class="activeTab === 'review' ? 'btn-neutral' : 'btn-outline'" data-test="review-part-link" @click="jumpToPart('review')">Review</button>
-            <button type="button" class="btn btn-sm min-h-11" :class="activeTab === 'security' ? 'btn-neutral' : 'btn-outline'" data-test="scans-part-link" @click="jumpToPart('security')">Scans</button>
+          <nav class="part-nav" aria-label="Review and scans sections" data-test="review-scans-nav">
+            <button type="button" class="part-nav__link" :aria-current="activeTab === 'review' ? 'true' : undefined" data-test="review-part-link" @click="jumpToPart('review')">Review</button>
+            <button type="button" class="part-nav__link" :aria-current="activeTab === 'security' ? 'true' : undefined" data-test="scans-part-link" @click="jumpToPart('security')">Scans</button>
           </nav>
-          <section id="review-part" ref="reviewPart" tabindex="-1" aria-label="Review" data-test="review-part">
+          <section id="review-part" ref="reviewPart" tabindex="-1" class="focus:outline-none" aria-label="Review" data-test="review-part">
             <ReviewScreen ref="reviewScreen" :server-name="server.name" @approved="refreshData" />
           </section>
-          <section id="scans-part" ref="scansPart" tabindex="-1" aria-labelledby="scans-heading" data-test="scans-part">
+          <section id="scans-part" ref="scansPart" tabindex="-1" class="focus:outline-none" aria-labelledby="scans-heading" data-test="scans-part">
           <h2 id="scans-heading" class="text-xl font-semibold mb-4">Scans for {{ displayName }}</h2>
           <div class="space-y-6">
             <!-- Header: Scan button + Risk Score -->
@@ -2274,9 +2202,9 @@ const adminStateTone = computed(() => {
     case 'Quarantined':
       return 'text-warning'
     case 'Disabled':
-      return 'text-base-content/50'
+      return 'text-base-content/60'
     default:
-      return 'text-secondary'
+      return ''
   }
 })
 
@@ -2514,12 +2442,12 @@ function quarantineBannerHas(action: QuarantineBannerAction): boolean {
 
 const quarantineBannerAlertClass = computed(() => {
   switch (quarantineBanner.value?.tone) {
-    case 'info': return 'alert-info'
-    case 'threat': return 'alert-error'
-    // A failed scan is a precaution, not a verdict: warning tone, never error.
+    case 'info': return 'tone-busy'
+    case 'threat': return 'tone-error'
+    // A failed scan is a precaution, not a verdict: review tone, never error.
     case 'precaution':
     case 'warning':
-    default: return 'alert-warning'
+    default: return 'tone-review'
   }
 })
 

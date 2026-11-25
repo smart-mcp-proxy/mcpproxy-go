@@ -1,6 +1,6 @@
 <template>
-  <section class="space-y-3" aria-label="Server facts" data-test="server-facts">
-    <dl class="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+  <section class="space-y-2 rounded border bg-base-100 p-3" style="border-color: var(--border)" aria-label="Server facts" data-test="server-facts">
+    <dl class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-x-6 gap-y-2 text-sm">
       <div class="flex items-center gap-1.5 min-w-0" data-test="fact-identity">
         <dt class="text-base-content/70">Id</dt>
         <dd class="font-mono break-all" data-test="fact-id">{{ server.name }}</dd>
@@ -9,9 +9,18 @@
           <dd data-test="fact-title">{{ server.title }}</dd>
         </template>
       </div>
-      <div class="flex items-center gap-1.5" data-test="fact-transport">
+      <div class="flex items-center gap-1.5 min-w-0" data-test="fact-transport">
         <dt class="text-base-content/70">Transport</dt>
-        <dd>{{ server.protocol }}<span class="text-base-content/70">, {{ connectionText }}</span></dd>
+        <dd class="min-w-0 break-all">{{ server.protocol }}<span class="text-base-content/70">, {{ connectionText }}</span>
+          <code v-if="endpoint" class="ml-1 text-xs" data-test="fact-endpoint">{{ endpoint }}</code></dd>
+      </div>
+      <div v-if="adminState" class="flex items-center gap-1.5" data-test="fact-admin-state">
+        <dt class="text-base-content/70">State</dt>
+        <dd><span class="font-medium" :class="adminTone" data-test="server-admin-state">{{ adminState }}</span><span class="text-base-content/70">, <span data-test="server-admin-state-desc">{{ adminStateDesc }}</span></span></dd>
+      </div>
+      <div v-if="toolCount !== undefined" class="flex items-center gap-1.5" data-test="fact-tools">
+        <dt class="text-base-content/70">Tools</dt>
+        <dd data-test="server-tools-count"><span>{{ toolCount }} available</span><span v-if="(disabledTools ?? 0) > 0" class="text-error">, {{ disabledTools }} disabled</span></dd>
       </div>
       <div class="flex items-center gap-1.5" data-test="fact-trust">
         <dt class="text-base-content/70">Trust mode</dt>
@@ -35,12 +44,12 @@
         <dt class="text-base-content/70">Last 24 h</dt>
         <dd><router-link :to="activityLink" class="link link-hover" data-test="fact-activity-link">calls and errors in Activity</router-link></dd>
       </div>
-      <div>
+      <div class="flex items-center">
         <button type="button" class="btn btn-sm btn-outline min-h-11" data-test="open-diagnostic" aria-haspopup="dialog" @click="openDiagnostic">Full diagnostic</button>
       </div>
     </dl>
 
-    <ul v-if="lines.length" class="space-y-1" data-test="attention-lines">
+    <ul v-if="lines.length" class="space-y-1 border-t pt-2" style="border-color: var(--border)" data-test="attention-lines">
       <li v-for="line in lines" :key="line.id">
         <button type="button" class="link link-hover text-left text-sm min-h-11 sm:min-h-0" :data-test="`attention-${line.id}`" @click="$emit('go', line.id)">{{ line.text }}</button>
       </li>
@@ -72,7 +81,7 @@ import StateTag from '@/components/StateTag.vue'
 import UiIcon from '@/components/UiIcon.vue'
 import { attentionLines, diagnosticSections, heldCounts, scanFact, trustFact, type AttentionTarget } from '@/utils/serverDetailFacts'
 
-const props = defineProps<{ server: Server; primaryAction?: string; primaryLabel?: string }>()
+const props = defineProps<{ server: Server; primaryAction?: string; primaryLabel?: string; adminState?: string; adminStateDesc?: string; adminTone?: string; toolCount?: number; disabledTools?: number }>()
 defineEmits<{ go: [target: AttentionTarget] }>()
 
 const dialogEl = ref<HTMLDialogElement | null>(null)
@@ -93,6 +102,7 @@ const connectionText = computed(() => {
   if (s.connecting) return 'connecting'
   return 'not connected'
 })
+const endpoint = computed(() => props.server.url || props.server.command || 'No endpoint')
 const activityLink = computed(() => ({ path: '/activity', query: { server: props.server.name } }))
 
 // The text is rendered only while the dialog is open, so a closed dialog adds nothing to the page.

@@ -90,12 +90,12 @@ describe('ServerDetail — Health tile answers "can my client use it?" (F10)', (
         action: 'approve',
       },
     })
-    const tile = wrapper.find('[data-test="server-health-level"]')
+    const tile = wrapper.find('[data-test="server-status-badge"]')
     expect(tile.exists()).toBe(true)
     expect(tile.text()).not.toBe('Healthy')
-    expect(tile.text()).toBe('Blocked')
+    expect(tile.text()).toBe('Quarantined for review')
     // …and never in the success tone.
-    expect(tile.classes()).not.toContain('text-success')
+    expect(tile.html()).not.toContain('success')
     // Spec 134 FR-030: the observed fact is the header's one-line reason, printed once.
     expect(wrapper.find('[data-test="server-status-badge"]').text()).toContain(
       'Quarantined for review'
@@ -114,9 +114,9 @@ describe('ServerDetail — Health tile answers "can my client use it?" (F10)', (
         action: 'enable',
       },
     })
-    const tile = wrapper.find('[data-test="server-health-level"]')
-    expect(tile.text()).toBe('Off')
-    expect(tile.classes()).not.toContain('text-success')
+    const tile = wrapper.find('[data-test="server-status-badge"]')
+    expect(tile.text()).toBe('Disabled')
+    expect(tile.html()).not.toContain('success')
   })
 
   it('reads the status label ("Online"), not the level word, for an enabled, healthy server', async () => {
@@ -132,11 +132,11 @@ describe('ServerDetail — Health tile answers "can my client use it?" (F10)', (
         actions: [],
       },
     })
-    const tile = wrapper.find('[data-test="server-health-level"]')
+    const tile = wrapper.find('[data-test="server-status-badge"]')
     // FR-011: `status` renders through the label table ("Online"), never the
     // raw `level` word ("Healthy").
     expect(tile.text()).toBe('Online')
-    expect(tile.classes()).toContain('text-success')
+    expect(tile.find('[data-test="status-pill"]').attributes('data-tone')).toBe('ok')
   })
 
   it('never reads "Healthy" for a connecting server (level=healthy, usable=false)', async () => {
@@ -158,7 +158,7 @@ describe('ServerDetail — Health tile answers "can my client use it?" (F10)', (
         actions: [],
       },
     })
-    const tile = wrapper.find('[data-test="server-health-level"]')
+    const tile = wrapper.find('[data-test="server-status-badge"]')
     expect(tile.text()).not.toBe('Healthy')
     expect(tile.text()).toBe('Connecting')
     expect(wrapper.find('[data-test="server-detail-reason"]').text()).toContain('Connecting...')
@@ -178,10 +178,10 @@ describe('ServerDetail — Health tile answers "can my client use it?" (F10)', (
         actions: ['view_logs'],
       },
     })
-    const tile = wrapper.find('[data-test="server-health-level"]')
+    const tile = wrapper.find('[data-test="server-status-badge"]')
     expect(tile.text()).not.toBe('Unhealthy')
     expect(tile.text()).toBe('Error')
-    expect(tile.classes()).toContain('text-error')
+    expect(tile.find('[data-test="status-pill"]').attributes('data-tone')).toBe('error')
 
     const degraded = await mountDetail({
       ...base,
@@ -195,10 +195,10 @@ describe('ServerDetail — Health tile answers "can my client use it?" (F10)', (
         actions: ['login'],
       },
     })
-    const degradedTile = degraded.find('[data-test="server-health-level"]')
+    const degradedTile = degraded.find('[data-test="server-status-badge"]')
     expect(degradedTile.text()).not.toBe('Degraded')
     expect(degradedTile.text()).toBe('Sign-in required')
-    expect(degradedTile.classes()).toContain('text-warning')
+    expect(degradedTile.find('[data-test="status-pill"]').attributes('data-tone')).toBe('error')
   })
 
   it('does not read "Online" for an old-core, OAuth-required, still-connected server (round-5 review finding)', async () => {
@@ -224,7 +224,7 @@ describe('ServerDetail — Health tile answers "can my client use it?" (F10)', (
         // no `status`, no `usable`, no `actions` — the pre-109-c shape.
       },
     })
-    const tile = wrapper.find('[data-test="server-health-level"]')
+    const tile = wrapper.find('[data-test="server-status-badge"]')
     expect(tile.text()).not.toBe('Online')
     expect(tile.text()).toBe('Sign-in required')
     expect(wrapper.find('[data-test="server-status-badge"]').text()).toContain('Sign-in required')

@@ -121,6 +121,16 @@ describe('facts on the first screen (FR-020, FR-030)', () => {
     }
   })
 
+  it('has no stat cards; admin state, tool counts and the endpoint appear once, in the facts row', async () => {
+    serverExtra = { command: 'npx', quarantine: { pending_count: 0, changed_count: 0, blocked_count: 3 } }
+    const { wrapper } = await mountDetail()
+    expect(wrapper.findAll('.stat')).toHaveLength(0)
+    expect(wrapper.get('[data-test="server-admin-state"]').text()).toBe('Enabled')
+    expect(wrapper.get('[data-test="server-admin-state-desc"]').text()).toBe('set by you')
+    expect(wrapper.get('[data-test="server-tools-count"]').text()).toContain('3 disabled')
+    expect(wrapper.text().split('npx').length - 1).toBe(1)
+  })
+
   it('opens the complete untruncated diagnostic and raw error, and returns focus', async () => {
     const long = 'x'.repeat(600)
     serverExtra = { last_error: `boom ${long}`, health: { level: 'unhealthy', admin_state: 'enabled', summary: 'Error', detail: 'long detail', status: 'error', usable: false, actions: [] } }

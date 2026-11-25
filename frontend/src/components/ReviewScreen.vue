@@ -14,11 +14,11 @@
       <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2" data-test="review-tier-counts">
         <div v-for="tier in tiers" :key="tier" class="min-w-0 rounded border border-base-300 bg-base-100 px-3 py-2"><div class="text-xs capitalize text-base-content/70 truncate">{{ tier }}</div><div class="text-xl font-semibold">{{ tierCounts[tier] }}</div></div>
       </div>
-      <div v-if="banner" class="alert" :class="bannerClass" data-test="review-scan-summary">
+      <div v-if="banner" class="soft-banner-wrap flex flex-wrap items-center justify-between gap-2 rounded px-4 py-3 text-sm" :class="bannerClass" data-test="review-scan-summary">
         <span>{{ banner.text }}</span>
         <button v-if="banner.action !== 'none'" class="btn btn-sm" data-test="review-scan-action" @click="rescan">{{ banner.action === 'scan-now' ? 'Scan now' : 'Rescan' }}</button>
       </div>
-      <div v-if="changedNames.length > 0 && !review.server.quarantined" class="alert alert-warning flex flex-wrap items-center gap-2" data-test="review-held-changes">
+      <div v-if="changedNames.length > 0 && !review.server.quarantined" class="soft-banner-wrap tone-review flex flex-wrap items-center gap-2 rounded px-4 py-3" data-test="review-held-changes">
         <p class="min-w-0 flex-1 basis-60 text-sm" data-test="review-held-hint">{{ HELD_CHANGE_HINT }} <a :href="HELD_CHANGE_DOCS" target="_blank" rel="noopener" class="link">Learn more</a></p>
         <button type="button" class="btn btn-primary btn-sm" :disabled="approving || refreshing" data-test="review-approve-update" @click="approveUpdate">{{ approveUpdateLabel(changedNames.length) }}</button>
       </div>
@@ -46,7 +46,7 @@
         <div v-if="review.server.source_registry_id"><span class="font-medium">Origin:</span> {{ review.server.source_registry_id }}<template v-if="review.server.source_registry_provenance"> · {{ review.server.source_registry_provenance }}</template></div>
       </div>
 
-      <div v-if="!review.server.definitions_captured" class="alert alert-warning" data-test="review-no-definitions">
+      <div v-if="!review.server.definitions_captured" class="soft-banner-wrap tone-review flex flex-wrap items-center justify-between gap-2 rounded px-4 py-3" data-test="review-no-definitions">
         <span>Tool definitions have not been captured yet.</span>
         <button class="btn btn-sm min-h-11" :class="review.server.quarantined ? 'btn-primary' : ''" :disabled="scanning" data-test="review-fetch-definitions" @click="fetchDefinitions">{{ scanning ? 'Fetching…' : 'Fetch tool definitions' }}</button>
       </div>
@@ -189,7 +189,8 @@ const banner = computed(() => {
   if (computedBanner && rescanning.value) return { severity: 'info' as const, text: 'Scan in progress…', action: 'none' as const }
   return computedBanner
 })
-const bannerClass = computed(() => `alert-${banner.value?.severity ?? 'info'}`)
+// Soft status tones (Spec 134 FR-001): never a solid block with white text.
+const bannerClass = computed(() => `soft-banner tone-${({ success: 'ok', warning: 'review', error: 'error', info: 'busy' } as Record<string, string>)[banner.value?.severity ?? 'info'] ?? 'busy'}`)
 // Filters and paging decide which rows are drawn. allowedTools and the block list
 // in approve() always come from the FULL review.tools, never from these.
 // The route's ?change= restriction is just the initial value of the visible state dropdown, so All states / Clear filters really clear it.

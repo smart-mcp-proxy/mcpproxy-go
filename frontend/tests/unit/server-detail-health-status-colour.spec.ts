@@ -114,9 +114,10 @@ describe('ServerDetail — health colour keys on status (T169)', () => {
     expect(badge.classes()).toContain('badge-warning')
     expect(badge.classes()).not.toContain('badge-success')
 
-    const tile = wrapper.find('[data-test="server-health-level"]')
+    // Spec 134: the stat cards are gone; the header pill carries the word and the tone.
+    const tile = wrapper.find('[data-test="server-status-badge"] [data-test="status-pill"]')
     expect(tile.text()).toBe('Needs review')
-    expect(tile.classes()).toContain('text-warning')
+    expect(tile.attributes('data-tone')).toBe('review')
     expect(tile.text()).not.toContain('Blocked')
 
     const header = wrapper.find('[data-test="server-status-badge"]')
@@ -142,9 +143,9 @@ describe('ServerDetail — health colour keys on status (T169)', () => {
         actions: ['login'],
       },
     })
-    const tile = wrapper.find('[data-test="server-health-level"]')
+    const tile = wrapper.find('[data-test="server-status-badge"] [data-test="status-pill"]')
     expect(tile.text()).toBe('Sign-in required')
-    expect(tile.classes()).toContain('text-warning')
+    expect(tile.attributes('data-tone')).toBe('error')
   })
 
   it('reads "Disabled" (not "Off") in neutral for a disabled server, never success', async () => {
@@ -162,11 +163,10 @@ describe('ServerDetail — health colour keys on status (T169)', () => {
         actions: ['enable'],
       },
     })
-    const tile = wrapper.find('[data-test="server-health-level"]')
+    const tile = wrapper.find('[data-test="server-status-badge"] [data-test="status-pill"]')
     expect(tile.text()).toBe('Disabled')
     expect(tile.text()).not.toBe('Off')
-    expect(tile.classes()).toContain('text-base-content/50')
-    expect(tile.classes()).not.toContain('text-success')
+    expect(tile.attributes('data-tone')).toBe('off')
   })
 
   it('keeps the level-based reading for an old core that sends no status', async () => {
@@ -182,6 +182,6 @@ describe('ServerDetail — health colour keys on status (T169)', () => {
       },
     })
     expect(configBadge(wrapper).classes()).toContain('badge-success')
-    expect(wrapper.find('[data-test="server-health-level"]').text()).toBe('Blocked')
+    expect(wrapper.find('[data-test="server-status-badge"]').text()).toBe('Quarantined for review')
   })
 })

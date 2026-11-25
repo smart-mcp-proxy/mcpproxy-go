@@ -4,7 +4,7 @@ Checked on the PR head, 2026-11-25, macOS arm64. Isolated instances only (`scrip
 
 | Check | Command | Result |
 |---|---|---|
-| Frontend unit tests | `cd frontend && npx vitest run` | 3211 passed |
+| Frontend unit tests | `cd frontend && npx vitest run` | 3212 passed |
 | Type check | `cd frontend && npx vue-tsc --noEmit` | clean |
 | Build | `npm run build`; `go build ./cmd/mcpproxy`; `go build -tags server ./cmd/mcpproxy` | ok |
 | Playwright sweeps with fixture upstream | `MCPPROXY_FIXTURE_PATH=<mcpfixture> ./scripts/run-web-smoke.sh` | 182 passed, 0 failed, 3 skipped (need a client or a skill fixture) |
@@ -30,7 +30,7 @@ The Trust mode selector note (`opacity-60`, 4.43:1) on the Configuration tab fai
 
 ## Not covered
 
-- No human visual review of screenshots beyond the sweeps' assertions (contrast, overflow, 44 px, keyboard); no screenshot attached.
+- Pre-existing solid-colour chips in `ScanHistory` ("completed") and the hold-evidence badge in dark are not restyled here.
 - A skill row's "Unblock" opens the card where the guarded Unblock button is; there is no write from the table.
 - The server edition build was compiled; the detail page is personal-edition only, so no server-edition sweep was run.
 
@@ -43,3 +43,17 @@ Reviewer `github-copilot/gpt-6.2-astra` (high), diffed against the merge-base `9
 - Skills: 1 finding, fixed (a long unbroken word could widen the stacked table at 390 px).
 
 Reviewer `github-copilot/gpt-6.2-sol` (high), approval paths only: neither the header primary action (approve opens the review part) nor the skills table row action (including Unblock) writes anything. Two observations, not changed: the review screen now stays mounted while the scan part is shown, so it keeps its review-change listeners (before, returning from Security remounted it); a tenant could already reach the review screen through `?tab=review` before this PR, and the backend answers 403.
+
+## Visual review (screenshots)
+
+Seeded isolated instance (`127.0.0.1:18850`, scratch data dir): the skills fixture with three pending skills, a trusted server with a held tool, a quarantined server with captured definitions (`fx-ok`), a quarantined server without (`fx-quarantined`), a disabled quarantined server and a broken one. Playwright full-page captures at 1440 light, 1440 dark and 390 are in `verification/pr3-screenshots/` (`<page>-light|dark|m.png`): tools, review, security, logs, config, skills, skillcard, quar-captured, quar-notcaptured.
+
+Fixed after looking (follow-up request from the design session):
+- The four stat cards are gone (audit A3). Each card's facts moved into the facts row (inventory row P3-07): tool count and disabled count, admin state with "set by you" / "awaiting your review", transport with the endpoint once (the subtitle line is removed); the Health word and tone are the header pill. The cards had no click target or tooltip.
+- `Review | Scans` is a quiet segmented anchor nav with a 1 px `--border` border; both anchors and the `?tab=` landing are unchanged.
+- The scan result banner and the other solid yellow blocks on these pages (quarantine banner, Tool Quarantine, "definitions not captured", held-change) use the soft status tones with a 1 px border; AA passes in both themes. The quarantine banner no longer squeezes its text into a narrow column at 390 px.
+- Disable All is an outline button. It has no confirmation today and none was added (R2).
+- The facts row is a bordered card on a 1/2/3 column grid; the Skills table narrows to skill, state and action beside an open card (the other three facts are in the card), and is full width otherwise.
+- Admin state "Enabled" no longer renders magenta in dark; the scan and review parts no longer show a browser focus outline after an anchor jump.
+
+Left to the PR 1 session (shared styles, per the request): the 1 px outline buttons and chips (the heavy black outline buttons such as Full diagnostic and Actions are the current shared `btn-outline`), the sidebar active item. Merge `claude/134-webui-pr1-shell-f30c09` when it reports.

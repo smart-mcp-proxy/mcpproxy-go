@@ -52,24 +52,24 @@
           </p>
           <!-- Spec 134 FR-036: a table; below md each row stacks and the headers move into the cells. -->
           <div v-else ref="skillList" class="border border-base-300 rounded-lg lg:max-h-[65vh] lg:overflow-y-auto" data-test="skills-list">
-            <table class="table w-full text-sm" :class="stacked ? 'block' : 'max-md:block'" aria-label="Skills">
-              <thead :class="stacked ? 'hidden' : 'hidden md:table-header-group'">
-                <tr><th scope="col">Skill</th><th scope="col">Description</th><th scope="col">State</th><th scope="col">Scan result</th><th scope="col">Files</th><th scope="col"><span class="sr-only">Action</span></th></tr>
+            <table class="table w-full text-sm" :class="'max-md:block'" aria-label="Skills">
+              <thead class="hidden md:table-header-group">
+                <tr><th scope="col">Skill</th><th scope="col" :class="wideCls">Description</th><th scope="col">State</th><th scope="col" :class="wideCls">Scan result</th><th scope="col" :class="wideCls">Files</th><th scope="col"><span class="sr-only">Action</span></th></tr>
               </thead>
-              <tbody :class="stacked ? 'block' : 'max-md:block'">
+              <tbody class="max-md:block">
                 <tr v-for="s in visibleSkills" :key="s.path" class="border-b border-base-200" :class="[rowCls, s.path === selectedPath ? 'bg-base-200' : '']" :data-test="`skill-tr-${s.path}`">
                   <td class="min-w-0" :class="cellCls">
                     <span class="font-medium [overflow-wrap:anywhere]" v-text="s.name || s.path"></span>
                     <span class="block text-xs text-base-content/70">{{ s.available ? 'Offered to agents' : 'Not offered' }}</span>
                   </td>
-                  <td class="min-w-0 md:max-w-xs" :class="cellCls"><span class="block text-base-content/80 line-clamp-2 [overflow-wrap:anywhere]" v-text="s.description || 'No description'"></span></td>
+                  <td class="min-w-0 md:max-w-xs" :class="wideCellCls"><span class="block text-base-content/80 line-clamp-2 [overflow-wrap:anywhere]" v-text="s.description || 'No description'"></span></td>
                   <td :class="cellCls">
                     <StateTag :tone="skillStateTone(s)" :data-test="`skill-chip-${s.path}`"><span v-text="skillStateChip(s).label"></span></StateTag>
                     <span v-if="s.unusable_reason" class="block text-xs text-base-content/70 [overflow-wrap:anywhere]" :data-test="`skill-unusable-${s.path}`">Unusable: <span v-text="s.unusable_reason"></span></span>
                   </td>
-                  <td class="text-base-content/80" :class="cellCls"><span :class="stacked ? '' : 'md:hidden'">Scan: </span><span v-text="s.scan?.verdict || 'not scanned'"></span></td>
-                  <td class="text-base-content/80" :class="cellCls">{{ s.files?.length ?? 0 }} file{{ (s.files?.length ?? 0) === 1 ? '' : 's' }}</td>
-                  <td :class="[cellCls, stacked ? '' : 'md:text-right']">
+                  <td class="text-base-content/80" :class="wideCellCls"><span class="md:hidden">Scan: </span><span v-text="s.scan?.verdict || 'not scanned'"></span></td>
+                  <td class="text-base-content/80" :class="wideCellCls">{{ s.files?.length ?? 0 }} file{{ (s.files?.length ?? 0) === 1 ? '' : 's' }}</td>
+                  <td :class="[cellCls, 'md:text-right']">
                     <button
                       type="button"
                       class="btn btn-sm min-h-11 lg:min-h-0"
@@ -148,9 +148,14 @@ const heldSkills = computed(() => {
   return current.skills.filter(s => s.listed && !s.blocked && (s.status === 'pending' || s.status === 'changed'))
 })
 // A card open beside the list narrows the table: rows stack, every fact stays in its cell.
-const stacked = computed(() => !!review.value)
-const rowCls = computed(() => stacked.value ? 'block' : 'block md:table-row')
-const cellCls = computed(() => stacked.value ? 'block' : 'block md:table-cell')
+// With a card open the table narrows to skill, state and action; description, scan result and file count
+// are in the card. Without one, rows stack below md and the headers move into the cells.
+const compact = computed(() => !!review.value)
+const rowCls = computed(() => 'block md:table-row')
+const cellCls = computed(() => 'block md:table-cell')
+// The three wide columns: hidden outright while a card is open (md:table-cell would otherwise win).
+const wideCellCls = computed(() => compact.value ? 'hidden' : 'block md:table-cell')
+const wideCls = computed(() => compact.value ? 'hidden' : '')
 const visibleSkills = computed(() => props.needsReview ? heldSkills.value : listing.value?.skills ?? [])
 // A live skills.changed for this server: the records moved, so the version on
 // screen may be out of date. Approve is off (for the open review and for one

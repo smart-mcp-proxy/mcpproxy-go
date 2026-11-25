@@ -693,3 +693,17 @@ details.dropdown > summary::-webkit-details-marker { display: none; }
     min-height: 2.75rem;
   }
 }
+
+/* Spec 134 PR 3: soft status banners and the quiet in-page anchor nav. */
+.soft-banner-wrap { border: 1px solid var(--border); }
+.soft-banner-wrap.tone-ok { color: var(--status-ok); background: var(--status-ok-soft); border-color: var(--status-ok); }
+.soft-banner-wrap.tone-review { color: var(--status-review); background: var(--status-review-soft); border-color: var(--status-review); }
+.soft-banner-wrap.tone-error { color: var(--status-error); background: var(--status-error-soft); border-color: var(--status-error); }
+.soft-banner-wrap.tone-busy { color: var(--status-busy); background: var(--status-busy-soft); border-color: var(--status-busy); }
+.part-nav { display: inline-flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.part-nav__link { min-height: 2.25rem; padding: 0 1rem; font-size: 0.875rem; background: transparent; color: inherit; }
+.part-nav__link + .part-nav__link { border-left: 1px solid var(--border); }
+.part-nav__link[aria-current='true'] { background: var(--brand-soft); color: var(--brand-text); font-weight: 600; }
+.part-nav__link:hover { background: var(--brand-soft); }
+.part-nav__link:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+@media (max-width: 767px) { .touch-44 .part-nav__link { min-height: 2.75rem; } }
