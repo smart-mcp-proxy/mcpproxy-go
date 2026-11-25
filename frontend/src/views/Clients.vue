@@ -160,8 +160,6 @@ async function copyOtherClientSnippet() {
 function selectTab(id: string) { tab.value = id }
 // The panel belongs to the Clients tab: leaving it (a tab, the palette, a link) closes it and its dialogs.
 watch(tab, (value) => { if (value !== 'clients') { handledFocus = ''; if (panelId.value) panelId.value = '' } })
-// A scope change reloads the roster: the panel of a client from the old list closes with it.
-watch(() => store.loading, (loading) => { if (loading && panelId.value) panelId.value = '' })
 watch(tab, value => {
   if (route.path !== '/clients') return
   const query = { ...route.query }
@@ -251,7 +249,8 @@ async function moveClient(id: string) {
   moveRequest.value = id
   await openPanel(id)
 }
-watch(() => [scopeQuery.state.profile, scopeQuery.state.client], () => { if (authStore.principalKind !== 'tenant') refreshClients() })
+// A scope change reloads the roster: the panel of a client from the old list closes with it.
+watch(() => [scopeQuery.state.profile, scopeQuery.state.client], () => { panelId.value = ''; if (authStore.principalKind !== 'tenant') refreshClients() })
 watch(() => route.query.move, value => { moveRequest.value = value === '1' && typeof route.query.focus === 'string' ? route.query.focus : '' }, { immediate: true })
 onMounted(() => {
   if (authStore.principalKind === 'tenant') return
