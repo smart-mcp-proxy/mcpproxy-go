@@ -3,11 +3,13 @@ package core
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
@@ -55,7 +57,7 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 	}
 
 	// Right after "run", so that `--init=false` in extra_args overrides it.
-	if c.dockerHasInit() {
+	if c.dockerInit {
 		dockerRunArgs = slices.Insert(dockerRunArgs, 1, "--init")
 	}
 
@@ -99,14 +101,42 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 	return c.resolveDockerSpawn(finalArgs)
 }
 
+// dockerInitKnown remembers dockerHasInit's answers, so that a daemon is asked once per process.
+var dockerInitKnown sync.Map // probe command and DOCKER_* environment -> bool
+
 // dockerHasInit reports whether the Docker daemon can run containers with --init. The daemon lists
 // the docker-init component only when it found and ran that binary. Podman lists none, and may
 // lack an init binary, so it never gets --init.
-func (c *Client) dockerHasInit() bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+//
+// The probe is spawned as `docker run` will be, with env as its environment: a DOCKER_HOST that
+// only a login shell or the server's own env sets must reach it too, or it could ask another daemon.
+func (c *Client) dockerHasInit(ctx context.Context, env []string) bool {
+	command, args, _, dockerDir := c.resolveDockerSpawn([]string{"version", "--format", "{{range .Server.Components}}{{println .Name}}{{end}}"})
+	env = prependDockerDirToPath(env, dockerDir)
+
+	key := command + "\x00" + strings.Join(args, "\x00")
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "DOCKER_") {
+			key += "\x00" + kv
+		}
+	}
+	if known, ok := dockerInitKnown.Load(key); ok {
+		return known.(bool)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	out, err := c.newDockerCmd(ctx, "version", "--format", "{{range .Server.Components}}{{println .Name}}{{end}}").Output()
-	return err == nil && slices.Contains(strings.Fields(string(out)), "docker-init")
+	cmd := exec.CommandContext(ctx, command, args...)
+	shellwrap.UseVerbatimCmdLine(cmd)
+	cmd.Env = env
+	cmd.WaitDelay = time.Second // a killed shell can leave docker holding the output pipe
+	out, err := cmd.Output()
+	if err != nil {
+		return false // not remembered: the daemon may be starting
+	}
+	has := slices.Contains(strings.Fields(string(out)), "docker-init")
+	dockerInitKnown.Store(key, has)
+	return has
 }
 
 // resolveDockerSpawn decides how to spawn `docker` given the fully built docker
