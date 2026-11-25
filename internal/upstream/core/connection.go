@@ -326,6 +326,7 @@ func (c *Client) Connect(ctx context.Context) error {
 				zap.String("server", c.config.Name),
 				zap.String("transport", c.transportType))
 			if launchErr := c.connectWithLauncher(ctx); launchErr != nil {
+				c.forgetDockerInit()
 				return fmt.Errorf("failed to launch local upstream: %w", launchErr)
 			}
 		}
@@ -345,6 +346,8 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	if err != nil {
+		c.forgetDockerInit()
+
 		// #1148: the transport error text embeds the configured URL, credentials
 		// and all. Redact it HERE, before it is logged, returned, or stored as
 		// the client's last error — every consumer downstream inherits the safe

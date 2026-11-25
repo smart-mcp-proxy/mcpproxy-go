@@ -156,7 +156,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		// cidfile helper.
 		var dockerShellWrapped bool
 		var dockerDir string
-		c.dockerInit = c.dockerHasInit(ctx, envVars)
+		c.probeDockerSpawn(ctx, envVars)
 		finalCommand, finalArgs, dockerShellWrapped, dockerDir = c.setupDockerIsolation(c.config.Command, args)
 		c.isDockerCommand = true
 

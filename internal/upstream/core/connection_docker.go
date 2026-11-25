@@ -56,7 +56,14 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 		return shellCmd, shellArgs, true, ""
 	}
 
-	// Right after "run", so that `--init=false` in extra_args overrides it.
+	// Right after "run", so that extra_args can override these.
+	//
+	// Without --sig-proxy=false the docker client would pass its own SIGTERM on, and the server
+	// would get two: many programs take the second one as "force quit". Where our own docker
+	// commands can miss the container, that SIGTERM is the only one it gets.
+	if !c.dockerOtherDaemon {
+		dockerRunArgs = slices.Insert(dockerRunArgs, 1, "--sig-proxy=false")
+	}
 	if c.dockerInit {
 		dockerRunArgs = slices.Insert(dockerRunArgs, 1, "--init")
 	}
@@ -99,6 +106,57 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 	// (connectStdio) via resolveDockerSpawn so both spawn paths behave identically
 	// (#696 / MCP-2868).
 	return c.resolveDockerSpawn(finalArgs)
+}
+
+// loginShellEnv is a variable so that tests can stub the user's login profile.
+var loginShellEnv = shellwrap.LoginShellEnv
+
+// probeDockerSpawn decides the flags that depend on the daemon `docker run` will use, given env as
+// its environment.
+func (c *Client) probeDockerSpawn(ctx context.Context, env []string) {
+	c.dockerInit = c.dockerHasInit(ctx, env)
+	c.dockerOtherDaemon = c.dockerRunMayUseOtherDaemon(env)
+}
+
+// dockerRunMayUseOtherDaemon reports whether `docker run` can reach another daemon than the docker
+// commands that look up and stop its container. Those run with mcpproxy's own environment, while
+// the server's env and the login profile can point `docker run` elsewhere.
+func (c *Client) dockerRunMayUseOtherDaemon(env []string) bool {
+	login := map[string]string{}
+	viaLoginShell := runtime.GOOS != osWindows && !dockerDaemonEnvGuaranteed()
+	if viaLoginShell {
+		if login = loginShellEnv(c.logger); login == nil {
+			return true // cannot tell
+		}
+	}
+	for _, key := range []string{"DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG"} {
+		own := os.Getenv(key)
+		if v, ok := lastEnvValue(env, key); ok && v != own {
+			return true
+		}
+		if viaLoginShell && login[key] != own {
+			return true
+		}
+	}
+	return false
+}
+
+// lastEnvValue returns key's value in env, where the last entry wins as in os/exec.
+func lastEnvValue(env []string, key string) (value string, ok bool) {
+	for _, kv := range env {
+		if v, found := strings.CutPrefix(kv, key+"="); found {
+			value, ok = v, true
+		}
+	}
+	return value, ok
+}
+
+// forgetDockerInit makes the next spawn ask the daemon again after one with --init failed: the
+// remembered answer can be about another daemon, for example after `docker context use`.
+func (c *Client) forgetDockerInit() {
+	if c.dockerInit {
+		dockerInitKnown.Clear()
+	}
 }
 
 // dockerInitKnown remembers dockerHasInit's answers, so that a daemon is asked once per process.

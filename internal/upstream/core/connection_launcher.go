@@ -281,7 +281,7 @@ func (c *Client) buildLauncherCmd(ctx context.Context, willUseDocker bool) (*exe
 	if c.isolationManager != nil && c.isolationManager.ShouldIsolate(c.config) {
 		var dockerShellWrapped bool
 		var dockerDir string
-		c.dockerInit = c.dockerHasInit(ctx, envVars)
+		c.probeDockerSpawn(ctx, envVars)
 		finalCommand, finalArgs, dockerShellWrapped, dockerDir = c.setupDockerIsolation(c.config.Command, args)
 		// Prepend the docker bundle dir to the child PATH so the spawned docker
 		// can exec its sibling credential helper / tooling on a registry pull

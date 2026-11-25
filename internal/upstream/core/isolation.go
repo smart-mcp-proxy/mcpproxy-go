@@ -560,9 +560,7 @@ func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, r
 	}
 
 	// ExtraArgs come later on the command line, so a server can override these.
-	// Without --sig-proxy=false the docker client would pass its own SIGTERM on, and the server
-	// would get two: many programs take the second one as "force quit".
-	args := []string{"run", "--rm", "-i", "--sig-proxy=false", "--stop-timeout", containerStopTimeout}
+	args := []string{"run", "--rm", "-i", "--stop-timeout", containerStopTimeout}
 
 	// Add container name for easier identification
 	containerName := generateContainerName(serverConfig.Name)
