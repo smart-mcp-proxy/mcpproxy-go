@@ -120,9 +120,11 @@ describe('ServerDetail — health colour keys on status (T169)', () => {
     expect(tile.text()).not.toContain('Blocked')
 
     const header = wrapper.find('[data-test="server-status-badge"]')
-    expect(header.classes()).toContain('badge-warning')
-    // The header badge text stays the summary.
-    expect(header.text()).toContain('Quarantined for review')
+    // Spec 134 FR-003: the header prints the Spec 109 label through the one status pill (review tone);
+    // the summary is the one-line reason beside it.
+    expect(header.find('[data-test="status-pill"]').attributes('data-tone')).toBe('review')
+    expect(header.text()).toBe('Needs review')
+    expect(wrapper.find('[data-test="server-detail-reason"]').text()).toContain('Quarantined for review')
   })
 
   it('reads "Sign-in required" in warning for a quarantined OAuth server', async () => {

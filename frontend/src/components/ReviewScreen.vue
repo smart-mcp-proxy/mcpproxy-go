@@ -1,5 +1,5 @@
 <template>
-  <section class="space-y-5" data-test="review-screen">
+  <section class="space-y-5 touch-44" data-test="review-screen">
     <div v-if="loading" class="text-center py-8"><span class="loading loading-spinner"></span></div>
     <div v-else-if="error" class="alert alert-error"><span>{{ error }}</span><button class="btn btn-sm" @click="load">Retry</button></div>
     <template v-else-if="review">
@@ -48,8 +48,9 @@
 
       <div v-if="!review.server.definitions_captured" class="alert alert-warning" data-test="review-no-definitions">
         <span>Tool definitions have not been captured yet.</span>
-        <button class="btn btn-sm" :disabled="scanning" @click="fetchDefinitions">{{ scanning ? 'Fetching…' : 'Fetch tool definitions' }}</button>
+        <button class="btn btn-sm min-h-11" :class="review.server.quarantined ? 'btn-primary' : ''" :disabled="scanning" data-test="review-fetch-definitions" @click="fetchDefinitions">{{ scanning ? 'Fetching…' : 'Fetch tool definitions' }}</button>
       </div>
+      <p v-if="fetchOutcome" class="text-sm" :class="fetchOutcome.kind === 'ok' ? 'text-success' : 'text-warning'" role="status" data-test="review-fetch-outcome">{{ fetchOutcome.text }}</p>
 
       <p v-if="review.server.quarantined && review.server.definitions_captured && review.tools.length > 0" class="text-sm text-base-content/70" data-test="review-selection-hint">{{ REVIEW_SELECTION_HINT }}</p>
 
@@ -85,7 +86,7 @@
         No tools match. <button type="button" class="link" @click="clearFilters">Clear filters</button>
       </div>
 
-      <article v-for="tool in pagedTools" :key="tool.name" class="card bg-base-100 border border-base-300" :data-test="`review-tool-${tool.name}`">
+      <article v-for="tool in pagedTools" :key="tool.name" tabindex="-1" class="card bg-base-100 border border-base-300" :data-test="`review-tool-${tool.name}`">
         <div class="card-body gap-3 p-4">
           <div class="flex flex-wrap justify-between gap-2">
             <div class="min-w-0"><h3 class="font-mono font-semibold break-all">{{ tool.name }}</h3><span class="badge badge-outline mt-1">{{ tool.tier }}</span> <span class="badge badge-ghost mt-1">{{ tool.scan_verdict }}</span></div>
@@ -132,7 +133,7 @@
         <p class="text-sm" data-test="review-decision-summary" aria-live="polite"><span class="font-medium" data-test="review-allowed-count">Allowed {{ allowedTools.length }}</span> · <span class="font-medium" data-test="review-blocked-count">Blocked {{ blockedCount }}</span> of {{ review.tools.length }}</p>
         <p v-if="notice" class="text-sm text-warning" role="status" data-test="review-stale-force-notice">{{ notice }}</p>
         <div class="flex flex-wrap gap-2">
-          <button class="btn btn-primary btn-sm sm:btn-md" :disabled="approving || refreshing" data-test="review-approve-server" @click="requestApprove(false)">{{ primaryLabel }}</button>
+          <button class="btn btn-sm sm:btn-md min-h-11" :class="review.server.definitions_captured ? 'btn-primary' : 'btn-outline'" :disabled="approving || refreshing" data-test="review-approve-server" @click="requestApprove(false)">{{ primaryLabel }}</button>
           <button v-if="showApproveAll" class="btn btn-outline btn-sm sm:btn-md" :disabled="approving || refreshing" :title="APPROVE_ALL_HINT" data-test="review-approve-all" @click="requestApprove(true)">{{ approveAllLabel(review.tools.length) }}</button>
           <button class="btn btn-outline btn-error btn-sm sm:btn-md" :disabled="approving" @click="rejectServer">Reject server</button>
         </div>
@@ -144,14 +145,14 @@
       <ScanHistory />
     </template>
 
-    <dialog ref="confirmDialog" class="modal" @close="confirmOpen = false"><div class="modal-box"><h3 class="font-bold text-lg">Approve without seeing tools?</h3><p class="py-3">No tool definitions were captured. Fetch them before approval whenever possible. Any tools the server lists later will wait for review.</p><div class="modal-action"><button class="btn" @click="closeConfirm">Cancel</button><button class="btn btn-warning" @click="confirmBlindApprove">Approve without seeing tools</button></div></div></dialog>
+    <dialog ref="confirmDialog" class="modal" @close="confirmOpen = false"><div class="modal-box"><h3 class="font-bold text-lg" data-test="review-blind-title">Approve without seeing tools?</h3><p class="py-3" data-test="review-blind-server">Approve {{ serverName }} without seeing its tools. No tool definitions were captured. Fetch them before approval whenever possible. Any tools the server lists later will wait for review.</p><div class="modal-action"><button class="btn" @click="closeConfirm">Cancel</button><button class="btn btn-warning" data-test="review-blind-confirm" @click="confirmBlindApprove">Approve {{ serverName }} without seeing tools</button></div></div></dialog>
     <dialog ref="forceDialog" class="modal"><div class="modal-box"><h3 class="font-bold text-lg">Dangerous findings detected</h3><p class="py-3">The baseline scan found dangerous findings. Force approval activates this server despite that warning.</p><div class="modal-action"><button class="btn" @click="forceDialog?.close()">Cancel</button><button class="btn btn-error" @click="approve(true)">Force approve server</button></div></div></dialog>
       <dialog ref="requarantineDialog" class="modal" data-test="review-requarantine-dialog"><div class="modal-box"><h3 class="font-bold text-lg">Quarantine {{ serverName }} to review again?</h3><p class="py-3">Agents lose access to every tool on {{ serverName }} until you approve it again.</p><div class="modal-action"><button class="btn" data-test="review-requarantine-cancel" @click="requarantineDialog?.close?.()">Cancel</button><button class="btn btn-warning" :disabled="requarantining" data-test="review-requarantine-confirm" @click="requarantine">Quarantine</button></div></div></dialog>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import api from '@/services/api'
 import { incarnationArgs } from '@/utils/incarnation'
 import type { ReviewTool, ServerReviewResponse } from '@/types'
@@ -172,6 +173,7 @@ const notice = ref('')
 // decision bar, which only a quarantined server shows.
 const toolNotice = ref('')
 const loading = ref(false); const refreshing = ref(false); const scanning = ref(false); const approving = ref(false); const error = ref('')
+const fetchOutcome = ref<{ kind: 'ok' | 'none' | 'failed'; text: string } | null>(null)
 const rescanning = ref(false); const requarantining = ref(false); const requarantineDialog = ref<HTMLDialogElement | null>(null)
 const allowedTools = ref<string[]>([]); const choices = new Map<string, SelectionChoice>(); const lastBlock = ref<string[] | null>(null); const confirmDialog = ref<HTMLDialogElement | null>(null); const forceDialog = ref<HTMLDialogElement | null>(null); const confirmOpen = ref(false)
 // The review binding (Spec 117 PR-2) of the attempt the force retry belongs to: the retry re-sends it with lastBlock.
@@ -218,6 +220,27 @@ async function copyLaunchLine() {
   }
   copied.value = true; setTimeout(() => { copied.value = false }, 1500)
 }
+// Spec 134 FR-035: a summary line on server detail points at the first held tool. Following it clears every
+// filter that could hide that tool, moves to its page and focuses it. Asked before the review loaded, it waits.
+let revealPending = false
+const HELD = ['pending', 'changed']
+async function revealHeld() { revealPending = true; await tryReveal() }
+async function tryReveal() {
+  if (!revealPending || !review.value) return
+  revealPending = false
+  clearFilters()
+  const all = review.value.tools
+  const index = all.findIndex(t => HELD.includes(t.approval_status))
+  await nextTick()
+  if (index < 0) return
+  page.value = Math.floor(index / pageSize.value) + 1
+  await nextTick()
+  const el = document.querySelector<HTMLElement>(`[data-test="${CSS.escape(`review-tool-${all[index].name}`)}"]`)
+  el?.scrollIntoView?.({ block: 'center' })
+  el?.focus?.({ preventScroll: true })
+}
+watch(review, () => { void tryReveal() })
+defineExpose({ revealHeld })
 function clearFilters() { searchQuery.value = ''; tierFilter.value = 'all'; stateFilter.value = 'all'; selectionFilter.value = 'all'; page.value = 1 }
 // Bulk actions touch exactly the filtered set (all pages); everything else keeps its decision.
 function bulkSet(allow: boolean) {
@@ -300,12 +323,20 @@ async function requarantine() {
 }
 async function fetchDefinitions() {
   const server = props.serverName; const visit = visitGeneration
-  scanning.value = true
+  scanning.value = true; fetchOutcome.value = null
   const res = await api.discoverServerTools(server)
   if (!isCurrent(server, visit)) return
   scanning.value = false
-  if (!res.success) { error.value = res.error || 'Failed to capture tool definitions'; return }
+  // The attempt's outcome is reported on its own line. It never replaces the review (a failed attempt leaves
+  // the screen in the state the last successful load put it in) and it never decides the branch: only the
+  // reloaded `definitions_captured` does (Spec 134 FR-032).
+  const failure = res.success ? '' : (res.error || 'Failed to capture tool definitions')
   await load()
+  if (!isCurrent(server, visit) || !review.value) return
+  if (review.value.server.definitions_captured) fetchOutcome.value = { kind: 'ok', text: 'Tool definitions were captured. Review them before approving.' }
+  else if (failure) fetchOutcome.value = { kind: 'failed', text: `The fetch attempt failed: ${failure}` }
+  else if (review.value.server.enabled === false) fetchOutcome.value = { kind: 'none', text: 'The server is disabled, so its tools could not be fetched. Nothing was enabled or approved.' }
+  else fetchOutcome.value = { kind: 'none', text: 'The attempt finished but no tool definitions were captured. Nothing was enabled or approved.' }
 }
 function requestApprove(everything: boolean) { if (refreshing.value) return; if (!review.value?.server.definitions_captured) { blindReview = review.value; blindEverything = everything; confirmOpen.value = true; confirmDialog.value?.showModal(); return }; void approve(false, everything ? [] : undefined) }
 function closeConfirm() { confirmOpen.value = false; blindReview = null; confirmDialog.value?.close?.() }
@@ -426,7 +457,7 @@ async function refreshAfterScanSettled(event: Event) {
   void load()
 }
 // Component reuse across /review/A -> /review/B: scan state and any pending force retry belong to the old server.
-watch(() => props.serverName, () => { visitGeneration++; readinessChecks = 0; if (readinessTimer) clearTimeout(readinessTimer); readinessTimer = null; choices.clear(); review.value = null; allowedTools.value = []; clearFilters(); stateFilter.value = initialStateFilter(props.change); lastBlock.value = null; notice.value = ''; toolNotice.value = ''; approving.value = false; requarantining.value = false; refreshing.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; void load() })
+watch(() => props.serverName, () => { visitGeneration++; readinessChecks = 0; if (readinessTimer) clearTimeout(readinessTimer); readinessTimer = null; choices.clear(); review.value = null; allowedTools.value = []; clearFilters(); stateFilter.value = initialStateFilter(props.change); lastBlock.value = null; notice.value = ''; toolNotice.value = ''; approving.value = false; requarantining.value = false; refreshing.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; fetchOutcome.value = null; error.value = ''; void load() })
 onMounted(() => {
   void load()
   window.addEventListener('mcpproxy:review-changed', refreshAfterReviewChange)

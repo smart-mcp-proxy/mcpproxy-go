@@ -683,3 +683,13 @@ body {
 details.dropdown:not([open]) > .dropdown-content { display: none; }
 details.dropdown > summary::-webkit-details-marker { display: none; }
 .menu .menu-title { color: var(--tone-muted); opacity: 1; }
+
+/* Spec 134 SC-005: on a phone every button in the body of these pages is at least 44 px tall. */
+@media (max-width: 767px) {
+  .touch-44 .btn,
+  .touch-44 .tab,
+  .touch-44 .menu li > button,
+  .touch-44 .menu li > a {
+    min-height: 2.75rem;
+  }
+}

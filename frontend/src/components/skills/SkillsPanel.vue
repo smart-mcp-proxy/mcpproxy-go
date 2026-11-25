@@ -1,5 +1,5 @@
 <template>
-  <section class="space-y-4" data-test="skills-panel">
+  <section class="space-y-4 touch-44" data-test="skills-panel">
     <div v-if="loading && !listing" class="text-center py-8"><span class="loading loading-spinner"></span></div>
 
     <div v-else-if="error && !listing" class="alert alert-error" data-test="skills-error">
@@ -13,7 +13,7 @@
 
     <template v-else-if="listing">
       <div class="flex flex-wrap items-center gap-3 text-sm" data-test="skills-header">
-        <button class="btn btn-sm" data-test="skills-refresh" :disabled="refreshing || !listing.supported" @click="refresh">
+        <button class="btn btn-sm min-h-11 lg:min-h-0" data-test="skills-refresh" :disabled="refreshing || !listing.supported" @click="refresh">
           <span v-if="refreshing" class="loading loading-spinner loading-xs"></span>
           Refresh
         </button>
@@ -38,11 +38,11 @@
       <p v-if="!listing.supported && listing.skills.length === 0" class="text-base-content/70" data-test="skills-empty-unsupported">
         This server does not announce the skills extension.
       </p>
-      <div v-else class="grid items-start gap-4" :class="{ 'lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]': review }">
+      <div v-else class="space-y-4">
         <div class="min-w-0 space-y-3" :class="{ 'hidden lg:block': review }">
           <div class="join" role="group" aria-label="Filter skills">
-            <button ref="allFilter" type="button" class="btn btn-sm join-item" :class="{ 'btn-active': !needsReview }" :aria-pressed="!needsReview" data-test="skills-filter-all" @click="emit('filter', false)">All skills</button>
-            <button ref="reviewFilter" type="button" class="btn btn-sm join-item" :class="{ 'btn-active': needsReview }" :aria-pressed="needsReview" data-test="skills-filter-needs-review" @click="emit('filter', true)">Needs review ({{ heldSkills.length }})</button>
+            <button ref="allFilter" type="button" class="btn btn-sm join-item min-h-11 lg:min-h-0" :class="{ 'btn-active': !needsReview }" :aria-pressed="!needsReview" data-test="skills-filter-all" @click="emit('filter', false)">All skills</button>
+            <button ref="reviewFilter" type="button" class="btn btn-sm join-item min-h-11 lg:min-h-0" :class="{ 'btn-active': needsReview }" :aria-pressed="needsReview" data-test="skills-filter-needs-review" @click="emit('filter', true)">Needs review ({{ heldSkills.length }})</button>
           </div>
           <p v-if="needsReview && visibleSkills.length === 0" class="text-base-content/70" data-test="skills-empty-review" role="status">
             No skills need review.
@@ -50,28 +50,44 @@
           <p v-else-if="visibleSkills.length === 0" class="text-base-content/70" data-test="skills-empty-none">
             This server lists no skills.
           </p>
-          <ul v-else ref="skillList" class="divide-y divide-base-200 border border-base-300 rounded-lg lg:max-h-[65vh] lg:overflow-y-auto" data-test="skills-list">
-            <li v-for="s in visibleSkills" :key="s.path">
-              <button
-                type="button"
-                class="w-full text-left px-3 py-2 flex flex-wrap items-center gap-2 hover:bg-base-200"
-                :class="s.path === selectedPath ? 'bg-base-200' : ''"
-                :aria-pressed="s.path === selectedPath"
-                :data-test="`skill-row-${s.path}`"
-                @click="open(s)"
-              >
-                <span class="font-medium break-all" v-text="s.name || s.path"></span>
-                <span class="badge badge-sm" :class="chipClass(s)" :data-test="`skill-chip-${s.path}`" v-text="skillStateChip(s).label"></span>
-                <span class="text-xs text-base-content/60">{{ s.available ? 'Offered to agents' : 'Not offered' }}</span>
-                <span class="text-xs text-base-content/60">{{ s.files?.length ?? 0 }} file{{ (s.files?.length ?? 0) === 1 ? '' : 's' }}</span>
-                <span v-if="s.scan?.verdict" class="text-xs text-base-content/60">scan: <span v-text="s.scan.verdict"></span></span>
-              </button>
-            </li>
-          </ul>
+          <!-- Spec 134 FR-036: a table; below md each row stacks and the headers move into the cells. -->
+          <div v-else ref="skillList" class="border border-base-300 rounded-lg lg:max-h-[65vh] lg:overflow-y-auto" data-test="skills-list">
+            <table class="table w-full text-sm" aria-label="Skills">
+              <thead class="hidden md:table-header-group">
+                <tr><th scope="col">Skill</th><th scope="col">Description</th><th scope="col">State</th><th scope="col">Scan result</th><th scope="col">Files</th><th scope="col"><span class="sr-only">Action</span></th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="s in visibleSkills" :key="s.path" class="block md:table-row border-b border-base-200" :class="s.path === selectedPath ? 'bg-base-200' : ''" :data-test="`skill-tr-${s.path}`">
+                  <td class="block md:table-cell min-w-0">
+                    <span class="font-medium break-all" v-text="s.name || s.path"></span>
+                    <span class="block text-xs text-base-content/70">{{ s.available ? 'Offered to agents' : 'Not offered' }}</span>
+                  </td>
+                  <td class="block md:table-cell min-w-0 md:max-w-xs"><span class="block text-base-content/80 line-clamp-2 break-words" v-text="s.description || 'No description'"></span></td>
+                  <td class="block md:table-cell">
+                    <StateTag :tone="skillStateTone(s)" :data-test="`skill-chip-${s.path}`"><span v-text="skillStateChip(s).label"></span></StateTag>
+                    <span v-if="s.unusable_reason" class="block text-xs text-base-content/70 break-words" :data-test="`skill-unusable-${s.path}`">Unusable: <span v-text="s.unusable_reason"></span></span>
+                  </td>
+                  <td class="block md:table-cell text-base-content/80"><span class="md:hidden">Scan: </span><span v-text="s.scan?.verdict || 'not scanned'"></span></td>
+                  <td class="block md:table-cell text-base-content/80">{{ s.files?.length ?? 0 }} file{{ (s.files?.length ?? 0) === 1 ? '' : 's' }}</td>
+                  <td class="block md:table-cell md:text-right">
+                    <button
+                      type="button"
+                      class="btn btn-sm min-h-11 lg:min-h-0"
+                      :class="skillRowAction(s) === 'Review' || skillRowAction(s) === 'Review changes' ? 'btn-primary' : 'btn-outline'"
+                      :aria-pressed="s.path === selectedPath"
+                      :aria-label="`${skillRowAction(s)}: ${s.name || s.path}`"
+                      :data-test="`skill-row-${s.path}`"
+                      @click="open(s)"
+                    >{{ skillRowAction(s) }}</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <div v-if="review" ref="detailPane" class="min-w-0 space-y-3">
-          <button ref="backToList" type="button" class="btn btn-sm btn-ghost scroll-mt-4 lg:hidden" data-test="skill-back-to-list" @click="closeSkill()">Back to skills</button>
+          <button ref="backToList" type="button" class="btn btn-sm btn-ghost scroll-mt-4 min-h-11 lg:hidden" data-test="skill-back-to-list" @click="closeSkill()">Back to skills</button>
           <div v-if="review.stale" class="alert alert-warning text-sm" data-test="skill-stale" role="status">
             <span>This skill changed while you were reviewing it. Approve is off until you open the new version.</span>
             <button v-if="liveSelected" class="btn btn-xs" data-test="skill-reopen" @click="open(liveSelected)">Open the new version</button>
@@ -105,8 +121,9 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import api from '@/services/api'
 import type { SkillEntry, SkillsListResponse } from '@/types/api'
 import { formatDateTime } from '@/utils/datetime'
-import { skillsChangeIncludesServer, skillStateChip, skillExpectedHashes, skillErrorCode, skillErrorNotice, skillApprovedNotice, type SkillAction } from '@/utils/skills'
+import { skillsChangeIncludesServer, skillStateChip, skillStateTone, skillRowAction, skillExpectedHashes, skillErrorCode, skillErrorNotice, skillApprovedNotice, type SkillAction } from '@/utils/skills'
 import SkillDetail from './SkillDetail.vue'
+import StateTag from '@/components/StateTag.vue'
 
 const props = withDefaults(defineProps<{ serverName: string; needsReview?: boolean; serverReviewable?: boolean }>(), {
   serverReviewable: true,
@@ -188,9 +205,6 @@ function onContentChanged() {
   void load()
 }
 
-function chipClass(s: SkillEntry) {
-  return `badge-${({ error: 'error', warning: 'warning', info: 'info', success: 'success', neutral: 'ghost' })[skillStateChip(s).tone]}`
-}
 
 // A response is applied only if it answers the newest request for the server
 // still on screen: a late reply for the previous server, or an older reload of

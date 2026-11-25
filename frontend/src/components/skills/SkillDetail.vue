@@ -3,7 +3,7 @@
     <header class="space-y-1">
       <div class="flex flex-wrap items-center gap-2">
         <h3 ref="heading" tabindex="-1" class="font-semibold text-lg break-all scroll-mt-4" data-test="skill-name" v-text="skill.name || skill.path"></h3>
-        <span class="badge badge-sm" :class="chipClass" data-test="skill-detail-chip" v-text="chip.label"></span>
+        <StateTag :tone="skillStateTone(skill)" data-test="skill-detail-chip"><span v-text="chip.label"></span></StateTag>
       </div>
       <p class="text-xs text-base-content/60">from the server, not verified</p>
       <!-- v-text: every string below was written by the upstream server. -->
@@ -115,8 +115,9 @@ import { computed, nextTick, reactive, ref, watch } from 'vue'
 import api from '@/services/api'
 import type { SkillCopy, SkillEntry } from '@/types/api'
 import { formatDateTime } from '@/utils/datetime'
+import StateTag from '@/components/StateTag.vue'
 import {
-  skillStateChip, skillFileDiff, lineDiff, readWholeSkillFile, skillFileDigest, skillPartMatches,
+  skillStateChip, skillStateTone, skillFileDiff, lineDiff, readWholeSkillFile, skillFileDigest, skillPartMatches,
   SKILL_CONTENT_CHANGED, SKILL_CONTENT_CHANGED_MESSAGE, type FileDiffRow, type LineOp,
 } from '@/utils/skills'
 
@@ -155,7 +156,6 @@ const scanAttentionClass = computed(() => {
   if (scan.value?.verdict === 'clean' && scan.value.complete) return 'text-base-content/70'
   return ['rounded-lg border px-3 py-2', scan.value?.verdict === 'dangerous' ? 'border-error/40 bg-error/10' : 'border-warning/40 bg-warning/10']
 })
-const chipClass = computed(() => `badge-${({ error: 'error', warning: 'warning', info: 'info', success: 'success', neutral: 'ghost' })[chip.value.tone]}`)
 const canApprove = computed(() => !props.skill.blocked && (props.skill.status === 'pending' || props.skill.status === 'changed'))
 const diffRows = computed<FileDiffRow[] | null>(() => props.skill.approved_files ? skillFileDiff(props.skill.approved_files, props.skill.files) : null)
 const changedFiles = computed(() => diffRows.value?.filter(row => row.state !== 'same') ?? [])

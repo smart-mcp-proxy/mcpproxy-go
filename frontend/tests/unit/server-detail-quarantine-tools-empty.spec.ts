@@ -90,7 +90,7 @@ describe('ServerDetail — Tools tab empty state on a quarantined server (F08)',
   // the wrong reason (a component that never rendered the Tools tab at all).
   it('actually renders the Tools tab empty state', async () => {
     const wrapper = await mountDetail(quarantined())
-    expect(wrapper.find('[data-test="security-tab"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="review-tab"]').exists()).toBe(true)
     // The Tools tab is the default tab and the tool list is empty, so the empty
     // state — whatever it says — is the branch under test.
     expect(wrapper.find('[data-test="server-tools-empty"]').exists()).toBe(true)

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
-  skillStateChip, skillFileDiff, lineDiff, skillExpectedHashes, readWholeSkillFile,
+  skillStateChip, skillStateTone, skillRowAction, skillFileDiff, lineDiff, skillExpectedHashes, readWholeSkillFile,
   skillsTabVisible, skillErrorNotice, skillErrorCode, SKILL_CONTENT_CHANGED, LINE_DIFF_CONTEXT, LINE_DIFF_MAX_OPS,
 } from '@/utils/skills'
 
@@ -202,5 +202,23 @@ describe('skillErrorNotice', () => {
       expect(n).not.toMatch(/refreshed/)
       expect(skillErrorNotice('server_replaced', 'x', action)).toContain(`nothing was ${verb}`)
     }
+  })
+})
+
+// Spec 134 FR-036/FR-037
+describe('skillStateTone and skillRowAction', () => {
+  it('maps the five states to the status tones', () => {
+    expect(skillStateTone(entry('approved'))).toBe('ok')
+    expect(skillStateTone(entry('pending'))).toBe('review')
+    expect(skillStateTone(entry('changed'))).toBe('review')
+    expect(skillStateTone(entry('approved', true))).toBe('error')
+    expect(skillStateTone(entry('unusable'))).toBe('off')
+  })
+  it('names the one row action by state', () => {
+    expect(skillRowAction(entry('pending'))).toBe('Review')
+    expect(skillRowAction(entry('changed'))).toBe('Review changes')
+    expect(skillRowAction(entry('approved'))).toBe('View')
+    expect(skillRowAction(entry('unusable'))).toBe('View')
+    expect(skillRowAction(entry('approved', true))).toBe('Unblock')
   })
 })
