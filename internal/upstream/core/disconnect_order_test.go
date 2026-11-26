@@ -89,15 +89,17 @@ func TestDisconnectDocker_ClosesStdinBeforeStopping(t *testing.T) {
 			raw, err := os.ReadFile(log)
 			require.NoError(t, err)
 			calls := strings.Fields(string(raw))
-			closeAt, waitAt := slices.Index(calls, "close-stdin"), slices.Index(calls, "wait")
+			// The close runs beside `docker wait`, so only close-before-stop is ordered.
+			closeAt := slices.Index(calls, "close-stdin")
 			require.GreaterOrEqual(t, closeAt, 0, calls)
-			require.Greater(t, waitAt, closeAt, calls)
+			require.Contains(t, calls, "wait")
 			require.Empty(t, c.containerID)
 			if tt.exits {
 				require.NotContains(t, calls, "stop", "a container that already exited is not stopped")
 				return
 			}
 			require.Equal(t, "stop", calls[len(calls)-1])
+			require.Less(t, closeAt, len(calls)-1, calls)
 			require.GreaterOrEqual(t, elapsed, stdinCloseGrace, "the container gets time to exit on its own first")
 		})
 	}
