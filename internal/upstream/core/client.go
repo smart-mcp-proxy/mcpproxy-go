@@ -1035,7 +1035,11 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		logErr = err // the answer was cut short: say so in the request line
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			// A success cut short: say so in the request line. An error
+			// status is an answer either way, as on the wrapper path.
+			logErr = err
+		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			// The status arrived even though the body did not. Keep it, so a
 			// truncated rejection is classified as the answer it is and not
