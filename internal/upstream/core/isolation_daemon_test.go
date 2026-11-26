@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -93,4 +94,40 @@ func TestDockerIsolation_FailedSpawnForgetsInit(t *testing.T) {
 	require.NoError(t, err)
 	probes := slices.DeleteFunc(strings.Fields(string(raw)), func(s string) bool { return s != "version" })
 	require.Len(t, probes, 2, "one probe per failed spawn")
+}
+
+// A probe that answers after the answers were forgotten must not put its answer back.
+func TestDockerIsolation_ProbeRunningWhileForgottenIsNotRemembered(t *testing.T) {
+	dir := t.TempDir()
+	log, gate := filepath.Join(dir, "calls.log"), filepath.Join(dir, "gate")
+	// The shim answers only once the gate exists, so the test decides when the probe ends.
+	name, script := "docker", "#!/bin/sh\necho \"$1\" >> '"+log+"'\nwhile [ ! -e '"+gate+"' ]; do /bin/sleep 0.1; done\necho docker-init\n"
+	if runtime.GOOS == osWindows {
+		ping := filepath.Join(os.Getenv("SystemRoot"), "System32", "ping.exe")
+		name, script = "docker.cmd", "@echo off\r\necho %1>>\""+log+"\"\r\n:wait\r\nif exist \""+gate+"\" goto done\r\n\""+ping+"\" -n 2 127.0.0.1 >nul\r\ngoto wait\r\n:done\r\necho docker-init\r\n"
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755))
+	t.Setenv("PATH", dir)
+	t.Setenv("SHELL", "")
+	t.Setenv("DOCKER_HOST", "")
+	forceDockerDaemonEnvGOOS(t, osDarwin)
+	useRealDockerResolver(t)
+	clearDockerInitKnown()
+	t.Cleanup(clearDockerInitKnown)
+
+	probes := func() int {
+		raw, _ := os.ReadFile(log)
+		return strings.Count(string(raw), "version")
+	}
+	c := newIsolatedTestClient()
+	first := make(chan bool)
+	go func() { first <- c.dockerHasInit(context.Background(), os.Environ()) }()
+	require.Eventually(t, func() bool { return probes() == 1 }, 5*time.Second, 10*time.Millisecond)
+
+	clearDockerInitKnown() // a failed spawn forgets while the probe still runs
+	require.NoError(t, os.WriteFile(gate, nil, 0o600))
+	require.True(t, <-first)
+
+	require.True(t, c.dockerHasInit(context.Background(), os.Environ()))
+	require.Equal(t, 2, probes(), "the daemon is asked again")
 }
