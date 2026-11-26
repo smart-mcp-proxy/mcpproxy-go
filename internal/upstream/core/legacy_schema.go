@@ -46,7 +46,9 @@ func (s legacySchema) MarshalJSON() ([]byte, error) {
 		AdditionalProperties any             `json:"additionalProperties,omitempty"`
 	}
 	if err := json.Unmarshal(full, &v10); err != nil {
-		return nil, err
+		// v1.0.0 could not have decoded it either (a number out of float64
+		// range, say): there are no earlier bytes to keep.
+		return full, nil
 	}
 	if v10.Defs == nil && v10.Definitions != nil {
 		v10.Defs = v10.Definitions

@@ -62,10 +62,14 @@ func TestLegacySchemaJSON_NestedRefResidual_HashUnchanged(t *testing.T) {
 
 // A schema v1.0.0 could not decode has no earlier bytes: it is kept whole.
 func TestLegacySchemaJSON_ArrayTypeKeptWhole(t *testing.T) {
-	in := `{"type":["object"],"patternProperties":{"^m_":{"type":"number"}},"additionalProperties":false}`
-	var s mcp.ToolOutputSchema
-	require.NoError(t, json.Unmarshal([]byte(in), &s))
-	got, err := json.Marshal(legacySchema(mcp.ToolArgumentsSchema(s)))
-	require.NoError(t, err)
-	assert.Contains(t, string(got), `"patternProperties"`)
+	for _, in := range []string{
+		`{"type":["object"],"patternProperties":{"^m_":{"type":"number"}},"additionalProperties":false}`,
+		`{"$schema":"http://json-schema.org/draft-07/schema#","type":["object"],"definitions":{"Limit":{"const":1e400}}}`,
+	} {
+		var s mcp.ToolOutputSchema
+		require.NoError(t, json.Unmarshal([]byte(in), &s), in)
+		got, err := json.Marshal(legacySchema(mcp.ToolArgumentsSchema(s)))
+		require.NoError(t, err, in)
+		assert.Contains(t, string(got), `"type":["object"]`, in)
+	}
 }
