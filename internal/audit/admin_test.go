@@ -201,6 +201,7 @@ func TestNewAdminAction_LabelCappedAt64AfterMasking(t *testing.T) {
 
 func TestLiteral_TypeMismatchIsWithheld(t *testing.T) {
 	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
 	in.Changes = []audit.Change{audit.Literal(audit.FieldTokenPrefix, audit.Bool(true), audit.Bool(false))}
 	_, obj := mustAdmin(t, in)
 	ch := obj["changes"].([]interface{})[0].(map[string]interface{})
@@ -211,6 +212,7 @@ func TestLiteral_TypeMismatchIsWithheld(t *testing.T) {
 
 func TestLiteral_InvalidTokenPrefixIsWithheld(t *testing.T) {
 	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
 	in.Changes = []audit.Change{audit.Literal(audit.FieldTokenPrefix, nil, audit.TokenPrefix("not a prefix at all, way too long"))}
 	_, obj := mustAdmin(t, in)
 	ch := obj["changes"].([]interface{})[0].(map[string]interface{})
@@ -240,7 +242,7 @@ func TestClassifier_SecretAndUnknownPaths(t *testing.T) {
 
 func TestChange_PointerEscapes(t *testing.T) {
 	in := tokenRotateInput()
-	in.Action = audit.ActionTokenRevoke
+	in.Action = audit.ActionTokenDelete
 	in.Changes = []audit.Change{audit.Withheld(audit.Path("env", "a.b/c~d"), audit.WithheldSecret)}
 	_, obj := mustAdmin(t, in)
 	ch := obj["changes"].([]interface{})[0].(map[string]interface{})
@@ -251,6 +253,7 @@ func TestChange_PointerEscapes(t *testing.T) {
 
 func TestNewAdminAction_ChangesSortedAndCapped(t *testing.T) {
 	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
 	in.Changes = nil
 	for i := 0; i < 200; i++ {
 		in.Changes = append(in.Changes, audit.Withheld(audit.Path("env", strings.Repeat("k", 40)+string(rune('a'+i%26))+strings.Repeat("z", i%7)), audit.WithheldSecret))
@@ -309,5 +312,49 @@ func TestNewAdminAction_TimestampLiteral(t *testing.T) {
 	}
 	if chs[0].(map[string]interface{})["after"] != "2027-01-02T03:04:05.000000000Z" {
 		t.Fatalf("timestamp literal: %v", chs[0])
+	}
+}
+
+func TestNewAdminAction_RequiresTheLifecyclePrefixes(t *testing.T) {
+	in := tokenRotateInput()
+	in.Changes = []audit.Change{audit.Literal(audit.FieldTokenPrefix, nil, audit.TokenPrefix("mcp_agt_9f8e"))}
+	if _, err := audit.NewAdminAction(in); err == nil {
+		t.Fatal("token.rotate without the before prefix must be rejected")
+	}
+	in.Changes = nil
+	if _, err := audit.NewAdminAction(in); err == nil {
+		t.Fatal("token.rotate without changes must be rejected")
+	}
+}
+
+func TestNewAdminAction_RequestCallerRequiresRequestID(t *testing.T) {
+	in := tokenRotateInput()
+	in.RequestID = ""
+	if _, err := audit.NewAdminAction(in); err == nil {
+		t.Fatal("a socket caller without request_id must be rejected")
+	}
+}
+
+func TestChange_PointerSegmentRules(t *testing.T) {
+	render := func(c audit.Change) map[string]interface{} {
+		in := tokenRotateInput()
+		in.Action = audit.ActionTokenDelete
+		in.Changes = []audit.Change{c}
+		line, obj := mustAdmin(t, in)
+		assertSentinelAbsent(t, line, "MIIEsecret")
+		return obj["changes"].([]interface{})[0].(map[string]interface{})
+	}
+	pem := render(audit.Withheld(audit.Path("env", "-----BEGIN PRIVATE KEY-----MIIEsecret"), audit.WithheldSecret))
+	if pem["field"] != "/env" || pem["field_masked"] != true {
+		t.Fatalf("a private-key segment collapses to its fixed parent: %v", pem)
+	}
+	opaque := render(audit.Withheld(audit.Path("server_edition", "private-key-name"), audit.WithheldValue))
+	if opaque["field"] != "/server_edition" || opaque["field_masked"] != true {
+		t.Fatalf("below an opaque block the change is reported at the parent: %v", opaque)
+	}
+	// A credential straddling the 64-character segment cap is masked first.
+	straddle := render(audit.Withheld(audit.Path("env", strings.Repeat("k", 50)+"ghp_0123456789abcdefghij"), audit.WithheldSecret))
+	if strings.Contains(straddle["field"].(string), "ghp_01") {
+		t.Fatalf("mask before cap: %v", straddle)
 	}
 }

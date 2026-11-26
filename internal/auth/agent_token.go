@@ -141,6 +141,10 @@ type AgentToken struct {
 	// first time a transaction that a line reports touches it. Additive and
 	// omitempty.
 	AuditRef string `json:"audit_ref,omitempty"`
+	// RotatedAt is when the token's secret was last regenerated (UTC),
+	// stamped inside the rotating transaction, so the token.rotate audit line
+	// carries the commit time (Spec 133 FR-016b). Additive and omitempty.
+	RotatedAt *time.Time `json:"rotated_at,omitempty"`
 
 	// MatchedPrefix is the display prefix of the secret that authenticated
 	// this request. It is set by validation, never stored. It differs from

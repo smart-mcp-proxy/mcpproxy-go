@@ -20,12 +20,20 @@ import (
 // registry, and every REST registry row still names a registered route.
 func TestAdminDoorRegistry_CoversEveryRESTRoute(t *testing.T) {
 	srv, _ := scopeRound10Server(t, &mockSecurityController{})
+	set := map[string]bool{}
+	// The second router has observability metrics on: /metrics is mounted
+	// only then, and conditional routes must be classified too.
+	for _, router := range []chi.Routes{srv.Router(), newMetricsTestServer(t).Router()} {
+		err := chi.Walk(router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+			set["REST "+method+" "+route] = true
+			return nil
+		})
+		require.NoError(t, err)
+	}
 	var doors []string
-	err := chi.Walk(srv.Router(), func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
-		doors = append(doors, "REST "+method+" "+route)
-		return nil
-	})
-	require.NoError(t, err)
+	for d := range set {
+		doors = append(doors, d)
+	}
 	require.Greater(t, len(doors), 100, "chi.Walk found too few routes: the router changed shape")
 	missing, stale := audit.DiffDoors("REST ", doors)
 	require.Empty(t, missing, "REST doors with no registry row (internal/audit/admindoors.go): map them to an action or exempt them with a reason")

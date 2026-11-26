@@ -10,9 +10,10 @@ package audit
 // Enumeration tests in internal/httpapi, internal/server and cmd/mcpproxy
 // walk the production registrations and fail when a door is missing here or
 // an entry no longer exists, so a new door cannot merge without a record.
-// TestAdminDoorRegistry_PendingOnlyShrinks pins the pending count: a slice
-// that ships lines flips its rows to done and lowers the ceiling; a new
-// pending row raises it visibly in review.
+// TestAdminDoorRegistry_PendingOnlyShrinks pins the pending set by identity
+// (AdminDoorsFrozenPending, admindoors_pending.go): a slice that ships lines
+// flips its rows to done and removes them from the frozen list; a new pending
+// row has to be added to that list, visibly, in review.
 //
 // Branches inside a door (a flag split in RunE, a cascade in a service)
 // cannot be discovered by enumeration; they are listed per door here and
@@ -43,9 +44,6 @@ type AdminDoor struct {
 	Actions []string
 	Reason  string
 }
-
-// AdminDoorsPendingCeiling is the frozen pending count. It may only go down.
-const AdminDoorsPendingCeiling = 138
 
 // AdminDoors is the registry, sorted by door then branch.
 var AdminDoors = []AdminDoor{
@@ -82,12 +80,14 @@ var AdminDoors = []AdminDoor{
 	{Door: "CLI mcpproxy client", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "CLI mcpproxy client add", Status: DoorPending, Slice: "PR-1b", Reason: "client credentials via REST"},
 	{Door: "CLI mcpproxy client forget", Status: DoorPending, Slice: "PR-1b", Reason: "client credentials via REST"},
-	{Door: "CLI mcpproxy client list", Status: DoorExempt, Reason: "read-only: no committed effect"},
+	{Door: "CLI mcpproxy client list", Branch: "no staged rotation", Status: DoorExempt, Reason: "read-only: no committed effect on the no-change path"},
+	{Door: "CLI mcpproxy client list", Branch: "reconcile", Status: DoorPending, Slice: "PR-1b", Actions: []string{"client.rotate_finalize", "client.rotate_rollback"}, Reason: "calls the reconcile-on-read REST doors"},
 	{Door: "CLI mcpproxy client lock", Status: DoorPending, Slice: "PR-1b", Reason: "client credentials via REST"},
 	{Door: "CLI mcpproxy client revoke-login", Status: DoorPending, Slice: "PR-1b", Reason: "client credentials via REST"},
 	{Door: "CLI mcpproxy client rotate", Status: DoorPending, Slice: "PR-1b", Reason: "client credentials via REST"},
 	{Door: "CLI mcpproxy client set-profile", Status: DoorPending, Slice: "PR-1b", Reason: "client credentials via REST"},
-	{Door: "CLI mcpproxy client show", Status: DoorExempt, Reason: "read-only: no committed effect"},
+	{Door: "CLI mcpproxy client show", Branch: "no staged rotation", Status: DoorExempt, Reason: "read-only: no committed effect on the no-change path"},
+	{Door: "CLI mcpproxy client show", Branch: "reconcile", Status: DoorPending, Slice: "PR-1b", Actions: []string{"client.rotate_finalize", "client.rotate_rollback"}, Reason: "calls the reconcile-on-read REST doors"},
 	{Door: "CLI mcpproxy client unlock", Status: DoorPending, Slice: "PR-1b", Reason: "client credentials via REST"},
 	{Door: "CLI mcpproxy client upgrade-admin-key-holders", Status: DoorPending, Slice: "PR-1b", Reason: "client credentials via REST"},
 	{Door: "CLI mcpproxy code", Status: DoorExempt, Reason: "read-only: no committed effect"},
@@ -122,7 +122,7 @@ var AdminDoors = []AdminDoor{
 	{Door: "CLI mcpproxy registry search", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "CLI mcpproxy review", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "CLI mcpproxy review approve", Status: DoorPending, Slice: "PR-2", Reason: "approvals"},
-	{Door: "CLI mcpproxy review fetch", Status: DoorExempt, Reason: "read-only: no committed effect"},
+	{Door: "CLI mcpproxy review fetch", Status: DoorPending, Slice: "PR-2", Actions: []string{"tool.hold"}, Reason: "posts to the discovery door; recorded there"},
 	{Door: "CLI mcpproxy review list", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "CLI mcpproxy review reject", Status: DoorPending, Slice: "PR-2", Reason: "approvals"},
 	{Door: "CLI mcpproxy review show", Status: DoorExempt, Reason: "read-only: no committed effect"},
@@ -227,6 +227,7 @@ var AdminDoors = []AdminDoor{
 	{Door: "MCP search_servers", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "MCP set_profile", Status: DoorExempt, Reason: "per-session selection inside the token binding; not persisted"},
 	{Door: "MCP upstream_servers", Status: DoorPending, Slice: "PR-3", Reason: "server config; refresh tool.hold is PR-2"},
+	{Door: "REST CONNECT /metrics", Status: DoorExempt, Reason: "Prometheus exporter (mounted only with observability metrics on): read-only"},
 	{Door: "REST DELETE /api/v1/clients/{client}", Status: DoorPending, Slice: "PR-1b", Reason: "client credentials and logins"},
 	{Door: "REST DELETE /api/v1/clients/{client}/api-key", Status: DoorPending, Slice: "PR-1b", Reason: "client credentials and logins"},
 	{Door: "REST DELETE /api/v1/clients/{client}/logins/{grant_id}", Status: DoorPending, Slice: "PR-1b", Reason: "client credentials and logins"},
@@ -235,11 +236,12 @@ var AdminDoors = []AdminDoor{
 	{Door: "REST DELETE /api/v1/registries/{id}", Status: DoorPending, Slice: "PR-3", Reason: "registries"},
 	{Door: "REST DELETE /api/v1/secrets/{name}", Status: DoorPending, Slice: "PR-1b", Reason: "keyring secrets"},
 	{Door: "REST DELETE /api/v1/security/scanners/{id}", Status: DoorPending, Slice: "PR-2", Reason: "scanners"},
-	{Door: "REST DELETE /api/v1/servers/{id}/", Status: DoorPending, Slice: "PR-3", Reason: "server.remove"},
+	{Door: "REST DELETE /api/v1/servers/{id}/", Status: DoorPending, Slice: "PR-3", Actions: []string{"server.remove"}, Reason: "server config"},
 	{Door: "REST DELETE /api/v1/tokens/{name}/", Branch: "agent token", Status: DoorDone, Slice: "PR-1a", Actions: []string{"token.revoke"}},
 	{Door: "REST DELETE /api/v1/tokens/{name}/", Branch: "client-<id> record", Status: DoorPending, Slice: "PR-1b", Actions: []string{"client.key_revoke", "login.revoke", "login.cancel"}, Reason: "client-wide or key-only legacy branch"},
 	{Door: "REST DELETE /api/v1/tokens/{name}/permanent", Branch: "agent token", Status: DoorDone, Slice: "PR-1a", Actions: []string{"token.delete"}},
 	{Door: "REST DELETE /api/v1/tokens/{name}/permanent", Branch: "client-<id> record", Status: DoorPending, Slice: "PR-1b", Actions: []string{"token.delete"}, Reason: "target.kind client needs the client ref and id origin"},
+	{Door: "REST DELETE /metrics", Status: DoorExempt, Reason: "Prometheus exporter (mounted only with observability metrics on): read-only"},
 	{Door: "REST GET /api/v1/access/explain", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "REST GET /api/v1/access/suggest", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "REST GET /api/v1/activity", Status: DoorExempt, Reason: "read-only: no committed effect"},
@@ -320,19 +322,27 @@ var AdminDoors = []AdminDoor{
 	{Door: "REST GET /health", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "REST GET /healthz", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "REST GET /livez", Status: DoorExempt, Reason: "read-only: no committed effect"},
+	{Door: "REST GET /metrics", Status: DoorExempt, Reason: "Prometheus exporter (mounted only with observability metrics on): read-only"},
 	{Door: "REST GET /ready", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "REST GET /readyz", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "REST HEAD /events", Status: DoorExempt, Reason: "read-only: no committed effect"},
-	{Door: "REST PATCH /api/v1/config", Status: DoorPending, Slice: "PR-3", Reason: "global config"},
+	{Door: "REST HEAD /metrics", Status: DoorExempt, Reason: "Prometheus exporter (mounted only with observability metrics on): read-only"},
+	{Door: "REST OPTIONS /metrics", Status: DoorExempt, Reason: "Prometheus exporter (mounted only with observability metrics on): read-only"},
+	{Door: "REST PATCH /api/v1/config", Branch: "browser-login switch-off", Status: DoorPending, Slice: "PR-1b", Actions: []string{"login.cancel"}, Reason: "approved authorizations cancelled by a browser-login switch-off"},
+	{Door: "REST PATCH /api/v1/config", Branch: "bundle policy", Status: DoorPending, Slice: "PR-2", Actions: []string{"bundle.reload", "bundle.activate"}, Reason: "bundle policy applied from the commit result"},
+	{Door: "REST PATCH /api/v1/config", Branch: "config delta", Status: DoorPending, Slice: "PR-3", Actions: []string{"config.update", "server.add", "server.update", "server.remove", "profile.create", "profile.update", "profile.delete", "registry.add", "registry.update", "registry.remove"}, Reason: "commit-delta partition"},
 	{Door: "REST PATCH /api/v1/config/docker-isolation", Status: DoorPending, Slice: "PR-3", Reason: "global config"},
-	{Door: "REST PATCH /api/v1/servers/{id}/", Status: DoorPending, Slice: "PR-1b", Reason: "PATCH: server.update via PatchServer"},
+	{Door: "REST PATCH /api/v1/servers/{id}/", Status: DoorPending, Slice: "PR-1b", Actions: []string{"server.update"}, Reason: "PatchServer hook on the commit result"},
+	{Door: "REST PATCH /metrics", Status: DoorExempt, Reason: "Prometheus exporter (mounted only with observability metrics on): read-only"},
 	{Door: "REST POST /api/v1/clients", Status: DoorPending, Slice: "PR-1b", Reason: "client credentials and logins"},
 	{Door: "REST POST /api/v1/clients/bulk-assign", Status: DoorPending, Slice: "PR-1b", Reason: "client credentials and logins"},
 	{Door: "REST POST /api/v1/clients/upgrade-admin-key-holders", Status: DoorPending, Slice: "PR-1b", Reason: "client credentials and logins"},
 	{Door: "REST POST /api/v1/clients/{client}/rotate", Status: DoorPending, Slice: "PR-1b", Reason: "client credentials and logins"},
 	{Door: "REST POST /api/v1/clients/{client}/rotate/finalize", Status: DoorPending, Slice: "PR-1b", Reason: "client credentials and logins"},
 	{Door: "REST POST /api/v1/code/exec", Status: DoorExempt, Reason: "execution door: covered by authz/tool_call"},
-	{Door: "REST POST /api/v1/config/apply", Status: DoorPending, Slice: "PR-3", Reason: "global config"},
+	{Door: "REST POST /api/v1/config/apply", Branch: "browser-login switch-off", Status: DoorPending, Slice: "PR-1b", Actions: []string{"login.cancel"}, Reason: "approved authorizations cancelled by a browser-login switch-off"},
+	{Door: "REST POST /api/v1/config/apply", Branch: "bundle policy", Status: DoorPending, Slice: "PR-2", Actions: []string{"bundle.reload", "bundle.activate"}, Reason: "bundle policy applied from the commit result"},
+	{Door: "REST POST /api/v1/config/apply", Branch: "config delta", Status: DoorPending, Slice: "PR-3", Actions: []string{"config.update", "server.add", "server.update", "server.remove", "profile.create", "profile.update", "profile.delete", "registry.add", "registry.update", "registry.remove"}, Reason: "commit-delta partition"},
 	{Door: "REST POST /api/v1/config/validate", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "REST POST /api/v1/connect/{client}", Status: DoorPending, Slice: "PR-1b", Reason: "Connect steps"},
 	{Door: "REST POST /api/v1/connect/{client}/undo", Status: DoorPending, Slice: "PR-1b", Reason: "Connect steps"},
@@ -369,9 +379,9 @@ var AdminDoors = []AdminDoor{
 	{Door: "REST POST /api/v1/servers/reconnect", Status: DoorExempt, Reason: "runtime action; changes no rule"},
 	{Door: "REST POST /api/v1/servers/restart_all", Status: DoorPending, Slice: "PR-3", Reason: "restart adoption"},
 	{Door: "REST POST /api/v1/servers/{id}/config-to-secret", Status: DoorPending, Slice: "PR-1b", Reason: "secret.set + server.update"},
-	{Door: "REST POST /api/v1/servers/{id}/disable", Status: DoorPending, Slice: "PR-1b", Reason: "server.remove"},
+	{Door: "REST POST /api/v1/servers/{id}/disable", Status: DoorPending, Slice: "PR-3", Actions: []string{"server.disable"}, Reason: "from the commit result; a no-op toggle writes nothing"},
 	{Door: "REST POST /api/v1/servers/{id}/discover-tools", Status: DoorPending, Slice: "PR-2", Reason: "tool.hold from the discovery pass"},
-	{Door: "REST POST /api/v1/servers/{id}/enable", Status: DoorPending, Slice: "PR-1b", Reason: "server.remove"},
+	{Door: "REST POST /api/v1/servers/{id}/enable", Status: DoorPending, Slice: "PR-3", Actions: []string{"server.enable"}, Reason: "from the commit result; a no-op toggle writes nothing"},
 	{Door: "REST POST /api/v1/servers/{id}/login", Status: DoorExempt, Reason: "upstream credential, not an access rule (Q3)"},
 	{Door: "REST POST /api/v1/servers/{id}/logout", Status: DoorExempt, Reason: "upstream credential, not an access rule (Q3)"},
 	{Door: "REST POST /api/v1/servers/{id}/quarantine", Status: DoorPending, Slice: "PR-2", Reason: "approvals"},
@@ -396,9 +406,13 @@ var AdminDoors = []AdminDoor{
 	{Door: "REST POST /api/v1/tokens/{name}/regenerate", Branch: "agent token", Status: DoorDone, Slice: "PR-1a", Actions: []string{"token.rotate"}},
 	{Door: "REST POST /api/v1/tool-calls/{id}/replay", Status: DoorExempt, Reason: "execution door: covered by authz/tool_call"},
 	{Door: "REST POST /api/v1/tools/call", Status: DoorExempt, Reason: "execution door: covered by authz/tool_call; a built-in admin dispatch takes that tool's rows"},
+	{Door: "REST POST /metrics", Status: DoorExempt, Reason: "Prometheus exporter (mounted only with observability metrics on): read-only"},
 	{Door: "REST PUT /api/v1/clients/{client}/binding", Status: DoorPending, Slice: "PR-1b", Reason: "client credentials and logins"},
 	{Door: "REST PUT /api/v1/profiles/active", Status: DoorExempt, Reason: "UI preference, not an MCP authorization rule"},
 	{Door: "REST PUT /api/v1/profiles/{name}", Status: DoorPending, Slice: "PR-3", Reason: "profiles"},
 	{Door: "REST PUT /api/v1/registries/{id}", Status: DoorPending, Slice: "PR-3", Reason: "registries"},
 	{Door: "REST PUT /api/v1/security/scanners/{id}/config", Status: DoorPending, Slice: "PR-2", Reason: "scanners"},
+	{Door: "REST PUT /metrics", Status: DoorExempt, Reason: "Prometheus exporter (mounted only with observability metrics on): read-only"},
+	{Door: "REST QUERY /metrics", Status: DoorExempt, Reason: "Prometheus exporter (mounted only with observability metrics on): read-only"},
+	{Door: "REST TRACE /metrics", Status: DoorExempt, Reason: "Prometheus exporter (mounted only with observability metrics on): read-only"},
 }

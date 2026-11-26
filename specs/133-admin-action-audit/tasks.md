@@ -47,7 +47,7 @@ description: "Task list for Spec 133 — admin_action audit events"
 
 ### Door registry (FR-022)
 
-- [X] T014 Registry rows for every personal REST route and method, runnable CLI command and built-in MCP tool, per branch, done/pending/exempt with slice and reason, plus the frozen pending ceiling in internal/audit/admindoors.go and internal/audit/admindoors_enum.go
+- [X] T014 Registry rows for every personal REST route and method, runnable CLI command and built-in MCP tool, per branch, done/pending/exempt with slice and reason, plus the identity-frozen pending set in internal/audit/admindoors.go, internal/audit/admindoors_pending.go and internal/audit/admindoors_enum.go
 - [X] T015 [P] Registry well-formedness and pending-only-shrinks tests in internal/audit/admindoors_test.go
 - [X] T016 [P] chi.Walk enumeration test in internal/httpapi/admin_door_registry_test.go
 - [X] T017 [P] Cobra enumeration test in cmd/mcpproxy/admin_door_registry_test.go
@@ -92,7 +92,7 @@ description: "Task list for Spec 133 — admin_action audit events"
 - [ ] T040 [US1] D-A: CLI and daemon ownership (config and audit-file locks, instance nonce verified on each rerouted mutation, keyring commands rerouted through `POST /secrets`, `cli_offline` sink otherwise, no config creation by the CLI loader) in cmd/mcpproxy/cli_config.go, cmd/mcpproxy/daemon_client.go, cmd/mcpproxy/secrets_cmd.go and internal/cliclient/client.go
 - [ ] T041 [US1] Ingress tags for the server-edition sibling group, the public SSO callback, the public OAuth mux and stdio in internal/serveredition/setup.go and internal/server/server.go; request-id plumbing for the other MCP admin tools in internal/server/mcp.go
 - [ ] T042 [US1] MCP admin-tool operation descriptors (move `TestActivityAttributedOps_MatchTheOperationSwitches` with them), the single outer-mux registrar with its enumeration, per-surface MCP enumeration and the `-tags server` router enumeration in internal/server/mcp.go, internal/server/server.go and internal/audit/admindoors.go; add the Cobra guard to the tagged CI job in .github/workflows/unit-tests.yml
-- [ ] T043 [US1] Flip the PR-1b registry rows to done and lower `AdminDoorsPendingCeiling` in internal/audit/admindoors.go
+- [ ] T043 [US1] Flip the PR-1b registry rows to done and remove their keys from `AdminDoorsFrozenPending` in internal/audit/admindoors.go and internal/audit/admindoors_pending.go
 
 **Checkpoint**: SC-002 holds for every token and credential change.
 
@@ -111,7 +111,7 @@ description: "Task list for Spec 133 — admin_action audit events"
 - [ ] T048 [US2] `prompt.*`, `skill.*` incl. holds, with the rule-1a handoff from the request's commit result in internal/server/prompt_quarantine.go and internal/runtime/skills_catalog.go
 - [ ] T049 [US2] D-D: `bundle.*` at each locked state transition, bundle application on sequence-ordered commit results in internal/security/scanner/tpa_refresh.go and internal/security/scanner/tpa_bundle_runtime.go
 - [ ] T050 [US2] `scanner.*` incl. the pull completion and startup boundary in internal/security/scanner/service.go and internal/security/scanner/pull_manager.go
-- [ ] T051 [US2] Flip the PR-2 registry rows and lower the ceiling in internal/audit/admindoors.go
+- [ ] T051 [US2] Flip the PR-2 registry rows and remove their keys from `AdminDoorsFrozenPending` in internal/audit/admindoors_pending.go
 
 ---
 
@@ -130,14 +130,14 @@ description: "Task list for Spec 133 — admin_action audit events"
 - [ ] T056 [US3] Registry id origin (`explicit|derived`) and registry-added server-name provenance in internal/config/config.go and internal/httpapi/add_registry_source.go
 - [ ] T057 [US3] `profile.*`, `token.repin`, `client.bind` for bindings and bulk assign in internal/runtime/profile_change_diff.go and internal/runtime/client_bindings.go
 - [ ] T058 [US3] `config.update` for `status --reset-key`, telemetry and the startup API-key save owned by `main` in cmd/mcpproxy/main.go, cmd/mcpproxy/status_cmd.go and cmd/mcpproxy/telemetry_cmd.go
-- [ ] T059 [US3] Flip the PR-3 registry rows and lower the ceiling in internal/audit/admindoors.go
+- [ ] T059 [US3] Flip the PR-3 registry rows and remove their keys from `AdminDoorsFrozenPending` in internal/audit/admindoors_pending.go
 
 ### PR-4 — server edition
 
 - [ ] T060 [P] [US3] `-tags server` door table tests red first in internal/serveredition/api/admin_action_test.go
 - [ ] T061 [US3] Storage calls return changed identities (user disable's tokens, sharing) in internal/serveredition/users/store.go and internal/runtime/server_sharing.go
 - [ ] T062 [US3] Tenant tokens (`owner_user_id`), `jwt.issue`, `user.*`, `server.share`, `user_server.*`, `user_credential.*`, SSO provisioning from the verified identity in internal/serveredition/api/user_handlers.go, internal/serveredition/api/admin_handlers.go, internal/serveredition/api/auth_endpoints.go and internal/serveredition/auth/oauth_handler.go
-- [ ] T063 [US3] Flip the PR-4 registry rows and lower the ceiling in internal/audit/admindoors.go
+- [ ] T063 [US3] Flip the PR-4 registry rows and remove their keys from `AdminDoorsFrozenPending` in internal/audit/admindoors_pending.go
 
 ---
 
@@ -163,4 +163,4 @@ description: "Task list for Spec 133 — admin_action audit events"
 
 ## Implementation strategy
 
-MVP is PR-1a: the event kind plus the reporter's first priority (agent tokens). Each later slice lands its tests red, flips its registry rows to done and lowers the pending ceiling, so the registry shows how far the feature is at any commit.
+MVP is PR-1a: the event kind plus the reporter's first priority (agent tokens). Each later slice lands its tests red, flips its registry rows to done and removes them from the frozen pending set, so the registry shows how far the feature is at any commit.

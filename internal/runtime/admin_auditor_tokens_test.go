@@ -183,6 +183,53 @@ func TestAdminAudit_TimestampIsTheCommitTime(t *testing.T) {
 	require.True(t, recs[0].At.Equal(*stored.RevokedAt), "revoke ts is the RevokedAt the transaction stamped")
 }
 
+type lockProbeAuditor struct {
+	mu   *sync.Mutex
+	held []bool
+}
+
+func (l *lockProbeAuditor) AdminAction(_ context.Context, _ AdminRecord) {
+	ok := l.mu.TryLock()
+	if ok {
+		l.mu.Unlock()
+	}
+	l.held = append(l.held, !ok)
+}
+
+// The synchronous audit write runs after the credential lock is released, so
+// a stalled sink never blocks a concurrent revoke or a guarded config write.
+func TestAdminAudit_WrittenOutsideTheCredentialLock(t *testing.T) {
+	ctx := context.Background()
+	h := newCredHarness(t)
+	probe := &lockProbeAuditor{mu: h.cs.mu}
+	h.cs.adminAudit = &adminAuditHolder{}
+	h.cs.adminAudit.set(probe)
+	a := Actor{Kind: "api_key", Surface: profile.SurfaceCLI}
+	_, err := h.cs.IssueToken(ctx, a, restTokenReq("lk"))
+	require.NoError(t, err)
+	_, err = h.cs.Regenerate(ctx, a, "lk")
+	require.NoError(t, err)
+	_, err = h.cs.Revoke(ctx, a, CredentialRef{Token: "lk"}, true)
+	require.NoError(t, err)
+	_, err = h.cs.DeleteToken(ctx, a, "lk")
+	require.NoError(t, err)
+	require.Equal(t, []bool{false, false, false, false}, probe.held)
+}
+
+func TestAdminAudit_RotationTimestampFromTheTransaction(t *testing.T) {
+	ctx := context.Background()
+	h, cap := newAuditedCredHarness(t)
+	a := Actor{Kind: "api_key", Surface: profile.SurfaceCLI}
+	_, err := h.cs.IssueToken(ctx, a, restTokenReq("rt"))
+	require.NoError(t, err)
+	_, err = h.cs.Regenerate(ctx, a, "rt")
+	require.NoError(t, err)
+	recs := cap.take()
+	stored, _ := h.sm.GetAgentTokenByName("rt")
+	require.NotNil(t, stored.RotatedAt)
+	require.True(t, recs[len(recs)-1].At.Equal(*stored.RotatedAt))
+}
+
 func TestAdminAudit_NoAuditorIsANoOp(t *testing.T) {
 	h := newCredHarness(t)
 	_, err := h.cs.IssueToken(context.Background(), mcpActor(), mcpTokenReq("quiet", "ro", "1h"))

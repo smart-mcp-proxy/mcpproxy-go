@@ -72,6 +72,11 @@ type writerSink struct {
 	// nothing while that repair fails (Spec 133 FR-017, plan D-C). Guarded
 	// by mu.
 	torn bool
+	// repair, when set (the file sink), appends the boundary newline to the
+	// file at its path directly, bypassing the rotating writer: a rotation
+	// triggered by the one-byte repair would move on to a new file and leave
+	// the torn tail unterminated in the backup.
+	repair func() error
 
 	clock         func() time.Time
 	failureLogger func(error)
@@ -120,12 +125,20 @@ func (s *writerSink) Write(line []byte) error {
 	// is repaired in the file that holds it — before a rotation triggered by
 	// this record could move on to a new file.
 	if s.torn {
-		n, err := s.w.Write([]byte{'\n'})
-		if err == nil && n != 1 {
-			err = io.ErrShortWrite
-		}
-		if n == 1 {
-			s.torn = false
+		var err error
+		if s.repair != nil {
+			if err = s.repair(); err == nil {
+				s.torn = false
+			}
+		} else {
+			var n int
+			n, err = s.w.Write([]byte{'\n'})
+			if err == nil && n != 1 {
+				err = io.ErrShortWrite
+			}
+			if n == 1 {
+				s.torn = false
+			}
 		}
 		if s.torn {
 			if err == nil {
@@ -227,8 +240,35 @@ func NewFileSink(path string, maxSizeMB, maxBackups, maxAgeDays int, compress bo
 		Compress:   compress,
 	}
 	s := newWriterSink(lj, opts...)
+	s.repair = func() error { return appendNewline(path) }
 	s.torn = torn
+	if torn {
+		// Repair the tail of the file a previous process left mid-record
+		// now, in that file, before anything can rotate it. A failure leaves
+		// torn set: the first Write retries, and appends nothing until the
+		// boundary is restored.
+		if err := s.repair(); err == nil {
+			s.torn = false
+		}
+	}
 	return s, nil
+}
+
+// appendNewline appends one newline to the file at path.
+func appendNewline(path string) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	n, werr := f.Write([]byte{'\n'})
+	cerr := f.Close()
+	if werr != nil {
+		return werr
+	}
+	if n != 1 {
+		return io.ErrShortWrite
+	}
+	return cerr
 }
 
 // endsMidRecord reports whether the file at path is non-empty and does not

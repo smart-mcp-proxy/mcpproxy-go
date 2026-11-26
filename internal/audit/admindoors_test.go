@@ -46,17 +46,29 @@ func TestAdminDoorRegistry_WellFormed(t *testing.T) {
 	}
 }
 
-// TestAdminDoorRegistry_PendingOnlyShrinks: the pending set is frozen. A
-// slice that ships lines flips its rows to done and lowers the ceiling; a new
-// pending row must raise it in the same diff, where review sees it.
+// TestAdminDoorRegistry_PendingOnlyShrinks: the pending set is frozen by
+// identity. A slice that ships lines flips its rows to done and removes them
+// from AdminDoorsFrozenPending; a new pending row must be added there, in the
+// same diff, where review sees it. Swapping one pending door for another
+// therefore always shows up.
 func TestAdminDoorRegistry_PendingOnlyShrinks(t *testing.T) {
-	n := 0
+	frozen := map[string]bool{}
+	for _, k := range audit.AdminDoorsFrozenPending {
+		frozen[k] = true
+	}
+	pending := map[string]bool{}
 	for _, d := range audit.AdminDoors {
 		if d.Status == audit.DoorPending {
-			n++
+			k := d.Door + "#" + d.Branch
+			pending[k] = true
+			if !frozen[k] {
+				t.Errorf("pending row %s is not in AdminDoorsFrozenPending: a new pending door is a reviewed change", k)
+			}
 		}
 	}
-	if n != audit.AdminDoorsPendingCeiling {
-		t.Fatalf("pending rows = %d, AdminDoorsPendingCeiling = %d: lower the ceiling when a slice ships, never raise it silently", n, audit.AdminDoorsPendingCeiling)
+	for k := range frozen {
+		if !pending[k] {
+			t.Errorf("AdminDoorsFrozenPending lists %s, which is no longer pending: remove it", k)
+		}
 	}
 }

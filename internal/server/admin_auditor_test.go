@@ -16,7 +16,7 @@ import (
 
 func tokenRecord() runtime.AdminRecord {
 	return runtime.AdminRecord{
-		At: time.Now(), Action: audit.ActionTokenRevoke,
+		At: time.Now(), Action: audit.ActionTokenDelete,
 		Target: audit.AgentTokenTarget("ci", auth.NewAuditRef(auth.AuditRefKindAgentToken), ""),
 	}
 }

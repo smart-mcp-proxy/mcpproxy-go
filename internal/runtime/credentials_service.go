@@ -577,6 +577,11 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 	if s == nil || s.tokens == nil {
 		return nil, ErrCredentialsUnavailable
 	}
+	// Spec 133: admin_action records are collected under the lock and
+	// written after it is released (deferred calls run last-in first-out), so
+	// a slow audit write never extends the critical section.
+	out := adminOutbox{}
+	defer out.flush(ctx, s.adminAudit)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	mcp := req.RequireProfile
@@ -789,7 +794,7 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 	if !committed.ExpiresAt.IsZero() {
 		changes = append(changes, audit.Literal(audit.FieldExpiresAt, nil, audit.Timestamp(committed.ExpiresAt)))
 	}
-	s.recordTokenEffect(ctx, audit.ActionTokenCreate, &committed, changes, committedAt)
+	s.recordTokenEffect(&out, audit.ActionTokenCreate, &committed, changes, committedAt)
 	s.announce(view, profile.ChangeIssue)
 	return &IssuedCredentialResult{View: view, Secret: raw, record: &committed}, nil
 }
@@ -1052,6 +1057,11 @@ func (s *CredentialsService) Revoke(ctx context.Context, a Actor, ref Credential
 	if ref.Grant != "" && ref.Client == "" {
 		return nil, credErr(profile.CredentialErrorCodeInvalidArgument, "grant", "a grant is revoked together with its client", 400)
 	}
+	// Spec 133: admin_action records are collected under the lock and
+	// written after it is released (deferred calls run last-in first-out), so
+	// a slow audit write never extends the critical section.
+	out := adminOutbox{}
+	defer out.flush(ctx, s.adminAudit)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.writeGateError(ref.EnforceWriteGates); err != nil {
@@ -1125,7 +1135,7 @@ func (s *CredentialsService) Revoke(ctx context.Context, a Actor, ref Credential
 	s.writeLifecycle(ctx, a, profile.ChangeRevoke, view, map[string]interface{}{"changed": true})
 	// The storage transaction flipped Revoked false → true (a no-op revoke
 	// returned above). The revoked key's display prefix is `before`.
-	s.recordTokenEffect(ctx, audit.ActionTokenRevoke, after,
+	s.recordTokenEffect(&out, audit.ActionTokenRevoke, after,
 		[]audit.Change{audit.Literal(audit.FieldTokenPrefix, audit.TokenPrefix(after.TokenPrefix), nil)}, revokedAt)
 	s.announce(view, profile.ChangeRevoke)
 	if s.clients != nil && s.clients.notifier != nil {
@@ -1148,6 +1158,11 @@ func (s *CredentialsService) Regenerate(ctx context.Context, a Actor, name strin
 	if !ok {
 		return nil, ErrCredentialsUnavailable
 	}
+	// Spec 133: admin_action records are collected under the lock and
+	// written after it is released (deferred calls run last-in first-out), so
+	// a slow audit write never extends the critical section.
+	out := adminOutbox{}
+	defer out.flush(ctx, s.adminAudit)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	secret, err := s.generate()
@@ -1176,7 +1191,10 @@ func (s *CredentialsService) Regenerate(ctx context.Context, a Actor, name strin
 		}
 		return nil, err
 	}
-	rotatedAt := s.now() // taken before the activity write, so ts is the commit time
+	rotatedAt := s.now()
+	if after.RotatedAt != nil {
+		rotatedAt = *after.RotatedAt // stamped inside the rotating transaction
+	}
 	oldPrefix := ""
 	if before != nil {
 		oldPrefix = before.TokenPrefix
@@ -1190,7 +1208,7 @@ func (s *CredentialsService) Regenerate(ctx context.Context, a Actor, name strin
 	if oldPrefix != "" {
 		oldP = audit.TokenPrefix(oldPrefix)
 	}
-	s.recordTokenEffect(ctx, audit.ActionTokenRotate, after,
+	s.recordTokenEffect(&out, audit.ActionTokenRotate, after,
 		[]audit.Change{audit.Literal(audit.FieldTokenPrefix, oldP, audit.TokenPrefix(after.TokenPrefix))}, rotatedAt)
 	s.announce(view, profile.ChangeRotate)
 	return &RegenerateResult{View: view, Secret: secret}, nil
@@ -1210,6 +1228,11 @@ func (s *CredentialsService) DeleteToken(ctx context.Context, a Actor, name stri
 	if !ok {
 		return nil, ErrCredentialsUnavailable
 	}
+	// Spec 133: admin_action records are collected under the lock and
+	// written after it is released (deferred calls run last-in first-out), so
+	// a slow audit write never extends the critical section.
+	out := adminOutbox{}
+	defer out.flush(ctx, s.adminAudit)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	deleted, err := del.DeleteAgentTokenReport("", name)
@@ -1226,7 +1249,7 @@ func (s *CredentialsService) DeleteToken(ctx context.Context, a Actor, name stri
 		if deleted.TokenPrefix != "" {
 			changes = []audit.Change{audit.Literal(audit.FieldTokenPrefix, audit.TokenPrefix(deleted.TokenPrefix), nil)}
 		}
-		s.recordTokenEffect(ctx, audit.ActionTokenDelete, deleted, changes, deletedAt)
+		s.recordTokenEffect(&out, audit.ActionTokenDelete, deleted, changes, deletedAt)
 	}
 	return deleted, nil
 }
@@ -1234,8 +1257,8 @@ func (s *CredentialsService) DeleteToken(ctx context.Context, a Actor, name stri
 // recordTokenEffect hands one committed agent-token effect to the auditor.
 // rec is the record the storage transaction reported; its audit ref is the
 // stored one (a store that cannot report a ref gets one assigned on this copy).
-func (s *CredentialsService) recordTokenEffect(ctx context.Context, action string, rec *auth.AgentToken, changes []audit.Change, at time.Time) {
-	if s == nil || s.adminAudit == nil || rec == nil {
+func (s *CredentialsService) recordTokenEffect(out *adminOutbox, action string, rec *auth.AgentToken, changes []audit.Change, at time.Time) {
+	if s == nil || s.adminAudit == nil || rec == nil || out == nil {
 		return
 	}
 	// A client credential's record (client-<id>, reached through the legacy
@@ -1247,7 +1270,7 @@ func (s *CredentialsService) recordTokenEffect(ctx context.Context, action strin
 	}
 	cp := *rec
 	auth.EnsureAuditRef(&cp)
-	s.adminAudit.record(ctx, AdminRecord{
+	out.add(AdminRecord{
 		At: at, Action: action, Target: agentTokenTarget(cp.Name, cp.AuditRef, cp.UserID), Changes: changes,
 	})
 }

@@ -99,3 +99,17 @@ func (r *Runtime) SetAdminAuditor(a AdminAuditor) {
 func agentTokenTarget(name, ref, ownerUserID string) audit.AdminTarget {
 	return audit.AgentTokenTarget(name, ref, ownerUserID)
 }
+
+// adminOutbox collects the records a locked section commits, for writing
+// after the lock is released.
+type adminOutbox struct{ recs []AdminRecord }
+
+func (o *adminOutbox) add(rec AdminRecord) { o.recs = append(o.recs, rec) }
+
+// flush hands every collected record to the auditor, in commit order.
+func (o *adminOutbox) flush(ctx context.Context, h *adminAuditHolder) {
+	for _, r := range o.recs {
+		h.record(ctx, r)
+	}
+	o.recs = nil
+}

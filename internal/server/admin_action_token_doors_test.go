@@ -155,7 +155,22 @@ func TestAdminActionDoors_RESTTokenDoors(t *testing.T) {
 	require.Equal(t, "req-rotate-1", lines[0]["request_id"])
 	ch := lines[0]["changes"].([]interface{})[0].(map[string]interface{})
 	require.Equal(t, "/token_prefix", ch["field"])
-	require.NotEqual(t, ch["before"], ch["after"])
+	createdPrefix := l["changes"].([]interface{})[0].(map[string]interface{})["after"]
+	for _, c := range l["changes"].([]interface{}) {
+		if m := c.(map[string]interface{}); m["field"] == "/token_prefix" {
+			createdPrefix = m["after"]
+		}
+	}
+	require.Equal(t, createdPrefix, ch["before"], "before is the prefix the create line recorded")
+	var rotated struct {
+		Data struct {
+			TokenPrefix string `json:"token_prefix"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(body, &rotated))
+	if rotated.Data.TokenPrefix != "" {
+		require.Equal(t, rotated.Data.TokenPrefix, ch["after"], "after is the prefix the regenerate returned")
+	}
 	require.Equal(t, 1, e.activityRequestIDs("req-rotate-1"))
 
 	// DELETE /tokens/{name} → token.revoke; again → no line.
@@ -233,12 +248,26 @@ func TestAdminActionDoors_MCPCredentialsTool(t *testing.T) {
 		return err == nil && len(rows) >= 2
 	}, 10*time.Second, 50*time.Millisecond, "wrapper row and profile_change row share the line's request id")
 
+	createRef := l["target"].(map[string]interface{})["ref"]
+	require.Equal(t, map[string]interface{}{"kind": "api_key"}, l["caller"])
+
 	res, err = c.CallTool(context.Background(), callReq("credentials", map[string]any{"operation": "revoke", "token": "worker"}))
 	require.NoError(t, err)
 	require.False(t, res.IsError, getToolResultText(res))
 	lines = e.adminLines(&seen)
 	require.Len(t, lines, 1)
-	require.Equal(t, "token.revoke", lines[0]["action"])
+	r := lines[0]
+	require.Equal(t, "token.revoke", r["action"])
+	require.Equal(t, map[string]interface{}{"kind": "api_key"}, r["caller"])
+	require.Equal(t, "mcp", r["source"])
+	require.Equal(t, createRef, r["target"].(map[string]interface{})["ref"], "same token, same ref")
+	revokeID, _ := r["request_id"].(string)
+	require.NotEmpty(t, revokeID)
+	require.NotEqual(t, rid, revokeID, "each MCP call has its own request id")
+	require.Eventually(t, func() bool {
+		rows, _, err := sm.ListActivities(storage.ActivityFilter{RequestID: revokeID, Limit: 100})
+		return err == nil && len(rows) >= 2
+	}, 10*time.Second, 50*time.Millisecond, "the revoke line joins its wrapper and profile_change rows")
 
 	// A refused operation (unknown token) writes nothing.
 	res, err = c.CallTool(context.Background(), callReq("credentials", map[string]any{"operation": "revoke", "token": "nope"}))

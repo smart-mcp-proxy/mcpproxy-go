@@ -275,6 +275,14 @@ func NewAdminAction(in AdminActionInput) (Line, error) {
 	if (kind == "none" || kind == "cli_offline") && in.RequestID != "" {
 		return Line{}, fmt.Errorf("audit.NewAdminAction: caller.kind %s never carries request_id", kind)
 	}
+	// A request caller always has a request: its line joins the activity row
+	// by request_id (FR-009). Only the background kinds may omit it.
+	if !backgroundKinds[kind] && in.RequestID == "" {
+		return Line{}, fmt.Errorf("audit.NewAdminAction: caller.kind %s requires request_id", kind)
+	}
+	if err := checkRequiredPrefixes(in.Action, in.Changes); err != nil {
+		return Line{}, err
+	}
 	if in.ClientSurface != "" && !adminClientSurfaces[in.ClientSurface] {
 		return Line{}, fmt.Errorf("audit.NewAdminAction: invalid client.surface %q", in.ClientSurface)
 	}
@@ -511,4 +519,31 @@ func AdminActionSorted() []string {
 	out := append([]string(nil), AdminActions...)
 	sort.Strings(out)
 	return out
+}
+
+// requiredPrefixSides names the display-prefix sides each lifecycle action
+// must carry on /token_prefix (contract §Keys, changes row).
+var requiredPrefixSides = map[string]struct{ before, after bool }{
+	ActionTokenCreate:          {after: true},
+	ActionClientCreate:         {after: true},
+	ActionTokenRotate:          {before: true, after: true},
+	ActionClientRotateFinalize: {before: true, after: true},
+	ActionTokenRevoke:          {before: true},
+	ActionClientKeyRevoke:      {before: true},
+}
+
+func checkRequiredPrefixes(action string, changes []Change) error {
+	want, ok := requiredPrefixSides[action]
+	if !ok {
+		return nil
+	}
+	for _, c := range changes {
+		if c.path.sortKey() != FieldTokenPrefix.sortKey() || c.withheld != "" {
+			continue
+		}
+		if (!want.before || c.before != nil) && (!want.after || c.after != nil) {
+			return nil
+		}
+	}
+	return fmt.Errorf("audit.NewAdminAction: %s requires its /token_prefix display-prefix entry", action)
 }

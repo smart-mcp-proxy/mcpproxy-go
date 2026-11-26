@@ -163,3 +163,28 @@ func TestNewFileSink_ReopenOfCleanFileAddsNothing(t *testing.T) {
 		t.Fatalf("got %q", raw)
 	}
 }
+
+func TestNewFileSink_TornFileAtSizeLimitIsRepairedInPlace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	// 1 MB is lumberjack's smallest unit: fill to exactly the limit, torn.
+	body := strings.Repeat("x", 1024*1024-3) + "{\"s"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewFileSink(path, 1, 5, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Write([]byte(`{"seq":2}`)); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		raw, _ := os.ReadFile(filepath.Join(dir, e.Name()))
+		if len(raw) > 0 && raw[len(raw)-1] != '\n' {
+			t.Fatalf("%s ends mid-record after the repair", e.Name())
+		}
+	}
+}

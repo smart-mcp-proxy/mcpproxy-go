@@ -766,6 +766,8 @@ func (m *Manager) RegenerateAgentTokenReport(userID, name string, newRawToken st
 		// touched: it is false here, because a revoked token was refused above.
 		token.TokenHash = newHash
 		token.TokenPrefix = newPrefix
+		rotatedAt := time.Now().UTC()
+		token.RotatedAt = &rotatedAt
 
 		// Re-apply the caller's current server entitlement, if they supplied
 		// one. Narrowing only, enforced by the intersection below rather than

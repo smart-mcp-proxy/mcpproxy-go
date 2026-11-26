@@ -299,6 +299,12 @@ secret with no recognisable shape (a 64-hex API key pasted into a token name or 
 `X-Request-Id`) reaches the audit file, as it already reaches the activity log and
 `authz` lines. Per-field mask hits are counted and surfaced by `mcpproxy doctor`.
 
+**Crash window.** An `admin_action` line is written right after its effect
+commits. A process killed between the commit and the write keeps the change and
+loses its line, the same window as for `authz` lines. The audit file therefore
+proves that a change happened; the absence of a line does not prove that it did
+not — check the activity log or the stored state as well.
+
 **File order is not commit order.** `ts` is the commit time of the effect; order
 by `ts`, not by position in the file.
 

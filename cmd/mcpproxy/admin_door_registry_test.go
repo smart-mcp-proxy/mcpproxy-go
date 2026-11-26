@@ -22,7 +22,7 @@ func TestAdminDoorRegistry_CoversEveryCLICommand(t *testing.T) {
 		// Cobra adds `help` and `completion` to a tree the first time a
 		// command in it executes (other tests in this package execute
 		// shared package-level commands); they are generated, not doors.
-		if c.Name() == "help" || c.Name() == "completion" {
+		if cobraGenerated(c) {
 			return
 		}
 		if c.Runnable() {
@@ -43,4 +43,17 @@ func TestAdminDoorRegistry_CoversEveryCLICommand(t *testing.T) {
 	if len(stale) > 0 {
 		t.Errorf("registry rows whose CLI command no longer exists: %v", stale)
 	}
+}
+
+// cobraGenerated reports Cobra's own default help and completion commands,
+// recognised by Cobra's default Short text, so an explicitly registered
+// command that happens to be called "help" or "completion" is still walked.
+func cobraGenerated(c *cobra.Command) bool {
+	switch c.Name() {
+	case "help":
+		return c.Short == "Help about any command"
+	case "completion":
+		return c.Short == "Generate the autocompletion script for the specified shell"
+	}
+	return false
 }

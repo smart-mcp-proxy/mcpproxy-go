@@ -62,29 +62,50 @@ const (
 	maxPointerLength  = 256
 )
 
-// render returns the escaped pointer and whether a segment was capped or the
-// entry fell back to its fixed parent.
+// opaqueRoots are blocks that preserve arbitrary keys (the personal build
+// keeps server_edition as raw JSON): nothing below them is descended into,
+// a change is reported at the fixed parent (contract §Changes).
+var opaqueRoots = map[string]bool{"server_edition": true}
+
+// render returns the escaped pointer and whether it was shortened, masked or
+// collapsed to a parent (field_masked). Order per segment (contract §Size):
+// private-key check on the original, mask, then the 64-character cap, then
+// escaping. A private-key segment, or any segment below an opaque root,
+// collapses the path to its fixed parent.
 func (f FieldPath) render() (string, bool) {
+	segs := f.segs
 	masked := false
+	if len(segs) > 1 && opaqueRoots[segs[0]] {
+		segs = segs[:1]
+		masked = true
+	}
 	var b strings.Builder
-	for _, s := range f.segs {
-		r := []rune(s)
-		if len(r) > maxPointerSegment {
-			r = r[:maxPointerSegment]
+	for _, s := range segs {
+		if containsPrivateKey(s) {
 			masked = true
+			break
 		}
-		seg := string(r)
+		seg := s
 		if m, hit := applyMasking(seg); hit {
 			noteFieldMask()
 			seg = m
 			masked = true
 		}
+		if r := []rune(seg); len(r) > maxPointerSegment {
+			seg = string(r[:maxPointerSegment])
+			masked = true
+		}
 		b.WriteByte('/')
-		b.WriteString(strings.ReplaceAll(strings.ReplaceAll(seg, "~", "~0"), "/", "~1"))
+		b.WriteString(escapeSeg(seg))
 	}
 	out := b.String()
-	if len(out) > maxPointerLength && len(f.segs) > 0 {
-		return "/" + escapeSeg(f.segs[0]), true
+	if out == "" {
+		// The first segment itself was a private-key label: no fixed parent
+		// to report; the root pointer names "a field changed".
+		return "/", true
+	}
+	if len(out) > maxPointerLength && len(segs) > 0 {
+		return "/" + escapeSeg(segs[0]), true
 	}
 	return out, masked
 }

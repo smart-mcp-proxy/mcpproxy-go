@@ -290,7 +290,8 @@ func baseAdminFixture(overrides map[string]interface{}) map[string]interface{} {
 		"schema_version": 1, "ts": "2026-09-17T10:00:00.000000001Z", "event": "admin_action",
 		"request_id": "req-1", "origin": "local", "source": "api", "caller": map[string]interface{}{"kind": "api_key"},
 		"action": "token.revoke", "outcome": "success",
-		"target": map[string]interface{}{"kind": "agent_token", "name": "ci", "ref": "tok_ABCDEFGH"},
+		"target":  map[string]interface{}{"kind": "agent_token", "name": "ci", "ref": "tok_ABCDEFGH"},
+		"changes": []interface{}{map[string]interface{}{"field": "/token_prefix", "before": "mcp_agt_ab12"}},
 	}
 	for k, v := range overrides {
 		if v == nil {
