@@ -51,21 +51,21 @@ describe('HeaderStatus (Spec 109-i FR-053)', () => {
     useSystemStore().$patch({ status: { running: true, listen_addr: '127.0.0.1:8080', routing_mode: 'retrieve_tools' } as any })
   })
 
-  it('names a pending routing mode in text, not only on hover (title and aria-label)', async () => {
+  it('no longer prints the pending routing mode (it moved to Home, spec 134 PR 4)', async () => {
     useSystemStore().$patch({ status: { running: true, routing_mode: 'retrieve_tools' } as any, routing: { routing_mode: 'retrieve_tools', pending_routing_mode: 'direct', restart_required: true } } as any)
     const wrapper = await mountPill()
     const link = wrapper.get('[data-test="header-status-pill"]')
-    expect(link.attributes('aria-label')).toContain('Restart pending')
-    expect(link.attributes('title')).toContain('Restart pending')
+    expect(link.attributes('aria-label')).not.toContain('Restart pending')
+    expect(link.attributes('title')).not.toContain('Restart pending')
   })
 
-  it('counts usable servers and their tools, with the routing mode label', async () => {
+  it('counts online servers; tool count and routing mode moved to Home', async () => {
     const wrapper = await mountPill()
-    expect(wrapper.get('[data-test="header-status-full"]').text().replace(/\s+/g, ' ')).toBe('2 of 4 online · 13 tools · Retrieve')
+    expect(wrapper.get('[data-test="header-status-full"]').text().replace(/\s+/g, ' ')).toBe('2 of 4 online')
     expect(wrapper.get('[data-test="header-status-compact"]').text()).toBe('2/4')
     expect(wrapper.get('[data-test="header-status-online"]').text()).toBe('2 of 4 online')
-    expect(wrapper.get('[data-test="header-status-tools"]').text()).toBe('13 tools')
-    expect(wrapper.get('[data-test="header-status-mode"]').text()).toBe('Retrieve')
+    expect(wrapper.find('[data-test="header-status-tools"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="header-status-mode"]').exists()).toBe(false)
   })
 
   it('ignores upstream_stats.connected_servers from /status', async () => {
@@ -74,26 +74,11 @@ describe('HeaderStatus (Spec 109-i FR-053)', () => {
     expect(wrapper.get('[data-test="header-status-online"]').text()).toBe('2 of 4 online')
   })
 
-  it('names the direct routing mode', async () => {
-    useSystemStore().$patch({ status: { running: true, routing_mode: 'direct' } as any })
-    const wrapper = await mountPill()
-    expect(wrapper.get('[data-test="header-status-mode"]').text()).toBe('Direct')
-  })
-
   it('links to /servers with an exact aria-label', async () => {
     const wrapper = await mountPill()
     const pill = wrapper.get('[data-test="header-status-pill"]')
     expect(pill.attributes('href')).toBe('/servers')
-    expect(pill.attributes('aria-label')).toBe('2 of 4 servers online, 13 tools, routing mode Retrieve')
-  })
-
-  it('names the pending mode when a routing restart is required', async () => {
-    useSystemStore().routing = {
-      routing_mode: 'retrieve_tools', pending_routing_mode: 'direct', restart_required: true,
-      endpoints: {}, available_modes: [], description: '',
-    } as any
-    const wrapper = await mountPill()
-    expect(wrapper.get('[data-test="header-status-mode"]').attributes('title')).toContain('Direct')
+    expect(pill.attributes('aria-label')).toBe('2 of 4 servers online')
   })
 
   it('reads neutral with no servers and green when every server is online', async () => {

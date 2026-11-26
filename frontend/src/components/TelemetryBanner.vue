@@ -29,7 +29,8 @@
        gets `min-w-0` so it may shrink inside its track. -->
   <div
     v-else-if="variant === 'banner' && visible"
-    class="alert alert-vertical sm:alert-horizontal alert-info"
+    class="flex flex-col sm:flex-row sm:items-center gap-3 rounded border px-4 py-3 text-sm"
+    style="background: var(--status-busy-soft); color: var(--status-busy); border-color: var(--status-busy)"
     data-test="telemetry-banner"
     :data-mode="mode"
   >
@@ -64,13 +65,13 @@
       <RouterLink
         v-if="mode !== 'off_env'"
         to="/settings?focus=telemetry.enabled"
-        class="btn btn-sm btn-ghost"
+        class="btn btn-sm btn-outline max-sm:min-h-11"
         data-test="telemetry-banner-settings-link"
         @click="dismiss"
       >
         Manage in Settings
       </RouterLink>
-      <button class="btn btn-sm btn-ghost btn-square" @click="dismiss" aria-label="Dismiss" data-test="telemetry-banner-dismiss">
+      <button class="btn btn-sm btn-ghost btn-square max-sm:h-11 max-sm:w-11" @click="dismiss" aria-label="Dismiss" data-test="telemetry-banner-dismiss">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
         </svg>

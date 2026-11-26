@@ -145,7 +145,7 @@ describe('Home getting-started card (Spec 109 FR-051, T170)', () => {
     expect(wrapper.find(CARD).text()).toContain('Get started')
     expect(wrapper.find(CARD).text()).toContain('MCPProxy has no servers yet')
     expect(wrapper.find(ALL_CLEAR).exists()).toBe(false)
-    expect(wrapper.find('[data-test="home-usage-strip-top"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="home-usage-strip"]').exists()).toBe(false)
 
     await wrapper.find('[data-test="home-getting-started-add-server"]').trigger('click')
     await flushPromises()
@@ -176,7 +176,7 @@ describe('Home getting-started card (Spec 109 FR-051, T170)', () => {
 
     expect(wrapper.find(CARD).exists()).toBe(false)
     expect(wrapper.find(ALL_CLEAR).exists()).toBe(true)
-    expect(wrapper.find('[data-test="home-usage-strip-top"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="home-usage-strip"]').exists()).toBe(true)
   })
 
   it('does not flash the card or "All clear" before the server list has loaded', async () => {

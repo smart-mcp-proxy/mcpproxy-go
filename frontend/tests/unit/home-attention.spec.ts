@@ -107,17 +107,14 @@ describe('Home attention list (Spec 109 FR-001/FR-003)', () => {
     ;(globalThis as unknown as { EventSource: unknown }).EventSource = FakeEventSource
   })
 
-  it('shows "All clear" and moves the usage strip above the topology when the list is empty', async () => {
+  it('shows one "nothing needs attention" line, and the usage strip, when the list is empty', async () => {
     attentionSpy.mockResolvedValue({ success: true, data: { count: 0, items: [] } })
     const wrapper = await mountHome()
 
     expect(wrapper.find('[data-test="attention-all-clear"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="attention-list-card"]').exists()).toBe(false)
 
-    const stripTop = wrapper.find('[data-test="home-usage-strip-top"]')
-    const stripBottom = wrapper.find('[data-test="home-usage-strip-bottom"]')
-    expect(stripTop.exists()).toBe(true)
-    expect(stripBottom.exists()).toBe(false)
+    expect(wrapper.find('[data-test="home-usage-strip"]').exists()).toBe(true)
   })
 
   it('holds the top usage strip back until the server list has loaded (#1466)', async () => {
@@ -127,7 +124,7 @@ describe('Home attention list (Spec 109 FR-001/FR-003)', () => {
     // flash only to be replaced by the getting-started card.
     api.getServers.mockReturnValueOnce(new Promise(() => {}))
     const wrapper = await mountHome()
-    expect(wrapper.find('[data-test="home-usage-strip-top"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="home-usage-strip"]').exists()).toBe(false)
   })
 
   it('lists items in the order the API returns them, with fix buttons routing to fix.target', async () => {
@@ -153,9 +150,8 @@ describe('Home attention list (Spec 109 FR-001/FR-003)', () => {
     expect(fixLink.exists()).toBe(true)
     expect(fixLink.attributes('href')).toBe('/servers/github')
 
-    // The usage strip sits below the topology once there is something to act on.
-    expect(wrapper.find('[data-test="home-usage-strip-top"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="home-usage-strip-bottom"]').exists()).toBe(true)
+    // The usage strip follows the list in every state (spec 134 FR-040).
+    expect(wrapper.find('[data-test="home-usage-strip"]').exists()).toBe(true)
   })
 
   // Review finding: T057's coverage never exercised the SSE
@@ -193,8 +189,10 @@ describe('Home attention list (Spec 109 FR-001/FR-003)', () => {
     vi.useFakeTimers()
     try {
       const wrapper = await mountHome()
-      // The failed fetch never resolved `loaded`, so nothing renders yet.
-      expect(wrapper.find('[data-test="attention-list"]').exists()).toBe(false)
+      // The failed fetch never resolved `loaded`: the list says so, and never
+      // claims all clear.
+      expect(wrapper.find('[data-test="attention-failed"]').exists()).toBe(true)
+      expect(wrapper.find('[data-test="attention-all-clear"]').exists()).toBe(false)
 
       attentionSpy.mockResolvedValue({ success: true, data: { count: 0, items: [] } })
       await vi.advanceTimersByTimeAsync(30000)
