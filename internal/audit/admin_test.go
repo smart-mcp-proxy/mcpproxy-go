@@ -528,3 +528,13 @@ func TestChange_RateLimitAndAllServersLiterals(t *testing.T) {
 		t.Fatalf("the * grant is shown: %v", byField["/allowed_servers"])
 	}
 }
+
+func TestAllServersGranted_OnlyOnTheAllowList(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
+	in.Changes = []audit.Change{audit.AllServersGranted(audit.Path("env", "GITHUB_TOKEN"))}
+	_, obj := mustAdmin(t, in)
+	if ch := obj["changes"].([]interface{})[0].(map[string]interface{}); ch["withheld"] != "secret" {
+		t.Fatalf("a secret path is withheld, never a list: %v", ch)
+	}
+}

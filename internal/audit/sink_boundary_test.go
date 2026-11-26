@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -181,12 +182,81 @@ func TestNewFileSink_TornFileAtSizeLimitIsRepairedInPlace(t *testing.T) {
 	}
 	_ = s.Close()
 	entries, _ := os.ReadDir(dir)
+	found := 0
 	for _, e := range entries {
 		raw, _ := os.ReadFile(filepath.Join(dir, e.Name()))
 		if len(raw) > 0 && raw[len(raw)-1] != '\n' {
 			t.Fatalf("%s ends mid-record after the repair", e.Name())
 		}
+		for _, l := range strings.Split(string(raw), "\n") {
+			if l == `{"seq":2}` {
+				found++
+			}
+		}
 	}
+	if found != 1 {
+		t.Fatalf("the record written after the repair must be present once, found %d", found)
+	}
+}
+
+// An active sink: a short write leaves the file torn, the next write repairs
+// it through the writer's own handle and the record after it is intact, even
+// when that record makes the file rotate.
+func TestNewFileSink_ShortWriteThenRotationKeepsRecords(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	s, err := NewFileSink(path, 1, 5, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := s.(*writerSink)
+	// First record: only part of it reaches the file (the lumberjack writer
+	// is wrapped so its first call is short).
+	ws.mu.Lock()
+	ws.w = &shortOnceWriter{w: ws.w, n: 5}
+	ws.mu.Unlock()
+	_ = s.Write([]byte(`{"seq":1}`))
+	// Fill close to the 1 MB limit, then a record that forces a rotation.
+	pad := strings.Repeat("x", 1024*1024-64)
+	if err := s.Write([]byte(`{"pad":"` + pad + `"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Write([]byte(`{"seq":3}`)); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+	entries, _ := os.ReadDir(dir)
+	seen := map[string]bool{}
+	for _, e := range entries {
+		raw, _ := os.ReadFile(filepath.Join(dir, e.Name()))
+		if len(raw) > 0 && raw[len(raw)-1] != '\n' {
+			t.Fatalf("%s ends mid-record", e.Name())
+		}
+		for _, l := range assertWellDelimited(t, raw) {
+			if strings.HasPrefix(l, `{"seq":3}`) || strings.HasPrefix(l, `{"pad":`) {
+				seen[l[:8]] = true
+			}
+		}
+	}
+	if !seen[`{"seq":3`] || !seen[`{"pad":"`] {
+		t.Fatalf("records after the repair must be intact across the rotation: %v", seen)
+	}
+}
+
+// shortOnceWriter writes only n bytes of its first call, then passes through.
+type shortOnceWriter struct {
+	w    io.Writer
+	n    int
+	done bool
+}
+
+func (s *shortOnceWriter) Write(p []byte) (int, error) {
+	if !s.done {
+		s.done = true
+		n, _ := s.w.Write(p[:s.n])
+		return n, errors.New("disk full")
+	}
+	return s.w.Write(p)
 }
 
 func TestNewFileSink_WriteOnlyFileGetsABoundaryAtOpen(t *testing.T) {

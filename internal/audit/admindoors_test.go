@@ -58,17 +58,24 @@ func TestAdminDoorRegistry_PendingOnlyShrinks(t *testing.T) {
 	}
 	pending := map[string]bool{}
 	for _, d := range audit.AdminDoors {
-		if d.Status == audit.DoorPending {
-			k := d.Door + "#" + d.Branch
+		if d.Status != audit.DoorPending {
+			continue
+		}
+		actions := d.Actions
+		if len(actions) == 0 {
+			actions = []string{"-"}
+		}
+		for _, a := range actions {
+			k := d.Door + "#" + d.Branch + "#" + a
 			pending[k] = true
 			if !frozen[k] {
-				t.Errorf("pending row %s is not in AdminDoorsFrozenPending: a new pending door is a reviewed change", k)
+				t.Errorf("pending effect %s is not in AdminDoorsFrozenPending: a new pending effect is a reviewed change", k)
 			}
 		}
 	}
 	for k := range frozen {
 		if !pending[k] {
-			t.Errorf("AdminDoorsFrozenPending lists %s, which is no longer pending: remove it", k)
+			t.Errorf("AdminDoorsFrozenPending lists %s, which is no longer a pending effect: remove it", k)
 		}
 	}
 }

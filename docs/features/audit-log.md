@@ -93,7 +93,7 @@ In the distroless server image, `mcpproxy version`/`doctor` need `--entrypoint`
 
 ```bash
 # Tail the audit stream out of a running container
-docker logs -f my-mcpproxy | jq -c 'select(.schema_version == 1)'
+docker logs -f my-mcpproxy | jq -R -c 'fromjson? // empty | select(.schema_version == 1)'
 ```
 
 ### Native stdio transport exception

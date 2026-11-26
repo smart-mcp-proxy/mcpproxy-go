@@ -1179,7 +1179,10 @@ func (s *CredentialsService) Revoke(ctx context.Context, a Actor, ref Credential
 	// The storage transaction flipped Revoked false → true (a no-op revoke
 	// returned above). The revoked key's display prefix is `before`.
 	s.recordTokenEffect(&out, audit.ActionTokenRevoke, after,
-		[]audit.Change{audit.Literal(audit.FieldTokenPrefix, audit.TokenPrefix(after.TokenPrefix), nil)}, revokedAt)
+		[]audit.Change{
+			audit.Literal(audit.FieldTokenPrefix, audit.TokenPrefix(after.TokenPrefix), nil),
+			audit.Literal(audit.Path("revoked"), audit.Bool(false), audit.Bool(true)),
+		}, revokedAt)
 	s.announce(view, profile.ChangeRevoke)
 	if s.clients != nil && s.clients.notifier != nil {
 		s.clients.notifier.NotifyBindingChanged(after.Name)

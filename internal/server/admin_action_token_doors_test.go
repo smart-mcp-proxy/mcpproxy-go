@@ -163,6 +163,8 @@ func TestAdminActionDoors_RESTTokenDoors(t *testing.T) {
 	require.Equal(t, "token.rotate", lines[0]["action"])
 	require.Equal(t, ref, lines[0]["target"].(map[string]interface{})["ref"], "rotation keeps the ref")
 	require.Equal(t, "req-rotate-1", lines[0]["request_id"])
+	require.Equal(t, map[string]interface{}{"kind": "api_key"}, lines[0]["caller"], "TCP with the API key is api_key, not socket")
+	require.Equal(t, "local", lines[0]["origin"])
 	ch := lines[0]["changes"].([]interface{})[0].(map[string]interface{})
 	require.Equal(t, "/token_prefix", ch["field"])
 	createdPrefix := l["changes"].([]interface{})[0].(map[string]interface{})["after"]

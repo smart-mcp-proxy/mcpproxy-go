@@ -198,6 +198,7 @@ var literalFields = map[string]literalKind{
 	"expires_at":           kindTimestamp,
 	"logins":               kindCount,
 	"guard_bound":          kindBool,
+	"revoked":              kindBool,
 	// Bounded integers, keyed by their full path (segments joined by '/').
 	"rate_limit/per_minute": kindRateLimit,
 	"rate_limit/burst":      kindRateLimit,
@@ -261,6 +262,11 @@ func (v RateLimitValue) render() (interface{}, bool) {
 // name servers are reported once PR-1b's server-name provenance exists;
 // until then they are withheld.
 func AllServersGranted(field FieldPath) Change {
+	if field.sortKey() != Path("allowed_servers").sortKey() {
+		// Only a server allow-list can carry the sentinel: anything else is
+		// classified like any other path (never rendered).
+		return Withheld(field, WithheldKind(ClassifyField(field)))
+	}
 	return Change{path: field, set: true, list: true, added: []interface{}{"*"}, addedCount: 1}
 }
 
