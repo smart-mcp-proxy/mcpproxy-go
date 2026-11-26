@@ -40,6 +40,10 @@ async function shot(page: Page, name: string, full = true) {
   if (full) await page.setViewportSize(vp)
 }
 
+function escapeRegExp(v: string): string {
+  return v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 const sizes = [
   { w: 1440, h: 900, tag: '1440' },
   { w: 390, h: 844, tag: '390' },
@@ -108,7 +112,7 @@ test('See all reveals the rest in place, by keyboard (SC-002)', async ({ page })
   await sixthFix.focus()
   const href = await sixthFix.getAttribute('href')
   await page.keyboard.press('Enter')
-  await expect(page).toHaveURL(new RegExp(href!.replace(/[?]/g, '\\?').replace(/^\/?/, '')))
+  await expect(page).toHaveURL(new RegExp(escapeRegExp(href!.replace(/^\//, ''))))
 })
 
 test('shortcuts are reachable and activate by keyboard at 390', async ({ page }) => {
