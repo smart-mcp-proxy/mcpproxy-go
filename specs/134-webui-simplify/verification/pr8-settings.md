@@ -48,3 +48,9 @@ Fixed with a test first: navigating in place to `/settings?focus=<unknown key>` 
 2. `ProfileEditor.vue` `revealRefusal`: the document-wide `.text-error` fallback can find another profile editor's error if a slow save fails after the user left the editor and opened a different profile with its own field error, and focus sits on `<body>`. Assessment: real, narrow, introduced by this diff (the fallback is new).
 
 Verdict: not clean (round 21, final).
+
+## Round 22 (the maintainer approved fixing both round-21 findings and one last review)
+
+Merged `origin/main` first (it had moved by one commit, #2034, no conflicts). Fixed with a failing test first each: (1) a focus link with a stale `?tab=teams` before edition status now rewrites the URL to the section it showed (`tab=general`); (2) `ProfileEditor.vue` `revealRefusal` searches only its own root and does nothing after the editor is unmounted, so a late save failure cannot move focus into another editor. Unit tests 3247 passed, type check clean, `make build` ok, full sweep on an isolated instance 173 passed, 4 skipped, 0 failed. One Sol run on the final diff against the merge-base with `origin/main` (the brief reached it: it echoed its token). Verdict: not clean, one finding, reported unfixed:
+
+1. `Settings.vue` `onMounted` / `focusField`: a Settings instance that has been left while its config request was pending can, when the request finishes, call `focusField()` with the current route's `focus`; the new `router.replace({ tab })` then rewrites the tab of the page the user is on (returned via `/settings?focus=routing_mode`, then picked Advanced: the late call writes `tab=general`). Assessment: real, narrow (needs a slow config load plus leaving and returning), introduced by this diff; on main the stopped tab-writeback watcher of the old instance could not touch the URL. A guard (`unmounted` flag checked after `await loadConfig()`) would fix it.
