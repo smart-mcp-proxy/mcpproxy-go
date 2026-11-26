@@ -30,6 +30,10 @@ Seen, not changed: the wizard footer tip is cut off at 390 px (wizard footer, no
 - Unit tests: 3245 passed, type check clean. Full sweep on the final build: 173 passed, 4 skipped, 0 failed; `settings-pr8.spec.ts` against an instance with a profile: 5 passed.
 - Screenshots were not re-taken for this round: no layout change, only behaviour, focus and ARIA.
 
+## After merging origin/main (PR 1 landed)
+
+Merged `origin/main` (no rebase); conflicts were in the files both sides touched (docs spec lists, `main.css`, hints panel, wizard, Settings header, smoke script, inventory), resolved by keeping this PR's additions on top of main's. `go test ./cmd/release-gate/...` and the Spec 109 traceability/parity tests in `internal/httpapi` pass (the spec-list check sees `settings-pr8.spec.ts` in the launcher, `release-gate.md` and `web-ui-verification.md`; no file was renamed). Unit tests 3245 passed, type check clean, `make build` ok, full sweep 173 passed, 4 skipped, 0 failed.
+
 ## Reviews
 
 - **Sol (`github-copilot/gpt-6.2-sol --variant high`, code correctness): 20 rounds, verdict NOT CLEAN at the cap.** Rounds 1-19 produced real fixes (stale `?tab=` and `?focus=` handling, bare and unknown tab and focus links, late edition discovery, roving tabindex and wrapping arrows, ignoring modified keys, focus hand-off, tabpanel roles, per-open status token, "checking" state, live region, field-error focus and aria-invalid). Round 12 returned no verdict (reviewer tried to read node_modules, UNREVIEWED) and was re-run. Round 20's single finding is unfixed: navigating in place to `/settings?focus=<unknown key>` falls back to General but then writes `tab=general` into the URL, where a direct load leaves `tab` absent (cosmetic). Not fixed, because round 21 is not allowed.

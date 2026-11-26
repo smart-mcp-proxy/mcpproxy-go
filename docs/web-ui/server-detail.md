@@ -134,7 +134,7 @@ Click the ✕ icon and confirm. The header is deleted with a JSON Merge
 Patch that sets the key to `null`:
 
 ```http
-PATCH /api/v1/servers/synapbus
+PATCH /api/v1/servers/my-server
 Content-Type: application/json
 
 {"headers": {"X-Stale": null}}
