@@ -24,7 +24,7 @@ When MCPProxy shuts down (via Ctrl+C, SIGTERM, or tray quit), it follows a struc
 
 ## Running calls
 
-Requests that are still running when shutdown starts, tool calls included, get up to **15 seconds** to finish. After that they are cancelled.
+Requests that are still running when shutdown starts, tool calls included, get up to **15 seconds** to finish. This includes requests from clients signed in through the browser (`/mcp/oauth`). After that they are cancelled.
 
 Event streams (`/events` and the MCP `GET` stream) never end on their own, so they are not waited for. They close as soon as the last running call ends, or at once when there is none. An idle mcpproxy therefore does not wait at all.
 
