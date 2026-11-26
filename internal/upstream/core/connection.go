@@ -9,6 +9,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/qahooks"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shutdown"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 
@@ -23,6 +24,7 @@ const (
 	dockerCleanupTimeout = 30 * time.Second
 
 	// Subprocess shutdown timeouts
+	stdinCloseGrace = shutdown.StdinClose
 	// mcpClientCloseTimeout is the max time to wait for graceful MCP client close
 	mcpClientCloseTimeout = 10 * time.Second
 	// processGracefulTimeout is the max time to wait after SIGTERM before SIGKILL
@@ -324,6 +326,7 @@ func (c *Client) Connect(ctx context.Context) error {
 				zap.String("server", c.config.Name),
 				zap.String("transport", c.transportType))
 			if launchErr := c.connectWithLauncher(ctx); launchErr != nil {
+				c.forgetDockerInit()
 				return fmt.Errorf("failed to launch local upstream: %w", launchErr)
 			}
 		}
@@ -343,6 +346,8 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	if err != nil {
+		c.forgetDockerInit()
+
 		// #1148: the transport error text embeds the configured URL, credentials
 		// and all. Redact it HERE, before it is logged, returned, or stored as
 		// the client's last error — every consumer downstream inherits the safe

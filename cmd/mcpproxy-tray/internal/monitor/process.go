@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy-tray/internal/state"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shutdown"
 )
 
 // ProcessStatus represents the status of a monitored process
@@ -230,10 +231,9 @@ func (pm *ProcessMonitor) Stop() error {
 		pm.logger.Infow("Process stopped (no exit info)", "pid", pid)
 		return nil
 
-	case <-time.After(45 * time.Second):
-		// Force kill after 45 seconds to allow core time to clean up Docker containers
-		// Core needs time for parallel container cleanup (typically 10-30s for 7 containers)
-		pm.logger.Warn("Process did not stop gracefully after 45s, sending SIGKILL", "pid", pid)
+	case <-time.After(shutdown.Tray):
+		// Force kill only a wedged core: it ends by itself after 60 seconds at the latest.
+		pm.logger.Warnw("Process did not stop gracefully, sending SIGKILL", "pid", pid, "grace", shutdown.Tray)
 		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 			pm.logger.Error("Failed to send SIGKILL", "pid", pid, "error", err)
 		}

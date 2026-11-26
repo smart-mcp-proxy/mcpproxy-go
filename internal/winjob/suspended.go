@@ -15,13 +15,34 @@ import (
 // runs no user code, so it cannot fork a descendant that escapes the Job. The
 // caller assigns the suspended process to its Job, then calls Resume.
 
-// MarkSuspended makes cmd start with its main thread suspended. It keeps any
-// SysProcAttr fields the caller already set. Call it before cmd.Start.
+// MarkSuspended makes cmd start with its main thread suspended, in its own
+// console process group: a CTRL_BREAK that asks the core to shut down must not
+// reach the children, which would fail the calls still running on them. It
+// keeps any SysProcAttr fields the caller already set. Call it before cmd.Start.
 func MarkSuspended(cmd *exec.Cmd) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
-	cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED
+	cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED | windows.CREATE_NEW_PROCESS_GROUP
+}
+
+// RequestExit asks the process group led by pid, a process started through
+// MarkSuspended, to exit. It is the closest Windows has to SIGTERM: CTRL_BREAK
+// ends a program that does not handle it. It fails when the caller does not
+// share a console with the group.
+func RequestExit(pid int) error {
+	return windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(pid))
+}
+
+// HoldPID keeps Windows from giving pid to another process until release: an
+// open handle to a process reserves its PID even after the process is reaped.
+// Call it while the process is still unreaped.
+func HoldPID(pid int) (release func()) {
+	h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid)) //nolint:gosec // pid is a live PID from exec.Cmd.Process.Pid
+	if err != nil {
+		return func() {}
+	}
+	return func() { _ = windows.CloseHandle(h) }
 }
 
 // IsSuspended reports whether cmd was marked to start suspended.

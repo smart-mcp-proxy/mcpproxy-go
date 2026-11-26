@@ -58,6 +58,12 @@ func captureLoginShellEnv(logger *zap.Logger) map[string]string {
 	return loginShellEnvVal
 }
 
+// LoginShellEnv returns what the user's login shell exports on top of this process's environment,
+// or nil when that is not known (always on Windows). The result is shared: do not modify it.
+func LoginShellEnv(logger *zap.Logger) map[string]string {
+	return captureLoginShellEnv(logger)
+}
+
 func doCaptureLoginShellEnv(logger *zap.Logger) map[string]string {
 	if runtime.GOOS == osWindows {
 		// Windows has no login shell; PATH lives in the registry and is handled
