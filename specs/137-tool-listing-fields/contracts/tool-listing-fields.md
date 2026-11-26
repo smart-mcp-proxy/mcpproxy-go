@@ -28,8 +28,8 @@
 }
 ```
 
-The last six keys are omitted for scoped callers.
+The last six keys are present only for a positively authenticated administrator. `GET /api/v1/servers/{id}/review` for a scoped caller and MCP `quarantine_security` `inspect_quarantined`/`inspect_tools` for every caller use the agent-safe projection: emitted titles plus `title_pending: true|false`, no pending or invalid text anywhere (values, diffs, evidence).
 
 ## Review door
 
-The existing review-bound tool approval accepts `rv3-` fingerprints only. A record that is `approved` and has a pending title is listed and approvable. On success, both titles shown are approved in the same write.
+The existing review-bound tool approvals (`ApproveToolsReviewedAt`, `ApproveAllToolsReviewedAt`) accept `rv3-` fingerprints only. A record that is `approved` and has a pending title is listed (`titles_pending` in the queue) and selectable. On a match under the lock, the contract and both valid titles are approved in the same write. Unbound approvals (no fingerprint, including MCP `approve_tool`/`approve_all_tools`) approve the contract only, never a title.

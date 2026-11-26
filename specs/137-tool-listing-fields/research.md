@@ -6,16 +6,21 @@
 - **Rationale**: the threat a title adds is text reaching a model. Withholding the text removes the threat completely while leaving the reviewed contract (description, schemas, hints, dispatch tier) callable. Holding the tool would turn every cosmetic rename into an outage and, at upgrade, would hold every tool whose upstream already sends a title.
 - **Alternatives**: (a) fold the title into the rug-pull hash v6 and hold on change: needs a hash migration and mass-holds on upgrade in manual mode; rejected. (b) a Spec 120 structural signal: that gate exists for capability widening, which a title is not; rejected. (c) pass titles through unreviewed: reopens a quarantine bypass and keeps the existing `annotations.title` gap; rejected.
 
+## R1a. Title scan
+
+- **Decision**: scan each title on its own (title-only view), never inside the contract scan.
+- **Rationale**: the contract gate holds a tool on any per-tool finding, and the phrase detector returns one match over the joined text with no field attribution. Mixing titles in would let a title finding hold a contract and let a description finding be blamed on (or hide behind) a title.
+
 ## R2. Rug-pull hash and fingerprint
 
 - **Decision**: keep the v5 approval hash; bump the review fingerprint to `rv3` with the live titles.
 - **Rationale**: no stored hash changes, so no tool can change status on upgrade (SC-002). The fingerprint is derived, never stored; a version bump only makes an open review page reload.
-- **Alternatives**: a separate title fingerprint and a separate approval door: more surface for the same guarantee; rejected.
+- **Alternatives**: a separate title fingerprint and a separate approval door: more surface for the same guarantee; rejected. Letting unbound approvals approve titles: the agent-reachable `quarantine_security` approve operations are unbound, so an agent could approve text it then reads; rejected.
 
 ## R3. `annotations.title` at upgrade
 
-- **Decision**: adopt current values as approved.
-- **Rationale**: they are emitted today, so adopting them does not increase exposure. Scanning them at upgrade and withholding flagged ones would be stricter, but would make the upgrade change what agents see for a reason the operator did not act on. Tightening applies from the next change. Recorded as spec Assumption 2 so a reviewer can overturn it.
+- **Decision**: a one-time pass before the first discovery adopts each record's **stored** `annotations.title` (the value the previous version was emitting); nothing live is grandfathered, new records get nothing, and a record that later loses its title state to an older binary fails closed.
+- **Rationale**: the stored value is what agents saw before the upgrade, so adopting them does not increase exposure. Scanning them at upgrade and withholding flagged ones would be stricter, but would make the upgrade change what agents see for a reason the operator did not act on. Tightening applies from the next change. Recorded as spec Assumption 2 so a reviewer can overturn it.
 
 ## R4. Icons
 
