@@ -36,6 +36,18 @@ func TestAdminDoorRegistry_WellFormed(t *testing.T) {
 			if d.Slice == "" || len(d.Actions) == 0 {
 				t.Errorf("%s: a pending row names its slice and every action it owes (the frozen set is per effect)", key)
 			}
+			if len(d.PendingActions()) == 0 {
+				t.Errorf("%s: every action has shipped; mark the row done", key)
+			}
+			for _, a := range d.Shipped {
+				found := false
+				for _, b := range d.Actions {
+					found = found || a == b
+				}
+				if !found {
+					t.Errorf("%s: shipped action %q is not one of its actions", key, a)
+				}
+			}
 		case audit.DoorExempt:
 			if d.Reason == "" || len(d.Actions) > 0 {
 				t.Errorf("%s: an exempt row has a reason and no actions", key)
@@ -58,10 +70,7 @@ func TestAdminDoorRegistry_PendingOnlyShrinks(t *testing.T) {
 	}
 	pending := map[string]bool{}
 	for _, d := range audit.AdminDoors {
-		if d.Status != audit.DoorPending {
-			continue
-		}
-		for _, a := range d.Actions {
+		for _, a := range d.PendingActions() {
 			k := d.Door + "#" + d.Branch + "#" + a
 			pending[k] = true
 			if !frozen[k] {

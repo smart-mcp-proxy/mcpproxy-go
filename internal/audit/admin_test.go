@@ -648,3 +648,22 @@ func TestNewAdminAction_ChangesCountExceedsKeptEntries(t *testing.T) {
 		t.Fatalf("changes_count must exceed the kept entries when truncated: %v / %d", obj["changes_count"], len(obj["changes"].([]interface{})))
 	}
 }
+
+func TestChange_ServerAndProfilePathsAreBounded(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
+	in.Changes = []audit.Change{
+		audit.Withheld(audit.Path("mcpServers", "ci", "args", "positional-password"), audit.WithheldValue),
+		audit.Withheld(audit.Path("profiles", "dev", "nested", "free-text"), audit.WithheldValue),
+	}
+	line, obj := mustAdmin(t, in)
+	assertSentinelAbsent(t, line, "positional-password")
+	assertSentinelAbsent(t, line, "free-text")
+	got := map[string]bool{}
+	for _, c := range obj["changes"].([]interface{}) {
+		got[c.(map[string]interface{})["field"].(string)] = true
+	}
+	if !got["/mcpServers"] || !got["/profiles/dev"] {
+		t.Fatalf("got %v", got)
+	}
+}

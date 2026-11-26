@@ -94,6 +94,12 @@ func knownRoot(seg string) bool {
 	return literal || secretPrefixes[seg] || nestedRoots[seg] || opaqueRoots[seg] || knownFieldRoots[seg]
 }
 
+// profileFields are the fixed fields of a profile entry.
+var profileFields = map[string]bool{
+	"servers": true, "mode": true, "tier": true, "management_tools": true, "description": true,
+	"switchable_to": true, "tools": true, "labels": true, "name": true,
+}
+
 // fixedChildren are the only child names a fixed sub-schema root may have;
 // any other child collapses the path to the root (FR-015b: paths come from a
 // fixed schema, never from a value). Mirrors config.OAuthConfig.
@@ -135,6 +141,24 @@ func (f FieldPath) render() (string, bool) {
 	if allowed, ok := fixedChildren[segs[0]]; ok && len(segs) > 1 && !allowed[segs[1]] {
 		segs = segs[:1]
 		masked = true
+	}
+	switch segs[0] {
+	case "mcpServers":
+		// Server-name segments are derived labels until PR-1b records their
+		// origin (contract §Target, derived labels): never spelled here.
+		if len(segs) > 1 {
+			segs = segs[:1]
+			masked = true
+		}
+	case "profiles":
+		// /profiles/<name>/<fixed field>, nothing deeper or unknown.
+		if len(segs) > 2 && !profileFields[segs[2]] {
+			segs = segs[:2]
+			masked = true
+		} else if len(segs) > 3 {
+			segs = segs[:3]
+			masked = true
+		}
 	}
 	var b strings.Builder
 	for _, s := range segs {

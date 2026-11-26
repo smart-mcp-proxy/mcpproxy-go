@@ -56,30 +56,42 @@ func TestMaskAllSpans_BoundStopsAtTheRunEnd(t *testing.T) {
 	}
 }
 
-func TestSink_DeletedTornFileStopsBlocking(t *testing.T) {
+// A retry repairs the torn file itself, even after it was renamed.
+func TestSink_RetryRepairsTheHeldTornFile(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/audit.jsonl"
 	if err := os.WriteFile(path, []byte("{\"se"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s, err := NewFileSink(path, 1, 5, 1, false)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ws := s.(*writerSink)
-	ws.mu.Lock()
-	ws.torn = true
-	ws.openRepair = func() error { return repairTornPath(path) }
-	ws.mu.Unlock()
-	if err := os.Remove(path); err != nil {
+	s := newWriterSink(&scriptedWriter{})
+	s.torn = true
+	s.openRepair = func() error {
+		if err := writeNewline(f); err != nil {
+			return err
+		}
+		return f.Close()
+	}
+	renamed := dir + "/audit-old.jsonl"
+	if err := os.Rename(path, renamed); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Write([]byte(`{"seq":2}`)); err != nil {
-		t.Fatalf("a removed torn file leaves nothing to repair: %v", err)
+		t.Fatal(err)
 	}
-	_ = s.Close()
-	raw, _ := os.ReadFile(path)
-	if string(raw) != "{\"seq\":2}\n" {
-		t.Fatalf("the writer creates a clean file: %q", raw)
+	raw, _ := os.ReadFile(renamed)
+	if string(raw) != "{\"se\n" {
+		t.Fatalf("the renamed torn file is the one repaired: %q", raw)
+	}
+}
+
+func TestMaskAllSpans_ScanContinuesAfterTheBound(t *testing.T) {
+	s := strings.Repeat("mcp_agt_", 60) + "0123456789abcdefghij,mcp_cli_secondsecretvalue0123"
+	got, _ := maskAllSpans(s)
+	if strings.Contains(got, "secondsecretvalue") {
+		t.Fatalf("a credential after the bounded run is still masked: %q", got)
 	}
 }

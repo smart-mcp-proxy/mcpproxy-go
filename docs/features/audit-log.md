@@ -259,7 +259,7 @@ are not recorded yet; they follow with the server-edition slice:
 
 | `action` | Doors | `changes` |
 |---|---|---|
-| `token.create` | `POST /api/v1/tokens`, `mcpproxy token create`, MCP `credentials create_token` | `/token_prefix` (after), `/expires_at` (after, when it expires) |
+| `token.create` | `POST /api/v1/tokens`, `mcpproxy token create`, MCP `credentials create_token` | `/token_prefix` (after); `/expires_at` (after, or `withheld` for a token that never expires); `/allowed_servers` (the `*` sentinel shown, a list of server names withheld); `/permissions` (withheld); and, when set, `/profile_pin`, `/purpose` (withheld), `/guard_bound` (`true`), `/rate_limit/per_minute` and `/rate_limit/burst` (integers) |
 | `token.rotate` | `POST /api/v1/tokens/{name}/regenerate`, `mcpproxy token regenerate` | `/token_prefix` before and after, from the rotating transaction |
 | `token.revoke` | `DELETE /api/v1/tokens/{name}`, `mcpproxy token revoke`, MCP `credentials revoke` with `token` | `/token_prefix` (before) and `/revoked` (`false` → `true`) — only when the token was not already revoked |
 | `token.delete` | `DELETE /api/v1/tokens/{name}/permanent`, `mcpproxy token delete` | `/token_prefix` (before). A permanent delete writes no activity row, so its `request_id` has nothing to join in `activity list`; the line is the record |

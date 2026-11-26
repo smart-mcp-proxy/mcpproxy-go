@@ -42,7 +42,30 @@ type AdminDoor struct {
 	Status  DoorStatus
 	Slice   string // the plan slice that owns (or will own) the lines
 	Actions []string
+	// Shipped lists the actions of a pending row that already write their
+	// lines (status per effect, plan "PR slicing"): a slice that ships one
+	// action of a shared row adds it here and removes only that frozen key;
+	// the row turns done when every action has shipped.
+	Shipped []string
 	Reason  string
+}
+
+// PendingActions returns the actions of d that do not write lines yet.
+func (d AdminDoor) PendingActions() []string {
+	if d.Status != DoorPending {
+		return nil
+	}
+	shipped := map[string]bool{}
+	for _, a := range d.Shipped {
+		shipped[a] = true
+	}
+	var out []string
+	for _, a := range d.Actions {
+		if !shipped[a] {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // AdminDoors is the registry, sorted by door then branch.
@@ -102,7 +125,8 @@ var AdminDoors = []AdminDoor{
 	{Door: "CLI mcpproxy db compact", Status: DoorExempt, Reason: "storage maintenance (Q1)"},
 	{Door: "CLI mcpproxy db stats", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "CLI mcpproxy disconnect", Status: DoorPending, Slice: "PR-1b", Actions: []string{"client.forget", "client.key_revoke", "client.bind", "login.cancel"}, Reason: "Forget, incl. offline"},
-	{Door: "CLI mcpproxy doctor", Status: DoorExempt, Reason: "read-only: no committed effect"},
+	{Door: "CLI mcpproxy doctor", Branch: "no staged rotation", Status: DoorExempt, Reason: "read-only: no committed effect on the no-change path"},
+	{Door: "CLI mcpproxy doctor", Branch: "reconcile", Status: DoorPending, Slice: "PR-1b", Actions: []string{"client.rotate_finalize", "client.rotate_rollback"}, Reason: "calls the reconcile-on-read REST doors"},
 	{Door: "CLI mcpproxy doctor fix", Status: DoorExempt, Reason: "registered fixers are read-only or upstream OAuth (Q3)"},
 	{Door: "CLI mcpproxy doctor list-codes", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "CLI mcpproxy feedback", Status: DoorExempt, Reason: "not a rule"},
@@ -126,6 +150,7 @@ var AdminDoors = []AdminDoor{
 	{Door: "CLI mcpproxy registry search", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "CLI mcpproxy review", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "CLI mcpproxy review approve", Status: DoorPending, Slice: "PR-2", Actions: []string{"server.review_approve", "server.baseline_set", "tool.approve", "tool.block"}, Reason: "approvals"},
+	{Door: "CLI mcpproxy review approve", Branch: "triggered refresh", Status: DoorPending, Slice: "PR-2", Actions: []string{"prompt.approve", "prompt.hold", "skill.approve", "skill.hold"}, Reason: "prompt and skill refreshes the server commit triggers (rule 1a)"},
 	{Door: "CLI mcpproxy review fetch", Status: DoorPending, Slice: "PR-2", Actions: []string{"tool.approve", "tool.hold", "server.baseline_set"}, Reason: "posts to the discovery door; recorded there"},
 	{Door: "CLI mcpproxy review list", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "CLI mcpproxy review reject", Status: DoorPending, Slice: "PR-2", Actions: []string{"server.baseline_clear", "tool.block"}, Reason: "approvals"},
@@ -139,6 +164,7 @@ var AdminDoors = []AdminDoor{
 	{Door: "CLI mcpproxy secrets set", Status: DoorPending, Slice: "PR-1b", Actions: []string{"secret.set"}, Reason: "keyring; offline cli_offline"},
 	{Door: "CLI mcpproxy security", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "CLI mcpproxy security approve", Status: DoorPending, Slice: "PR-2", Actions: []string{"server.review_approve", "server.baseline_set", "tool.approve", "tool.block"}, Reason: "approvals, bundle, scanners"},
+	{Door: "CLI mcpproxy security approve", Branch: "triggered refresh", Status: DoorPending, Slice: "PR-2", Actions: []string{"prompt.approve", "prompt.hold", "skill.approve", "skill.hold"}, Reason: "prompt and skill refreshes the server commit triggers (rule 1a)"},
 	{Door: "CLI mcpproxy security bundle", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "CLI mcpproxy security bundle history", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "CLI mcpproxy security bundle refresh", Status: DoorPending, Slice: "PR-2", Actions: []string{"bundle.activate", "bundle.reload"}, Reason: "approvals, bundle, scanners"},
@@ -285,8 +311,7 @@ var AdminDoors = []AdminDoor{
 	{Door: "REST GET /api/v1/clients/{client}", Branch: "reconcile", Status: DoorPending, Slice: "PR-1b", Actions: []string{"client.rotate_finalize", "client.rotate_rollback"}, Reason: "reconcile-on-read of a staged rotation (policy rotation_reconcile)"},
 	{Door: "REST GET /api/v1/code/scripts", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "REST GET /api/v1/config", Status: DoorExempt, Reason: "read-only: no committed effect"},
-	{Door: "REST GET /api/v1/connect", Branch: "no staged rotation", Status: DoorExempt, Reason: "read-only: no committed effect on the no-change path"},
-	{Door: "REST GET /api/v1/connect", Branch: "reconcile", Status: DoorPending, Slice: "PR-1b", Actions: []string{"client.rotate_finalize", "client.rotate_rollback"}, Reason: "reconcile-on-read of a staged rotation (policy rotation_reconcile)"},
+	{Door: "REST GET /api/v1/connect", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "REST GET /api/v1/connect/{client}", Branch: "no staged rotation", Status: DoorExempt, Reason: "read-only: no committed effect on the no-change path"},
 	{Door: "REST GET /api/v1/connect/{client}", Branch: "reconcile", Status: DoorPending, Slice: "PR-1b", Actions: []string{"client.rotate_finalize", "client.rotate_rollback"}, Reason: "reconcile-on-read of a staged rotation (policy rotation_reconcile)"},
 	{Door: "REST GET /api/v1/connect/{client}/preview", Branch: "no staged rotation", Status: DoorExempt, Reason: "read-only: no committed effect on the no-change path"},
@@ -443,6 +468,7 @@ var AdminDoors = []AdminDoor{
 	{Door: "REST POST /api/v1/servers/{id}/scan", Branch: "triggered refresh", Status: DoorPending, Slice: "PR-2", Actions: []string{"prompt.approve", "prompt.hold", "skill.approve", "skill.hold"}, Reason: "prompt and skill refreshes the server commit triggers (rule 1a)"},
 	{Door: "REST POST /api/v1/servers/{id}/scan/cancel", Status: DoorExempt, Reason: "scan job"},
 	{Door: "REST POST /api/v1/servers/{id}/security/approve", Status: DoorPending, Slice: "PR-2", Actions: []string{"server.review_approve", "server.baseline_set", "tool.approve", "tool.block"}, Reason: "security review"},
+	{Door: "REST POST /api/v1/servers/{id}/security/approve", Branch: "triggered refresh", Status: DoorPending, Slice: "PR-2", Actions: []string{"prompt.approve", "prompt.hold", "skill.approve", "skill.hold"}, Reason: "prompt and skill refreshes the server commit triggers (rule 1a)"},
 	{Door: "REST POST /api/v1/servers/{id}/security/reject", Status: DoorPending, Slice: "PR-2", Actions: []string{"server.baseline_clear"}, Reason: "security review"},
 	{Door: "REST POST /api/v1/servers/{id}/skills/approve", Status: DoorPending, Slice: "PR-2", Actions: []string{"skill.approve"}, Reason: "skill decisions"},
 	{Door: "REST POST /api/v1/servers/{id}/skills/block", Status: DoorPending, Slice: "PR-2", Actions: []string{"skill.block"}, Reason: "skill decisions"},

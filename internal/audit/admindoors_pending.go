@@ -1,10 +1,9 @@
 package audit
 
 // AdminDoorsFrozenPending is the frozen pending set, one key per
-// "<door>#<branch>#<action>". The plan keeps registry status per (door,
-// branch, effect): a slice that ships one action of a shared row removes only
-// that key, and the row stays pending while any of its actions does. Adding a
-// key is a reviewed change.
+// "<door>#<branch>#<action>" (AdminDoor.PendingActions). Status is kept per
+// effect: a slice that ships one action of a shared row lists it in that
+// row's Shipped and removes only that key. Adding a key is a reviewed change.
 var AdminDoorsFrozenPending = []string{
 	"CLI mcpproxy##config.update",
 	"CLI mcpproxy catalog add##server.add",
@@ -46,6 +45,8 @@ var AdminDoorsFrozenPending = []string{
 	"CLI mcpproxy disconnect##client.key_revoke",
 	"CLI mcpproxy disconnect##client.bind",
 	"CLI mcpproxy disconnect##login.cancel",
+	"CLI mcpproxy doctor#reconcile#client.rotate_finalize",
+	"CLI mcpproxy doctor#reconcile#client.rotate_rollback",
 	"CLI mcpproxy profile anonymous##profile.set_anonymous",
 	"CLI mcpproxy profile classify##profile.classify",
 	"CLI mcpproxy profile create##profile.create",
@@ -69,6 +70,10 @@ var AdminDoorsFrozenPending = []string{
 	"CLI mcpproxy review approve##server.baseline_set",
 	"CLI mcpproxy review approve##tool.approve",
 	"CLI mcpproxy review approve##tool.block",
+	"CLI mcpproxy review approve#triggered refresh#prompt.approve",
+	"CLI mcpproxy review approve#triggered refresh#prompt.hold",
+	"CLI mcpproxy review approve#triggered refresh#skill.approve",
+	"CLI mcpproxy review approve#triggered refresh#skill.hold",
 	"CLI mcpproxy review fetch##tool.approve",
 	"CLI mcpproxy review fetch##tool.hold",
 	"CLI mcpproxy review fetch##server.baseline_set",
@@ -80,6 +85,10 @@ var AdminDoorsFrozenPending = []string{
 	"CLI mcpproxy security approve##server.baseline_set",
 	"CLI mcpproxy security approve##tool.approve",
 	"CLI mcpproxy security approve##tool.block",
+	"CLI mcpproxy security approve#triggered refresh#prompt.approve",
+	"CLI mcpproxy security approve#triggered refresh#prompt.hold",
+	"CLI mcpproxy security approve#triggered refresh#skill.approve",
+	"CLI mcpproxy security approve#triggered refresh#skill.hold",
 	"CLI mcpproxy security bundle refresh##bundle.activate",
 	"CLI mcpproxy security bundle refresh##bundle.reload",
 	"CLI mcpproxy security bundle reload##bundle.reload",
@@ -247,8 +256,6 @@ var AdminDoorsFrozenPending = []string{
 	"REST GET /api/v1/clients#reconcile#client.rotate_rollback",
 	"REST GET /api/v1/clients/{client}#reconcile#client.rotate_finalize",
 	"REST GET /api/v1/clients/{client}#reconcile#client.rotate_rollback",
-	"REST GET /api/v1/connect#reconcile#client.rotate_finalize",
-	"REST GET /api/v1/connect#reconcile#client.rotate_rollback",
 	"REST GET /api/v1/connect/{client}#reconcile#client.rotate_finalize",
 	"REST GET /api/v1/connect/{client}#reconcile#client.rotate_rollback",
 	"REST GET /api/v1/connect/{client}/preview#reconcile#client.rotate_finalize",
@@ -443,6 +450,10 @@ var AdminDoorsFrozenPending = []string{
 	"REST POST /api/v1/servers/{id}/security/approve##server.baseline_set",
 	"REST POST /api/v1/servers/{id}/security/approve##tool.approve",
 	"REST POST /api/v1/servers/{id}/security/approve##tool.block",
+	"REST POST /api/v1/servers/{id}/security/approve#triggered refresh#prompt.approve",
+	"REST POST /api/v1/servers/{id}/security/approve#triggered refresh#prompt.hold",
+	"REST POST /api/v1/servers/{id}/security/approve#triggered refresh#skill.approve",
+	"REST POST /api/v1/servers/{id}/security/approve#triggered refresh#skill.hold",
 	"REST POST /api/v1/servers/{id}/security/reject##server.baseline_clear",
 	"REST POST /api/v1/servers/{id}/skills/approve##skill.approve",
 	"REST POST /api/v1/servers/{id}/skills/block##skill.block",

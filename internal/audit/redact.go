@@ -159,8 +159,12 @@ func maskAllSpans(s string) (masked string, hit bool) {
 				// contain, e.g. a JSON quote), rather than resume mid-way and
 				// leave a partly consumed token's tail visible. Masking stops
 				// there, so the rest of a serialized record is untouched.
-				spans = append(spans, [2]int{off + m[0], credentialRunEnd(s, off+m[0])})
-				break
+				end := credentialRunEnd(s, off+m[0])
+				spans = append(spans, [2]int{off + m[0], end})
+				// Keep scanning after the run, with a fresh bound, so a
+				// later credential in the same string is still found.
+				off, rescans = end, 0
+				continue
 			}
 			rescans++
 			off += m[0] + 1

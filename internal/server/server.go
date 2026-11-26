@@ -436,12 +436,15 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		}
 	}
 
+	// Spec 133 FR-019: every audit counter is administrator-only in Doctor —
+	// they now also move with administrators' admin_action writes, which a
+	// scoped caller must not be able to observe.
 	// Spec 107 T109: the audit sink's always-on write-failure counter, mirrored
 	// to both `mcpproxy doctor` (works with metrics disabled) and Prometheus
 	// (metrics enabled only). Registered only when a sink exists - nil means
 	// audit_log is off, so there is nothing to report.
 	if server.auditSink != nil {
-		mgmtService.AddRuntimeWarningSource(func() []string {
+		mgmtService.AddAdminRuntimeWarningSource(func() []string {
 			if n := server.auditSink.WriteFailures(); n > 0 {
 				return []string{fmt.Sprintf("audit_log: %d write failures since start", n)}
 			}
@@ -451,7 +454,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		// counter, mirrored the same way as the write-failure counter above -
 		// a nonzero count means a builder bug let a credential-shaped string
 		// past per-field masking (the pass still masked and wrote the line).
-		mgmtService.AddRuntimeWarningSource(func() []string {
+		mgmtService.AddAdminRuntimeWarningSource(func() []string {
 			if n := server.auditSink.SanitizerHits(); n > 0 {
 				return []string{fmt.Sprintf("audit_log: %d defence-in-depth sanitizer hits since start (a builder bug may be leaking credential-shaped values into audit lines)", n)}
 			}

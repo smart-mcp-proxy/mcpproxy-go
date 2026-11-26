@@ -473,4 +473,16 @@ func TestAdminActionDoors_WebUISurface(t *testing.T) {
 	require.Len(t, lines, 1)
 	require.Equal(t, "web", lines[0]["client"].(map[string]interface{})["surface"])
 	require.Equal(t, "webui/1.0", lines[0]["client"].(map[string]interface{})["name"])
+	for _, step := range []struct{ method, path, action string }{
+		{http.MethodPost, "/api/v1/tokens/web-bot/regenerate", "token.rotate"},
+		{http.MethodDelete, "/api/v1/tokens/web-bot", "token.revoke"},
+		{http.MethodDelete, "/api/v1/tokens/web-bot/permanent", "token.delete"},
+	} {
+		code, body := e.restAs("webui/1.0", step.method, step.path, "", nil)
+		require.Less(t, code, 300, "%s %s: %s", step.method, step.path, body)
+		lines := e.adminLines(&seen)
+		require.Len(t, lines, 1, step.action)
+		require.Equal(t, step.action, lines[0]["action"])
+		require.Equal(t, "web", lines[0]["client"].(map[string]interface{})["surface"], step.action)
+	}
 }

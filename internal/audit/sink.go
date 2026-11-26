@@ -79,6 +79,9 @@ type writerSink struct {
 	// blocks every write), so the path still names the torn file, and a
 	// rotation cannot run before the repair. Cleared once it succeeds.
 	openRepair func() error
+	// closeRepair is the held torn-file handle, closed with the sink if the
+	// repair never succeeded.
+	closeRepair io.Closer
 
 	clock         func() time.Time
 	failureLogger func(error)
@@ -133,7 +136,7 @@ func (s *writerSink) Write(line []byte) error {
 		var err error
 		if s.openRepair != nil {
 			if err = s.openRepair(); err == nil {
-				s.torn, s.openRepair = false, nil
+				s.torn, s.openRepair, s.closeRepair = false, nil, nil
 			}
 		} else {
 			var n int
@@ -210,6 +213,10 @@ func (s *writerSink) SanitizerHits() uint64 {
 func (s *writerSink) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closeRepair != nil {
+		_ = s.closeRepair.Close()
+		s.closeRepair = nil
+	}
 	if s.closer != nil {
 		return s.closer.Close()
 	}
@@ -262,10 +269,26 @@ func NewFileSink(path string, maxSizeMB, maxBackups, maxAgeDays int, compress bo
 		// The path names the torn file here: nothing has opened it yet.
 		// After this point repairs go through the writer's own handle, the
 		// file that received the partial write, even if the path is renamed.
-		if err := appendNewline(path); err == nil {
-			s.torn = false
+		// Hold the torn file itself: a retry must repair THAT file, even if
+		// the path is renamed or removed in between.
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+		if err == nil {
+			if werr := writeNewline(f); werr == nil {
+				_ = f.Close()
+				s.torn = false
+			} else {
+				s.openRepair = func() error {
+					if err := writeNewline(f); err != nil {
+						return err
+					}
+					_ = f.Close()
+					return nil
+				}
+				s.closeRepair = f
+			}
 		} else {
-			s.openRepair = func() error { return repairTornPath(path) }
+			// Not even openable now: retry by path, the only handle there is.
+			s.openRepair = func() error { return appendNewline(path) }
 		}
 	}
 	return s, nil
@@ -319,13 +342,14 @@ func probeWritable(path string) error {
 	return f.Close()
 }
 
-// repairTornPath appends the boundary newline to the torn file at path. A
-// file that no longer exists (an operator removed it to free space) has no
-// tail left to repair: the rotating writer creates a clean one.
-func repairTornPath(path string) error {
-	err := appendNewline(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
+// writeNewline writes one newline to f.
+func writeNewline(f *os.File) error {
+	n, err := f.Write([]byte{'\n'})
+	if err != nil {
+		return err
 	}
-	return err
+	if n != 1 {
+		return io.ErrShortWrite
+	}
+	return nil
 }
