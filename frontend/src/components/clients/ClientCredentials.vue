@@ -1,11 +1,11 @@
 <template>
-  <section v-if="visible && (section !== 'revoke' || revocable.length)" class="space-y-2" :data-test="`client-credentials-${client.id}${section === 'revoke' ? '-revoke' : ''}`">
+  <section v-if="visible && (section !== 'revoke' || revocable.length || pending || busy)" class="space-y-2" :data-test="`client-credentials-${client.id}${section === 'revoke' ? '-revoke' : ''}`">
     <h3 v-if="section === 'all'" class="text-sm font-semibold">Credentials</h3>
     <!-- Spec 134 FR-060: in the Manage panel's closed "Disconnect or remove" group each
          revocation is a button with one line saying what it does. -->
     <ul v-if="section === 'revoke'" class="space-y-3">
       <li v-for="cred in revocable" :key="credKey(cred)" class="space-y-1">
-        <button v-if="cred.kind === 'api_key'" type="button" class="btn btn-sm btn-outline btn-error max-sm:min-h-11" data-test="revoke-api-key" @click="ask({ kind: 'api_key' })">Revoke API key</button>
+        <button v-if="cred.kind === 'api_key'" type="button" class="btn btn-sm btn-outline btn-error max-sm:min-h-11" data-test="revoke-api-key" @click="ask({ kind: 'api_key', prefix: cred.prefix ?? '' })">Revoke API key</button>
         <button v-else type="button" class="btn btn-sm btn-outline btn-error max-sm:min-h-11" :data-test="`revoke-login-${cred.grant_id}`" :aria-label="`Revoke this login of ${client.display_name}`" @click="ask({ kind: 'browser_login', cred })">Revoke login of <bdi class="font-mono">{{ cred.reported_name }}</bdi></button>
         <p v-if="cred.kind === 'browser_login'" class="text-sm" :data-test="`credential-facts-${cred.grant_id}`">Approved {{ when(cred.approved_at) }} · last used {{ when(cred.last_used_at) }} · returns to <bdi class="font-mono">{{ cred.redirect_host }}</bdi></p>
         <p class="text-sm text-base-content/70">{{ cred.kind === 'api_key' ? 'Stops the key working; browser logins and the profile binding stay.' : `Stops the login returning to ${cred.redirect_host} on its next request; other credentials and the profile binding stay.` }}</p>
@@ -24,7 +24,7 @@
           <span class="badge badge-sm" :class="stateClass(cred.state)" :data-test="`credential-state-${cred.kind === 'api_key' ? 'api_key' : cred.grant_id}`">{{ cred.state }}</span>
           <span class="grow" />
           <template v-if="section === 'all'">
-            <button v-if="cred.kind === 'api_key' && cred.state !== 'revoked'" type="button" class="btn btn-ghost btn-xs text-error" data-test="revoke-api-key" @click="ask({ kind: 'api_key' })">Revoke API key</button>
+            <button v-if="cred.kind === 'api_key' && cred.state !== 'revoked'" type="button" class="btn btn-ghost btn-xs text-error" data-test="revoke-api-key" @click="ask({ kind: 'api_key', prefix: cred.prefix ?? '' })">Revoke API key</button>
             <button v-if="cred.kind === 'browser_login' && cred.state !== 'revoked'" type="button" class="btn btn-ghost btn-xs text-error" :data-test="`revoke-login-${cred.grant_id}`" :aria-label="`Revoke this login of ${client.display_name}`" @click="ask({ kind: 'browser_login', cred })">Revoke login</button>
           </template>
         </div>
@@ -78,7 +78,7 @@ import type { ClientCredential, ClientPresence } from '@/types/api'
 //
 // Reported names, observed names and redirect hosts come from the client
 // itself: they are rendered as text inside <bdi>, never as HTML.
-type Pending = { kind: 'api_key' } | { kind: 'browser_login'; cred: ClientCredential }
+type Pending = { kind: 'api_key'; prefix: string } | { kind: 'browser_login'; cred: ClientCredential }
 
 // `section` (Spec 134 FR-060): `status` lists the credentials without revoke buttons
 // (group "How it connects"), `revoke` shows only the revoke actions (group
@@ -97,8 +97,18 @@ const dialogTitle = computed(() => pending.value?.kind === 'api_key' ? 'Revoke A
 
 // A confirmation names the credential the operator chose. If the credential set changes under an open
 // confirmation (another session revoked or re-issued it) the confirmation is dropped, never retargeted.
-watch(() => credentials.value.map(cred => `${cred.kind}:${cred.grant_id ?? ''}:${cred.prefix ?? ''}:${cred.state}`).join('|'), () => {
-  if (!busy.value) { pending.value = null; error.value = '' }
+// Only the credential the confirmation names matters: another credential changing leaves it alone.
+function sigOf(cred: ClientCredential | undefined) { return cred ? `${cred.kind}:${cred.grant_id ?? ''}:${cred.prefix ?? ''}:${cred.state}` : 'gone' }
+function pendingCredential(target: Pending): ClientCredential | undefined {
+  return target.kind === 'api_key'
+    ? credentials.value.find(cred => cred.kind === 'api_key')
+    : credentials.value.find(cred => cred.kind === 'browser_login' && cred.grant_id === target.cred.grant_id)
+}
+let pendingSig = ''
+watch(() => pending.value ? sigOf(pendingCredential(pending.value)) : '', (sig) => {
+  if (!pending.value) { pendingSig = ''; return }
+  if (!pendingSig) { pendingSig = sig; return }
+  if (sig !== pendingSig && !busy.value) { pending.value = null; error.value = ''; pendingSig = '' }
 })
 function credKey(cred: ClientCredential) { return cred.kind === 'api_key' ? 'api_key' : `login-${cred.grant_id}` }
 function when(value?: string | null) { return value ? new Date(value).toLocaleString() : 'never' }
@@ -117,6 +127,7 @@ function ask(next: Pending) {
   if (busy.value) return // a revoke is in flight: the target cannot change under it
   current = ++opSeq
   error.value = ''
+  pendingSig = sigOf(pendingCredential(next))
   pending.value = next
 }
 function cancel() {
@@ -129,6 +140,11 @@ async function confirm() {
   const target = pending.value
   if (!target || busy.value) return
   const op = current
+  // The key shown when the confirmation opened is the key revoked: a replacement is never hit by a retry.
+  if (target.kind === 'api_key' && (pendingCredential(target)?.prefix ?? '') !== target.prefix) {
+    error.value = 'The API key changed since this confirmation opened. Close it and review the key again.'
+    return
+  }
   busy.value = true
   error.value = ''
   try {

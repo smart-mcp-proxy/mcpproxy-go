@@ -75,7 +75,7 @@
         <section class="space-y-3" :data-test="`client-manage-key-${client.id}`" :aria-labelledby="`${titleId}-key`">
           <h3 :id="`${titleId}-key`" class="text-base font-semibold">Key</h3>
           <CredentialLifecycle v-if="client.kind === 'custom' || client.issuer" :id="client.id" kind="client" :profile="client.profile" :mode="client.profile_mode" :issuer="client.issuer" :lease="client.lease" :expires-at="client.expires_at" :revoked="client.credential_state === 'revoked'" :revoked-at="client.revoked_at" :credential-state="client.credential_state" :purpose="client.purpose" :profile-state="client.profile_state" :show-state="true" />
-          <ClientBindingControls :client="client" section="key" @changed="emit('changed')" @credential="emit('credential', $event)" />
+          <ClientBindingControls :client="client" section="key" @changed="emit('changed')" @credential="emit('credential', $event)" @busy="emit('busy', $event)" />
         </section>
 
         <!-- 4. Disconnect or remove (closed by default) -->
@@ -122,6 +122,7 @@ const emit = defineEmits<{
   (e: 'forget', client: ClientPresence): void
   (e: 'credential', payload: { credential: string; snippet?: { generic_http: string; header_name: string } | null; title: string }): void
   (e: 'check', id: string): void
+  (e: 'busy', busy: boolean): void
   (e: 'connect', id: string): void
 }>()
 

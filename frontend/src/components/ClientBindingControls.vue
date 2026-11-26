@@ -49,7 +49,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import BaseDialog from '@/components/BaseDialog.vue'
 import AccessExplainer from '@/components/AccessExplainer.vue'
 import api from '@/services/api'
@@ -74,6 +74,8 @@ const profileFact = computed(() => props.section === 'access' && Boolean(props.c
 const showRemove = computed(() => props.section === 'all' || props.section === 'remove')
 const emit = defineEmits<{
   (e: 'changed'): void
+  // A rotation is in flight: the page must not tear the panel down before its one-time credential arrives.
+  (e: 'busy', busy: boolean): void
   // The forget dialog lives on the page, not in the row: a forgotten custom
   // client drops out of the list, and its result must outlive the row.
   (e: 'forget', client: ClientPresence): void
@@ -87,13 +89,17 @@ const rotateOpen = ref(false)
 const rotatePreview = ref<ConnectPreview | null>(null)
 const rotateError = ref('')
 const rotateBusy = ref(false)
+watch(rotateBusy, value => emit('busy', value))
 const actionResult = ref('')
 const actionError = ref('')
 
 const isCustom = computed(() => props.client.kind === 'custom')
 const hasRecord = computed(() => Boolean(props.client.token_name) || ['client', 'revoked', 'expired'].includes(props.client.credential_state ?? ''))
 
+// Each opening of the dialog has its own number: a preview that answers for an earlier opening is dropped.
+let openSeq = 0
 async function startRotate() {
+  const mine = ++openSeq
   rotateOpen.value = true
   rotateError.value = ''
   rotatePreview.value = null
@@ -104,16 +110,18 @@ async function startRotate() {
   // then binds the rotate call, so a config edited in between is refused.
   try {
     const response = await api.getConnectPreview(props.client.id)
+    if (mine !== openSeq) return
     if (response.success && response.data) rotatePreview.value = response.data
     else rotateError.value = response.error || 'Failed to load the preview'
   } catch (err) {
-    rotateError.value = describeError(err)
+    if (mine === openSeq) rotateError.value = describeError(err)
   }
 }
 
 function closeRotate() {
   // The one-time credential of a custom rotation must reach the page: no closing while it is in flight.
   if (rotateBusy.value) return
+  openSeq++
   rotateOpen.value = false
   rotatePreview.value = null
 }
@@ -123,6 +131,7 @@ async function confirmRotate() {
   rotateError.value = ''
   try {
     const result = await api.rotateClient(props.client.id, isCustom.value ? {} : { precondition_token: rotatePreview.value?.precondition_token })
+    rotateBusy.value = false
     closeRotate()
     if (isCustom.value && result.credential) {
       emit('credential', { credential: result.credential, snippet: result.snippet ?? null, title: `New credential for ${props.client.display_name}` })

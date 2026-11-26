@@ -18,12 +18,6 @@
       <ViewAs />
       <ScopeChips v-if="tab === 'clients'" page="clients" :scope-query="scopeQuery" :disabled="scopeNotApplied" :unavailable="scopeUnavailable" />
     </div>
-    <!-- Spec 134 FR-016: View as and its chips in the filter row of the Clients
-         and Tokens tabs (the Endpoint tab applies no scope). -->
-    <div v-if="tab !== 'endpoint'" class="flex flex-wrap items-center gap-2 empty:hidden" data-test="clients-view-as">
-      <ViewAs />
-      <ScopeChips v-if="tab === 'clients'" page="clients" :scope-query="scopeQuery" :disabled="scopeNotApplied" :unavailable="scopeUnavailable" />
-    </div>
     <section v-if="tab === 'clients'" class="space-y-3">
       <ClientsWarningsBanner :warnings="store.warnings" @upgrade="upgradeOpen = true" @move="moveClient" />
       <div v-if="store.loading" class="py-12 text-center"><span class="loading loading-spinner loading-lg" /></div>
@@ -55,6 +49,7 @@
       @forget="forgetTarget = $event"
       @credential="showCredential"
       @check="checkConnection"
+      @busy="onPanelBusy"
       @connect="openConnectFor"
     />
     <ClientConnectList :show="connectOpen" :reveal-client="connectReveal" @close="connectOpen = false; connectReveal = ''" @updated="refreshClients" />
@@ -165,7 +160,15 @@ async function copyOtherClientSnippet() {
 }
 function selectTab(id: string) { tab.value = id }
 // The panel belongs to the Clients tab: leaving it (a tab, the palette, a link) closes it and its dialogs.
-watch(tab, (value) => { if (value !== 'clients') { handledFocus = ''; if (panelId.value) panelId.value = '' } })
+// A credential rotation in flight keeps the panel until its one-time secret has reached the page.
+let panelBusy = false
+let closeWhenIdle = false
+function onPanelBusy(busy: boolean) {
+  panelBusy = busy
+  if (!busy && closeWhenIdle) { closeWhenIdle = false; panelId.value = '' }
+}
+function dropPanel() { if (panelBusy) closeWhenIdle = true; else panelId.value = '' }
+watch(tab, (value) => { if (value !== 'clients') { handledFocus = ''; if (panelId.value) dropPanel() } })
 watch(tab, value => {
   if (route.path !== '/clients') return
   const query = { ...route.query }
@@ -256,7 +259,7 @@ async function moveClient(id: string) {
   await openPanel(id)
 }
 // A scope change reloads the roster: the panel of a client from the old list closes with it.
-watch(() => [scopeQuery.state.profile, scopeQuery.state.client], () => { panelId.value = ''; if (authStore.principalKind !== 'tenant') refreshClients() })
+watch(() => [scopeQuery.state.profile, scopeQuery.state.client], () => { dropPanel(); if (authStore.principalKind !== 'tenant') refreshClients() })
 watch(() => route.query.move, value => { moveRequest.value = value === '1' && typeof route.query.focus === 'string' ? route.query.focus : '' }, { immediate: true })
 onMounted(() => {
   if (authStore.principalKind === 'tenant') return
