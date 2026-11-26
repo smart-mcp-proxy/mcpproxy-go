@@ -85,6 +85,15 @@ describe('Profile editor action row (FR-052)', () => {
     await flushPromises()
     expect(w.get('[data-test="profile-response-limit"]').text()).toContain('whole number')
     expect(scroll).toHaveBeenCalled()
+    const field = w.get('[data-test="profile-response-limit-value"]')
+    expect(field.attributes('aria-invalid')).toBe('true')
+    expect(w.get(`#${field.attributes('aria-describedby')}`).text()).toContain('whole number')
+    // Focus lands in the invalid field itself, so the next Tab stays on it.
+    expect(document.activeElement).toBe(w.get('[data-test="profile-response-limit-value"]').element)
+    // Correcting the value clears the stale invalid state.
+    await w.get('[data-test="profile-response-limit-value"]').setValue('20000')
+    await flushPromises()
+    expect(w.get('[data-test="profile-response-limit-value"]').attributes('aria-invalid')).toBeUndefined()
     delete (Element.prototype as any).scrollIntoView
   })
 })

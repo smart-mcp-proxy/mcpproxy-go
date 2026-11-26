@@ -53,7 +53,7 @@
         <!-- ============================ -->
         <!-- Tab: Clients -->
         <!-- ============================ -->
-        <section v-if="activeTab === 'clients'" id="wizard-panel-clients" role="tabpanel" aria-labelledby="wizard-tab-clients" data-test="panel-clients">
+        <section v-if="activeTab === 'clients'" id="wizard-panel-clients" role="tabpanel" tabindex="0" aria-labelledby="wizard-tab-clients" data-test="panel-clients">
           <!-- The wizard's primary client path is the same component used by
                Clients. Keep the legacy markup below inert temporarily while
                its presentation-only helpers are retired; it must never own a
@@ -207,7 +207,7 @@
         <!-- ============================ -->
         <!-- Tab: Servers -->
         <!-- ============================ -->
-        <section v-else-if="activeTab === 'servers'" id="wizard-panel-servers" role="tabpanel" aria-labelledby="wizard-tab-servers" data-test="panel-servers">
+        <section v-else-if="activeTab === 'servers'" id="wizard-panel-servers" role="tabpanel" tabindex="0" aria-labelledby="wizard-tab-servers" data-test="panel-servers">
           <p class="text-sm opacity-70 mb-4">
             Pick which servers from your existing AI clients to import. Same name in multiple sources? We auto-rename collisions like
             <code class="font-mono text-xs bg-base-200 px-1 rounded">mcpproxy_claude_code</code> so each entry stays distinct.
@@ -444,7 +444,7 @@
         <!-- ============================ -->
         <!-- Tab: Verify -->
         <!-- ============================ -->
-        <section v-else-if="activeTab === 'verify'" id="wizard-panel-verify" role="tabpanel" aria-labelledby="wizard-tab-verify" data-test="panel-verify">
+        <section v-else-if="activeTab === 'verify'" id="wizard-panel-verify" role="tabpanel" tabindex="0" aria-labelledby="wizard-tab-verify" data-test="panel-verify">
           <!-- Two milestones, deliberately separate (UX audit F13). The MCP
                `initialize` handshake behind firstMCPClientEver proves the
                wiring only; the value the product exists for is an upstream
@@ -467,6 +467,8 @@
                  no row. -->
             <div
               class="flex items-start justify-center gap-2 pb-4 text-sm text-center max-w-md mx-auto"
+              role="status"
+              aria-live="polite"
               data-test="verify-first-upstream-call"
               :data-state="upstreamCallState"
             >
@@ -491,7 +493,7 @@
               <template v-else>
                 <span class="opacity-50"><UiIcon name="signal" class="w-4 h-4" /></span>
                 <span class="opacity-70">
-                  <span class="font-semibold">Upstream tool calls are not tracked here</span> — mcpproxy cannot say whether a tool has run, because this routing mode or an unreadable status hides it. Check Recent activity below.
+                  <span class="font-semibold">Cannot tell from here whether a tool has run</span> — the status could not be read or does not say (older core, or direct or code-execution routing). Check Recent activity below.
                 </span>
               </template>
             </div>
@@ -744,6 +746,21 @@ const importSession = ref(0)
 // this flag a delayed result would overwrite the tab the user already chose
 // while those fetches were pending.
 let userPickedTab = false
+// The wizard can pick a step by itself while the user is already inside the
+// previous step's panel; that panel unmounts and would drop keyboard focus.
+// Hand focus to the new step's tab instead.
+watch(activeTab, () => {
+  void nextTick(() => {
+    const dlg = dialogEl.value
+    if (!dlg || !dlg.open) return
+    const cur = document.activeElement as HTMLElement | null
+    // Focus inside the new step's panel (or on its selected tab) stays; focus on
+    // a tab that just became unselected, or nowhere, moves to the selected tab.
+    const onStaleTab = cur?.getAttribute('role') === 'tab' && cur.getAttribute('aria-selected') !== 'true'
+    if (cur && dlg.contains(cur) && cur !== dlg && !onStaleTab) return
+    ;(dlg.querySelector(`[data-test="tab-${activeTab.value}"]`) as HTMLElement | null)?.focus()
+  })
+})
 function selectTab(id: TabID) {
   userPickedTab = true
   activeTab.value = id
@@ -1089,9 +1106,17 @@ const suggestedPrompts = computed(() => {
 // the old run finish and stamp its tab over the new one — and call
 // startPolling() on a wizard that is no longer open, leaving a 5s poll running
 // until unmount. Every run checks it still owns the wizard before it writes.
+// True once the status call behind the verify step's upstream row has answered
+// (or failed); declared before onOpened, which the immediate watcher runs.
+const upstreamStatusSettled = ref(false)
 let openSeq = 0
 async function onOpened() {
   const seq = ++openSeq
+  // A reopened wizard asks again: until the new status call answers, the
+  // upstream row says "checking", not a leftover "not tracked".
+  upstreamStatusSettled.value = false
+  // A negative seen in an earlier open is stale; a latched true is a lifetime fact.
+  if (firstRealToolCallEver.value !== true) firstRealToolCallEver.value = null
   userPickedTab = false
   const requested = onboarding.consumeWizardInitialTab()
   importSession.value++
@@ -1132,7 +1157,7 @@ async function onOpened() {
     fetchDockerStatus(),
     fetchImportSources(),
     fetchRecentActivity(),
-    fetchActivation(),
+    fetchActivation(seq),
     // Spec 109-ux-navigation-consistency US7 Acceptance Scenario 4: the
     // Servers step's inline review list (below) reads serversStore directly,
     // so it needs a fresh fetch on every open rather than relying on some
@@ -1181,16 +1206,17 @@ function pickInitialTab(requested: TabID | null): TabID {
 // than as a way to undo a wrong turn.
 const tabOrder: TabID[] = ['clients', 'servers', 'verify']
 const canGoBack = computed(() => tabOrder.indexOf(activeTab.value) > 0)
-// FR-053: the tab strip is a roving-tabindex tablist, so the arrow keys, Home
+// FR-053: the tab strip is a roving-tabindex tablist, so the arrow keys (wrapping), Home
 // and End move between steps (Enter and Space activate a focused tab natively).
 function onTabKeydown(event: KeyboardEvent) {
+  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return // browser/OS shortcuts keep their meaning
   // Arrow keys move from the FOCUSED tab, which can differ from the selected
   // one when the wizard picks a step by itself while focus sits on another.
   const focused = (event.currentTarget as HTMLElement | null)?.getAttribute('data-test')?.replace('tab-', '') as TabID | undefined
   const i = focused ? tabOrder.indexOf(focused) : tabOrder.indexOf(activeTab.value)
   let next = -1
-  if (event.key === 'ArrowRight') next = Math.min(i + 1, tabOrder.length - 1)
-  else if (event.key === 'ArrowLeft') next = Math.max(i - 1, 0)
+  if (event.key === 'ArrowRight') next = (i + 1) % tabOrder.length
+  else if (event.key === 'ArrowLeft') next = (i - 1 + tabOrder.length) % tabOrder.length
   else if (event.key === 'Home') next = 0
   else if (event.key === 'End') next = tabOrder.length - 1
   if (next < 0) return
@@ -1328,10 +1354,12 @@ async function fetchRecentActivity() {
 // Never surfaces an error: a missing `activation` block leaves the milestone
 // unknown, and the row simply does not render. It must not read as "not yet"
 // — that is an assertion about the user's install we have no basis for.
-const upstreamStatusSettled = ref(false)
-async function fetchActivation() {
+// `token` is the open this request belongs to (a poll uses the current one):
+// the answer to an earlier open must change nothing in this one.
+async function fetchActivation(token: number = openSeq) {
   try {
     const res = await api.getStatus()
+    if (token !== openSeq) return
     if (!res.success || !res.data) return
     routingMode.value = res.data.routing_mode ?? ''
     // The flag is monotonic in the core: it latches on and never clears. Once
@@ -1343,7 +1371,7 @@ async function fetchActivation() {
   } catch {
     // graceful — keep prior value
   } finally {
-    upstreamStatusSettled.value = true
+    if (token === openSeq) upstreamStatusSettled.value = true
   }
 }
 

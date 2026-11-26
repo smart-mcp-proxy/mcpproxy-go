@@ -122,11 +122,11 @@
                 <label class="label cursor-pointer gap-2 py-0"><input v-model="draft.response_limit_mode" type="radio" class="radio radio-sm" value="custom" name="response-limit-mode" data-test="profile-response-limit-custom" /><span class="label-text">Custom</span></label>
               </div>
               <label v-if="draft.response_limit_mode === 'custom'" class="flex items-center gap-2 mt-1">
-                <input v-model.number="draft.response_limit" type="number" min="1" step="1" class="input input-bordered input-sm w-40" aria-label="Tool response limit in characters" data-test="profile-response-limit-value" />
+                <input v-model.number="draft.response_limit" type="number" min="1" step="1" class="input input-bordered input-sm w-40" aria-label="Tool response limit in characters" :aria-invalid="fieldErrors.tool_response_limit ? 'true' : undefined" :aria-describedby="fieldErrors.tool_response_limit ? 'profile-response-limit-error' : undefined" data-test="profile-response-limit-value" />
                 <span class="text-sm opacity-70">characters</span>
               </label>
               <span class="text-xs opacity-70 mt-1">Replaces the global limit for calls under this profile. Use "No limit" for scripts that parse whole results.</span>
-              <span v-if="fieldErrors.tool_response_limit" class="text-error text-xs mt-1">{{ fieldErrors.tool_response_limit }}</span>
+              <span v-if="fieldErrors.tool_response_limit" id="profile-response-limit-error" role="alert" class="text-error text-xs mt-1">{{ fieldErrors.tool_response_limit }}</span>
             </fieldset>
 
             <fieldset class="form-control" data-test="profile-switchable">
@@ -345,6 +345,8 @@ const saveError = ref('')
 const savedNote = ref('')
 const guard = ref<ApiError | null>(null)
 const fieldErrors = reactive<Record<string, string>>({})
+// An edited limit is a new attempt: its old message (and aria-invalid) goes away.
+watch(() => [draft?.response_limit_mode, draft?.response_limit], () => { delete fieldErrors.tool_response_limit })
 const warnings = ref<string[]>([])
 const changedElsewhere = ref(false)
 const renameOpen = ref(false)
@@ -489,6 +491,7 @@ async function save() {
   const name = props.name
   const body = toConfig(draft)
   const sent = draftSnapshot()
+  const focusAtSubmit = document.activeElement
   try {
     const result = await api.updateProfile(name, body)
     if (props.name !== name) return
@@ -509,19 +512,42 @@ async function save() {
     // The draft stays: nothing was written. Bring the reason into view: it sits
     // under the form, away from the action row, and the row alone only says
     // "Unsaved changes".
-    void revealRefusal()
+    // An edit, or a move of focus, made while the save was in flight keeps the user's place.
+    void revealRefusal(draftSnapshot() === sent && focusStayed(focusAtSubmit))
   } finally {
     saving.value = false
   }
 }
 
-async function revealRefusal() {
+// Focus is "where it was" if it is still there or has only fallen to <body> (a
+// disabled Save button drops it there); anything else is a move by the user.
+function focusStayed(at: Element | null): boolean {
+  const now = document.activeElement
+  return !now || now === document.body || now === at
+}
+
+async function revealRefusal(mayMoveFocusToField = true) {
   await nextTick()
   // A refusal block, else the first field message: the action row now sits
   // after the tool rules, far from the field the message belongs to.
   const target = refusalEl.value?.querySelector<HTMLElement>('[data-test="guard-refusal"], [data-test="profile-save-error"]')
     ?? document.querySelector<HTMLElement>('[data-test="profile-form"] .text-error')
   if (!target) return
+  // A field message: focus the field it belongs to, so the next Tab stays on it.
+  const input = target.matches('.text-error') && !refusalEl.value?.contains(target)
+    ? (() => {
+        const group = target.closest('.form-control')
+        return group?.querySelector<HTMLElement>('input[type="number"], input[type="text"], input:not([type]), textarea, select')
+          ?? group?.querySelector<HTMLElement>('input:checked')
+          ?? group?.querySelector<HTMLElement>('input')
+      })()
+    : null
+  if (input && !mayMoveFocusToField) return
+  if (input) {
+    input.focus({ preventScroll: true })
+    input.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
+    return
+  }
   target.setAttribute('tabindex', '-1')
   target.focus({ preventScroll: true })
   target.scrollIntoView?.({ block: 'center', behavior: 'smooth' })

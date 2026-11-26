@@ -42,7 +42,7 @@
       <select
         class="select select-bordered w-full md:hidden min-h-11"
         aria-label="Settings section"
-        :value="activeTab"
+        :value="rovingTabId"
         data-test="settings-tab-select"
         @change="pickTab(($event.target as HTMLSelectElement).value)"
       >
@@ -55,7 +55,7 @@
           type="button"
           role="tab"
           :aria-selected="activeTab === t.id ? 'true' : 'false'"
-          :tabindex="activeTab === t.id ? 0 : -1"
+          :tabindex="rovingTabId === t.id ? 0 : -1"
           :data-tab-id="t.id"
           class="flex items-center justify-start gap-2 w-full min-h-11 text-left rounded px-3 py-2 text-sm hover:bg-base-200"
           :class="activeTab === t.id ? 'tab-active font-semibold settings-nav-active' : ''"
@@ -382,6 +382,10 @@ const IconBraces = makeTabIcon(
   'M8 4c-2 0-3 1-3 3v3c0 1-1 2-2 2 1 0 2 1 2 2v3c0 2 1 3 3 3m8-16c2 0 3 1 3 3v3c0 1 1 2 2 2-1 0-2 1-2 2v3c0 2-1 3-3 3'
 )
 
+// The one section button that is a Tab stop: the selected one, or the first when
+// the selection names a section that is not in the list.
+const rovingTabId = computed(() => (tabs.value.some((t) => t.id === activeTab.value) ? activeTab.value : tabs.value[0]?.id))
+
 const tabs = computed(() => {
   const base = [
     { id: 'general', label: 'General', icon: IconGear },
@@ -392,6 +396,23 @@ const tabs = computed(() => {
   if (hasServerEdition.value) base.push({ id: 'teams', label: SERVER_EDITION_TAB_LABEL, icon: IconUsers })
   base.push({ id: 'raw', label: 'Edit as JSON', icon: IconBraces })
   return base
+})
+
+// A section change the user did not make by pressing a section button (a late
+// `?tab=teams`) must not strand keyboard focus on a button that just lost its Tab stop.
+watch(activeTab, () => {
+  void nextTick(() => {
+    const cur = document.activeElement as HTMLElement | null
+    if (cur?.getAttribute('role') === 'tab' && cur.hasAttribute('data-tab-id') && cur.getAttribute('aria-selected') !== 'true') {
+      ;(document.querySelector(`[data-test="settings-tab-${activeTab.value}"]`) as HTMLElement | null)?.focus()
+    }
+  })
+})
+
+// Once the edition is known, a selection that names a section this edition lacks
+// (a `teams` pick made before status arrived) falls back to General.
+watch([tabs, () => systemStore.status?.edition], ([list]) => {
+  if (systemStore.status && !list.some((t) => t.id === activeTab.value)) activeTab.value = 'general'
 })
 
 // ---- Raw JSON (Monaco) state, preserved from the previous editor ----
@@ -563,10 +584,24 @@ function tabForFieldKey(key: string): string {
   return activeTab.value
 }
 
+function isKnownFieldKey(key: string): boolean {
+  return key === 'anonymous_profile' || allFields.value.some((f) => f.key === key) || serverEditionFields.some((f) => f.key === key)
+}
+
 async function focusField(key: string) {
   // Clear any active search so the tabbed layout (not search results) renders.
   search.value = ''
-  activeTab.value = tabForFieldKey(key)
+  // A field of a section this edition does not show (or an unknown key) must not
+  // select a section that is not in the list; the tab then stays as it is.
+  const resolved = tabForFieldKey(key)
+  if (tabs.value.some((t) => t.id === resolved) || (resolved === 'teams' && !systemStore.status)) {
+    activeTab.value = resolved
+    // The focus link picked the section: a still-pending `?tab=` retry must not undo it.
+    if (isKnownFieldKey(key)) tabParamPending = false
+  }
+  // Name the section in the URL (General, the default, is otherwise never
+  // written), so following the same bare focus link again is a real navigation.
+  if (route.query.tab === undefined && isKnownFieldKey(key) && tabs.value.some((t) => t.id === activeTab.value)) await router.replace({ query: { ...route.query, tab: activeTab.value } })
   await nextTick()
 
   // Advanced settings live inside collapsed <details>; open the one holding it.
@@ -648,11 +683,12 @@ function pickTab(id: string) {
 }
 // Roving tabindex + Up/Down/Home/End on the vertical section list.
 function onSectionKeydown(event: KeyboardEvent) {
+  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return // browser/OS shortcuts keep their meaning
   const ids = tabs.value.map((t) => t.id)
   const i = ids.indexOf((event.currentTarget as HTMLElement).getAttribute('data-tab-id') ?? '')
   let next = -1
-  if (event.key === 'ArrowDown') next = Math.min(i + 1, ids.length - 1)
-  else if (event.key === 'ArrowUp') next = Math.max(i - 1, 0)
+  if (event.key === 'ArrowDown') next = (i + 1) % ids.length
+  else if (event.key === 'ArrowUp') next = (i - 1 + ids.length) % ids.length
   else if (event.key === 'Home') next = 0
   else if (event.key === 'End') next = ids.length - 1
   if (next < 0) return
@@ -684,11 +720,17 @@ watch(
     const [prevTab, prevFocus] = prev ?? [undefined, undefined]
     if (typeof tab === 'string' && tab !== prevTab) {
       tabParamPending = false
-      applyTabParamIfValid()
+      // An unknown section selects nothing: General, as on a direct load. (While
+      // the edition is still unknown `teams` may become valid, so wait.)
+      if (!applyTabParamIfValid() && (tab !== 'teams' || systemStore.status)) {
+        activeTab.value = 'general'
+        // A valid, unchanged focus target is not forgotten with the bad tab.
+        if (typeof focus === 'string' && focus) void focusField(focus)
+      }
     }
     // A bare /settings (e.g. the sidebar link while on ?tab=security) falls
     // back to General; a focus link picks its own section below.
-    if (typeof tab !== 'string' && (typeof prevTab === 'string' || typeof prevFocus === 'string') && !(typeof focus === 'string' && focus)) {
+    if (typeof tab !== 'string' && (typeof prevTab === 'string' || typeof prevFocus === 'string') && !(typeof focus === 'string' && focus && isKnownFieldKey(focus))) {
       activeTab.value = 'general'
     }
     if (typeof focus === 'string' && focus) {

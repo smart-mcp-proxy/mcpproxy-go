@@ -119,6 +119,151 @@ describe('Review fixes', () => {
     expect(wrapper.get('[data-test="settings-tab-security"]').classes()).toContain('tab-active')
   })
 
+  it('a repeated ?focus= link on General still re-applies (the first visit writes the section into the URL)', async () => {
+    const { wrapper, router } = await mountSettings('/settings')
+    await router.push('/settings?focus=routing_mode')
+    await flushPromises()
+    await flushPromises()
+    expect(router.currentRoute.value.query.tab).toBe('general')
+    // The user searches, hiding the sections; the same link is followed again.
+    await wrapper.get('[data-test="settings-search"]').setValue('timeout')
+    expect(wrapper.find('[data-test="settings-search-results"]').exists()).toBe(true)
+    await router.push('/settings?focus=routing_mode')
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.find('[data-test="settings-search-results"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="setting-row-routing_mode"]').exists()).toBe(true)
+  })
+
+  it('an unknown ?tab= falls back to General, also on in-page navigation', async () => {
+    const { wrapper, router } = await mountSettings('/settings?tab=security')
+    const systemStore = useSystemStore()
+    // @ts-expect-error partial status is enough
+    systemStore.status = { edition: 'personal' }
+    await router.push('/settings?tab=typo')
+    await flushPromises()
+    expect(wrapper.get('[data-test="settings-tab-general"]').classes()).toContain('tab-active')
+  })
+
+  it('an unknown ?tab= falls back to General even before status arrives; ?tab=teams still waits', async () => {
+    const { wrapper, router } = await mountSettings('/settings?tab=security')
+    await router.push('/settings?tab=typo')
+    await flushPromises()
+    expect(wrapper.get('[data-test="settings-tab-general"]').classes()).toContain('tab-active')
+    const w2 = await mountSettings('/settings?tab=teams&focus=removed_field')
+    await flushPromises()
+    expect(w2.router.currentRoute.value.query.tab).toBe('teams')
+  })
+
+  it('a field of a section this edition lacks, or an unknown key, never leaves the list without a Tab stop', async () => {
+    const { wrapper, router } = await mountSettings('/settings')
+    const systemStore = useSystemStore()
+    // @ts-expect-error partial status is enough
+    systemStore.status = { edition: 'personal' }
+    await router.push('/settings?focus=server_edition.oauth.issuer_url')
+    await flushPromises()
+    const stops = wrapper.findAll('[role="tab"]').filter((t) => t.attributes('tabindex') === '0')
+    expect(stops).toHaveLength(1)
+    await router.push('/settings?focus=removed_field')
+    await flushPromises()
+    expect(router.currentRoute.value.query.tab).toBeUndefined()
+  })
+
+  it('a teams selection made before status arrived falls back to General on a personal edition', async () => {
+    const { wrapper, router } = await mountSettings('/settings')
+    await router.push('/settings?focus=server_edition.oauth.issuer_url')
+    await flushPromises()
+    const systemStore = useSystemStore()
+    // @ts-expect-error partial status is enough
+    systemStore.status = { edition: 'personal' }
+    await flushPromises()
+    expect(wrapper.get('[data-test="settings-tab-general"]').classes()).toContain('tab-active')
+  })
+
+  it('an invalid ?tab= does not hide a valid ?focus= target', async () => {
+    const { wrapper, router } = await mountSettings('/settings?focus=require_mcp_auth')
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.get('[data-test="settings-tab-security"]').classes()).toContain('tab-active')
+    const systemStore = useSystemStore()
+    // @ts-expect-error partial status is enough
+    systemStore.status = { edition: 'personal' }
+    await router.push('/settings?tab=typo&focus=require_mcp_auth')
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.get('[data-test="settings-tab-security"]').classes()).toContain('tab-active')
+  })
+
+  it('a focus link cancels a pending ?tab=teams retry even when General is already selected', async () => {
+    const { wrapper } = await mountSettings('/settings?tab=teams&focus=routing_mode')
+    await flushPromises()
+    await flushPromises()
+    const systemStore = useSystemStore()
+    // @ts-expect-error partial status is enough
+    systemStore.status = { edition: 'server' }
+    await flushPromises()
+    expect(wrapper.get('[data-test="settings-tab-general"]').classes()).toContain('tab-active')
+  })
+
+  it('an unknown focus key leaves a pending ?tab=teams retry alone', async () => {
+    const { wrapper } = await mountSettings('/settings?tab=teams&focus=removed_field')
+    await flushPromises()
+    await flushPromises()
+    const systemStore = useSystemStore()
+    // @ts-expect-error partial status is enough
+    systemStore.status = { edition: 'server' }
+    await flushPromises()
+    expect(wrapper.get('[data-test="settings-tab-teams"]').classes()).toContain('tab-active')
+  })
+
+  it('focus on a section button that just lost its Tab stop moves to the selected one', async () => {
+    const { wrapper } = await mountSettings('/settings?tab=teams')
+    await flushPromises()
+    const general = wrapper.get('[data-test="settings-tab-general"]').element as HTMLElement
+    document.body.appendChild(wrapper.element)
+    general.focus()
+    expect(document.activeElement).toBe(general)
+    const systemStore = useSystemStore()
+    // @ts-expect-error partial status is enough
+    systemStore.status = { edition: 'server' }
+    await flushPromises()
+    expect(document.activeElement).toBe(wrapper.get('[data-test="settings-tab-teams"]').element)
+  })
+
+  it('a bare focus link to a server-edition field survives late edition discovery', async () => {
+    const { wrapper, router } = await mountSettings('/settings')
+    await router.push('/settings?focus=server_edition.oauth.issuer_url')
+    await flushPromises()
+    const systemStore = useSystemStore()
+    // @ts-expect-error partial status is enough
+    systemStore.status = { edition: 'server' }
+    await flushPromises()
+    expect(wrapper.get('[data-test="settings-tab-teams"]').classes()).toContain('tab-active')
+    expect((wrapper.get('[data-test="settings-tab-select"]').element as HTMLSelectElement).value).toBe('teams')
+  })
+
+  it('modified keys on the section list are left to the browser', async () => {
+    const { wrapper } = await mountSettings()
+    await wrapper.get('[data-test="settings-tab-general"]').trigger('keydown', { key: 'End', ctrlKey: true })
+    await flushPromises()
+    expect(wrapper.get('[data-test="settings-tab-general"]').classes()).toContain('tab-active')
+  })
+
+  it('an unknown ?focus= with no tab falls back to General on in-page navigation', async () => {
+    const { wrapper, router } = await mountSettings('/settings?tab=security')
+    await router.push('/settings?focus=not_a_field')
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.get('[data-test="settings-tab-general"]').classes()).toContain('tab-active')
+  })
+
+  it('section list arrows wrap', async () => {
+    const { wrapper } = await mountSettings()
+    await wrapper.get('[data-test="settings-tab-general"]').trigger('keydown', { key: 'ArrowUp' })
+    await flushPromises()
+    expect(wrapper.get('[data-test="settings-tab-raw"]').classes()).toContain('tab-active')
+  })
+
   it('help text names sections that exist', async () => {
     const { ADVANCED_ACCORDIONS } = await import('@/views/settings/fields')
     const text = ADVANCED_ACCORDIONS.map((a) => a.description ?? '').join(' ')

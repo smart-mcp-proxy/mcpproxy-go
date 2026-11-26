@@ -135,7 +135,25 @@ describe('Wizard tabs and hints are keyboard-operable (FR-053)', () => {
     const w = await open({}, ok('retrieve_tools', true))
     const panel = w.get('[data-test="panel-verify"]')
     expect(panel.attributes('role')).toBe('tabpanel')
+    expect(panel.attributes('tabindex')).toBe('0')
     expect(panel.attributes('aria-labelledby')).toBe(w.get('[data-test="tab-verify"]').attributes('id'))
+  })
+
+  it('modified keys on the wizard tabs are left to the browser', async () => {
+    const w = await open({}, ok('retrieve_tools', true))
+    await w.get('[data-test="tab-verify"]').trigger('keydown', { key: 'Home', ctrlKey: true })
+    await flushPromises()
+    expect(w.get('[data-test="tab-verify"]').attributes('aria-selected')).toBe('true')
+  })
+
+  it('arrow keys wrap at the ends', async () => {
+    const w = await open({}, ok('retrieve_tools', true))
+    await w.get('[data-test="tab-verify"]').trigger('keydown', { key: 'ArrowRight' })
+    await flushPromises()
+    expect(w.get('[data-test="tab-clients"]').attributes('aria-selected')).toBe('true')
+    await w.get('[data-test="tab-clients"]').trigger('keydown', { key: 'ArrowLeft' })
+    await flushPromises()
+    expect(w.get('[data-test="tab-verify"]').attributes('aria-selected')).toBe('true')
   })
 
   it('arrow keys move from the focused tab, not the selected one', async () => {
@@ -162,6 +180,71 @@ describe('Wizard tabs and hints are keyboard-operable (FR-053)', () => {
     releases.forEach((r) => r(ok('retrieve_tools', false)))
     await flushPromises()
     expect(w.get('[data-test="verify-first-upstream-call"]').attributes('data-state')).toBe('pending')
+  })
+
+  it('reopening on Verify after a failed status read shows checking again, not "not tracked"', async () => {
+    ;(api.getOnboardingState as any).mockResolvedValue(state({}))
+    ;(api.getStatus as any).mockRejectedValue(new Error('boom'))
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/:p(.*)*', component: { template: '<div/>' } }] })
+    router.push('/')
+    await router.isReady()
+    const w = mount(OnboardingWizard, { props: { show: false }, global: { plugins: [router], stubs: { RouterLink: { template: '<a><slot /></a>' } } } })
+    await w.setProps({ show: true })
+    await flushPromises()
+    await w.get('[data-test="tab-verify"]').trigger('click')
+    await flushPromises()
+    expect(w.get('[data-test="verify-first-upstream-call"]').attributes('data-state')).toBe('unknown')
+    // Close, then reopen with a status call that has not answered yet.
+    await w.setProps({ show: false })
+    await flushPromises()
+    ;(api.getStatus as any).mockImplementation(() => new Promise(() => {}))
+    await w.setProps({ show: true })
+    await flushPromises()
+    await w.get('[data-test="tab-verify"]').trigger('click')
+    await flushPromises()
+    expect(w.get('[data-test="verify-first-upstream-call"]').attributes('data-state')).toBe('checking')
+  })
+
+  it('a failed status request from a closed session does not settle the reopened one', async () => {
+    ;(api.getOnboardingState as any).mockResolvedValue(state({}))
+    const fails: Array<(e: unknown) => void> = []
+    ;(api.getStatus as any).mockImplementation(() => new Promise((_r, rej) => { fails.push(rej) }))
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/:p(.*)*', component: { template: '<div/>' } }] })
+    router.push('/')
+    await router.isReady()
+    const w = mount(OnboardingWizard, { props: { show: false }, global: { plugins: [router], stubs: { RouterLink: { template: '<a><slot /></a>' } } } })
+    await w.setProps({ show: true })
+    await flushPromises()
+    await w.setProps({ show: false })
+    await w.setProps({ show: true })
+    await flushPromises()
+    await w.get('[data-test="tab-verify"]').trigger('click')
+    expect(fails.length).toBeGreaterThan(0)
+    // the earlier session's request fails while the new one is still pending
+    fails[0](new Error('late'))
+    await flushPromises()
+    expect(w.get('[data-test="verify-first-upstream-call"]').attributes('data-state')).toBe('checking')
+  })
+
+  it('a negative seen in an earlier open is not shown as current after reopening', async () => {
+    ;(api.getOnboardingState as any).mockResolvedValue(state({}))
+    ;(api.getStatus as any).mockResolvedValue(ok('retrieve_tools', false))
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/:p(.*)*', component: { template: '<div/>' } }] })
+    router.push('/')
+    await router.isReady()
+    const w = mount(OnboardingWizard, { props: { show: false }, global: { plugins: [router], stubs: { RouterLink: { template: '<a><slot /></a>' } } } })
+    await w.setProps({ show: true })
+    await flushPromises()
+    await w.get('[data-test="tab-verify"]').trigger('click')
+    await flushPromises()
+    expect(w.get('[data-test="verify-first-upstream-call"]').attributes('data-state')).toBe('pending')
+    await w.setProps({ show: false })
+    ;(api.getStatus as any).mockImplementation(() => new Promise(() => {}))
+    await w.setProps({ show: true })
+    await flushPromises()
+    await w.get('[data-test="tab-verify"]').trigger('click')
+    await flushPromises()
+    expect(w.get('[data-test="verify-first-upstream-call"]').attributes('data-state')).toBe('checking')
   })
 
   it('the hints disclosure is a button with aria-expanded, in both states', async () => {
