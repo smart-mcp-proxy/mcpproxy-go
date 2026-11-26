@@ -27,10 +27,20 @@ func TestHoldPIDKeepsAReapedProcessPID(t *testing.T) {
 	cmd := exec.Command(filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe"), "/c", "exit 0")
 	require.NoError(t, cmd.Start())
 	pid := cmd.Process.Pid
-	release := HoldPID(pid)
+	release, held := HoldPID(pid)
+	require.True(t, held)
 	require.NoError(t, cmd.Wait()) // reaps it and closes Go's own handle
 
 	require.True(t, exitedProcessAt(pid), "the held PID still names the exited process")
 	release()
 	require.False(t, exitedProcessAt(pid), "after release nothing keeps the PID")
+}
+
+// A process that cannot be opened is not held, so nothing may be sent to its PID.
+func TestHoldPIDReportsAProcessItCannotOpen(t *testing.T) {
+	cmd := exec.Command(filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe"), "/c", "exit 0")
+	require.NoError(t, cmd.Run()) // reaped: nothing keeps its PID
+	release, held := HoldPID(cmd.Process.Pid)
+	defer release()
+	require.False(t, held)
 }
