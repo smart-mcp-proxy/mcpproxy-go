@@ -188,18 +188,29 @@ func (w *OAuthTransportWrapper) RoundTrip(req *http.Request) (*http.Response, er
 			grantType = tokenRequestGrantType(v) // what injectFormParams sends
 		}
 		start := time.Now()
-		status := 0 // the provider's status, before any normalization
-		resp, err := w.roundTripParams(req, tokenReq, &status)
-		LogTokenRequest(req.Context(), w.logger, grantType, status, err, time.Since(start))
+		var obs tokenResponseObs
+		resp, err := w.roundTripParams(req, tokenReq, &obs)
+		logErr := err
+		if logErr == nil {
+			logErr = obs.bodyErr // a 2xx whose body was cut short
+		}
+		LogTokenRequest(req.Context(), w.logger, grantType, obs.status, logErr, time.Since(start))
 		return resp, err
 	}
 	return w.roundTripParams(req, tokenReq, nil)
 }
 
+// tokenResponseObs is what a token request's log line reports about the
+// response: the status as the provider sent it, before any normalization, and
+// a read error met while the body was buffered for normalization.
+type tokenResponseObs struct {
+	status  int
+	bodyErr error
+}
+
 // roundTripParams injects the extra params, sends the request and normalizes
-// a token response. *rawStatus, when non-nil, receives the response status as
-// the provider sent it.
-func (w *OAuthTransportWrapper) roundTripParams(req *http.Request, tokenReq bool, rawStatus *int) (*http.Response, error) {
+// a token response. obs, when non-nil, receives what the log line reports.
+func (w *OAuthTransportWrapper) roundTripParams(req *http.Request, tokenReq bool, obs *tokenResponseObs) (*http.Response, error) {
 	send := req
 	if len(w.extraParams) > 0 {
 		// Clone request to avoid modifying original
@@ -214,15 +225,18 @@ func (w *OAuthTransportWrapper) roundTripParams(req *http.Request, tokenReq bool
 	}
 
 	resp, err := w.inner.RoundTrip(send)
-	if rawStatus != nil && resp != nil {
-		*rawStatus = resp.StatusCode
+	if obs != nil && resp != nil {
+		obs.status = resp.StatusCode
 	}
 	if err != nil {
 		return resp, err
 	}
 
 	if tokenReq {
-		w.normalizeTokenResponse(req, resp)
+		bodyErr := w.normalizeTokenResponse(req, resp)
+		if obs != nil {
+			obs.bodyErr = bodyErr
+		}
 	}
 
 	return resp, nil
@@ -243,7 +257,10 @@ const maxTokenResponseBodyBytes = 1 << 20
 //     "expires_at" into a time.Time and otherwise fails with
 //     "Time.UnmarshalJSON: input is not a JSON string"; see
 //     normalizeTokenResponseBody).
-func (w *OAuthTransportWrapper) normalizeTokenResponse(req *http.Request, resp *http.Response) {
+//
+// It returns the read error met while buffering the body, if any; mcp-go
+// still sees that error when it reads the body.
+func (w *OAuthTransportWrapper) normalizeTokenResponse(req *http.Request, resp *http.Response) error {
 	if resp.StatusCode == http.StatusCreated {
 		w.logger.Debug("Normalized token response status 201→200",
 			zap.String("url", logSafeURL(req.URL.String())))
@@ -252,11 +269,11 @@ func (w *OAuthTransportWrapper) normalizeTokenResponse(req *http.Request, resp *
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 || resp.Body == nil {
-		return
+		return nil
 	}
 	// A still-encoded body (the transport did not transparently decode it) cannot be parsed here.
 	if enc := resp.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
-		return
+		return nil
 	}
 
 	orig := resp.Body
@@ -268,14 +285,14 @@ func (w *OAuthTransportWrapper) normalizeTokenResponse(req *http.Request, resp *
 			Reader: io.MultiReader(bytes.NewReader(buf), orig),
 			Closer: orig,
 		}
-		return
+		return err
 	}
 	_ = orig.Close()
 
 	out, changed := normalizeTokenResponseBody(buf, time.Now())
 	resp.Body = io.NopCloser(bytes.NewReader(out))
 	if !changed {
-		return
+		return nil
 	}
 	resp.ContentLength = int64(len(out))
 	if resp.Header == nil {
@@ -284,6 +301,7 @@ func (w *OAuthTransportWrapper) normalizeTokenResponse(req *http.Request, resp *
 	resp.Header.Set("Content-Length", strconv.Itoa(len(out)))
 	w.logger.Debug("Normalized token response body: dropped non-RFC3339 expires_at",
 		zap.String("url", logSafeURL(req.URL.String())))
+	return nil
 }
 
 // prefixedReadCloser reads from Reader and closes Closer.

@@ -80,7 +80,7 @@ func TestRefreshCoordinator_LogsNumberedFlightsToRequestLogger(t *testing.T) {
 // before the request was sent, and named nothing).
 func TestOAuthTransportWrapper_LogsTokenRequestOutcome(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.NoError(t, r.ParseForm())
+		assert.NoError(t, r.ParseForm()) // not require: server goroutine
 		assert.Equal(t, "rt-secret-1", r.PostForm.Get("refresh_token"), "the body still reaches the server")
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"error":"invalid_grant"}`)
@@ -236,3 +236,26 @@ func TestPeekTokenGrantType_EmptyBodyIsAnEmptyForm(t *testing.T) {
 	assert.Equal(t, "unknown", grant)
 	assert.True(t, parsed, "injectFormParams sends the extra params into an empty form")
 }
+
+// Review round 11: a 200 whose body is cut short while the wrapper buffers it
+// is logged with that failure, not as a clean answer.
+func TestOAuthTransportWrapper_CutShortSuccessBodyIsLogged(t *testing.T) {
+	cut := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(io.MultiReader(strings.NewReader(`{"access_token":"a`), errReader{io.ErrUnexpectedEOF}))}, nil
+	})
+	core, logs := observer.New(zapcore.DebugLevel)
+	w := NewOAuthTransportWrapper(cut, nil, zap.New(core))
+	req, err := http.NewRequest(http.MethodPost, "https://as.example/token", strings.NewReader("grant_type=refresh_token"))
+	require.NoError(t, err)
+	resp, err := w.RoundTrip(req)
+	require.NoError(t, err)
+	_, rerr := io.ReadAll(resp.Body)
+	assert.Error(t, rerr, "mcp-go still sees the cut")
+	m := logs.FilterMessage("OAuth token request finished").All()[0].ContextMap()
+	assert.Equal(t, int64(http.StatusOK), m["http_status"])
+	assert.NotEqual(t, "http_response", m["outcome"])
+}
+
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
