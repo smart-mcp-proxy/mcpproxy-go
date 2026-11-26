@@ -136,7 +136,7 @@ page disagree):
   sidebar and `+ Add`, the Viewing chip across pages, Clients-row and
   agent-token-row links, `/servers?profile=`, a Spec 108 warning surfacing as a
   needs-attention item, layout and keyboard order).
-- `clients-tokens-usage-pr7.spec.ts`: Spec 134 PR 7: the Clients table (one row and
+- `zz-clients-tokens-usage-pr7.spec.ts`: Spec 134 PR 7: the Clients table (one row and
   one button per client), the Manage side panel opened by keyboard with its four
   groups, `?focus=` opening it, the agent-tokens table at 1280 px (no horizontal
   scroll, no clipped cell) and 390 px, and the four Usage charts with data.
