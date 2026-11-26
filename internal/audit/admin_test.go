@@ -667,3 +667,12 @@ func TestChange_ServerAndProfilePathsAreBounded(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+func TestNewAdminAction_ProviderAndRoleAreClosed(t *testing.T) {
+	in := tokenRotateInput()
+	in.Origin = "local"
+	in.Caller = audit.Caller{Kind: "session_admin", UserID: "u1", Role: "admin", Provider: "saml"}
+	if _, err := audit.NewAdminAction(in); err == nil {
+		t.Fatal("a provider outside the closed set is rejected")
+	}
+}

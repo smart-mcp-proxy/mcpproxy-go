@@ -473,6 +473,14 @@ func buildAdminCaller(c Caller) (map[string]interface{}, error) {
 		if c.Role == "" || c.Provider == "" {
 			return nil, fmt.Errorf("audit.NewAdminAction: caller.user_id requires role and provider")
 		}
+		if c.Role != "admin" && c.Role != "user" {
+			return nil, fmt.Errorf("audit.NewAdminAction: invalid caller.role %q", c.Role)
+		}
+		switch c.Provider {
+		case "google", "github", "microsoft", "oidc":
+		default:
+			return nil, fmt.Errorf("audit.NewAdminAction: invalid caller.provider %q", c.Provider)
+		}
 		m["role"] = c.Role
 		m["provider"] = c.Provider
 		if email, ok := validEmail(c.UserEmail); ok {

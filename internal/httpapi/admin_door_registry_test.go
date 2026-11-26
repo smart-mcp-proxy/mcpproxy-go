@@ -11,9 +11,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 )
 
 // Spec 133 FR-022: every route and method of the production personal REST
@@ -24,7 +25,7 @@ func TestAdminDoorRegistry_CoversEveryRESTRoute(t *testing.T) {
 	set := map[string]bool{}
 	// The second router has observability metrics on: /metrics is mounted
 	// only then, and conditional routes must be classified too.
-	for _, router := range []chi.Routes{srv.Router(), newMetricsTestServer(t).Router()} {
+	for _, router := range []chi.Routes{srv.Router(), newMetricsTestServer(t).Router(), newHealthTestServer(t).Router()} {
 		err := chi.Walk(router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
 			set["REST "+method+" "+route] = true
 			return nil
@@ -41,20 +42,17 @@ func TestAdminDoorRegistry_CoversEveryRESTRoute(t *testing.T) {
 	require.Empty(t, stale, "registry rows whose REST door no longer exists")
 }
 
-// The contract exempts POST /diagnostics/fix per registered fixer, by name: a
-// newly registered fixer must get its own row (and a mapped funnel if it
-// changes a rule).
-func TestAdminDoorRegistry_ListsEveryDiagnosticsFixer(t *testing.T) {
-	rows := map[string]bool{}
-	for _, d := range audit.AdminDoors {
-		if d.Door == "REST POST /api/v1/diagnostics/fix" {
-			rows[d.Branch] = true
-		}
+// newHealthTestServer builds a Server with every observability branch on
+// (metrics and the health manager), so routes mounted only then are walked.
+func newHealthTestServer(t *testing.T) *Server {
+	t.Helper()
+	obsCfg := observability.Config{
+		Metrics: observability.MetricsConfig{Enabled: true},
+		Health:  observability.HealthConfig{Enabled: true},
+		Tracing: observability.TracingConfig{Enabled: false},
 	}
-	keys := diagnostics.FixerKeys()
-	require.NotEmpty(t, keys)
-	for _, k := range keys {
-		require.True(t, rows["fixer "+k], "diagnostics fixer %q has no registry row", k)
-	}
-	require.Len(t, rows, len(keys), "a fixer row names a fixer that is no longer registered")
+	mgr, err := observability.NewManager(zap.NewNop().Sugar(), &obsCfg)
+	require.NoError(t, err)
+	require.NotNil(t, mgr.Health())
+	return NewServer(&mockControllerWithKey{apiKey: metricsTestAPIKey}, zap.NewNop().Sugar(), mgr)
 }

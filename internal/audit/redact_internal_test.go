@@ -95,3 +95,11 @@ func TestMaskAllSpans_ScanContinuesAfterTheBound(t *testing.T) {
 		t.Fatalf("a credential after the bounded run is still masked: %q", got)
 	}
 }
+
+func TestMaskAllSpans_BearerAcrossANewlineAfterTheBound(t *testing.T) {
+	s := strings.Repeat("Bearer ", maxOverlapRescans+1) + "mcp_agt_0123456789abcdef0123" + "Bearer\nsecretBodyAfterNewline"
+	got, _ := maskAllSpans(s)
+	if strings.Contains(got, "secretBodyAfterNewline") {
+		t.Fatalf("got %q", got)
+	}
+}

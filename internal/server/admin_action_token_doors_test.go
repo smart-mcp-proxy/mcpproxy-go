@@ -353,12 +353,18 @@ func TestAdminActionDoors_SaturatedBus(t *testing.T) {
 		require.NoError(t, err)
 	}
 	revokes := 0
+	perToken := map[string]int{}
 	for _, l := range e.adminLines(&seen) {
 		if l["action"] == audit.ActionTokenRevoke {
 			revokes++
+			perToken[l["target"].(map[string]interface{})["name"].(string)]++
 		}
 	}
 	require.Equal(t, n, revokes, "every committed revocation writes one line with the bus saturated")
+	require.Len(t, perToken, n, "one line per revoked token, none dropped and none doubled")
+	for name, c := range perToken {
+		require.Equal(t, 1, c, name)
+	}
 }
 
 // adminTestContext is an administrator REST request context (API key over
@@ -469,20 +475,28 @@ func TestAdminActionDoors_WebUISurface(t *testing.T) {
 	seen := 0
 	code, body := e.restAs("webui/1.0", http.MethodPost, "/api/v1/tokens", "req-web-1", map[string]any{"name": "web-bot", "expires_in": "1h"})
 	require.Equal(t, http.StatusCreated, code, string(body))
+	check := func(l map[string]interface{}, action, rid string) {
+		require.Equal(t, action, l["action"])
+		require.Equal(t, map[string]interface{}{"kind": "api_key"}, l["caller"], action)
+		require.Equal(t, "api", l["source"], action)
+		require.Equal(t, "web-bot", l["target"].(map[string]interface{})["name"], action)
+		require.Equal(t, rid, l["request_id"], action)
+		require.Equal(t, "web", l["client"].(map[string]interface{})["surface"], action)
+		require.Equal(t, "webui/1.0", l["client"].(map[string]interface{})["name"], action)
+	}
 	lines := e.adminLines(&seen)
 	require.Len(t, lines, 1)
-	require.Equal(t, "web", lines[0]["client"].(map[string]interface{})["surface"])
-	require.Equal(t, "webui/1.0", lines[0]["client"].(map[string]interface{})["name"])
-	for _, step := range []struct{ method, path, action string }{
+	check(lines[0], "token.create", "req-web-1")
+	for i, step := range []struct{ method, path, action string }{
 		{http.MethodPost, "/api/v1/tokens/web-bot/regenerate", "token.rotate"},
 		{http.MethodDelete, "/api/v1/tokens/web-bot", "token.revoke"},
 		{http.MethodDelete, "/api/v1/tokens/web-bot/permanent", "token.delete"},
 	} {
-		code, body := e.restAs("webui/1.0", step.method, step.path, "", nil)
+		rid := fmt.Sprintf("req-web-%d", i+2)
+		code, body := e.restAs("webui/1.0", step.method, step.path, rid, nil)
 		require.Less(t, code, 300, "%s %s: %s", step.method, step.path, body)
 		lines := e.adminLines(&seen)
 		require.Len(t, lines, 1, step.action)
-		require.Equal(t, step.action, lines[0]["action"])
-		require.Equal(t, "web", lines[0]["client"].(map[string]interface{})["surface"], step.action)
+		check(lines[0], step.action, rid)
 	}
 }

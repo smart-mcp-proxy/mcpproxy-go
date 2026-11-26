@@ -240,17 +240,11 @@ func NewFileSink(path string, maxSizeMB, maxBackups, maxAgeDays int, compress bo
 	if err := probeWritable(path); err != nil {
 		return nil, err
 	}
-	torn, err := endsMidRecord(path)
+	// One handle checks the tail and repairs it, so an external rotator
+	// renaming the file in between cannot redirect the repair.
+	held, torn, err := openTail(path)
 	if err != nil {
-		if !errors.Is(err, os.ErrPermission) {
-			return nil, err
-		}
-		// A write-only audit file (the daemon may append but not read)
-		// cannot have its tail checked, so the boundary is established
-		// unconditionally: torn stays set and the repair below appends one
-		// newline. On a clean file that is one empty line, which shippers
-		// skip; on a torn one it ends the partial record.
-		torn = true
+		return nil, err
 	}
 	lj := &lumberjack.Logger{
 		Filename:   path,
@@ -263,33 +257,26 @@ func NewFileSink(path string, maxSizeMB, maxBackups, maxAgeDays int, compress bo
 	s.torn = torn
 	if torn {
 		// Repair the tail of the file a previous process left mid-record
-		// now, in that file, before anything can rotate it. A failure leaves
-		// torn set: the first Write retries, and appends nothing until the
-		// boundary is restored.
-		// The path names the torn file here: nothing has opened it yet.
-		// After this point repairs go through the writer's own handle, the
-		// file that received the partial write, even if the path is renamed.
-		// Hold the torn file itself: a retry must repair THAT file, even if
-		// the path is renamed or removed in between.
-		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
-		if err == nil {
-			if werr := writeNewline(f); werr == nil {
-				_ = f.Close()
-				s.torn = false
-			} else {
-				s.openRepair = func() error {
-					if err := writeNewline(f); err != nil {
-						return err
-					}
-					_ = f.Close()
-					return nil
-				}
-				s.closeRepair = f
-			}
+		// now, through the handle that read it, before anything can rotate
+		// it. A failure keeps that handle: the first Write retries on the
+		// same file (even if renamed or removed), and appends nothing until
+		// the boundary is restored.
+		if werr := writeNewline(held); werr == nil {
+			_ = held.Close()
+			s.torn = false
 		} else {
-			// Not even openable now: retry by path, the only handle there is.
-			s.openRepair = func() error { return appendNewline(path) }
+			f := held
+			s.openRepair = func() error {
+				if err := writeNewline(f); err != nil {
+					return err
+				}
+				_ = f.Close()
+				return nil
+			}
+			s.closeRepair = f
 		}
+	} else if held != nil {
+		_ = held.Close()
 	}
 	return s, nil
 }
@@ -311,27 +298,38 @@ func appendNewline(path string) error {
 	return cerr
 }
 
-// endsMidRecord reports whether the file at path is non-empty and does not
-// end in a newline: a previous process was cut off mid-record, and the first
-// write must restore the boundary (Spec 133 FR-017).
-func endsMidRecord(path string) (bool, error) {
-	f, err := os.Open(path)
+// openTail opens path once for read+append and reports whether it is
+// non-empty and does not end in a newline (a previous process was cut off
+// mid-record, Spec 133 FR-017); the returned handle is the one to repair
+// through. A file the daemon may append to but not read is opened write-only
+// and reported torn: its boundary is established unconditionally (one
+// newline; an empty line on a clean file, which shippers skip).
+func openTail(path string) (*os.File, bool, error) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0o600)
 	if err != nil {
-		return false, fmt.Errorf("audit: cannot open %s: %w", path, err)
+		if !errors.Is(err, os.ErrPermission) {
+			return nil, false, fmt.Errorf("audit: cannot open %s: %w", path, err)
+		}
+		w, werr := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+		if werr != nil {
+			return nil, false, fmt.Errorf("audit: cannot open %s: %w", path, werr)
+		}
+		return w, true, nil
 	}
-	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
-		return false, fmt.Errorf("audit: cannot stat %s: %w", path, err)
+		_ = f.Close()
+		return nil, false, fmt.Errorf("audit: cannot stat %s: %w", path, err)
 	}
 	if st.Size() == 0 {
-		return false, nil
+		return f, false, nil
 	}
 	last := make([]byte, 1)
 	if _, err := f.ReadAt(last, st.Size()-1); err != nil {
-		return false, fmt.Errorf("audit: cannot read %s: %w", path, err)
+		_ = f.Close()
+		return nil, false, fmt.Errorf("audit: cannot read %s: %w", path, err)
 	}
-	return last[0] != '\n', nil
+	return f, last[0] != '\n', nil
 }
 
 func probeWritable(path string) error {

@@ -827,9 +827,7 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 		// A grant to every server is the documented "*" sentinel and is shown;
 		// a list of server names is withheld until server-name provenance
 		// exists (Spec 133 PR-1b).
-		if allWildcard(committed.AllowedServers) {
-			changes = append(changes, audit.AllServersGranted(audit.Path("allowed_servers")))
-		} else if containsWildcard(committed.AllowedServers) {
+		if containsWildcard(committed.AllowedServers) {
 			// "*" grants every server whatever else is listed: show it, and
 			// count the other entries without naming them.
 			changes = append(changes, audit.AllServersGrantedAmong(audit.Path("allowed_servers"), len(committed.AllowedServers)))
@@ -1518,19 +1516,6 @@ func (s *CredentialsService) Get(ref CredentialRef) (*CredentialView, error) {
 	}
 	v := ViewOf(rec, s.cfg(), s.now())
 	return &v, nil
-}
-
-// allWildcard reports a non-empty server list made only of the "*" sentinel.
-func allWildcard(list []string) bool {
-	if len(list) == 0 {
-		return false
-	}
-	for _, v := range list {
-		if v != "*" {
-			return false
-		}
-	}
-	return true
 }
 
 func containsWildcard(list []string) bool {
