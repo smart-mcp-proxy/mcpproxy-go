@@ -246,6 +246,11 @@ func TestAdminActionDoors_RESTTokenDoors(t *testing.T) {
 	raw, _ = json.Marshal(lines[0])
 	require.NotContains(t, string(raw), pat)
 	require.Equal(t, true, lines[0]["request_id_masked"])
+	// The masked id keeps the mask's fixed shape (first four and last two
+	// characters), and the activity row keeps the original: only this
+	// line's join is lost.
+	require.Equal(t, pat[:4]+"***"+pat[len(pat)-2:], lines[0]["request_id"])
+	require.Equal(t, 1, e.activityRequestIDs(pat), "the activity row carries the original id")
 
 }
 

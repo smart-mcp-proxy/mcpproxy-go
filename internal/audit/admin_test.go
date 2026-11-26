@@ -619,3 +619,32 @@ func TestTimestamp_OutOfRangeYearIsWithheld(t *testing.T) {
 		t.Fatalf("a five-digit UTC year is outside the wire layout: %v", ch)
 	}
 }
+
+func TestNewAdminAction_ClientIPMustBeAnIP(t *testing.T) {
+	in := tokenRotateInput()
+	in.ClientIP = "@/tmp/-----BEGIN PRIVATE KEY-----MIIEbody"
+	line, obj := mustAdmin(t, in)
+	assertSentinelAbsent(t, line, "MIIEbody")
+	if c := obj["client"].(map[string]interface{}); c["ip"] != nil {
+		t.Fatalf("a non-IP peer label is omitted: %v", c)
+	}
+	in.ClientIP = "10.0.0.7"
+	_, obj = mustAdmin(t, in)
+	if obj["client"].(map[string]interface{})["ip"] != "10.0.0.7" {
+		t.Fatal("an IP is kept")
+	}
+}
+
+// The schema cannot compare changes_count with the number of entries; the
+// builder guarantees it exceeds them whenever changes_truncated is set.
+func TestNewAdminAction_ChangesCountExceedsKeptEntries(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
+	for i := 0; i < 140; i++ {
+		in.Changes = append(in.Changes, audit.Withheld(audit.Path("env", "K"+strings.Repeat("a", i%7)+string(rune('a'+i%26))+string(rune('a'+i/26))), audit.WithheldSecret))
+	}
+	_, obj := mustAdmin(t, in)
+	if obj["changes_truncated"] != true || int(obj["changes_count"].(float64)) <= len(obj["changes"].([]interface{})) {
+		t.Fatalf("changes_count must exceed the kept entries when truncated: %v / %d", obj["changes_count"], len(obj["changes"].([]interface{})))
+	}
+}

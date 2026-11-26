@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
@@ -84,4 +85,24 @@ func TestDoctor_AuditSanitizerHitsThroughRuntimeWarningSource(t *testing.T) {
 	assert.Contains(t, diag.RuntimeWarnings[0], "audit_log")
 	assert.Contains(t, diag.RuntimeWarnings[0], "sanitizer hits")
 	assert.Equal(t, 1, diag.TotalIssues)
+}
+
+// Spec 133 FR-019: the builder-rejection and mask-hit counters are
+// administrator-only; a scoped caller's Doctor does not show them.
+func TestDoctor_AdminOnlyWarningSourcesHiddenFromScopedCallers(t *testing.T) {
+	live := &config.Config{Listen: "127.0.0.1:8080"}
+	svc := NewService(newMockRuntime(), live, "", &mockEventEmitter{}, nil, zap.NewNop().Sugar())
+	svc.AddAdminRuntimeWarningSource(func() []string { return []string{"audit_log: 4 credential-shaped labels masked"} })
+
+	diag, err := svc.Doctor(auth.WithAuthContext(context.Background(), auth.AdminContext()))
+	require.NoError(t, err)
+	assert.Contains(t, diag.RuntimeWarnings, "audit_log: 4 credential-shaped labels masked")
+
+	scoped := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type: auth.AuthTypeAgent, AgentName: "scoped", TokenPrefix: "mcp_agt_ab12", AllowedServers: []string{"a"},
+		Permissions: []string{auth.PermRead},
+	})
+	diag, err = svc.Doctor(scoped)
+	require.NoError(t, err)
+	assert.NotContains(t, diag.RuntimeWarnings, "audit_log: 4 credential-shaped labels masked")
 }

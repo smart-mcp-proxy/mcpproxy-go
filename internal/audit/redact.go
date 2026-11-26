@@ -117,6 +117,20 @@ func applyLegacyMasking(s string) (masked string, hit bool) {
 // the merged spans. admin_action labels always use it (a new event kind has
 // no legacy bytes to keep); legacy kinds use it when a Spec 133 shape is
 // present (applyMasking).
+// credentialRunEnd returns the index of the first byte at or after i that no
+// credential pattern can contain.
+func credentialRunEnd(s string, i int) int {
+	for ; i < len(s); i++ {
+		c := s[i]
+		ok := c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' ||
+			c == '_' || c == '-' || c == '.' || c == '~' || c == '+' || c == '/' || c == '=' || c == ' ' || c == '\t'
+		if !ok {
+			return i
+		}
+	}
+	return i
+}
+
 // maxOverlapRescans bounds the overlapping-match rescans per pattern.
 const maxOverlapRescans = 32
 
@@ -140,10 +154,12 @@ func maskAllSpans(s string) (masked string, hit bool) {
 			}
 			spans = append(spans, [2]int{off + m[0], off + m[1]})
 			if rescans >= maxOverlapRescans {
-				// Bound reached: mask everything from this match on, rather
-				// than resume mid-way and leave a partly consumed token's
-				// tail visible. Over-masking a pathological label is safe.
-				spans = append(spans, [2]int{off + m[0], len(s)})
+				// Bound reached: mask from this match to the end of the
+				// credential-shaped run (the first byte no pattern can
+				// contain, e.g. a JSON quote), rather than resume mid-way and
+				// leave a partly consumed token's tail visible. Masking stops
+				// there, so the rest of a serialized record is untouched.
+				spans = append(spans, [2]int{off + m[0], credentialRunEnd(s, off+m[0])})
 				break
 			}
 			rescans++

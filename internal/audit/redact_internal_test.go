@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -41,5 +42,44 @@ func TestMaskAllSpans_BoundMasksTheRemainder(t *testing.T) {
 	got, hit := maskAllSpans(b.String())
 	if !hit || strings.Contains(got, "eyJsYXN0UGF5bG9hZA") || strings.Contains(got, "bGFzdFNpZw") {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// The bound masks only the credential-shaped run, never the rest of a
+// serialized record (a JSON quote ends it).
+func TestMaskAllSpans_BoundStopsAtTheRunEnd(t *testing.T) {
+	id := strings.Repeat("mcp_agt_", 60) + "0123456789abcdefghij"
+	line := `{"request_id":"` + id + `","ts":"2026-09-17T10:00:00.000000001Z"}`
+	got, _ := maskAllSpans(line)
+	if !strings.Contains(got, `"ts":"2026-09-17T10:00:00.000000001Z"`) {
+		t.Fatalf("masking must not run past the credential run: %q", got)
+	}
+}
+
+func TestSink_DeletedTornFileStopsBlocking(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/audit.jsonl"
+	if err := os.WriteFile(path, []byte("{\"se"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewFileSink(path, 1, 5, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := s.(*writerSink)
+	ws.mu.Lock()
+	ws.torn = true
+	ws.openRepair = func() error { return repairTornPath(path) }
+	ws.mu.Unlock()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Write([]byte(`{"seq":2}`)); err != nil {
+		t.Fatalf("a removed torn file leaves nothing to repair: %v", err)
+	}
+	_ = s.Close()
+	raw, _ := os.ReadFile(path)
+	if string(raw) != "{\"seq\":2}\n" {
+		t.Fatalf("the writer creates a clean file: %q", raw)
 	}
 }

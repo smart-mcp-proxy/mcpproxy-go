@@ -111,6 +111,8 @@ func TestAdminDoors_CLITokenCommandsHitTheirDoneRESTDoors(t *testing.T) {
 				mu.Unlock()
 				require.Equal(t, "ci", body["name"], "the create request carries the name the REST door needs")
 				require.Equal(t, "30d", body["expires_in"])
+				require.Equal(t, []interface{}{"*"}, body["allowed_servers"], "--servers is sent as the allow-list")
+				require.Equal(t, []interface{}{"read"}, body["permissions"], "--permissions read is sent as read")
 			}
 
 			cliActions := doneActions(tc.cli, "")

@@ -135,6 +135,10 @@ type Service interface {
 	// config.DoctorFindings over the live config; PR-D adds the audit sink's
 	// failure counter). Sources are consulted in registration order.
 	AddRuntimeWarningSource(source func() []string)
+	// AddAdminRuntimeWarningSource registers a producer whose warnings only
+	// an administrator's Doctor sees (scoped callers learn nothing new,
+	// Spec 133 FR-019).
+	AddAdminRuntimeWarningSource(source func() []string)
 }
 
 // EventEmitter defines the interface for emitting runtime events.
@@ -198,8 +202,9 @@ type service struct {
 	scanEnricherMu sync.RWMutex
 
 	// warningSources feed Doctor's RuntimeWarnings; guarded like scanEnricher.
-	warningSources   []func() []string
-	warningSourcesMu sync.RWMutex
+	warningSources      []func() []string
+	adminWarningSources []func() []string
+	warningSourcesMu    sync.RWMutex
 }
 
 // AddRuntimeWarningSource registers one Doctor runtime-warning producer. A nil
@@ -211,6 +216,28 @@ func (s *service) AddRuntimeWarningSource(source func() []string) {
 	s.warningSourcesMu.Lock()
 	s.warningSources = append(s.warningSources, source)
 	s.warningSourcesMu.Unlock()
+}
+
+// AddAdminRuntimeWarningSource registers an administrator-only producer.
+func (s *service) AddAdminRuntimeWarningSource(source func() []string) {
+	if source == nil {
+		return
+	}
+	s.warningSourcesMu.Lock()
+	s.adminWarningSources = append(s.adminWarningSources, source)
+	s.warningSourcesMu.Unlock()
+}
+
+// adminRuntimeWarningsFromSources evaluates every administrator-only source.
+func (s *service) adminRuntimeWarningsFromSources() []string {
+	s.warningSourcesMu.RLock()
+	sources := append([]func() []string(nil), s.adminWarningSources...)
+	s.warningSourcesMu.RUnlock()
+	var out []string
+	for _, src := range sources {
+		out = append(out, src()...)
+	}
+	return out
 }
 
 // runtimeWarningsFromSources evaluates every registered source.

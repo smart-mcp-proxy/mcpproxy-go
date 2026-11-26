@@ -265,7 +265,7 @@ func NewFileSink(path string, maxSizeMB, maxBackups, maxAgeDays int, compress bo
 		if err := appendNewline(path); err == nil {
 			s.torn = false
 		} else {
-			s.openRepair = func() error { return appendNewline(path) }
+			s.openRepair = func() error { return repairTornPath(path) }
 		}
 	}
 	return s, nil
@@ -317,4 +317,15 @@ func probeWritable(path string) error {
 		return fmt.Errorf("audit: cannot open %s for append: %w", path, err)
 	}
 	return f.Close()
+}
+
+// repairTornPath appends the boundary newline to the torn file at path. A
+// file that no longer exists (an operator removed it to free space) has no
+// tail left to repair: the rotating writer creates a clean one.
+func repairTornPath(path string) error {
+	err := appendNewline(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }

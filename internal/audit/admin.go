@@ -15,6 +15,7 @@ package audit
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/mail"
 	"sort"
 	"strings"
@@ -349,8 +350,10 @@ func NewAdminAction(in AdminActionInput) (Line, error) {
 	if v, ok := renderMetaLabel(in.ClientVersion); ok {
 		client["version"] = v
 	}
-	if in.ClientIP != "" {
-		client["ip"] = in.ClientIP
+	// client.ip is an IP address or nothing: a Unix-socket peer label or any
+	// other text never reaches the line.
+	if ip := net.ParseIP(in.ClientIP); ip != nil {
+		client["ip"] = ip.String()
 	}
 	if in.ClientSurface != "" {
 		client["surface"] = in.ClientSurface
