@@ -26,6 +26,13 @@ func TestAdminDoors_CLITokenCommandsHitTheirDoneRESTDoors(t *testing.T) {
 	var createBody map[string]interface{}
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
+		if r.Method != http.MethodGet && r.Header.Get("X-API-Key") != "test-key" {
+			// The real daemon rejects a TCP mutation without the API key
+			// before any audit line is written.
+			mu.Unlock()
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		got = append(got, r.Method+" "+r.URL.Path)
 		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/tokens" {
 			_ = json.NewDecoder(r.Body).Decode(&createBody)

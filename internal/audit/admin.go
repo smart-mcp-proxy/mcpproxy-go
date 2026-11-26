@@ -580,9 +580,20 @@ func checkRequiredPrefixes(action string, changes []Change) error {
 func checkRenderedPrefixes(action string, f map[string]interface{}) error {
 	want, ok := requiredPrefixSides[action]
 	if !ok {
-		return nil
+		want = struct{ before, after bool }{}
 	}
 	entries, _ := f["changes"].([]interface{})
+	n := 0
+	for _, e := range entries {
+		if m, _ := e.(map[string]interface{}); m["field"] == "/token_prefix" {
+			n++
+		}
+	}
+	if n > 1 {
+		// Paths are compared as rendered: a deeper path that collapses onto
+		// /token_prefix counts too.
+		return fmt.Errorf("audit.NewAdminAction: at most one rendered /token_prefix entry")
+	}
 	for _, e := range entries {
 		m, _ := e.(map[string]interface{})
 		if m["field"] != "/token_prefix" {
@@ -593,6 +604,9 @@ func checkRenderedPrefixes(action string, f map[string]interface{}) error {
 		if want.before == hasBefore && want.after == hasAfter {
 			return nil
 		}
+	}
+	if !ok {
+		return nil
 	}
 	return fmt.Errorf("audit.NewAdminAction: %s lost its /token_prefix entry to the size caps", action)
 }

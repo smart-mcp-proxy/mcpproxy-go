@@ -130,9 +130,8 @@ func maskAllSpans(s string) (masked string, hit bool) {
 	for _, re := range credentialPatterns {
 		// Restarting one byte after each match start finds overlapping
 		// matches; it is bounded (maxOverlapRescans per pattern) so a string
-		// packed with token prefixes cannot make masking quadratic. Past the
-		// bound the scan continues from each match's end, which still finds
-		// every non-overlapping match.
+		// packed with token prefixes cannot make masking quadratic. At the
+		// bound the remainder of the string is masked whole.
 		rescans := 0
 		for off := 0; off < len(s); {
 			m := re.FindStringIndex(s[off:])
@@ -140,12 +139,15 @@ func maskAllSpans(s string) (masked string, hit bool) {
 				break
 			}
 			spans = append(spans, [2]int{off + m[0], off + m[1]})
-			if rescans < maxOverlapRescans {
-				rescans++
-				off += m[0] + 1
-			} else {
-				off += m[1]
+			if rescans >= maxOverlapRescans {
+				// Bound reached: mask everything from this match on, rather
+				// than resume mid-way and leave a partly consumed token's
+				// tail visible. Over-masking a pathological label is safe.
+				spans = append(spans, [2]int{off + m[0], len(s)})
+				break
 			}
+			rescans++
+			off += m[0] + 1
 		}
 	}
 	if len(spans) == 0 {

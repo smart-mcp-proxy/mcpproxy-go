@@ -323,8 +323,9 @@ type Timestamp time.Time
 
 func (Timestamp) literalKind() literalKind { return kindTimestamp }
 func (t Timestamp) render() (interface{}, bool) {
-	tt := time.Time(t)
-	if tt.IsZero() {
+	tt := time.Time(t).UTC()
+	if tt.IsZero() || tt.Year() < 0 || tt.Year() > 9999 {
+		// The wire layout has a four-digit year.
 		return nil, false
 	}
 	return tt.UTC().Format(tsLayout), true

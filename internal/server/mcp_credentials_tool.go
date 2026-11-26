@@ -163,7 +163,8 @@ func (p *MCPProxyServer) handleCredentials(ctx context.Context, request mcp.Call
 	// Defence in depth (FR-011): the filter hides the tool, the handler refuses
 	// the same way. Only an administrator credential hidden by its profile is
 	// recorded, exactly as for `profiles`.
-	if admin, visible := p.adminToolAccess(ctx); !visible {
+	admin, visible, admittedProfile := p.adminToolAccessProfile(ctx)
+	if !visible {
 		if admin {
 			p.recordProfileManagementRefusal(ctx, credentialsToolName)
 		}
@@ -172,11 +173,10 @@ func (p *MCPProxyServer) handleCredentials(ctx context.Context, request mcp.Call
 
 	start := time.Now()
 	sessionID := sessionIDFromContext(ctx)
-	// Spec 133: the profile this call was admitted under, captured now, so
-	// the admin_action line names it whatever the session selects later.
-	if name, _ := p.resolveActiveProfile(ctx); name != "" {
-		ctx = withAdminProfile(ctx, name)
-	}
+	// Spec 133: the profile the access decision above admitted the call
+	// under (not a second resolution), so the admin_action line names it
+	// whatever the session selects later.
+	ctx = withAdminProfile(ctx, admittedProfile)
 	// Spec 133 rule 3: reuse the request id already on the context, mint one
 	// only at an ingress that has none, and install it so the mutation — and
 	// its admin_action line — carries the wrapper row's id.

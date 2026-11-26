@@ -67,6 +67,12 @@ func newAdminE2E(t *testing.T, extra ...func(*config.Config)) *adminE2E {
 
 func (e *adminE2E) rest(method, path, requestID string, body any) (int, []byte) {
 	e.t.Helper()
+	return e.restAs("cli/0.77.0", method, path, requestID, body)
+}
+
+// restAs sends the request with the given X-MCPProxy-Client value.
+func (e *adminE2E) restAs(client, method, path, requestID string, body any) (int, []byte) {
+	e.t.Helper()
 	var rdr io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -76,7 +82,7 @@ func (e *adminE2E) rest(method, path, requestID string, body any) (int, []byte) 
 	req, err := http.NewRequest(method, e.base+path, rdr)
 	require.NoError(e.t, err)
 	req.Header.Set("X-API-Key", adminE2EAPIKey)
-	req.Header.Set("X-MCPProxy-Client", "cli/0.77.0")
+	req.Header.Set("X-MCPProxy-Client", client)
 	if requestID != "" {
 		req.Header.Set("X-Request-Id", requestID)
 	}
@@ -450,4 +456,16 @@ func TestAdminDoorRegistry_ListsEveryFixerAfterStartup(t *testing.T) {
 	for _, k := range diagnostics.FixerKeys() {
 		require.True(t, rows["fixer "+k], "diagnostics fixer %q registered at startup has no registry row", k)
 	}
+}
+
+// The Web UI's own header classifies the surface as web.
+func TestAdminActionDoors_WebUISurface(t *testing.T) {
+	e := newAdminE2E(t)
+	seen := 0
+	code, body := e.restAs("webui/1.0", http.MethodPost, "/api/v1/tokens", "req-web-1", map[string]any{"name": "web-bot", "expires_in": "1h"})
+	require.Equal(t, http.StatusCreated, code, string(body))
+	lines := e.adminLines(&seen)
+	require.Len(t, lines, 1)
+	require.Equal(t, "web", lines[0]["client"].(map[string]interface{})["surface"])
+	require.Equal(t, "webui/1.0", lines[0]["client"].(map[string]interface{})["name"])
 }

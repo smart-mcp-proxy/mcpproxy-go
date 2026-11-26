@@ -597,3 +597,25 @@ func TestMaskAllSpans_BoundedOnRepeatedPrefixes(t *testing.T) {
 		t.Fatal("masking a label of repeated prefixes must stay bounded")
 	}
 }
+
+func TestNewAdminAction_CollapsedPathCountsAsAPrefixEntry(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenCreate
+	in.Changes = []audit.Change{
+		audit.Literal(audit.FieldTokenPrefix, nil, audit.TokenPrefix("mcp_agt_9f8e")),
+		audit.Withheld(audit.Path("token_prefix", "extra"), audit.WithheldValue),
+	}
+	if _, err := audit.NewAdminAction(in); err == nil {
+		t.Fatal("a path that renders as /token_prefix is a second prefix entry")
+	}
+}
+
+func TestTimestamp_OutOfRangeYearIsWithheld(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
+	in.Changes = []audit.Change{audit.Literal(audit.FieldExpiresAt, nil, audit.Timestamp(time.Date(9999, 12, 31, 23, 30, 0, 0, time.FixedZone("x", -3600))))}
+	_, obj := mustAdmin(t, in)
+	if ch := obj["changes"].([]interface{})[0].(map[string]interface{}); ch["withheld"] != "value" {
+		t.Fatalf("a five-digit UTC year is outside the wire layout: %v", ch)
+	}
+}

@@ -30,3 +30,16 @@ func TestMaskAllSpans_BackToBackJWTs(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// Past the rescan bound the remainder is masked whole: no recognisable tail.
+func TestMaskAllSpans_BoundMasksTheRemainder(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < maxOverlapRescans+5; i++ {
+		b.WriteString("eyJh.eyJp.c")
+	}
+	b.WriteString("eyJhbGciOi.eyJsYXN0UGF5bG9hZA.bGFzdFNpZw")
+	got, hit := maskAllSpans(b.String())
+	if !hit || strings.Contains(got, "eyJsYXN0UGF5bG9hZA") || strings.Contains(got, "bGFzdFNpZw") {
+		t.Fatalf("got %q", got)
+	}
+}
