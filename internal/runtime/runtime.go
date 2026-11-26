@@ -793,6 +793,12 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// through it.
 	rt.oauthLoginService = NewOAuthLoginService(OAuthLoginDeps{
 		Store: storageManager,
+		Presence: func() map[string]time.Time {
+			if st, err := rt.GetOnboardingState(); err == nil && st != nil {
+				return st.ClientLastSeen
+			}
+			return nil
+		},
 		HMACKey: func() ([]byte, error) {
 			return auth.GetOrCreateHMACKey(rt.Config().DataDir)
 		},

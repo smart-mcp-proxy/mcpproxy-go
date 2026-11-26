@@ -109,10 +109,14 @@ handed over. Everything the app reports is shown as plain text.
   Approve is enabled. "Replace the previous browser login" appears only when this same
   registration signed in before.
 - **Generic address**: the page opens with a client selected and you can change it. When the
-  reported name equals exactly one existing client's id, display name or known client name
+  reported name equals exactly one client's id, display name or known client name (clients with a key or login are tried first, built-in clients without records only when none of those matched)
   (`Claude Code (my-server)` is also tried as `Claude Code`), that client is pre-selected with
   the note `Suggested because the app calls itself "<name>". MCPProxy cannot verify that.`
   Otherwise "New client" is selected, with an editable id and name filled from the reported name.
+  The list offers every client that has an API key or a login, and also each supported built-in
+  client (VS Code, Cursor, ...) that has neither yet. Picking such a built-in client creates its
+  record when the app completes the sign-in (not at approval) and asks for a profile, the same as its per-client address; a built-in
+  client is not available through "New client". VS Code reports itself as `Visual Studio Code` on both of its agent harnesses, so that name fits two clients: `GitHub Copilot (VS Code, Copilot CLI)` (`copilot`, the harness VS Code uses by default) and `VS Code` (`vscode`, the older Local harness). The page suggests the one that already has a key or a login (if both do, or neither does, the next two steps decide; if several clients match and any of them matches by id or display name, no client is suggested); else the one whose MCP client name this installation saw most recently in the last 30 days (any Copilot client name counts for `copilot`, such as `vscode-agent-host` or `copilot-cli`, so daily Copilot CLI use also points at it); else `copilot`. Both stay in the list, so you can pick the other.
   The suggestion decides nothing: approval carries the client the page sent, and a request with
   no client is refused (`client_required`).
 - The binding guard's verdict is fetched through the preview call whenever the choice is

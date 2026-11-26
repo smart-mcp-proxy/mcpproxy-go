@@ -51,6 +51,17 @@ type ClientDef struct {
 	// login flow (specs/132-client-oauth-login/verification/real-clients.md);
 	// the MCP SDK passing is not enough. Every other client stays false.
 	SupportsBrowserLogin bool
+	// OAuthRegistrationNames lists extra names this client is known to report
+	// as its OAuth dynamic-registration `client_name` (Spec 132 consent page).
+	// They are separate from ClientInfoNames on purpose: the registration name
+	// and the MCP `clientInfo.name` are different signals, and presence
+	// matching must keep using only ClientInfoNames. The consent page matches a
+	// reported name against both lists.
+	OAuthRegistrationNames []string
+	// PreferredForRegistration breaks a tie when one reported name matches
+	// several clients and no other evidence separates them (the VS Code
+	// default harness).
+	PreferredForRegistration bool
 }
 
 // allClients defines all known MCP client applications.
@@ -131,7 +142,13 @@ var allClients = []ClientDef{
 		// sends "copilot-cli", VS Code's agent host "vscode-agent-host" (#1959),
 		// other Copilot hosts "github-copilot-developer".
 		ClientInfoNames: []string{"copilot-cli", "vscode-agent-host", "github-copilot-developer", "copilot"},
-		ReloadHint:      "Reload the VS Code window (or restart Copilot CLI) to load MCPProxy",
+		// VS Code registers as "Visual Studio Code" over OAuth on this harness
+		// too (reported in #1971; the Local harness's name is unverified), so
+		// the name is shared with the "vscode" client above. The Copilot harness
+		// is VS Code's default, hence the preferred tie-break.
+		OAuthRegistrationNames:   []string{"Visual Studio Code"},
+		PreferredForRegistration: true,
+		ReloadHint:               "Reload the VS Code window (or restart Copilot CLI) to load MCPProxy",
 	},
 	{
 		ID:        "codex",
@@ -201,6 +218,9 @@ func GetAllClients() []ClientDef {
 func cloneClientDef(c ClientDef) ClientDef {
 	if c.ClientInfoNames != nil {
 		c.ClientInfoNames = append([]string(nil), c.ClientInfoNames...)
+	}
+	if c.OAuthRegistrationNames != nil {
+		c.OAuthRegistrationNames = append([]string(nil), c.OAuthRegistrationNames...)
 	}
 	return c
 }
