@@ -58,6 +58,13 @@ MinVersion=10.0.19044
 PrivilegesRequired=admin
 ChangesEnvironment=yes
 
+; PrepareToInstall below quits the trays first, and each tray stops the core it
+; started. What still holds the files after that (a core orphaned by an older
+; tray, which exited without stopping it, or a core started by hand) has no
+; window, so Restart Manager cannot ask it to close and would only report it as
+; in use, even with /VERYSILENT. Force closes it instead.
+CloseApplications=force
+
 ; UI configuration
 WizardStyle=modern
 DisableWelcomePage=no
@@ -173,14 +180,44 @@ begin
   end;
 end;
 
-// Process detection (optional - check if mcpproxy apps are running)
-function InitializeSetup(): Boolean;
+// Number of running mcpproxy-tray.exe processes; 0 when WMI cannot be asked, in
+// which case Restart Manager (CloseApplications) still handles whatever is open.
+function RunningTrayCount(): Integer;
+var
+  Locator, Service: Variant;
 begin
-  Result := True;
-  // Future enhancement: Check for running processes
-  // if IsAppRunning('mcpproxy.exe') or IsAppRunning('mcpproxy-tray.exe') then
-  //   MsgBox('MCPProxy is currently running. Please close it before installing.', mbError, MB_OK);
-  //   Result := False;
+  try
+    Locator := CreateOleObject('WbemScripting.SWbemLocator');
+    Service := Locator.ConnectServer('.', 'root\CIMV2');
+    Result := Service.ExecQuery('SELECT ProcessId FROM Win32_Process WHERE Name = ''mcpproxy-tray.exe''').Count;
+  except
+    Log('Cannot list running trays: ' + GetExceptionMessage);
+    Result := 0;
+  end;
+end;
+
+// Quit running trays the way the Quit menu does before any file is replaced, so
+// each one stops the core it started gracefully. taskkill without /F only sends
+// WM_CLOSE. Restart Manager alone would end the tray but not the windowless core.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode, Waited: Integer;
+begin
+  Result := '';
+  if RunningTrayCount() = 0 then
+    exit;
+  Log('Asking running MCPProxy trays to quit');
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM mcpproxy-tray.exe', '', SW_HIDE,
+    ewWaitUntilTerminated, ResultCode);
+  // A tray waits for its core to stop, which can take up to the core's 60s
+  // shutdown limit; a tray that will not go is left to CloseApplications.
+  Waited := 0;
+  while (RunningTrayCount() > 0) and (Waited < 75000) do
+  begin
+    Sleep(500);
+    Waited := Waited + 500;
+  end;
+  Log(Format('Trays still running after %d ms: %d', [Waited, RunningTrayCount()]));
 end;
 
 // Custom uninstall preservation of user data
