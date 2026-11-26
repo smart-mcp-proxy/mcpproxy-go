@@ -21,6 +21,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/progressrelay"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secureenv"
@@ -135,6 +136,10 @@ type Client struct {
 	rootsChangedSendTimeout time.Duration
 	// urlElicitations routes the upstream's URL elicitation completions.
 	urlElicitations clientrelay.URLElicitations
+
+	// progress maps the progress tokens this client minted for its calls in
+	// flight to the MCP client sessions that asked for progress (GH #1967).
+	progress progressrelay.Registry
 	// requestObserver records every relayed request (activity log).
 	requestObserver atomic.Pointer[func(clientrelay.Event)]
 
@@ -644,6 +649,15 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		args = map[string]interface{}{}
 	}
 	request.Params.Arguments = args
+
+	// GH #1967: a call whose MCP client asked for progress carries a token
+	// minted for this call alone, never the client's own; the upstream's
+	// notifications/progress under it are forwarded until the call returns.
+	progressToken, endProgress := c.progress.Begin(ctx)
+	defer endProgress()
+	if progressToken != nil {
+		request.Params.Meta = &mcp.Meta{ProgressToken: progressToken}
+	}
 
 	// Log to server-specific log
 	if c.upstreamLogger != nil {
