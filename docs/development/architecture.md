@@ -90,7 +90,7 @@ Disconnected → Connecting → Authenticating → Ready
 
 When MCPProxy stops, subprocesses are terminated using a two-phase approach:
 
-1. **Graceful Close** (10s): Close MCP connection, wait for process to exit
+1. **Graceful Close** (10s): Close the server's stdin, then signal it (MCP lifecycle), and wait for it to exit
 2. **Force Kill** (9s): If still running, SIGTERM → poll → SIGKILL
 
 | Timeout | Value | Purpose |

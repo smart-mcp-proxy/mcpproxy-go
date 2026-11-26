@@ -19,6 +19,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/qahooks"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shutdown"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 	transportpkg "github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
@@ -1793,11 +1794,9 @@ func (s *Supervisor) emitEvent(event Event) {
 }
 
 // actionDrainTimeout bounds how long Stop() waits for in-flight reconcile action
-// goroutines to finish before disconnecting clients. It exceeds the per-action
-// context timeout (executeAction, 30s) so a well-behaved action that observes the
-// cancelled context returns first; the timeout is only a backstop against a wedged
-// Connect so shutdown can't hang forever.
-const actionDrainTimeout = 35 * time.Second
+// goroutines to finish before disconnecting clients. Stop() has cancelled their
+// context by then, so the timeout is only a backstop against a wedged Connect.
+const actionDrainTimeout = shutdown.ActionDrain
 
 // Stop gracefully stops the supervisor.
 func (s *Supervisor) Stop() {

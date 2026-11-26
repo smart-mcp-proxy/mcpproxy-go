@@ -1,7 +1,7 @@
 <template>
-  <div class="space-y-6">
+  <div class="space-y-3">
     <!-- Page Header -->
-    <div class="flex justify-between items-center">
+    <div class="flex flex-wrap justify-between items-center gap-3">
       <div>
         <h1 class="text-3xl font-bold">Servers</h1>
         <p class="text-base-content/70 mt-1">Manage upstream MCP servers</p>
@@ -10,11 +10,10 @@
         <button
           @click="refreshServers"
           :disabled="serversStore.loading.loading"
-          class="btn btn-outline"
+          class="btn btn-outline min-h-11 md:min-h-8"
+          data-test="servers-refresh"
         >
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-          </svg>
+          <UiIcon name="refresh" class="w-5 h-5" />
           <span v-if="serversStore.loading.loading" class="loading loading-spinner loading-sm"></span>
           {{ serversStore.loading.loading ? 'Refreshing...' : 'Refresh' }}
         </button>
@@ -22,157 +21,89 @@
           v-if="hasEnabledScanners()"
           @click="scanAllServers"
           :disabled="scanAllRunning"
-          class="btn btn-primary"
+          class="btn btn-outline min-h-11 md:min-h-8"
+          data-test="servers-scan-all"
         >
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-          </svg>
+          <UiIcon name="shield" class="w-5 h-5" />
           <span v-if="scanAllRunning" class="loading loading-spinner loading-sm"></span>
           {{ scanAllRunning ? 'Scanning...' : 'Scan All' }}
         </button>
       </div>
     </div>
 
-    <!-- Spec 109-l P10c (url-filter-contract.md: Servers `profile`, requires
-         scope_filters): the Profile select and its removable chip. Hidden until
-         the build lists `profile`; the URL keeps the parameter untouched
-         meanwhile (rule 7). -->
-    <div v-if="profileScopeAvailable || profileChipVisible" class="space-y-2" data-test="servers-scope-controls">
-      <div v-if="profileScopeAvailable" class="form-control w-full sm:w-64">
-        <label class="label py-1" for="servers-profile-select"><span class="label-text text-xs">Profile</span></label>
-        <select
-          id="servers-profile-select"
-          class="select select-bordered select-sm w-full"
-          data-test="servers-profile-select"
-          :disabled="profilesStore.loading"
-          :value="profileValue"
-          @change="pickProfile($event)"
-        >
-          <option value="">All profiles</option>
-          <option v-for="profile in profilesStore.profiles" :key="profile.name" :value="profile.name">{{ profile.title || profile.name }}</option>
-          <option v-if="profileOrphan" :value="profileValue">{{ profileValue }}</option>
-        </select>
+    <!-- Spec 134 FR-016/FR-023: one filter row. "View as" is the profile picker
+         (maintainer decision 2026-11-25). Chips, More filters and search wait
+         for the first server so a fresh install shows only the empty state. -->
+    <div class="space-y-2" data-test="servers-scope-controls">
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <ViewAs />
+        <template v-if="hasServers">
+          <!-- One row at every width; at phone width it scrolls sideways (a permitted
+               container, SC-005) with "More filters" at its end, so the list stays
+               in the first screen. -->
+          <div class="flex items-center gap-2 w-full md:w-auto min-w-0" data-test="servers-chip-row">
+          <div class="flex gap-2 min-w-0 overflow-x-auto md:overflow-visible md:flex-wrap pb-1 md:pb-0" role="group" aria-label="Server filter" data-test="servers-chips">
+            <button
+              v-for="chip in chips"
+              :key="chip.value"
+              type="button"
+              :class="['btn btn-sm min-h-11 md:min-h-8 shrink-0 whitespace-nowrap', filter === chip.value ? 'btn-primary' : 'btn-outline']"
+              :aria-pressed="filter === chip.value"
+              :data-test="chip.value === 'all' ? 'kpi-card-total' : `servers-chip-${chip.value}`"
+              @click="selectChip(chip.value)"
+            >{{ chip.label }} ({{ chip.count }})</button>
+          </div>
+          <details ref="moreFilters" class="dropdown shrink-0" data-test="servers-more-filters">
+            <summary class="btn btn-sm btn-outline min-h-11 md:min-h-8" data-test="servers-more-filters-toggle">
+              More filters<span v-if="legacyActiveLabel"> ({{ legacyActiveLabel }})</span>
+            </summary>
+            <ul class="dropdown-content menu dropdown-end z-[var(--z-dropdown)] bg-base-100 rounded-box shadow-lg border border-base-300 w-64 p-2">
+              <li v-for="item in legacyItems" :key="item.value">
+                <button
+                  type="button"
+                  class="min-h-11 md:min-h-0"
+                  :class="filter === item.value ? 'menu-active' : ''"
+                  :aria-pressed="filter === item.value"
+                  :data-test="`kpi-card-${item.value}`"
+                  @click="selectLegacy(item.value)"
+                >{{ item.label }} ({{ item.count }})<span v-if="item.note" class="block text-xs font-normal opacity-70 whitespace-normal">{{ item.note }}</span></button>
+              </li>
+            </ul>
+          </details>
+          </div>
+          <input
+            v-model="searchQuery"
+            type="search"
+            placeholder="Search servers..."
+            aria-label="Search servers"
+            data-test="servers-search"
+            class="input input-bordered input-sm min-h-11 md:min-h-8 w-full sm:w-64"
+          />
+        </template>
       </div>
-      <ViewAs />
       <ScopeChips page="servers" :scope-query="scopeQuery" :disabled="disabledScope" :unavailable="scopeUnavailableNames" />
-    </div>
-
-    <!-- Everything between the header and the server grid describes a list that
-         does not exist yet on a fresh install: four zero-valued stat tiles,
-         four zero-count filter pills and a search box with nothing to search.
-         They are hidden until the first server is configured so the empty
-         state below is the only thing on the page. -->
-    <!-- Summary Stats — clickable cards drive the filter row (issue #436) -->
-    <div v-if="hasServers" class="stats shadow bg-base-100 w-full">
-      <button
-        type="button"
-        data-test="kpi-card-total"
-        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filter === 'all' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
-        :aria-pressed="filter === 'all'"
-        @click="filter = 'all'"
-      >
-        <div class="stat-title">Total Servers</div>
-        <div class="stat-value">{{ counts.total }}</div>
-        <div class="stat-desc">{{ counts.enabled }} enabled</div>
-      </button>
-
-      <button
-        type="button"
-        data-test="kpi-card-connected"
-        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filter === 'connected' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
-        :aria-pressed="filter === 'connected'"
-        @click="filter = filter === 'connected' ? 'all' : 'connected'"
-      >
-        <div class="stat-title">Connected</div>
-        <div class="stat-value text-success">{{ counts.connected }}</div>
-        <!--
-          Audit finding F27 (#1046): this read "50% online" for 2 connected out
-          of 4 servers, one of which was switched off and one quarantined. A
-          server that is not enabled cannot be online, so counting it in the
-          denominator turns an administrative decision into a health problem.
-          The denominator is the servers that are SUPPOSED to be up, and the tile
-          names it instead of printing a bare percentage.
-        -->
-        <div class="stat-desc" data-test="servers-connected-denominator">{{ connectedSummary }}</div>
-      </button>
-
-      <button
-        type="button"
-        data-test="kpi-card-quarantined"
-        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filter === 'quarantined' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
-        :aria-pressed="filter === 'quarantined'"
-        @click="filter = filter === 'quarantined' ? 'all' : 'quarantined'"
-      >
-        <div class="stat-title">Quarantined</div>
-        <div class="stat-value text-warning">{{ counts.quarantined }}</div>
-        <div class="stat-desc">Need security review</div>
-      </button>
-
-      <div class="stat" data-test="kpi-card-total-tools">
-        <div class="stat-title">Total Tools</div>
-        <div class="stat-value text-info">{{ totalTools }}</div>
-        <div class="stat-desc">Available across all servers</div>
-      </div>
-    </div>
-
-    <!-- Filters -->
-    <div v-if="hasServers" class="flex flex-wrap gap-4 items-center justify-between">
-      <div class="flex flex-wrap gap-2">
-        <button
-          @click="filter = 'all'"
-          :class="['btn btn-sm', filter === 'all' ? 'btn-primary' : 'btn-outline']"
-        >
-          All ({{ rows.length }})
-        </button>
-        <button
-          @click="filter = 'connected'"
-          :class="['btn btn-sm', filter === 'connected' ? 'btn-primary' : 'btn-outline']"
-        >
-          Connected ({{ connectedRows.length }})
-        </button>
-        <button
-          @click="filter = 'enabled'"
-          :class="['btn btn-sm', filter === 'enabled' ? 'btn-primary' : 'btn-outline']"
-        >
-          Enabled ({{ enabledRows.length }})
-        </button>
-        <button
-          @click="filter = 'quarantined'"
-          :class="['btn btn-sm', filter === 'quarantined' ? 'btn-primary' : 'btn-outline']"
-        >
-          Quarantined ({{ quarantinedRows.length }})
-        </button>
-      </div>
-
-      <div class="form-control">
-        <input
-          v-model="searchQuery"
-          type="search"
-          placeholder="Search servers..."
-          aria-label="Search servers"
-          data-test="servers-search"
-          class="input input-bordered input-sm w-full sm:w-64"
-        />
-      </div>
+      <p v-if="hasServers" class="text-sm text-base-content/70" data-test="servers-totals">
+        <span data-test="servers-total-count">{{ counts.total }} servers, {{ counts.enabled }} enabled</span>
+        <span> · </span>
+        <span data-test="servers-connected-denominator">{{ connectedSummary }}</span>
+        <span> · </span>
+        <span data-test="kpi-card-total-tools">{{ totalTools }} tools available</span>
+      </p>
     </div>
 
     <!-- A refresh failed but we still hold a list. Say so without throwing the
-         servers away — the cached grid is still the most useful thing on the
-         page, and the failure is about freshness, not about the servers. This
-         is additive, so it sits outside the state chain below. -->
+         servers away: the failure is about freshness, not about the servers. -->
     <div
       v-if="hasServers && serversStore.loading.error"
       class="alert alert-warning"
       data-test="servers-refresh-error"
     >
-      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-      </svg>
+      <UiIcon name="alert" class="w-6 h-6" />
       <div class="flex-1 text-sm">
         Couldn't refresh the server list — showing the last known state.
         <span class="opacity-70">{{ serversStore.loading.error }}</span>
       </div>
-      <button @click="refreshServers" class="btn btn-sm">Retry</button>
+      <button @click="refreshServers" class="btn btn-sm min-h-11 md:min-h-8">Retry</button>
     </div>
 
     <!-- Loading State -->
@@ -279,7 +210,7 @@
       </svg>
       <h3 class="text-xl font-semibold mb-2">{{ profileActive && !searchQuery && filter === 'all' ? 'No servers in this profile' : 'No servers found' }}</h3>
       <p class="text-base-content/70 mb-4">
-        {{ searchQuery ? 'No servers match your search criteria' : `No ${filter === 'all' ? '' : filter} servers available`.replace(/\s+/g, ' ').trim() }}
+        {{ searchQuery ? 'No servers match your search criteria' : emptyFilterText }}
       </p>
       <button v-if="profileActive && !searchQuery && filter === 'all'" type="button" class="btn btn-outline" data-test="servers-profile-clear" @click="clearProfile">
         Clear
@@ -287,68 +218,62 @@
       <button v-else-if="searchQuery" @click="searchQuery = ''" class="btn btn-outline">
         Clear Search
       </button>
-      <button v-else @click="filter = 'all'" class="btn btn-outline">
+      <button v-else @click="selectChip('all')" class="btn btn-outline" data-test="servers-show-all">
         Show all servers
       </button>
     </div>
 
-    <!-- Servers Grid with Smooth Transitions -->
-    <TransitionGroup
+    <!-- Servers table: fixed row height, problems first (FR-024). -->
+    <div
       v-else
-      name="server-list"
-      tag="div"
-      class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"
+      role="table"
+      aria-label="Servers"
+      class="servers-table bg-base-100 rounded-box shadow-sm"
+      data-test="servers-table"
+      :style="{ '--servers-cols': COLS }"
     >
-      <ServerCard
-        v-for="server in filteredServers"
-        :key="server.name"
-        :server="server"
-        :activity-stats="perServerActivity[server.name]"
-        v-memo="[
-          server.connected,
-          server.connecting,
-          server.enabled,
-          server.quarantined,
-          server.tool_count,
-          server.last_error,
-          server.authenticated,
-          server.trust_mode,
-          server.quarantine?.pending_count,
-          server.quarantine?.changed_count,
-          // #1065: the store updates server objects IN PLACE to preserve
-          // identity, so without these keys a scan settling on an already-
-          // quarantined server leaves the card's verdict stale. The warning
-          // count is tracked too -- the quarantine note renders it, so a rescan
-          // that stays `warnings` but changes the count must still re-render.
-          server.security_scan?.status,
-          server.security_scan?.finding_counts?.warning,
-          // Spec 109 FR-013: the card's status line and its ONE primary
-          // button are now driven entirely by `health` — mergeServers()
-          // above replaces `existingServer.health` with a fresh object
-          // reference on every poll (Object.assign), so without these keys
-          // a health change carrying none of the OTHER memoized fields
-          // (e.g. actions gaining a token-expiring login nudge on an
-          // otherwise unchanged connected/enabled/quarantined server) would
-          // leave the primary button stale. Picking the scalar fields, not
-          // `server.health` itself, is what makes the comparison meaningful
-          // despite the new object reference each poll.
-          server.health?.status,
-          server.health?.summary,
-          server.health?.detail,
-          server.health?.admin_state,
-          server.health?.level,
-          // `action` always equals `actions[0]` (or '' when actions is
-          // empty) per contracts.ts — the plain scalar equivalent of
-          // actions[0], without an optional array-index chain.
-          server.health?.action,
-          // Spec 109 FR-013: the card's stats line reads this per-server slice
-          // of the one activity summary fetch.
-          perServerActivity[server.name]?.calls,
-          perServerActivity[server.name]?.errors,
-          perServerActivity[server.name]?.last_call_at
-        ]"
-      />
-    </TransitionGroup>
+      <div class="servers-table__head" role="row">
+        <div role="columnheader">Server</div>
+        <div role="columnheader">Status</div>
+        <div role="columnheader">Reason</div>
+        <div role="columnheader">Tools</div>
+        <div role="columnheader">Last call</div>
+        <div role="columnheader"><span class="sr-only">Action</span></div>
+        <div role="columnheader"><span class="sr-only">More</span></div>
+      </div>
+      <div role="rowgroup">
+        <ServerRow
+          v-for="server in filteredServers"
+          :key="server.name"
+          :server="server"
+          :activity-stats="perServerActivity[server.name]"
+          :now-ms="nowMs"
+          v-memo="[
+            nowMs,
+            server.connected,
+            server.connecting,
+            server.enabled,
+            server.quarantined,
+            server.tool_count,
+            server.last_error,
+            server.authenticated,
+            server.title,
+            server.trust_mode,
+            server.diagnostic?.code,
+            server.diagnostic?.user_message,
+            server.health?.status,
+            server.health?.summary,
+            server.health?.detail,
+            server.health?.admin_state,
+            server.health?.level,
+            server.health?.action,
+            server.health?.actions?.join(','),
+            perServerActivity[server.name]?.errors,
+            perServerActivity[server.name]?.last_call_at
+          ]"
+        />
+      </div>
+    </div>
 
     <!-- Hints Panel (Bottom of Page) -->
     <CollapsibleHintsPanel :hints="serversHints" />
@@ -366,17 +291,19 @@ import { useProfilesStore, PROFILES_CHANGED_EVENT } from '@/stores/profiles'
 import { useOnboardingStore } from '@/stores/onboarding'
 import api from '@/services/api'
 import type { Server } from '@/types'
-import ServerCard from '@/components/ServerCard.vue'
+import ServerRow from '@/components/ServerRow.vue'
+import UiIcon from '@/components/UiIcon.vue'
+import { countServers, matchesFilter, matchesSearch, resolveFilter, sortServers, type LegacyServerFilter, type ServerChip, type ServerFilter } from '@/utils/serversList'
 import ScopeChips from '@/components/scope/ScopeChips.vue'
 import ViewAs from '@/components/ViewAs.vue'
-import { isServerConnected } from '@/utils/health'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import type { ActivityPerServer } from '@/types'
 
-type ServerFilter = 'all' | 'connected' | 'enabled' | 'quarantined' | 'needs_review'
-const KNOWN_FILTERS: ServerFilter[] = ['all', 'connected', 'enabled', 'quarantined', 'needs_review']
+// Grid columns shared by the table header and every row (ServerRow.vue).
+// The reason takes what the fixed columns leave (FR-020); the name gets about a fifth.
+const COLS = 'minmax(180px, 20%) 140px minmax(0, 1fr) 56px 176px 112px 44px'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
@@ -385,7 +312,6 @@ const onboardingStore = useOnboardingStore()
 const route = useRoute()
 const router = useRouter()
 const scopeQuery = useScopeQuery('servers')
-const filter = ref<ServerFilter>('all')
 const searchQuery = ref('')
 const scanAllRunning = ref(false)
 const { hasEnabledScanners } = useSecurityScannerStatus()
@@ -420,21 +346,10 @@ async function loadActivitySummary() {
 // existing `q` pattern — this is what makes the `/review` -> `/servers?status
 // =needs_review` redirect (router T026a) actually filter the list instead of
 // silently landing on the unfiltered one.
-function isNeedsReview(server: Server): boolean {
-  if (server.quarantined) return true
-  const q = server.quarantine
-  return !!q && (q.pending_count ?? 0) + (q.changed_count ?? 0) > 0
-}
-
 function applyScopeQueryParams() {
-  const status = route.query.status
-  if (typeof status === 'string' && (KNOWN_FILTERS as string[]).includes(status)) {
-    filter.value = status as ServerFilter
-  }
   const q = route.query.q
-  if (typeof q === 'string' && q !== searchQuery.value) {
-    searchQuery.value = q
-  }
+  const next = typeof q === 'string' ? q : ''
+  if (next !== searchQuery.value) searchQuery.value = next
 }
 
 // ---------------------------------------------------------------------------
@@ -449,9 +364,6 @@ const UNATTRIBUTED_NOTE = 'Unattributed applies to Activity and Usage only'
 const profileScopeAvailable = computed(() => isScopeParamAvailable('profile'))
 const profileValue = computed(() => scopeQuery.state.profile ?? '')
 const profileChipVisible = computed(() => scopeQuery.chips.value.some(chip => chip.name === 'profile'))
-const profileOrphan = computed(() =>
-  profileValue.value !== '' && profileValue.value !== '-' &&
-  !profilesStore.profiles.some(profile => profile.name === profileValue.value))
 const disabledScope = computed<Record<string, string>>(() => {
   const out: Record<string, string> = {}
   if (profileValue.value === '-' && profileScopeAvailable.value) out.profile = UNATTRIBUTED_NOTE
@@ -519,11 +431,6 @@ async function loadScoped(silent: boolean) {
   }
 }
 
-function pickProfile(event: Event) {
-  const value = (event.target as HTMLSelectElement).value
-  scopeQuery.set({ profile: value || undefined })
-}
-
 function clearProfile() {
   scopeQuery.clear(['profile'])
 }
@@ -556,15 +463,7 @@ onBeforeUnmount(() => window.removeEventListener(PROFILES_CHANGED_EVENT, onProfi
 // What the page displays: the profile's list when one is applied, otherwise the
 // shared store. Every tile, pill and card below reads these, never the store.
 const rows = computed<Server[]>(() => (profileActive.value ? (scopedServers.value ?? []) : serversStore.servers))
-const connectedRows = computed(() => rows.value.filter(isServerConnected))
-const enabledRows = computed(() => rows.value.filter(s => s.enabled))
-const quarantinedRows = computed(() => rows.value.filter(s => s.quarantined))
-const counts = computed(() => ({
-  total: rows.value.length,
-  connected: connectedRows.value.length,
-  enabled: enabledRows.value.length,
-  quarantined: quarantinedRows.value.length,
-}))
+const counts = computed(() => countServers(rows.value))
 // Only tools that are actually available count: enabled, not quarantined (#285, #1064).
 const totalTools = computed(() =>
   rows.value.filter(s => s.enabled && !s.quarantined).reduce((sum, server) => sum + server.tool_count, 0))
@@ -585,19 +484,13 @@ onMounted(async () => {
 watch(profileScopeAvailable, available => {
   if (available && !profilesStore.loaded && !profilesStore.loading) void profilesStore.fetchProfiles()
 })
-watch(() => [route.query.status, route.query.q], applyScopeQueryParams)
+watch(() => route.query.q, applyScopeQueryParams)
 
-// Live QA fix (Spec 109-k, FR-080 "router.replace on change"): the read side
-// above was the whole story — a filter pill or the search box updated
-// `filter`/`searchQuery` but never wrote back, so "Clear Filters" visibly
-// reset the controls while the address bar kept the stale `?status=&q=`
-// (SC-009's URL round-trip). `filter === 'all'` is the unfiltered default and
-// clears the param entirely, matching applyScopeQueryParams()'s own read.
-watch([filter, searchQuery], () => {
-  scopeQuery.set({
-    status: filter.value === 'all' ? undefined : filter.value,
-    q: searchQuery.value || undefined,
-  })
+// The filter lives in the URL (`filter`, legacy `status`) and is derived below;
+// only the search box writes back (FR-023: a chip click keeps `q` and `profile`).
+watch(searchQuery, value => {
+  if ((typeof route.query.q === 'string' ? route.query.q : '') === value) return
+  scopeQuery.set({ q: value || undefined })
 })
 
 // The page chrome (stat tiles, filter pills, search) only describes a list that
@@ -625,45 +518,83 @@ function openImportWizard() {
  * percentage. With nothing enabled there is no ratio to report, only a fact.
  */
 const connectedSummary = computed(() => {
-  const { connected, enabled } = counts.value
+  // "Online" is health.usable, the same measure as the Online chip and the header
+  // (Spec 134 FR-012); the transport-connected count is the Connected filter.
+  const { online, notOnline } = counts.value
+  const enabled = online + notOnline
   if (enabled === 0) return 'no servers enabled'
-  return `${connected} of ${enabled} enabled online`
+  return `${online} of ${enabled} enabled online`
 })
 
-const filteredServers = computed(() => {
-  let servers = rows.value
-
-  // Apply filter
-  switch (filter.value) {
-    case 'connected':
-      servers = connectedRows.value
-      break
-    case 'enabled':
-      servers = enabledRows.value
-      break
-    case 'quarantined':
-      servers = quarantinedRows.value
-      break
-    case 'needs_review':
-      servers = rows.value.filter(isNeedsReview)
-      break
-    default:
-      // 'all' - no additional filtering
-      break
-  }
-
-  // Apply search
-  if (searchQuery.value) {
-    const query = searchQuery.value.toLowerCase()
-    servers = servers.filter(server =>
-      server.name.toLowerCase().includes(query) ||
-      server.url?.toLowerCase().includes(query) ||
-      server.command?.toLowerCase().includes(query)
-    )
-  }
-
-  return servers
+// FR-023: the filter in force, from the URL (`status` legacy, `filter` chip) or
+// the responsive default of a bare visit.
+const wide = ref(true)
+let mq: MediaQueryList | null = null
+const onMq = () => { if (mq) wide.value = mq.matches }
+onMounted(() => {
+  if (typeof window === 'undefined' || !window.matchMedia) return
+  mq = window.matchMedia('(min-width: 768px)')
+  wide.value = mq.matches
+  mq.addEventListener?.('change', onMq)
 })
+onBeforeUnmount(() => mq?.removeEventListener?.('change', onMq))
+
+const filter = computed<ServerFilter>(() => resolveFilter({
+  filter: route.query.filter,
+  status: route.query.status,
+  hasQ: route.query.q !== undefined,
+  hasProfile: route.query.profile !== undefined,
+  wide: wide.value,
+  notOnlineCount: counts.value.notOnline,
+}))
+
+const chips = computed<{ value: ServerChip; label: string; count: number }[]>(() => [
+  { value: 'not-online', label: 'Not online', count: counts.value.notOnline },
+  { value: 'all', label: 'All', count: counts.value.total },
+  { value: 'online', label: 'Online', count: counts.value.online },
+  { value: 'disabled', label: 'Disabled', count: counts.value.disabled },
+])
+const legacyItems = computed<{ value: LegacyServerFilter; label: string; count: number; note?: string }[]>(() => [
+  { value: 'connected', label: 'Connected', count: counts.value.connected },
+  { value: 'enabled', label: 'Enabled', count: counts.value.enabled },
+  { value: 'quarantined', label: 'Quarantined', count: counts.value.quarantined, note: 'Need security review' },
+  { value: 'needs_review', label: 'Needs review', count: counts.value.needsReview },
+])
+const legacyActiveLabel = computed(() => legacyItems.value.find(i => i.value === filter.value)?.label ?? '')
+
+const moreFilters = ref<HTMLDetailsElement | null>(null)
+// A chip click clears `status` and keeps `q` and `profile`; All is written
+// explicitly so it is not mistaken for the phone default.
+function selectChip(value: ServerChip) {
+  scopeQuery.set({ filter: value, status: undefined })
+  if (moreFilters.value) moreFilters.value.open = false
+}
+function selectLegacy(value: LegacyServerFilter) {
+  if (filter.value === value) { selectChip('all'); return }
+  scopeQuery.set({ status: value, filter: undefined })
+  if (moreFilters.value) moreFilters.value.open = false
+}
+
+const EMPTY_TEXT: Record<ServerFilter, string> = {
+  all: 'No servers available',
+  'not-online': 'No enabled servers are offline',
+  online: 'No servers are online',
+  disabled: 'No servers are disabled',
+  connected: 'No connected servers available',
+  enabled: 'No enabled servers available',
+  quarantined: 'No quarantined servers available',
+  needs_review: 'No servers need review',
+}
+const emptyFilterText = computed(() => EMPTY_TEXT[filter.value])
+
+// One shared clock for "last call" ages (a per-row timer would be 300 timers).
+const nowMs = ref(Date.now())
+let nowTimer: ReturnType<typeof setInterval> | undefined
+onMounted(() => { nowTimer = setInterval(() => { nowMs.value = Math.floor(Date.now() / 30_000) * 30_000 }, 30_000) })
+onBeforeUnmount(() => { if (nowTimer !== undefined) clearInterval(nowTimer) })
+
+const filteredServers = computed(() =>
+  sortServers(rows.value.filter(s => matchesFilter(s, filter.value) && matchesSearch(s, searchQuery.value))))
 
 async function refreshServers() {
   await serversStore.fetchServers()
@@ -777,3 +708,21 @@ const serversHints = computed<Hint[]>(() => {
   ]
 })
 </script>
+
+<style scoped>
+.servers-table__head {
+  display: grid;
+  grid-template-columns: var(--servers-cols);
+  column-gap: 12px;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 16px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: color-mix(in oklab, currentColor 60%, transparent);
+  border-bottom: 1px solid var(--color-base-300, oklch(var(--b3)));
+}
+@media (max-width: 1199px) {
+  .servers-table__head { display: none; }
+}
+</style>

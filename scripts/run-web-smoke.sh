@@ -347,7 +347,7 @@ set +e
   MCPPROXY_API_KEY="$API_KEY" \
   SWEEP_SERVER_NAME="$SWEEP_SERVER_NAME" \
   SWEEP_REPORT_DIR="$REPORT_DIR" \
-    "$PLAYWRIGHT_BIN" test client-oauth-consent.spec.ts web-ui-sweep.spec.ts visual-a11y-sweep.spec.ts navigation-consistency.spec.ts shell-pr1.spec.ts profiles-clients.spec.ts profiles-scope.spec.ts profiles-unhide.spec.ts tools-pr6.spec.ts demo-ux-fixes.spec.ts usertest-web-fixes.spec.ts
+    "$PLAYWRIGHT_BIN" test client-oauth-consent.spec.ts web-ui-sweep.spec.ts visual-a11y-sweep.spec.ts navigation-consistency.spec.ts shell-pr1.spec.ts servers-pr2.spec.ts home-pr4.spec.ts profiles-clients.spec.ts profiles-scope.spec.ts profiles-unhide.spec.ts tools-pr6.spec.ts demo-ux-fixes.spec.ts usertest-web-fixes.spec.ts
 )
 PLAYWRIGHT_STATUS=$?
 set -e

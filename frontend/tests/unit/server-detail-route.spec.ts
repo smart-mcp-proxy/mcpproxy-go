@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createWebHistory } from 'vue-router'
-import ServerCard from '@/components/ServerCard.vue'
+import ServerRow from '@/components/ServerRow.vue'
 import { serverDetailPath } from '@/utils/serverRoute'
 
 // MCP-1112 (#598): official-registry server names contain '/'
@@ -47,7 +47,7 @@ describe('server-detail route round-trip (MCP-1112)', () => {
   })
 })
 
-describe('ServerCard slash-name links + title preference (MCP-1112)', () => {
+describe('ServerRow slash-name links + title preference (MCP-1112)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
   })
@@ -57,7 +57,7 @@ describe('ServerCard slash-name links + title preference (MCP-1112)', () => {
       history: createWebHistory(),
       routes: [{ path: '/', component: { template: '<div>Home</div>' } }],
     })
-    return mount(ServerCard, {
+    return mount(ServerRow, {
       props: { server },
       global: { plugins: [createPinia(), router] },
     })

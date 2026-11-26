@@ -409,3 +409,30 @@ test('compact keyboard selection opens detail and Back restores row focus', asyn
   await expect(page.locator('[data-test="skill-detail"]')).toHaveCount(0)
   expect(pageErrors, 'uncaught page errors').toEqual([])
 })
+
+// Spec 134 FR-036/SC-005: the skills table and the open card at 390 px: no sideways scroll, every
+// body button at least 44 px tall, the table's six facts all present, one action per row.
+test('skills table and card at 390 px: no sideways scroll, 44 px buttons, one action per row', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(url(`/servers/${SERVER}?tab=skills`))
+  await expect(page.locator('[data-test="skills-list"]')).toBeVisible()
+  const rows = page.locator('[data-test^="skill-tr-"]')
+  expect(await rows.count()).toBeGreaterThan(0)
+  for (let i = 0; i < await rows.count(); i++) {
+    await expect(rows.nth(i).locator('button')).toHaveCount(1)
+    await expect(rows.nth(i)).toContainText(/files?/)
+    await expect(rows.nth(i)).toContainText('Scan:')
+  }
+  const small = async () => page.evaluate(() =>
+    Array.from(document.querySelectorAll('main .btn'))
+      .filter((el) => (el as HTMLElement).offsetParent !== null && !el.closest('dialog:not([open])'))
+      .map((el) => ({ el: (el as HTMLElement).dataset.test || el.textContent?.trim().slice(0, 30), h: el.getBoundingClientRect().height }))
+      .filter((b) => b.h < 43.5))
+  expect(await small(), 'table buttons under 44 px').toEqual([])
+  const overflow = () => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+  expect(await overflow()).toBeLessThanOrEqual(1)
+  await row(page, 'with-files').click()
+  await expect(page.locator('[data-test="skill-detail"]')).toBeVisible()
+  expect(await small(), 'card buttons under 44 px').toEqual([])
+  expect(await overflow()).toBeLessThanOrEqual(1)
+})

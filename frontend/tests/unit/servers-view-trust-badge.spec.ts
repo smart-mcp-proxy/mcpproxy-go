@@ -1,11 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { mount, flushPromises } from '@vue/test-utils'
+import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { createRouter, createWebHistory } from 'vue-router'
 import { TRUST_MODES } from '@/utils/trustMode'
 
 // Spec 088 US1 / FR-007 (T012): the servers list must show each server's trust
-// mode at a glance. The list renders ServerCard tiles, so the badge lives next
+// mode at a glance. The list renders ServerRow tiles, so the badge lives next
 // to the existing server-level status chip. The mode comes from
 // utils/trustMode.ts TRUST_MODES and always reflects the EFFECTIVE mode
 // (fail-closed to manual); an unrecognized raw value is shown as effective +
@@ -44,42 +43,29 @@ function makeServer(name: string, trustMode?: string) {
   }
 }
 
+// Spec 134 FR-020: the shield moved off the Servers row to the first screen of
+// server detail (ServerFacts). The row keeps "Trust mode: <label>" in its menu.
 async function mountServers(servers: ReturnType<typeof makeServer>[]) {
-  const pinia = createPinia()
-  setActivePinia(pinia)
-  const { useServersStore } = await import('@/stores/servers')
-  const store = useServersStore()
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  store.servers = servers as any
-
-  const Servers = (await import('@/views/Servers.vue')).default
-  const router = createRouter({
-    history: createWebHistory(),
-    routes: [
-      { path: '/', component: { template: '<div/>' } },
-      { path: '/servers/:serverName', component: { template: '<div/>' } },
-    ],
-  })
-  await router.push('/')
-  await router.isReady()
-
-  const wrapper = mount(Servers, { global: { plugins: [pinia, router] } })
-  await flushPromises()
-  return wrapper
+  setActivePinia(createPinia())
+  const ServerFacts = (await import('@/components/ServerFacts.vue')).default
+  const wrappers = servers.map(server => mount(ServerFacts, { props: { server: server as any } }))
+  // Single-server helper surface used by the cases below.
+  const first = wrappers[0]
+  return Object.assign(first, { all: wrappers })
 }
 
-describe('Servers list — trust-mode badge (spec 088 FR-007)', () => {
+describe('Server detail facts — trust-mode badge (spec 088 FR-007, spec 134 FR-020)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
   })
 
-  it('renders one trust-mode badge per server tile', async () => {
+  it('renders one trust-mode badge per server', async () => {
     const wrapper = await mountServers([
       makeServer('alpha', 'auto'),
       makeServer('beta', 'scan'),
       makeServer('gamma', 'manual'),
     ])
-    const badges = wrapper.findAll('[data-test="server-trust-mode"]')
+    const badges = (wrapper as any).all.flatMap((w: any) => w.findAll('[data-test="server-trust-mode"]'))
     expect(badges).toHaveLength(3)
   })
 
@@ -119,12 +105,12 @@ describe('Servers list — trust-mode badge (spec 088 FR-007)', () => {
     expect(badge.attributes('data-trust-invalid')).toBe('true')
   })
 
-  it('renders as a shield icon, sitting alongside the status line', async () => {
+  it('renders as a shield icon with its label as text', async () => {
     const wrapper = await mountServers([makeServer('styled', 'scan')])
     const badge = wrapper.find('[data-test="server-trust-mode"]')
     expect(badge.find('svg').exists()).toBe(true)
-    // Sits alongside the existing status chip, not replacing it.
-    expect(wrapper.find('[data-test="server-status-chip"]').exists()).toBe(true)
+    // The label is also printed as text (no hover needed on a phone).
+    expect(wrapper.find('[data-test="server-facts-trust-label"]').text()).toBe('Scan')
   })
 
   it('explains the mode in the tooltip for a valid mode', async () => {
@@ -132,5 +118,27 @@ describe('Servers list — trust-mode badge (spec 088 FR-007)', () => {
     const badge = wrapper.find('[data-test="server-trust-mode"]')
     expect(badge.attributes('data-tip')).toContain('Trust mode')
     expect(badge.attributes('data-tip')).toContain('Auto')
+  })
+})
+
+describe('Server detail facts — trust shield accessible name', () => {
+  it.each([['auto', 'Auto'], ['bogus', 'bogus']])('names %s for a screen reader, not only in the tooltip', async (mode, expected) => {
+    const wrapper = await mountServers([makeServer('srv', mode)])
+    const shield = wrapper.find('[data-test="server-trust-mode"]')
+    expect(shield.attributes('role')).toBe('img')
+    expect(shield.attributes('aria-label')).toContain(expected)
+    // The meaning is plain text too (no hover needed).
+    expect(wrapper.find('[data-test="server-facts-trust-detail"]').text().length).toBeGreaterThan(10)
+  })
+})
+
+describe('Servers row — trust mode stays reachable from the more menu', () => {
+  it('lists "Trust mode: <label>" linking to the configuration tab', async () => {
+    setActivePinia(createPinia())
+    const ServerRow = (await import('@/components/ServerRow.vue')).default
+    const wrapper = mount(ServerRow, { props: { server: makeServer('srv', 'auto') as any }, global: { stubs: { RouterLink: { props: ['to'], template: '<a :href="to"><slot /></a>' } } } })
+    const entry = wrapper.find('[data-test="server-card-menu-trust"]')
+    expect(entry.text()).toBe('Trust mode: Auto')
+    expect(entry.attributes('href')).toBe('/servers/srv?tab=config')
   })
 })

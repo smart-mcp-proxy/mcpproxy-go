@@ -67,8 +67,8 @@ describe('ErrorPanel (spec 044)', () => {
       global: { plugins: [pinia] },
     })
     expect(wrapper.find('h3').text()).toBe('Reconnecting automatically')
-    expect(wrapper.find('[role="alert"]').classes()).toContain('alert-warning')
-    expect(wrapper.find('[role="alert"]').classes()).not.toContain('alert-error')
+    expect(wrapper.find('[role="alert"]').classes()).toContain('tone-review')
+    expect(wrapper.find('[role="alert"]').classes()).not.toContain('tone-error')
     expect(wrapper.find('[data-testid="error-panel-reconnecting"]').text()).toContain('Next scheduled attempt in about 4m')
     expect(wrapper.find('[data-testid="error-panel-code"]').text()).toBe('MCPX_HTTP_CONN_REFUSED')
     expect(wrapper.find('[data-testid="error-panel-severity"]').text()).toBe('temporary')
@@ -171,13 +171,13 @@ describe('ErrorPanel (spec 044)', () => {
       props: { diagnostic: makeDiag({ severity: 'error' }), serverName: 's' },
       global: { plugins: [pinia] },
     })
-    expect(errorWrap.find('.alert').classes()).toContain('alert-error')
+    expect(errorWrap.find('.soft-panel').classes()).toContain('tone-error')
 
     const warnWrap = mount(ErrorPanel, {
       props: { diagnostic: makeDiag({ severity: 'warn' }), serverName: 's' },
       global: { plugins: [pinia] },
     })
-    expect(warnWrap.find('.alert').classes()).toContain('alert-warning')
+    expect(warnWrap.find('.soft-panel').classes()).toContain('tone-review')
   })
 
   it('renders nothing when diagnostic is null', () => {

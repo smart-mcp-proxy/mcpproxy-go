@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import ServerCard from '@/components/ServerCard.vue'
+import ServerRow from '@/components/ServerRow.vue'
 import { useServersStore } from '@/stores/servers'
 import type { Server } from '@/types'
 
@@ -37,7 +37,7 @@ function makeQuarantinedServer(overrides: Partial<Server> = {}): Server {
 }
 
 function mountCard(server: Server) {
-  return mount(ServerCard, {
+  return mount(ServerRow, {
     props: { server },
     global: {
       plugins: [createPinia()],
@@ -56,11 +56,11 @@ beforeEach(() => {
 // review screen, not call the approve API directly — matching the macOS
 // implementation (DashboardView.performAction .approve case).
 //
-// Spec 109-e rewrote ServerCard to a single primary action bound to
+// Spec 109-e rewrote ServerRow to a single primary action bound to
 // `health.actions[0]`/`health.action` (data-test="server-card-primary-action"),
 // replacing the per-action buttons (`server-card-approve` etc.) this test
 // originally targeted. The Review link opens the dedicated review screen.
-describe('ServerCard — approve action opens Review, never approves directly (FR-005)', () => {
+describe('ServerRow — approve action opens Review, never approves directly (FR-005)', () => {
   it('renders the primary action as "Review", not "Approve"', () => {
     const card = mountCard(makeQuarantinedServer())
     const action = card.find('[data-test="server-card-primary-action"]')

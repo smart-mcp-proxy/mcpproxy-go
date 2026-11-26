@@ -340,7 +340,7 @@ when an `upstreams` row is written anywhere but the storage package and
 - Resources closed in dependency order (upstream → cache → index → storage)
 
 **Subprocess Shutdown Flow**:
-1. **Graceful Close** (10s timeout): Close MCP client connection, wait for subprocess to exit cleanly
+1. **Graceful Close** (10s timeout): Close the server's stdin, then signal it (MCP lifecycle), and wait for it to exit
 2. **Force Kill** (9s timeout): If graceful close fails, send SIGTERM to process group, poll for exit, then SIGKILL
 
 | Timeout | Value | Purpose |

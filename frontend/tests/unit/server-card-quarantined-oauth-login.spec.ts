@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import ServerCard from '@/components/ServerCard.vue'
+import ServerRow from '@/components/ServerRow.vue'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import type { Server } from '@/types'
@@ -60,7 +60,7 @@ function quarantinedOAuthServer(overrides: Partial<Server> = {}): Server {
 }
 
 function mountCard(server: Server) {
-  return mount(ServerCard, {
+  return mount(ServerRow, {
     props: { server },
     global: {
       stubs: { RouterLink: RouterLinkStub, 'router-link': RouterLinkStub },
@@ -72,7 +72,7 @@ beforeEach(() => {
   setActivePinia(createPinia())
 })
 
-describe('ServerCard — quarantined server that needs OAuth sign-in', () => {
+describe('ServerRow — quarantined server that needs OAuth sign-in', () => {
   it('shows Sign in as the ONE primary action, with Review still reachable from the ⋯ menu', () => {
     const card = mountCard(quarantinedOAuthServer())
 

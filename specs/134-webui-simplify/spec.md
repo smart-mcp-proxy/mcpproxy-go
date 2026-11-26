@@ -152,7 +152,7 @@ On an ordinary page load the first Tab press opens the command palette; some con
 1. **Given** an ordinary page load (no dialog, no deep-link focus target), **When** the user presses Tab once, **Then** focus lands on "Skip to content", no dialog opens, and activating it moves focus into the main content.
 2. **Given** a load that intentionally focuses something (first-run Setup, `?create=1`, `?focus=`, `?tool=`), **When** it opens, **Then** that focus is kept as today.
 3. **Given** the phone menu, **When** it is used by keyboard, **Then** it opens, closes on Escape and returns focus; when closed, nothing inside it is a tab stop. Theme choices are operable by keyboard.
-4. **Given** a 390 px viewport, **When** any page this feature changes is opened, **Then** the document does not scroll sideways and no container does except log output, code and JSON blocks and diff views, and every button in the page body is at least 44 px tall.
+4. **Given** a 390 px viewport, **When** any page this feature changes is opened, **Then** the document does not scroll sideways and no container does except log output, code and JSON blocks, diff views and filter chip rows, and every button in the page body is at least 44 px tall.
 5. **Given** any action in the inventory, **When** its test runs, **Then** it activates the action by keyboard and at 390 px and asserts its result.
 
 ---
@@ -294,7 +294,7 @@ Settings opens on its densest section, descriptions run to several lines, and th
 - **SC-002**: From any page with the shell visible and no blocking dialog open, at 1440 px and 390 px, any attention item's fix is reached in at most two activations (attention count, then the fix), including the sixth item.
 - **SC-003**: On every surface that prints `health.status`, 100% of the eight known values are printed with their Spec 109 label; unknown and missing values are tested separately. Chrome contains 0 emoji.
 - **SC-004**: For every fixture data set with no profile filter, the online count is equal on header, Home and Servers, and the attention item count is equal on header, Home list and Home sidebar badge.
-- **SC-005**: At 390 px, on every page this feature changes, including its tabs, panels and dialogs, the document does not scroll sideways, and no container does except the permitted ones (log output, code and JSON blocks, diff views); every body button is at least 44 px tall.
+- **SC-005**: At 390 px, on every page this feature changes, including its tabs, panels and dialogs, the document does not scroll sideways, and no container does except the permitted ones (log output, code and JSON blocks, diff views, filter chip rows); every body button is at least 44 px tall.
 - **SC-006**: At 1280 px the Activity calls table and the tokens table have no horizontal scrollbar and no clipped content.
 - **SC-007**: On an ordinary load the first Tab opens no dialog; every inventory action is operable by keyboard; 0 links lead to the not-found page.
 - **SC-008**: The contrast sweep passes at AA on every changed page in light and dark.

@@ -124,8 +124,10 @@ describe('ServerDetail tab <-> ?tab= (Spec 109 FR-016)', () => {
   it('re-reads ?tab= on an in-place serverName change, resetting to the default when absent', async () => {
     const { wrapper, router } = await mountServerDetail('/servers/alpha?tab=security')
 
-    const securityTab = wrapper.find('[data-test="security-tab"]')
+    // Spec 134: ?tab=security opens "Review and scans" on its scan part.
+    const securityTab = wrapper.find('[data-test="review-tab"]')
     expect(securityTab.classes()).toContain('tab-active')
+    expect(wrapper.find('[data-test="scans-part"]').exists()).toBe(true)
 
     // Simulate the SPA navigation App.vue's <router-view> performs without a
     // remount: the route changes, and the parent hands the component a new
@@ -136,7 +138,7 @@ describe('ServerDetail tab <-> ?tab= (Spec 109 FR-016)', () => {
     await flushPromises()
     await flushPromises()
 
-    const toolsTab = wrapper.find('[data-test="security-tab"]')
+    const toolsTab = wrapper.find('[data-test="review-tab"]')
     expect(toolsTab.classes()).not.toContain('tab-active')
     expect(wrapper.find('.tab.tab-active').text()).toContain('Tools')
   })

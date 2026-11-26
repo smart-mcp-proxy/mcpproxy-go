@@ -33,21 +33,22 @@ const browser = await chromium.launch({
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } })
 
 async function waitGrid() {
-  await page.waitForSelector('[data-test="server-card"], [data-test="servers-first-run-empty"]', { timeout: 30_000 })
+  await page.waitForSelector('[data-test="server-row"], [data-test="servers-first-run-empty"]', { timeout: 30_000 })
 }
 
 async function readCards() {
-  return page.$$eval('[data-test="server-card"]', (cards) =>
+  return page.$$eval('[data-test="server-row"]', (cards) =>
     cards.map((card) => {
       const chip = card.querySelector('[data-test="server-status-chip"]')
+      // Spec 134: the status is a pill carrying its tone; a legacy chip keeps its badge class.
       const color = chip
-        ? [...chip.classList].find((c) => /^badge-(success|warning|error|neutral|secondary|ghost|info|accent|primary)$/.test(c)) || ''
+        ? ([...chip.classList].find((c) => /^tone-/.test(c)) || '').replace(/^tone-/, '') || [...chip.classList].find((c) => /^badge-(success|warning|error|neutral|secondary|ghost|info|accent|primary)$/.test(c)) || ''
         : ''
       const tools = card.querySelector('[data-test="server-card-tool-count"]')
       const toolMatch = tools ? /(\d+)/.exec(tools.textContent || '') : null
       const toggle = (card.querySelector('[data-test="server-card-menu-toggle"]')?.textContent || '').trim()
       return {
-        name: card.querySelector('[data-test="server-card-title"]')?.getAttribute('title') || '',
+        name: card.querySelector('[data-test="server-detail-link"]')?.getAttribute('title') || '',
         chip_class: color,
         chip_text: (chip?.textContent || '').trim(),
         tool_count: toolMatch ? Number(toolMatch[1]) : null,

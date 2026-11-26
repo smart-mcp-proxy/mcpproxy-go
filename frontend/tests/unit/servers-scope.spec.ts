@@ -50,7 +50,7 @@ async function mountServersAt(path: string, servers: ReturnType<typeof makeServe
   store.loaded = true
 
   const Servers = (await import('@/views/Servers.vue')).default
-  const ServerCard = (await import('@/components/ServerCard.vue')).default
+  const ServerRow = (await import('@/components/ServerRow.vue')).default
   const router = createRouter({
     history: createWebHistory(),
     routes: [
@@ -63,7 +63,7 @@ async function mountServersAt(path: string, servers: ReturnType<typeof makeServe
 
   const wrapper = mount(Servers, { global: { plugins: [pinia, router] } })
   await flushPromises()
-  return { wrapper, ServerCard }
+  return { wrapper, ServerRow }
 }
 
 describe('Servers list — scope filters (Spec 109-k, url-filter-contract.md)', () => {
@@ -72,14 +72,14 @@ describe('Servers list — scope filters (Spec 109-k, url-filter-contract.md)', 
   })
 
   it('?status=needs_review shows server-quarantined and tool-pending-review servers only', async () => {
-    const { wrapper, ServerCard } = await mountServersAt('/servers?status=needs_review', [
+    const { wrapper, ServerRow } = await mountServersAt('/servers?status=needs_review', [
       makeServer('clean'),
       makeServer('server-quarantined', { quarantined: true }),
       makeServer('tool-pending', { quarantine: { pending_count: 2, changed_count: 0, blocked_count: 0 } }),
       makeServer('tool-changed', { quarantine: { pending_count: 0, changed_count: 1, blocked_count: 0 } }),
     ])
 
-    const cards = wrapper.findAllComponents(ServerCard)
+    const cards = wrapper.findAllComponents(ServerRow)
     const shown = cards.map(c => (c.props('server') as { name: string }).name).sort()
     expect(shown).toEqual(['server-quarantined', 'tool-changed', 'tool-pending'])
   })
@@ -93,12 +93,12 @@ describe('Servers list — scope filters (Spec 109-k, url-filter-contract.md)', 
   })
 
   it('?q=alpha filters the list client-side and prefills the search box', async () => {
-    const { wrapper, ServerCard } = await mountServersAt('/servers?q=alpha', [
+    const { wrapper, ServerRow } = await mountServersAt('/servers?q=alpha', [
       makeServer('alpha-server'),
       makeServer('beta-server'),
     ])
 
-    const cards = wrapper.findAllComponents(ServerCard)
+    const cards = wrapper.findAllComponents(ServerRow)
     const shown = cards.map(c => (c.props('server') as { name: string }).name)
     expect(shown).toEqual(['alpha-server'])
 
@@ -107,11 +107,11 @@ describe('Servers list — scope filters (Spec 109-k, url-filter-contract.md)', 
   })
 
   it('an unrecognized `status` value is ignored (falls back to "all")', async () => {
-    const { wrapper, ServerCard } = await mountServersAt('/servers?status=bogus', [
+    const { wrapper, ServerRow } = await mountServersAt('/servers?status=bogus', [
       makeServer('a'),
       makeServer('b', { quarantined: true }),
     ])
-    const cards = wrapper.findAllComponents(ServerCard)
+    const cards = wrapper.findAllComponents(ServerRow)
     expect(cards).toHaveLength(2)
   })
 })

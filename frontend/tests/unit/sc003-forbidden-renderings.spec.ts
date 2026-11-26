@@ -4,7 +4,7 @@ import { resolve } from 'node:path'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createWebHistory } from 'vue-router'
-import ServerCard from '@/components/ServerCard.vue'
+import ServerRow from '@/components/ServerRow.vue'
 import { healthStatusText } from '@/utils/health'
 import type { Server, HealthStatus } from '@/types'
 
@@ -92,7 +92,7 @@ async function mountDetail(s: Overrides) {
 }
 
 function mountCard(s: Overrides) {
-  return mount(ServerCard, {
+  return mount(ServerRow, {
     props: { server: s as unknown as Server },
     global: { plugins: [createPinia()], stubs: { RouterLink: RouterLinkStub, 'router-link': RouterLinkStub } },
   })
