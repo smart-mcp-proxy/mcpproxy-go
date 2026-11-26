@@ -19,6 +19,9 @@ const (
 	FormatCursor        ConfigFormat = "cursor"
 	FormatCodex         ConfigFormat = "codex"
 	FormatGemini        ConfigFormat = "gemini"
+	// FormatMCPProxy is mcpproxy's own server shape (the add-json payload)
+	// in an mcpServers map.
+	FormatMCPProxy ConfigFormat = "mcpproxy"
 
 	// FormatURL and FormatCommand are the Paste-source formats (Spec 109
 	// FR-064): a single http(s):// URL, or a single command line that isn't
@@ -41,6 +44,8 @@ func (f ConfigFormat) String() string {
 		return "Codex CLI"
 	case FormatGemini:
 		return "Gemini CLI"
+	case FormatMCPProxy:
+		return "MCPProxy"
 	case FormatURL:
 		return "URL"
 	case FormatCommand:

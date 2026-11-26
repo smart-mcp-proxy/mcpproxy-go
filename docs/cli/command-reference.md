@@ -309,7 +309,7 @@ mcpproxy upstream import <path> [flags]
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--server, -s` | Import only a specific server by name | all |
-| `--format` | Force format (claude-desktop, claude-code, cursor, codex, gemini) | auto-detect |
+| `--format` | Force format (claude-desktop, claude-code, cursor, codex, gemini, mcpproxy) | auto-detect |
 | `--dry-run` | Preview import without making changes | `false` |
 | `--no-quarantine` | Don't quarantine imported servers (use with caution) | `false` |
 
