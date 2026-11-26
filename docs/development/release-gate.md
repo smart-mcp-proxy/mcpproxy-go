@@ -123,6 +123,9 @@ page disagree):
 - `visual-a11y-sweep.spec.ts`: WCAG contrast, layouts, accessible names, themes.
 - `navigation-consistency.spec.ts`: Spec 109 sidebar, header, command palette,
   `+ Add` menu, redirects and filtered deep links.
+- `shell-pr1.spec.ts`: Spec 134 PR 1 shell: skip link, command palette keys,
+  phone menu overlay and focus, footer disclosure, theme menu by keyboard, View as
+  placement, carried scope chips, the 390 px header and no dead shell links.
 - `profiles-clients.spec.ts`: Spec 108 Profiles and Clients screens, the goal
   flow, the binding-guard refusal, the Viewing chip, dialogs and layout.
 - `profiles-scope.spec.ts`: Spec 108 profile scope on Tools, Activity, Sessions
