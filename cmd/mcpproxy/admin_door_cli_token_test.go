@@ -55,6 +55,10 @@ func TestAdminDoors_CLITokenCommandsHitTheirDoneRESTDoors(t *testing.T) {
 	// newTokenTestDaemon writes the CLI config and routes /api/v1/tokens;
 	// the per-name doors live below it, so point the CLI at a daemon whose
 	// mux serves the whole subtree.
+	// The fake daemon expects the config's key: clear the overrides the
+	// CLI would otherwise send instead.
+	t.Setenv("MCPPROXY_API_KEY", "")
+	t.Setenv("MCPPROXY_API_KEY_FILE", "")
 	newTokenTestDaemon(t, handler)
 	cfgPath := tokenConfigPath
 	mux := http.NewServeMux()

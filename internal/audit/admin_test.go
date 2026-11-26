@@ -676,3 +676,15 @@ func TestNewAdminAction_ProviderAndRoleAreClosed(t *testing.T) {
 		t.Fatal("a provider outside the closed set is rejected")
 	}
 }
+
+func TestLiteral_TypedNilIsAnAbsentSide(t *testing.T) {
+	var unset *audit.Timestamp
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
+	in.Changes = []audit.Change{audit.Literal(audit.FieldExpiresAt, unset, audit.Timestamp(time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)))}
+	_, obj := mustAdmin(t, in)
+	ch := obj["changes"].([]interface{})[0].(map[string]interface{})
+	if _, has := ch["before"]; has || ch["after"] == nil {
+		t.Fatalf("a typed nil side is absent: %v", ch)
+	}
+}

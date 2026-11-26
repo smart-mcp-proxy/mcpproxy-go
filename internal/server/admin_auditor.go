@@ -34,10 +34,19 @@ import (
 type sinkAdminAuditor struct {
 	sink   audit.Sink
 	logger *zap.Logger
-	// clientInfo resolves the MCP session's caller-asserted clientInfo
-	// (name, version), as authz lines carry it. Nil until the MCP proxy is
-	// built; REST lines take client.name from the ingress tag instead.
-	clientInfo func(ctx context.Context) (name, version string)
+}
+
+// adminClientKey carries the MCP clientInfo captured when an admin tool call
+// was admitted, so a session evicted before the commit does not lose it.
+type adminClientKey struct{}
+
+type adminClient struct{ name, version string }
+
+func withAdminClient(ctx context.Context, name, version string) context.Context {
+	if name == "" && version == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, adminClientKey{}, adminClient{name: name, version: version})
 }
 
 // adminProfileKey carries the active profile an admin tool call was admitted
@@ -127,8 +136,10 @@ func adminLineInput(ctx context.Context, rec runtime.AdminRecord) (audit.AdminAc
 
 func (a *sinkAdminAuditor) AdminAction(ctx context.Context, rec runtime.AdminRecord) {
 	in, ok := adminLineInput(ctx, rec)
-	if ok && in.Source == "mcp" && in.ClientName == "" && a.clientInfo != nil {
-		in.ClientName, in.ClientVersion = a.clientInfo(ctx)
+	if ok && in.Source == "mcp" && in.ClientName == "" {
+		if ci, has := ctx.Value(adminClientKey{}).(adminClient); has {
+			in.ClientName, in.ClientVersion = ci.name, ci.version
+		}
 	}
 	if ok && rec.Decider == nil {
 		in.Profile = adminProfileFromContext(ctx)

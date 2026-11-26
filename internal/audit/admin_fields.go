@@ -15,6 +15,7 @@ package audit
 
 import (
 	"fmt"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -366,6 +367,18 @@ func (c Count) render() (interface{}, bool) {
 	return int(c), true
 }
 
+// nilIfTypedNil turns a typed nil pointer (e.g. a nil *Timestamp for an unset
+// expiry) into an absent side instead of a value whose methods would panic.
+func nilIfTypedNil(v LiteralValue) LiteralValue {
+	if v == nil {
+		return nil
+	}
+	if rv := reflect.ValueOf(v); rv.Kind() == reflect.Pointer && rv.IsNil() {
+		return nil
+	}
+	return v
+}
+
 // Withheld kinds.
 type WithheldKind string
 
@@ -396,6 +409,7 @@ type Change struct {
 // does not match the field, or a value is outside its closed set, the entry
 // is withheld (as a secret when the path is secret-class) — never rendered.
 func Literal(field FieldPath, before, after LiteralValue) Change {
+	before, after = nilIfTypedNil(before), nilIfTypedNil(after)
 	c := Change{path: field, set: true}
 	kind, ok := literalKindOf(field)
 	if !ok {

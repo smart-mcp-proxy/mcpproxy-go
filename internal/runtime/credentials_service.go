@@ -1333,7 +1333,14 @@ func (s *CredentialsService) recordTokenEffect(out *adminOutbox, action string, 
 		return
 	}
 	cp := *rec
-	auth.EnsureAuditRef(&cp)
+	// The ref must be the stored one: inventing a fresh ref here (a store
+	// that cannot report or persist one) would give the same token a
+	// different ref on every line. Such a record is counted and skipped.
+	if !auth.ValidAuditRef(cp.AuditRef) {
+		audit.NoteBuildFailure()
+		s.logger.Warn("audit: token record has no stored audit ref; admin_action line not written", zap.String("action", action))
+		return
+	}
 	out.add(AdminRecord{
 		At: at, Action: action, Target: agentTokenTarget(cp.Name, cp.AuditRef, cp.UserID), Changes: changes,
 	})

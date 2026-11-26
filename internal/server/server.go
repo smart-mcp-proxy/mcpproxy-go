@@ -532,17 +532,6 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// Spec 107 T103: the audit sink reaches the dispatch funnels through the
 	// proxy; nil keeps them no-ops.
 	mcpProxy.auditSink = server.auditSink
-	if server.adminAuditor != nil {
-		// MCP admin lines carry the session's clientInfo, as authz lines do.
-		server.adminAuditor.clientInfo = func(ctx context.Context) (string, string) {
-			if sid := sessionIDFromContext(ctx); sid != "" {
-				if sess := mcpProxy.sessionStore.GetSession(sid); sess != nil {
-					return sess.ClientName, sess.ClientVersion
-				}
-			}
-			return "", ""
-		}
-	}
 
 	server.mcpProxy = mcpProxy
 	// FR-008a: the one evaluator behind every guarded write (config routes,

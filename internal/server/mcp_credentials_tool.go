@@ -177,6 +177,12 @@ func (p *MCPProxyServer) handleCredentials(ctx context.Context, request mcp.Call
 	// under (not a second resolution), so the admin_action line names it
 	// whatever the session selects later.
 	ctx = withAdminProfile(ctx, admittedProfile)
+	// ... and the session's clientInfo as it is now, as authz lines carry it.
+	if sid := sessionIDFromContext(ctx); sid != "" && p.sessionStore != nil {
+		if sess := p.sessionStore.GetSession(sid); sess != nil {
+			ctx = withAdminClient(ctx, sess.ClientName, sess.ClientVersion)
+		}
+	}
 	// Spec 133 rule 3: reuse the request id already on the context, mint one
 	// only at an ingress that has none, and install it so the mutation — and
 	// its admin_action line — carries the wrapper row's id.

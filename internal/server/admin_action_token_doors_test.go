@@ -347,8 +347,12 @@ func TestAdminActionDoors_SaturatedBus(t *testing.T) {
 		name := fmt.Sprintf("sat-%d", i)
 		_, err := cs.IssueToken(ctx, a, runtime.IssueTokenRequest{Name: name, ExpiresIn: "1h", Expiry: runtime.ExpiryTokenDefault})
 		require.NoError(t, err)
+		before := len(e.sink.snapshot())
 		_, err = cs.Revoke(ctx, a, runtime.CredentialRef{Token: name}, true)
 		require.NoError(t, err)
+		// FR-018: the line is on the sink when Revoke returns — written
+		// synchronously, by no subscriber of the (saturated) bus.
+		require.Equal(t, before+1, len(e.sink.snapshot()), "revoke %d: the line is written before Revoke returns", i)
 		_, err = cs.DeleteToken(ctx, a, name)
 		require.NoError(t, err)
 	}
