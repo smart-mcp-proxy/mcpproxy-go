@@ -33,6 +33,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy-tray/internal/state"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shutdown"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tray"
 )
@@ -1798,13 +1799,13 @@ func (cpl *CoreProcessLauncher) handleShutdown() {
 			"pid", pid,
 			"status", cpl.processMonitor.GetStatus())
 
-		// NEW: Create timeout for core shutdown (30 seconds total)
-		shutdownTimeout := time.After(30 * time.Second)
+		// Backstop: above the process monitor's own stop-then-kill limit.
+		shutdownTimeout := time.After(shutdown.Tray + 5*time.Second)
 		shutdownDone := make(chan struct{})
 		shutdownStarted := time.Now()
 
 		go func() {
-			cpl.processMonitor.Shutdown() // This already has 10s SIGTERM + SIGKILL logic
+			cpl.processMonitor.Shutdown() // stops gracefully, then force kills after shutdown.Tray
 			close(shutdownDone)
 		}()
 
@@ -1833,7 +1834,10 @@ func (cpl *CoreProcessLauncher) handleShutdown() {
 		cpl.logger.Info("Core was not started by the tray - leaving it running")
 	}
 
-	if shouldTerminateCore(cpl.coreOwnership) {
+	// Once the monitor has reaped the core there is nothing left to verify, and the status API
+	// could only time out or name a core the tray did not start.
+	coreExited := cpl.processMonitor != nil && cpl.processMonitor.GetExitInfo() != nil
+	if shouldTerminateCore(cpl.coreOwnership) && !coreExited {
 		if err := cpl.ensureCoreTermination(); err != nil {
 			cpl.logger.Error("Final core termination verification failed", zap.Error(err))
 		}

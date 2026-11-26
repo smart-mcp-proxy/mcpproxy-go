@@ -360,8 +360,35 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	c.StopStderrMonitoring()
 	c.StopProcessMonitoring()
 
-	// Step 3: For Docker containers, use Docker-specific cleanup
-	if isDocker {
+	// The stdio child is this teardown's from here: the gate stops
+	// tracking it BEFORE the close below reaps it (Spec 116 PR4, review
+	// round 2). Once reaped, its process-group ID may be handed to an
+	// unrelated process, which a retirement's kill must never signal. A
+	// retirement before this line kills the group itself; after it, the
+	// close and the force-kill below end the child, and the gate already
+	// refuses every write to it.
+	stdioProc.Untrack()
+
+	// Step 3: Close the MCP client. For stdio this follows the MCP lifecycle:
+	// it closes the server's stdin at once, waits, then (Unix) sends SIGTERM
+	// and finally SIGKILL to the process.
+	if stdioProc != nil && !isDocker && pgid > 0 {
+		defer holdProcessID(pgid)() // before the close reaps it: step 5 may still signal its PID
+	}
+	closeDone := make(chan struct{})
+	go func() {
+		defer close(closeDone)
+		if mcpClient != nil {
+			c.logger.Debug("Attempting graceful MCP client close",
+				zap.String("server", serverName))
+			mcpClient.Close()
+		}
+	}()
+
+	// Step 4: A Docker container gets the same order: stop it only if closing
+	// its stdin did not end it.
+	exited := isDocker && stdioProc != nil && c.containerExitsWithin(containerID, stdinCloseGrace, closeDone)
+	if isDocker && !exited {
 		c.logger.Debug("Disconnecting Docker command, attempting container cleanup",
 			zap.String("server", serverName),
 			zap.Bool("has_container_id", containerID != ""))
@@ -395,41 +422,32 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 		}
 	}
 
-	// The stdio child is this teardown's from here: the gate stops
-	// tracking it BEFORE the close below reaps it (Spec 116 PR4, review
-	// round 2). Once reaped, its process-group ID may be handed to an
-	// unrelated process, which a retirement's kill must never signal. A
-	// retirement before this line kills the group itself; after it, the
-	// close and the force-kill below end the child, and the gate already
-	// refuses every write to it.
-	stdioProc.Untrack()
-
-	// Step 4: Try graceful close via MCP client FIRST
-	// This gives the subprocess a chance to exit cleanly via stdin/stdout close
-	gracefulCloseSucceeded := false
-	if mcpClient != nil {
-		c.logger.Debug("Attempting graceful MCP client close",
-			zap.String("server", serverName))
-
-		closeDone := make(chan struct{})
-		go func() {
-			mcpClient.Close()
-			close(closeDone)
-		}()
-
+	// Step 5: Wait for the close, which lets the subprocess exit cleanly.
+	if stdioProc != nil && !isDocker && pgid > 0 {
 		select {
 		case <-closeDone:
-			c.logger.Debug("MCP client closed gracefully",
-				zap.String("server", serverName))
-			gracefulCloseSucceeded = true
-		case <-time.After(mcpClientCloseTimeout):
-			c.logger.Warn("MCP client close timed out",
-				zap.String("server", serverName),
-				zap.Duration("timeout", mcpClientCloseTimeout))
+		case <-time.After(stdinCloseGrace):
+			select {
+			case <-closeDone: // both were ready: the child is reaped, nothing left to ask
+			default:
+				// Windows has no SIGTERM: ask the process tree to exit in its place.
+				requestProcessTreeExit(pgid)
+			}
 		}
 	}
+	gracefulCloseSucceeded := false
+	select {
+	case <-closeDone:
+		c.logger.Debug("MCP client closed gracefully",
+			zap.String("server", serverName))
+		gracefulCloseSucceeded = mcpClient != nil
+	case <-time.After(mcpClientCloseTimeout):
+		c.logger.Warn("MCP client close timed out",
+			zap.String("server", serverName),
+			zap.Duration("timeout", mcpClientCloseTimeout))
+	}
 
-	// Step 5: Force kill process group only if graceful close failed
+	// Step 6: Force kill process group only if graceful close failed
 	// For non-Docker stdio processes that didn't exit gracefully
 	if !gracefulCloseSucceeded && !isDocker && pgid > 0 {
 		c.logger.Info("Graceful close failed, force killing process group",
@@ -453,7 +471,7 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 		}
 	}
 
-	// Step 5b: Release the platform process-group resource regardless of
+	// Step 6b: Release the platform process-group resource regardless of
 	// how the close went. No-op on Unix. On Windows this terminates the
 	// Job Object (reaching grandchildren mcp-go's Close never touches —
 	// it only kills the immediate cmd.exe) and drops its registry entry;
@@ -465,7 +483,7 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 		releaseProcessGroup(pgid, processCmd, c.logger, serverName)
 	}
 
-	// Step 6: Stop any locally-launched HTTP/SSE upstream. We do this
+	// Step 7: Stop any locally-launched HTTP/SSE upstream. We do this
 	// AFTER closing the MCP client — the child should see the network
 	// transport go away first, giving it a clean shutdown signal before
 	// we send SIGTERM.
@@ -477,7 +495,7 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	c.stopLauncher(stopCtx)
 	stopCancel()
 
-	// Step 7: Update state under lock
+	// Step 8: Update state under lock
 	c.mu.Lock()
 	c.client = nil
 	c.serverInfo = nil
@@ -486,9 +504,11 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	c.cachedTools = nil
 	c.processGroupID = 0
 	c.processCmd = nil
+	c.containerID = ""
+	c.containerOwner = ""
 	c.mu.Unlock()
 
-	// Step 8: release the per-server log sink (issue #1266). Every
+	// Step 9: release the per-server log sink (issue #1266). Every
 	// teardown path — RemoveServer, ShutdownAll, a reconnect — comes
 	// through here, and this is the last line this Disconnect writes to it.
 	// lumberjack reopens the file on the next write, so a server that

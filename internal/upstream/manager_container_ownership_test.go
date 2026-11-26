@@ -105,6 +105,7 @@ if [ "$1" = inspect ]; then
   }'
   exit 0
 fi
+[ "$1" = wait ] && exit 1 # still running
 [ "$1" = ps ] || exit 0
 shift
 format='{{.ID}}	{{.Names}}'

@@ -13,7 +13,7 @@
       <span v-if="item.note" class="text-xs" data-test="scope-chip-note">&mdash; {{ item.note }}</span>
       <button
         type="button"
-        class="btn btn-ghost btn-xs btn-circle min-h-6 h-6 w-6"
+        class="btn btn-ghost btn-xs btn-circle min-h-6 h-6 w-6 max-md:min-h-11 max-md:h-11 max-md:w-11"
         :aria-label="`Remove ${item.label} filter (${item.name})`"
         :data-test="`scope-chip-remove-${item.name}`"
         @click="item.remove()"

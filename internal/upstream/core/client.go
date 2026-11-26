@@ -211,6 +211,11 @@ type Client struct {
 	// only by SetCredentialBinding before use.
 	binding atomic.Pointer[commitview.CredentialBinding]
 
+	// dockerInit is dockerHasInit's answer for the spawn in progress.
+	dockerInit bool
+	// dockerOtherDaemon is dockerRunMayUseOtherDaemon's answer for the spawn in progress.
+	dockerOtherDaemon bool
+
 	// stdioProc is the stdio child registered with the gate (FR-025a), so a
 	// normal Disconnect can hand it back to its own teardown. Guarded by mu.
 	stdioProc *dialgate.Process

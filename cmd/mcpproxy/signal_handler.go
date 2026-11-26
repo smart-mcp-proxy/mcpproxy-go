@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shutdown"
 )
 
 const (
@@ -21,7 +23,7 @@ const (
 	// daemon instead of waiting for a human with SIGKILL. It sits under
 	// systemd's 90s DefaultTimeoutStopSec, so systemd's own SIGKILL stays a
 	// backstop rather than the normal outcome.
-	shutdownHardDeadline = 60 * time.Second
+	shutdownHardDeadline = shutdown.Core
 )
 
 // signalHandlerDeps are the collaborators of runSignalHandler. Everything that

@@ -26,6 +26,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/qahooks"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shutdown"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/callstats"
@@ -758,7 +759,8 @@ func (m *Manager) ShutdownAll(ctx context.Context) error {
 	}
 
 	// Wait for all disconnections to complete (with timeout)
-	// Use a shorter timeout (5 seconds) for the disconnect phase
+	// The phase has to outlast one container that ignores both its closed stdin
+	// and SIGTERM (see the shutdown package)
 	// If servers are stuck in "Connecting" state, their disconnection will hang
 	// In that case, we'll force-proceed to container cleanup which can handle it
 	done := make(chan struct{})
@@ -767,7 +769,7 @@ func (m *Manager) ShutdownAll(ctx context.Context) error {
 		close(done)
 	}()
 
-	disconnectTimeout := 5 * time.Second
+	disconnectTimeout := shutdown.Disconnect
 	disconnectTimer := time.NewTimer(disconnectTimeout)
 	defer disconnectTimer.Stop()
 
@@ -775,7 +777,7 @@ func (m *Manager) ShutdownAll(ctx context.Context) error {
 	case <-done:
 		m.logger.Info("All upstream servers disconnected successfully")
 	case <-disconnectTimer.C:
-		m.logger.Warn("Disconnect phase timed out after 5 seconds, forcing cleanup")
+		m.logger.Warn("Disconnect phase timed out, forcing cleanup", zap.Duration("timeout", disconnectTimeout))
 		m.logger.Warn("Some servers may not have disconnected cleanly (likely stuck in Connecting state)")
 		// Don't wait for stuck goroutines - proceed with container cleanup anyway
 	case <-ctx.Done():
@@ -996,8 +998,7 @@ func (m *Manager) cleanupAllManagedContainers(ctx context.Context) {
 	m.logOwnerGroupedCounts("Found mcpproxy-managed containers to cleanup", m.logger.Info, owned)
 
 	// Grace period for graceful shutdown
-	gracePeriod := 10 * time.Second
-	graceCtx, graceCancel := context.WithTimeout(ctx, gracePeriod)
+	graceCtx, graceCancel := context.WithTimeout(ctx, shutdown.Sweep)
 	defer graceCancel()
 
 	// Ownership is re-established right before each mutation
@@ -1032,7 +1033,7 @@ func (m *Manager) cleanupAllManagedContainers(ctx context.Context) {
 	// Force kill any remaining containers after grace period
 	m.logger.Info("Force killing any remaining containers")
 
-	killCtx, killCancel := context.WithTimeout(ctx, 5*time.Second)
+	killCtx, killCancel := context.WithTimeout(ctx, shutdown.SweepKill)
 	defer killCancel()
 
 	for _, selected := range owned {

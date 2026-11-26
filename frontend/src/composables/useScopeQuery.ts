@@ -287,6 +287,8 @@ function registerDefaultScopeParams(): void {
   registerScopeParam({ name: 'type', pages: ['activity'] })
   registerScopeParam({ name: 'tab', pages: ['server-detail', 'settings', 'clients', 'add-server'], restPages: [] })
   registerScopeParam({ name: 'q', pages: ['tools', 'servers', 'catalog'], restPages: ['catalog'] })
+  // Spec 134 FR-023: the Servers chip (not-online | all | online | disabled), client-side only.
+  registerScopeParam({ name: 'filter', pages: ['servers'], restPages: [] })
   registerScopeParam({ name: 'tier', pages: ['tools'], restPages: [], label: 'Tier' })
   registerScopeParam({ name: 'risk', pages: ['tools'], restPages: [] }) // alias of tier, resolved by the page
   registerScopeParam({ name: 'approval', pages: ['tools'], restPages: [] })
