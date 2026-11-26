@@ -183,13 +183,14 @@ func (w *OAuthTransportWrapper) RoundTrip(req *http.Request) (*http.Response, er
 	if tokenReq {
 		// GH #1827: every token request leaves one line after it returns:
 		// grant type, the refresh flight that sent it, status and duration.
+		authz := w.matchesAuthorization(req) // one answer for injection and log
 		grantType, parsed := peekTokenGrantType(req)
-		if v, ok := w.extraParams["grant_type"]; ok && parsed && !w.matchesAuthorization(req) {
+		if v, ok := w.extraParams["grant_type"]; ok && parsed && !authz {
 			grantType = tokenRequestGrantType(v) // what injectFormParams sends
 		}
 		start := time.Now()
 		var obs tokenResponseObs
-		resp, err := w.roundTripParams(req, tokenReq, &obs)
+		resp, err := w.roundTripParams(req, authz, tokenReq, &obs)
 		logErr := err
 		if logErr == nil {
 			logErr = obs.bodyErr // a 2xx whose body was cut short
@@ -197,7 +198,7 @@ func (w *OAuthTransportWrapper) RoundTrip(req *http.Request) (*http.Response, er
 		LogTokenRequest(req.Context(), w.logger, grantType, obs.status, logErr, time.Since(start))
 		return resp, err
 	}
-	return w.roundTripParams(req, tokenReq, nil)
+	return w.roundTripParams(req, w.matchesAuthorization(req), tokenReq, nil)
 }
 
 // tokenResponseObs is what a token request's log line reports about the
@@ -210,14 +211,14 @@ type tokenResponseObs struct {
 
 // roundTripParams injects the extra params, sends the request and normalizes
 // a token response. obs, when non-nil, receives what the log line reports.
-func (w *OAuthTransportWrapper) roundTripParams(req *http.Request, tokenReq bool, obs *tokenResponseObs) (*http.Response, error) {
+func (w *OAuthTransportWrapper) roundTripParams(req *http.Request, authz, tokenReq bool, obs *tokenResponseObs) (*http.Response, error) {
 	send := req
 	if len(w.extraParams) > 0 {
 		// Clone request to avoid modifying original
 		send = req.Clone(req.Context())
 
 		// Detect OAuth endpoint type and inject params appropriately
-		if w.matchesAuthorization(req) {
+		if authz {
 			w.injectQueryParams(send)
 		} else if tokenReq {
 			w.injectFormParams(send)
