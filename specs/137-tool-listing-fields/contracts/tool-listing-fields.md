@@ -5,11 +5,11 @@
 | top-level `title` | emitted value | `title` (emitted, else emitted annotations title) | — | `title` (same) | as full | emitted + `pending_title` + `title_invalid` | emitted | emitted | display name |
 | `annotations.title` | emitted value | inside `annotations` (emitted) | — | inside `annotations` (emitted) | as full | emitted + `pending_annotations_title` + `annotations_title_invalid` | emitted | emitted | badge |
 | `icons` | validated set | — | — | — | — | `icons`, `icons_dropped` | `icons` | — | `ToolIcon` (data: inline img; https on request) |
-| `_meta` | stored object, owned keys replaced | — | — | — | — | `meta`, `meta_dropped` | — | — | collapsed JSON (admin) |
+| `_meta` | stored object minus owned keys, plus the size hook key when enabled | — | — | — | — | `meta`, `meta_dropped` | — | — | collapsed JSON (admin) |
 | `defer_loading` | when true | — | — | `defer_loading: true` | — | `defer_loading` | `defer_loading` | — | "loaded on demand" badge |
 | `execution.taskSupport` | **never** | — | — | `task_support` | — | `task_support` | `task_support` | — | badge; `required` = not callable yet |
 
-"Emitted" = the live value when it equals the approved value, else absent (spec FR-008).
+"Emitted" = the approval record's current value when it is valid and equals its approved value, read when the response is built; else absent (spec FR-008). Caches never supply a title.
 
 ## REST `contracts.Tool` additions
 
