@@ -227,7 +227,7 @@ func ClassifyField(f FieldPath) string {
 	if secretPrefixes[f.segs[0]] {
 		return classWithheldSecret
 	}
-	if _, ok := literalFields[strings.Join(f.segs, "/")]; ok {
+	if _, ok := literalKindOf(f); ok {
 		return classLiteral
 	}
 	return classWithheldValue
@@ -236,6 +236,13 @@ func ClassifyField(f FieldPath) string {
 func literalKindOf(f FieldPath) (literalKind, bool) {
 	if len(f.segs) == 0 || secretPrefixes[f.segs[0]] {
 		return 0, false
+	}
+	// The table is keyed by segments joined with '/': a segment that itself
+	// contains '/' would forge another path's key, so it is never literal.
+	for _, seg := range f.segs {
+		if strings.Contains(seg, "/") {
+			return 0, false
+		}
 	}
 	k, ok := literalFields[strings.Join(f.segs, "/")]
 	return k, ok

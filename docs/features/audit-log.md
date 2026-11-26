@@ -126,7 +126,9 @@ it writes a lone newline, so a torn tail is never glued onto the next line; whil
 that repair fails it appends nothing. On open it checks that the file ends in a
 newline and repairs it the same way, in that file, before anything can rotate it
 (a write-only file, which the daemon cannot read, gets one newline at open instead:
-an empty line on a clean file, which shippers skip). A line the builder rejects is not written;
+an empty line on a clean file, which shippers skip). The stdout sink has no file to inspect: a
+process that exits mid-line leaves that line torn for the next reader, so stdout
+delivery is best-effort per line — skip malformed lines in the shipper. A line the builder rejects is not written;
 rejections are counted apart from write failures and reported by `mcpproxy
 doctor`. Counters count attempts, not records: verify records by reading the file,
 and have the shipper skip a malformed line independently (below).

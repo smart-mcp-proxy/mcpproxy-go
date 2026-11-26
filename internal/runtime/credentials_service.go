@@ -807,37 +807,43 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 	committed.TokenPrefix = auth.TokenPrefix(raw)
 	view := ViewOf(&committed, cfg, now)
 	s.writeLifecycle(ctx, a, profile.ChangeIssue, view, nil)
-	changes := []audit.Change{audit.Literal(audit.FieldTokenPrefix, nil, audit.TokenPrefix(committed.TokenPrefix))}
-	if !committed.ExpiresAt.IsZero() {
-		changes = append(changes, audit.Literal(audit.FieldExpiresAt, nil, audit.Timestamp(committed.ExpiresAt)))
-	}
-	// FR-015: every field the mint set is named; values that are not on the
-	// literal list are withheld (scope, pin, purpose, call budget).
-	// A grant to every server is the documented "*" sentinel and is shown;
-	// a list of server names is withheld until server-name provenance
-	// exists (Spec 133 PR-1b).
-	if len(committed.AllowedServers) == 1 && committed.AllowedServers[0] == "*" {
-		changes = append(changes, audit.AllServersGranted(audit.Path("allowed_servers")))
-	} else {
-		changes = append(changes, audit.Withheld(audit.Path("allowed_servers"), audit.WithheldValue))
-	}
-	changes = append(changes, audit.Withheld(audit.Path("permissions"), audit.WithheldValue))
-	if committed.GuardBound {
-		changes = append(changes, audit.Literal(audit.Path("guard_bound"), nil, audit.Bool(true)))
-	}
-	if committed.ProfilePin != "" {
-		changes = append(changes, audit.Withheld(audit.Path("profile_pin"), audit.WithheldValue))
-	}
-	if committed.Purpose != "" {
-		changes = append(changes, audit.Withheld(audit.Path("purpose"), audit.WithheldValue))
-	}
-	if rl := committed.RateLimit; rl != nil {
-		changes = append(changes, audit.Literal(audit.Path("rate_limit", "per_minute"), nil, audit.RateLimitValue(rl.PerMinute)))
-		if rl.Burst > 0 {
-			changes = append(changes, audit.Literal(audit.Path("rate_limit", "burst"), nil, audit.RateLimitValue(rl.Burst)))
+	if s.adminAudit.active() {
+		changes := []audit.Change{audit.Literal(audit.FieldTokenPrefix, nil, audit.TokenPrefix(committed.TokenPrefix))}
+		if !committed.ExpiresAt.IsZero() {
+			changes = append(changes, audit.Literal(audit.FieldExpiresAt, nil, audit.Timestamp(committed.ExpiresAt)))
+		} else {
+			// "never": the zero-time sentinel is not a timestamp literal, but
+			// the field was set and is named.
+			changes = append(changes, audit.Withheld(audit.FieldExpiresAt, audit.WithheldValue))
 		}
+		// FR-015: every field the mint set is named; values that are not on the
+		// literal list are withheld (scope, pin, purpose, call budget).
+		// A grant to every server is the documented "*" sentinel and is shown;
+		// a list of server names is withheld until server-name provenance
+		// exists (Spec 133 PR-1b).
+		if allWildcard(committed.AllowedServers) {
+			changes = append(changes, audit.AllServersGranted(audit.Path("allowed_servers")))
+		} else {
+			changes = append(changes, audit.Withheld(audit.Path("allowed_servers"), audit.WithheldValue))
+		}
+		changes = append(changes, audit.Withheld(audit.Path("permissions"), audit.WithheldValue))
+		if committed.GuardBound {
+			changes = append(changes, audit.Literal(audit.Path("guard_bound"), nil, audit.Bool(true)))
+		}
+		if committed.ProfilePin != "" {
+			changes = append(changes, audit.Withheld(audit.Path("profile_pin"), audit.WithheldValue))
+		}
+		if committed.Purpose != "" {
+			changes = append(changes, audit.Withheld(audit.Path("purpose"), audit.WithheldValue))
+		}
+		if rl := committed.RateLimit; rl != nil {
+			changes = append(changes, audit.Literal(audit.Path("rate_limit", "per_minute"), nil, audit.RateLimitValue(rl.PerMinute)))
+			if rl.Burst > 0 {
+				changes = append(changes, audit.Literal(audit.Path("rate_limit", "burst"), nil, audit.RateLimitValue(rl.Burst)))
+			}
+		}
+		s.recordTokenEffect(&out, audit.ActionTokenCreate, &committed, changes, committedAt)
 	}
-	s.recordTokenEffect(&out, audit.ActionTokenCreate, &committed, changes, committedAt)
 	s.announce(view, profile.ChangeIssue)
 	return &IssuedCredentialResult{View: view, Secret: raw, record: &committed}, nil
 }
@@ -1304,7 +1310,7 @@ func (s *CredentialsService) DeleteToken(ctx context.Context, a Actor, name stri
 // rec is the record the storage transaction reported; its audit ref is the
 // stored one (a store that cannot report a ref gets one assigned on this copy).
 func (s *CredentialsService) recordTokenEffect(out *adminOutbox, action string, rec *auth.AgentToken, changes []audit.Change, at time.Time) {
-	if s == nil || s.adminAudit == nil || rec == nil || out == nil {
+	if s == nil || !s.adminAudit.active() || rec == nil || out == nil {
 		return
 	}
 	// A client credential's record (client-<id>, reached through the legacy
@@ -1495,4 +1501,17 @@ func (s *CredentialsService) Get(ref CredentialRef) (*CredentialView, error) {
 	}
 	v := ViewOf(rec, s.cfg(), s.now())
 	return &v, nil
+}
+
+// allWildcard reports a non-empty server list made only of the "*" sentinel.
+func allWildcard(list []string) bool {
+	if len(list) == 0 {
+		return false
+	}
+	for _, v := range list {
+		if v != "*" {
+			return false
+		}
+	}
+	return true
 }

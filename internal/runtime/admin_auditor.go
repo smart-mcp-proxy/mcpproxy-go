@@ -71,6 +71,16 @@ func (h *adminAuditHolder) set(a AdminAuditor) {
 	h.v.Store(&adminAuditorBox{a: a})
 }
 
+// active reports whether an auditor is installed, so callers skip building
+// records at all while audit is off. Safe on a nil holder.
+func (h *adminAuditHolder) active() bool {
+	if h == nil {
+		return false
+	}
+	box := h.v.Load()
+	return box != nil && box.a != nil
+}
+
 // record hands rec to the installed auditor, if any. Safe on a nil holder.
 func (h *adminAuditHolder) record(ctx context.Context, rec AdminRecord) {
 	if h == nil {

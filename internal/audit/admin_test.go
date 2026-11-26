@@ -538,3 +538,20 @@ func TestAllServersGranted_OnlyOnTheAllowList(t *testing.T) {
 		t.Fatalf("a secret path is withheld, never a list: %v", ch)
 	}
 }
+
+func TestMask_ClassicTokenRunningIntoFineGrainedPAT(t *testing.T) {
+	in := tokenRotateInput()
+	in.RequestID = "ghp_0123456789abcdefghijgithub_pat_11ABCDEFGHIJKLMNOPQRSTUV_secrettail0123456789"
+	line, _ := mustAdmin(t, in)
+	assertSentinelAbsent(t, line, "secrettail0123456789")
+}
+
+func TestLiteral_FlattenedSegmentIsNotLiteral(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
+	in.Changes = []audit.Change{audit.Literal(audit.Path("rate_limit/per_minute"), nil, audit.RateLimitValue(5))}
+	_, obj := mustAdmin(t, in)
+	if ch := obj["changes"].([]interface{})[0].(map[string]interface{}); ch["withheld"] != "value" {
+		t.Fatalf("a segment containing '/' is never literal: %v", ch)
+	}
+}

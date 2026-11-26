@@ -9,6 +9,8 @@ package audit
 
 import (
 	"regexp"
+	"sort"
+	"strings"
 	"sync/atomic"
 )
 
@@ -35,9 +37,9 @@ func truncateField(s string) string {
 	return string(r[:maxFieldLength]) + "...(truncated)"
 }
 
-// credentialPatterns are evaluated in order (most specific prefix first,
-// e.g. sk-ant- before sk-) so a longer, more specific match is consumed
-// before a shorter pattern could also match a prefix of it.
+// credentialPatterns are all matched against the original string and their
+// spans merged (applyMasking), so their order no longer decides what is
+// masked.
 var credentialPatterns = []*regexp.Regexp{
 	// Spec 133 FR-016: the proxy's own token shapes (agent token, client
 	// credential, browser-login access and refresh tokens) first, so a
@@ -71,14 +73,43 @@ func maskMatch(s string) string {
 
 // applyMasking runs every fixed-prefix pattern over s in order and reports
 // whether any of them fired.
+//
+// Every pattern is matched against the ORIGINAL string and overlapping or
+// touching matches are merged before anything is replaced (Spec 133 review):
+// replacing pattern by pattern let one mask consume the prefix another
+// pattern needed (a classic gh*_ token running into github_pat_, a proxy
+// token running into a JWT), leaving the second secret's tail in the line.
 func applyMasking(s string) (masked string, hit bool) {
+	var spans [][2]int
 	for _, re := range credentialPatterns {
-		if re.MatchString(s) {
-			hit = true
-			s = re.ReplaceAllStringFunc(s, maskMatch)
+		for _, m := range re.FindAllStringIndex(s, -1) {
+			spans = append(spans, [2]int{m[0], m[1]})
 		}
 	}
-	return s, hit
+	if len(spans) == 0 {
+		return s, false
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i][0] < spans[j][0] })
+	merged := spans[:1]
+	for _, sp := range spans[1:] {
+		last := &merged[len(merged)-1]
+		if sp[0] <= last[1] {
+			if sp[1] > last[1] {
+				last[1] = sp[1]
+			}
+			continue
+		}
+		merged = append(merged, sp)
+	}
+	var b strings.Builder
+	prev := 0
+	for _, sp := range merged {
+		b.WriteString(s[prev:sp[0]])
+		b.WriteString(maskMatch(s[sp[0]:sp[1]]))
+		prev = sp[1]
+	}
+	b.WriteString(s[prev:])
+	return b.String(), true
 }
 
 // maskCredential applies the per-field pass to one caller/operator-controlled

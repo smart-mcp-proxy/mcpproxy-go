@@ -23,9 +23,13 @@ import (
 func TestAdminDoors_CLITokenCommandsHitTheirDoneRESTDoors(t *testing.T) {
 	var mu sync.Mutex
 	var got []string
+	var createBody map[string]interface{}
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		got = append(got, r.Method+" "+r.URL.Path)
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/tokens" {
+			_ = json.NewDecoder(r.Body).Decode(&createBody)
+		}
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -94,6 +98,13 @@ func TestAdminDoors_CLITokenCommandsHitTheirDoneRESTDoors(t *testing.T) {
 				}
 			}
 			require.Equal(t, []string{tc.request}, mutations, "the command sends exactly its door's request")
+			if tc.cli == "CLI mcpproxy token create" {
+				mu.Lock()
+				body := createBody
+				mu.Unlock()
+				require.Equal(t, "ci", body["name"], "the create request carries the name the REST door needs")
+				require.Equal(t, "30d", body["expires_in"])
+			}
 
 			cliActions := doneActions(tc.cli, "")
 			if len(cliActions) == 0 {

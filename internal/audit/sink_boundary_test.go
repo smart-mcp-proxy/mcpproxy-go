@@ -217,7 +217,7 @@ func TestNewFileSink_ShortWriteThenRotationKeepsRecords(t *testing.T) {
 	ws.mu.Unlock()
 	_ = s.Write([]byte(`{"seq":1}`))
 	// Fill close to the 1 MB limit, then a record that forces a rotation.
-	pad := strings.Repeat("x", 1024*1024-64)
+	pad := strings.Repeat("x", 1024*1024-20)
 	if err := s.Write([]byte(`{"pad":"` + pad + `"}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -237,6 +237,9 @@ func TestNewFileSink_ShortWriteThenRotationKeepsRecords(t *testing.T) {
 				seen[l[:8]] = true
 			}
 		}
+	}
+	if len(entries) < 2 {
+		t.Fatalf("the fixture must reach the rotation threshold, got %d file(s)", len(entries))
 	}
 	if !seen[`{"seq":3`] || !seen[`{"pad":"`] {
 		t.Fatalf("records after the repair must be intact across the rotation: %v", seen)
