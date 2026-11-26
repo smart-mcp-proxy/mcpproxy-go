@@ -74,6 +74,14 @@ func TestWithProgressRelay_MessageThroughOutputPolicy(t *testing.T) {
 			sink(progressrelay.Update{Progress: 2, Total: &total, Message: secretMsg})
 			n := <-sess.notes
 			f := n.Params.AdditionalFields
+			if tc.action == "spotlight" {
+				// A policy switched on during the call applies to its next message.
+				p.config.OutputSanitisation = &config.OutputSanitisationConfig{ResponseAction: "redact", MaxRedactions: 100}
+				p.resetSkillOutputState()
+				sink(progressrelay.Update{Progress: 3, Message: secretMsg})
+				later := (<-sess.notes).Params.AdditionalFields["message"]
+				assert.NotContains(t, later, "AKIA1234567890ABCDEF")
+			}
 			assert.Equal(t, 7, f["progressToken"], "the client's own token, as it sent it")
 			assert.Equal(t, 2.0, f["progress"])
 			assert.Equal(t, 10.0, f["total"])

@@ -17,8 +17,9 @@ import (
 //
 // The message is upstream-written text an agent may read. It is capped by
 // progressrelay and then passed through the output sanitisation policy the
-// way skill words are (redact and strip apply; under block, a message with a
-// critical secret is left out and only the numbers are sent).
+// way skill words are, read live per message (redact and strip apply; under
+// block, a message with a critical secret is left out and only the numbers
+// are sent).
 //
 // Only the call_tool_* wrapper and the direct surface call this; a
 // code_execution sub-call carries no progress token of its own.
@@ -30,12 +31,12 @@ func (p *MCPProxyServer) withProgressRelay(ctx context.Context, request mcp.Call
 	return progressrelay.WithSink(ctx, sink)
 }
 
-// progressMessageCleaner applies the live output policy to one progress
-// message; a message the policy withholds becomes "".
+// progressMessageCleaner applies the output policy live when each message
+// arrives (a policy switched on during a long call applies to its later
+// messages); a message the policy withholds becomes "".
 func (p *MCPProxyServer) progressMessageCleaner() func(string) string {
-	clean := p.skillWordCleaner(p.skillPolicy())
 	return func(s string) string {
-		out := clean(s)
+		out := p.skillWordCleaner(p.skillPolicy())(s)
 		if out == skillWordWithheld {
 			return ""
 		}

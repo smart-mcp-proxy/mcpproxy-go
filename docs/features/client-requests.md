@@ -83,10 +83,10 @@ mcpproxy activity list --type client_request
 
 ## Progress notifications
 
-When an MCP client sends a `progressToken` in a tool call's `_meta`, the upstream server's `notifications/progress` for that call reach that client, under the client's own token. This needs no `client_features` entry and works on `call_tool_*`, the direct `server__tool` names and `/mcp/s/<server>`.
+When an MCP client sends a `progressToken` in a tool call's `_meta`, the upstream server's `notifications/progress` for that call are forwarded to that client, under the client's own token. Forwarding is best effort: an update is dropped when the client's session cannot take it at once, and a client connection that cannot receive notifications gets none. This needs no `client_features` entry and works on `call_tool_*`, the direct `server__tool` names and `/mcp/s/<server>`.
 
 - The upstream never sees the client's token. MCPProxy gives each upstream call a token of its own and maps it back to the calling client until the call returns, times out or the server disconnects. Two clients that use the same token each get only their own progress, and progress is never sent to any other client.
 - A call without a `progressToken` carries none upstream, and nothing is forwarded.
-- The `message` is text the upstream server wrote. It is cut to 512 bytes and passes the [output sanitisation](./output-sanitisation.md) policy like a tool result: redacted or stripped as configured, and under `block` a message with a secret is left out (`progress` and `total` are still sent).
-- At most one notification per call is forwarded every 100 ms; ones that arrive sooner, or whose `progress` does not increase, are dropped. The first one that reaches `total` is always forwarded.
+- The `message` is text the upstream server wrote. It is cut to 512 bytes and passes the [output sanitisation](./output-sanitisation.md) policy like a tool result: redacted or stripped as configured, and under `block` a message with a critical secret is left out (`progress` and `total` are still sent).
+- At most one notification per call is forwarded every 100 ms; ones that arrive sooner, or whose `progress` does not increase, are dropped. The first one that reaches `total` is not held back by the interval.
 - `code_execution` sub-calls do not forward progress.
