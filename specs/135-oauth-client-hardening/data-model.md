@@ -75,7 +75,8 @@ bound(B) ──(snapshot B' with !Matches(B, B'))──► changed(B→B')
           nothing sent, access token not attached; MCPX_OAUTH_ISSUER_CHANGED
 changed / bound(B) ──(first write bound to B' with !Equal — issuer, target, source class, regardless of skip: DCR registration or login)──► bound(B')
           one tx: replace the registration, clear the old tokens and MixUpProtected
-          login: CAS on the revision observed at flow start, or the row's binding Equal to the flow's; else discarded
+          login: CAS on the per-server OAuth write counter observed at flow start (moved by every
+          write and delete of the row), or the row's binding Equal to the flow's; else discarded
 any ──(row undecryptable, Spec 123)──► undecryptable   [checked first]
 ```
 

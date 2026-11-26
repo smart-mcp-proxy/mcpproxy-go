@@ -209,7 +209,7 @@ A brokered upstream (`ConnectorConfig`, static endpoints, no discovery) can now 
 - **Comparison**: `iss` and the stored issuer are compared as exact strings (RFC 9207 §2.4). Metadata issuer equality ignores one trailing `/`. Case is not normalised.
 - **Several authorization servers in PRM**: only the entry discovery uses (the first, as today) counts.
 - **Discovery cache**: the expected issuer of a login is the snapshot taken with its authorization request (FR-002). A credential send uses one validated snapshot both for the issuer check and for the endpoint it sends to (FR-009).
-- **Concurrent writes**: every issuer write runs inside the existing binding-checked transaction, compares the revision it read, and never stamps a row that was replaced meanwhile (FR-011, FR-012).
+- **Concurrent writes**: every issuer write runs inside the existing binding-checked transaction, compares the revision it read (a login compares a per-server write counter that a delete also moves), and never stamps a row that was replaced or deleted meanwhile (FR-011, FR-012).
 - **Purge and server delete**: the issuer is inside the row, so the existing purge set covers it.
 - **Undecryptable row**: the Spec 123 report comes first, and the issuer is unknown.
 
