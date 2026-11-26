@@ -10,7 +10,7 @@
 | Icons | `icons` | []Icon | ≤ 8, validated (FR-003) |
 | IconsDropped | `icons_dropped` | {count, items[≤8]{index, reason}} | reasons: `scheme`, `too_long`, `bad_data_uri`, `mime`, `mime_mismatch`, `sizes`, `theme`, `count`, `tool_budget`, `server_budget` |
 | Meta | `meta` | raw JSON object | ≤ 16 KiB canonical, `progressToken` removed |
-| MetaDropped | `meta_dropped` | string | `too_large`, `not_object`, `server_budget` |
+| MetaDropped | `meta_dropped` | string | `too_large`, `server_budget` |
 | DeferLoading | `defer_loading` | bool | |
 | TaskSupport | `task_support` | string | `forbidden`, `optional`, `required`, `unknown`, or absent |
 
@@ -54,4 +54,4 @@ Validity is checked first: an invalid live value is `invalid` whatever the appro
 
 ## Search index (`internal/index`)
 
-`ToolDocument` gains `Title` (searchable, emitted value only) and `ListingJSON` (stored only). `indexSchemaVersion` `"2"` → `"3"`.
+`ToolDocument` gains `ListingJSON` (stored only, extras without titles). No title is stored or searchable; titles are projected from approval records at read time. `indexSchemaVersion` `"2"` → `"3"`.

@@ -33,4 +33,4 @@ The last seven keys are present only for a positively authenticated administrato
 
 ## Review door
 
-The existing review-bound tool approvals (`ApproveToolsReviewedAt`, `ApproveAllToolsReviewedAt`) accept `rv3-` fingerprints only. A record that is `approved` and has a pending title is listed (`titles_pending` in the queue) and selectable. On a match under the lock, the contract and both valid titles are approved in the same write. Unbound approvals (no fingerprint, including MCP `approve_tool`/`approve_all_tools`) approve the contract only, never a title.
+The existing review-bound tool approvals (`ApproveToolsReviewedAt`, `ApproveAllToolsReviewedAt`) accept `rv3-` fingerprints only. A record that is `approved` and has a pending title is listed (`titles_pending` in the queue) and selectable. Requests gain `approve_titles` (bool, default false). On a match under the lock, the contract is approved and, only with `approve_titles: true`, both valid titles of every matched record are approved in the same write. Unbound approvals (no fingerprint, including MCP `approve_tool`/`approve_all_tools`) approve the contract only, never a title.
