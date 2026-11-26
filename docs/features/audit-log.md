@@ -265,8 +265,10 @@ are not recorded yet; they follow with the server-edition slice:
 Client credentials, browser logins, keyring secrets and Connect (the rest of the
 priority-1 list), approvals (priority 2) and config changes (priority 3) follow
 in later slices; the full action list is already part of the schema's closed
-`action` enum. `DELETE /api/v1/tokens/client-<id>` (a client credential record)
-writes no line yet.
+`action` enum. A client credential's record reached through the token doors —
+`DELETE /api/v1/tokens/client-<id>` and `DELETE /api/v1/tokens/client-<id>/permanent`
+(and `mcpproxy token revoke|delete client-<id>`) — writes no line yet; its
+`client` lines follow with the client slice.
 
 Example (the CLI over the tray socket rotating a token):
 
@@ -406,7 +408,7 @@ different, case by case:
   `admin_action` lines (and `caller.kind: none` / `cli_offline`).
 
 The extended credential mask (the proxy's own token shapes and `github_pat_`) also
-applies to `authz` and `tool_call` lines. A line that matched none of the new
+applies to `authz`, `tool_call` and `auth_event` lines. A line that matched none of the new
 patterns is byte-identical; a legacy `request_id` or `transport_request_id` that
 does match is now masked on the audit line while its activity row keeps the
 original, so that one join is lost (legacy kinds get no `request_id_masked`

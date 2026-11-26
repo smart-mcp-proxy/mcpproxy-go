@@ -277,6 +277,10 @@ func NewAdminAction(in AdminActionInput) (Line, error) {
 	if (kind == "none" || kind == "cli_offline") && in.RequestID != "" {
 		return Line{}, fmt.Errorf("audit.NewAdminAction: caller.kind %s never carries request_id", kind)
 	}
+	// No request: no ingress, so source internal and origin local.
+	if in.RequestID == "" && (in.Source != "internal" || in.Origin != "local") {
+		return Line{}, fmt.Errorf("audit.NewAdminAction: a line with no request has source internal and origin local")
+	}
 	// A request caller always has a request: its line joins the activity row
 	// by request_id (FR-009). Only the background kinds may omit it.
 	if !backgroundKinds[kind] && in.RequestID == "" {

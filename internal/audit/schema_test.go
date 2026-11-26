@@ -308,7 +308,7 @@ func TestAdminActionSchema_PositiveAndNegative(t *testing.T) {
 	ok := []map[string]interface{}{
 		baseAdminFixture(nil),
 		baseAdminFixture(map[string]interface{}{"request_id": nil, "source": "internal", "caller": map[string]interface{}{"kind": "internal"}, "trigger": "policy", "policy": "rotation_reconcile"}),
-		baseAdminFixture(map[string]interface{}{"request_id": nil, "caller": map[string]interface{}{"kind": "cli_offline"}}),
+		baseAdminFixture(map[string]interface{}{"request_id": nil, "source": "internal", "caller": map[string]interface{}{"kind": "cli_offline"}}),
 		baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "agent_token", "token_prefix": "mcp_agt_ab12", "token_name_withheld": true, "ref": "cli_abcdefgh"}}),
 		baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "session_user", "user_id": "u1", "role": "user", "provider": "oidc"}}),
 		baseAdminFixture(map[string]interface{}{"target": map[string]interface{}{"kind": "agent_token", "name_withheld": true, "ref": "tok_abcdefgh"}}),

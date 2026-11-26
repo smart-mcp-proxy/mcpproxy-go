@@ -451,3 +451,38 @@ func TestNewAdminAction_PrefixSidesAreExact(t *testing.T) {
 		t.Fatal("token.revoke has no after prefix")
 	}
 }
+
+func TestChange_UnknownRootIsNeverSpelled(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
+	in.Changes = []audit.Change{audit.Withheld(audit.Path("private-customer-hostname"), audit.WithheldValue)}
+	line, obj := mustAdmin(t, in)
+	assertSentinelAbsent(t, line, "private-customer-hostname")
+	if f := obj["changes"].([]interface{})[0].(map[string]interface{})["field"]; f != "/" {
+		t.Fatalf("got %v", f)
+	}
+}
+
+func TestLiteral_ValueFixedAtConstruction(t *testing.T) {
+	before := audit.TokenPrefix("mcp_agt_a1b2")
+	after := audit.TokenPrefix("mcp_agt_9f8e")
+	c := audit.Literal(audit.FieldTokenPrefix, &before, &after)
+	before, after = "not a prefix", "not a prefix"
+	in := tokenRotateInput()
+	in.Changes = []audit.Change{c}
+	_, obj := mustAdmin(t, in)
+	ch := obj["changes"].([]interface{})[0].(map[string]interface{})
+	if ch["before"] != "mcp_agt_a1b2" || ch["after"] != "mcp_agt_9f8e" {
+		t.Fatalf("a value mutated after Literal returned must not change the line: %v", ch)
+	}
+}
+
+func TestNewAdminAction_NoRequestMeansInternalLocal(t *testing.T) {
+	in := tokenRotateInput()
+	in.Caller = audit.Caller{Kind: "cli_offline"}
+	in.RequestID = ""
+	in.ClientName, in.ClientSurface = "", ""
+	if _, err := audit.NewAdminAction(in); err == nil {
+		t.Fatal("no request with source api/origin socket must be rejected")
+	}
+}

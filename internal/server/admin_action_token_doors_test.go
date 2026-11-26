@@ -29,6 +29,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
@@ -413,4 +414,20 @@ func TestAdminActionDoors_CLIOverTraySocket(t *testing.T) {
 	rid, _ := rot["request_id"].(string)
 	require.NotEmpty(t, rid)
 	require.Equal(t, 1, e.activityRequestIDs(rid))
+}
+
+// The daemon installs runtime-backed diagnostics fixers at startup
+// (registerDiagnosticFixers); every fixer registered after a real start has
+// its own registry row under POST /diagnostics/fix.
+func TestAdminDoorRegistry_ListsEveryFixerAfterStartup(t *testing.T) {
+	newAdminE2E(t)
+	rows := map[string]bool{}
+	for _, d := range audit.AdminDoors {
+		if d.Door == "REST POST /api/v1/diagnostics/fix" {
+			rows[d.Branch] = true
+		}
+	}
+	for _, k := range diagnostics.FixerKeys() {
+		require.True(t, rows["fixer "+k], "diagnostics fixer %q registered at startup has no registry row", k)
+	}
 }

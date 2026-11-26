@@ -80,6 +80,20 @@ var nestedRoots = map[string]bool{"env": true, "headers": true, "oauth": true, "
 // oauth. A deeper path collapses to that depth.
 var maxDepth = map[string]int{"env": 2, "headers": 2, "oauth": 2}
 
+// knownFieldRoots are fixed config field names a change may name besides the
+// literal list, the secret-class prefixes and the nested and opaque roots.
+var knownFieldRoots = map[string]bool{
+	// agent-token record fields (token.create)
+	"allowed_servers": true, "permissions": true, "profile_pin": true, "purpose": true, "rate_limit": true,
+	// upstream server fields (PR-1b and PR-3 extend this list)
+	"url": true, "command": true, "args": true, "working_dir": true, "protocol": true, "quarantined": true,
+}
+
+func knownRoot(seg string) bool {
+	_, literal := literalFields[seg]
+	return literal || secretPrefixes[seg] || nestedRoots[seg] || opaqueRoots[seg] || knownFieldRoots[seg]
+}
+
 // fixedChildren are the only child names a fixed sub-schema root may have;
 // any other child collapses the path to the root (FR-015b: paths come from a
 // fixed schema, never from a value). Mirrors config.OAuthConfig.
@@ -102,6 +116,12 @@ func (f FieldPath) render() (string, bool) {
 	masked := false
 	if len(segs) == 0 {
 		return "", false
+	}
+	// FR-015b: the root segment comes from the fixed schema. An unknown root
+	// could be arbitrary text, so it is never spelled: the entry is reported
+	// at the document root with field_masked.
+	if !knownRoot(segs[0]) {
+		return "/", true
 	}
 	if len(segs) > 1 && (opaqueRoots[segs[0]] || !nestedRoots[segs[0]]) {
 		segs = segs[:1]
@@ -281,9 +301,11 @@ const (
 
 // Change is one change entry. It can be built only by Literal or Withheld.
 type Change struct {
-	path     FieldPath
-	before   LiteralValue
-	after    LiteralValue
+	path FieldPath
+	// before/after hold the values rendered at construction (a caller
+	// mutating a value after Literal returned cannot change the line).
+	before   interface{}
+	after    interface{}
 	withheld WithheldKind
 	set      bool
 }
@@ -312,7 +334,12 @@ func Literal(field FieldPath, before, after LiteralValue) Change {
 			return c
 		}
 	}
-	c.before, c.after = before, after
+	if before != nil {
+		c.before, _ = before.render()
+	}
+	if after != nil {
+		c.after, _ = after.render()
+	}
 	return c
 }
 
@@ -348,12 +375,10 @@ func (c Change) entry() (map[string]interface{}, error) {
 		return nil, fmt.Errorf("audit: literal change %s has neither side", field)
 	}
 	if c.before != nil {
-		v, _ := c.before.render()
-		e["before"] = v
+		e["before"] = c.before
 	}
 	if c.after != nil {
-		v, _ := c.after.render()
-		e["after"] = v
+		e["after"] = c.after
 	}
 	return e, nil
 }

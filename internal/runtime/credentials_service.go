@@ -787,14 +787,11 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 		s.logger.Error("failed to get HMAC key", zap.Error(err))
 		return nil, credErr("", "", "Failed to initialize token security", 500)
 	}
-	// Spec 133 FR-016b: ts is the commit time, stamped inside the minting
-	// transaction when the store can report it (as revoke uses RevokedAt and
-	// rotate RotatedAt from inside theirs).
+	// Spec 133 FR-016b: ts is the commit time, which the store stamps right
+	// after the minting transaction commits, under its write lock (the same
+	// for rotate, revoke and delete).
 	committedAt := now
 	if rep, ok := s.tokens.(tokenCreateReporter); ok {
-		// created_at is stamped by the transaction too, so it equals the
-		// line's ts.
-		candidate.CreatedAt = time.Time{}
 		stored, err := rep.CreateAgentTokenReport(candidate, raw, key)
 		if err != nil {
 			return nil, s.classifyCreateError(req.Name, mcp, err, now)
@@ -813,6 +810,20 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 	changes := []audit.Change{audit.Literal(audit.FieldTokenPrefix, nil, audit.TokenPrefix(committed.TokenPrefix))}
 	if !committed.ExpiresAt.IsZero() {
 		changes = append(changes, audit.Literal(audit.FieldExpiresAt, nil, audit.Timestamp(committed.ExpiresAt)))
+	}
+	// FR-015: every field the mint set is named; values that are not on the
+	// literal list are withheld (scope, pin, purpose, call budget).
+	changes = append(changes,
+		audit.Withheld(audit.Path("allowed_servers"), audit.WithheldValue),
+		audit.Withheld(audit.Path("permissions"), audit.WithheldValue))
+	if committed.ProfilePin != "" {
+		changes = append(changes, audit.Withheld(audit.Path("profile_pin"), audit.WithheldValue))
+	}
+	if committed.Purpose != "" {
+		changes = append(changes, audit.Withheld(audit.Path("purpose"), audit.WithheldValue))
+	}
+	if committed.RateLimit != nil {
+		changes = append(changes, audit.Withheld(audit.Path("rate_limit"), audit.WithheldValue))
 	}
 	s.recordTokenEffect(&out, audit.ActionTokenCreate, &committed, changes, committedAt)
 	s.announce(view, profile.ChangeIssue)
@@ -1148,8 +1159,8 @@ func (s *CredentialsService) Revoke(ctx context.Context, a Actor, ref Credential
 		return nil, err
 	}
 	revokedAt := s.now()
-	if after.RevokedAt != nil {
-		revokedAt = *after.RevokedAt // stamped inside the revoking transaction
+	if !after.CommittedAt.IsZero() {
+		revokedAt = after.CommittedAt // stamped by the store right after its commit
 	}
 	view := ViewOf(after, cfg, s.now())
 	s.writeLifecycle(ctx, a, profile.ChangeRevoke, view, map[string]interface{}{"changed": true})
@@ -1212,8 +1223,8 @@ func (s *CredentialsService) Regenerate(ctx context.Context, a Actor, name strin
 		return nil, err
 	}
 	rotatedAt := s.now()
-	if after.RotatedAt != nil {
-		rotatedAt = *after.RotatedAt // stamped inside the rotating transaction
+	if !after.CommittedAt.IsZero() {
+		rotatedAt = after.CommittedAt // stamped by the store right after its commit
 	}
 	oldPrefix := ""
 	if before != nil {
@@ -1268,7 +1279,7 @@ func (s *CredentialsService) DeleteToken(ctx context.Context, a Actor, name stri
 		if deleted.TokenPrefix != "" {
 			changes = []audit.Change{audit.Literal(audit.FieldTokenPrefix, audit.TokenPrefix(deleted.TokenPrefix), nil)}
 		}
-		// CommittedAt is stamped inside the deleting transaction.
+		// CommittedAt is stamped by the store right after the commit.
 		s.recordTokenEffect(&out, audit.ActionTokenDelete, deleted, changes, deleted.CommittedAt)
 	}
 	return deleted, nil

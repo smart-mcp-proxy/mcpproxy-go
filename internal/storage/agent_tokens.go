@@ -227,9 +227,8 @@ func (m *Manager) CreateAgentTokenReport(token auth.AgentToken, rawToken string,
 	defer m.mu.Unlock()
 
 	err := m.db.db.Update(func(tx *bbolt.Tx) error {
-		token.CommittedAt = time.Now().UTC()
 		if token.CreatedAt.IsZero() {
-			token.CreatedAt = token.CommittedAt
+			token.CreatedAt = time.Now().UTC()
 		}
 		tokenBucket, err := tx.CreateBucketIfNotExists([]byte(AgentTokensBucket))
 		if err != nil {
@@ -308,6 +307,9 @@ func (m *Manager) CreateAgentTokenReport(token auth.AgentToken, rawToken string,
 	if err != nil {
 		return nil, err
 	}
+	// Spec 133 FR-016b: stamped after the transaction committed, still under
+	// m.mu, so no other token write can commit between the two.
+	token.CommittedAt = time.Now().UTC()
 	return &token, nil
 }
 
@@ -506,6 +508,7 @@ func (m *Manager) RevokeAgentTokenReport(userID, name string) (before, after *au
 	if err != nil {
 		return nil, nil, err
 	}
+	after.CommittedAt = time.Now().UTC() // after the commit, under m.mu
 	return before, after, nil
 }
 
@@ -663,13 +666,13 @@ func (m *Manager) DeleteAgentTokenReport(userID, name string) (*auth.AgentToken,
 		}
 
 		auth.EnsureAuditRef(token)
-		token.CommittedAt = time.Now().UTC()
 		deleted = token
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	deleted.CommittedAt = time.Now().UTC() // after the commit, under m.mu
 	return deleted, nil
 }
 
@@ -845,6 +848,7 @@ func (m *Manager) RegenerateAgentTokenReport(userID, name string, newRawToken st
 	if err != nil {
 		return nil, nil, err
 	}
+	updated.CommittedAt = time.Now().UTC() // after the commit, under m.mu
 	return prior, updated, nil
 }
 

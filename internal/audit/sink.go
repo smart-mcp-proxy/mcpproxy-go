@@ -73,11 +73,6 @@ type writerSink struct {
 	// nothing while that repair fails (Spec 133 FR-017, plan D-C). Guarded
 	// by mu.
 	torn bool
-	// repair, when set (the file sink), appends the boundary newline to the
-	// file at its path directly, bypassing the rotating writer: a rotation
-	// triggered by the one-byte repair would move on to a new file and leave
-	// the torn tail unterminated in the backup.
-	repair func() error
 
 	clock         func() time.Time
 	failureLogger func(error)
@@ -126,20 +121,15 @@ func (s *writerSink) Write(line []byte) error {
 	// is repaired in the file that holds it — before a rotation triggered by
 	// this record could move on to a new file.
 	if s.torn {
-		var err error
-		if s.repair != nil {
-			if err = s.repair(); err == nil {
-				s.torn = false
-			}
-		} else {
-			var n int
-			n, err = s.w.Write([]byte{'\n'})
-			if err == nil && n != 1 {
-				err = io.ErrShortWrite
-			}
-			if n == 1 {
-				s.torn = false
-			}
+		// Through the writer's own handle: the file that received the
+		// partial write. (A file reopened torn was already repaired by path
+		// before the writer opened it, in NewFileSink.)
+		n, err := s.w.Write([]byte{'\n'})
+		if err == nil && n != 1 {
+			err = io.ErrShortWrite
+		}
+		if n == 1 {
+			s.torn = false
 		}
 		if s.torn {
 			if err == nil {
@@ -249,14 +239,16 @@ func NewFileSink(path string, maxSizeMB, maxBackups, maxAgeDays int, compress bo
 		Compress:   compress,
 	}
 	s := newWriterSink(lj, opts...)
-	s.repair = func() error { return appendNewline(path) }
 	s.torn = torn
 	if torn {
 		// Repair the tail of the file a previous process left mid-record
 		// now, in that file, before anything can rotate it. A failure leaves
 		// torn set: the first Write retries, and appends nothing until the
 		// boundary is restored.
-		if err := s.repair(); err == nil {
+		// The path names the torn file here: nothing has opened it yet.
+		// After this point repairs go through the writer's own handle, the
+		// file that received the partial write, even if the path is renamed.
+		if err := appendNewline(path); err == nil {
 			s.torn = false
 		}
 	}

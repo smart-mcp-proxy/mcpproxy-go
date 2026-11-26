@@ -180,7 +180,7 @@ func TestAdminAudit_TimestampIsTheCommitTime(t *testing.T) {
 	require.Len(t, recs, 1)
 	stored, _ := h.sm.GetAgentTokenByName("tsk")
 	require.NotNil(t, stored.RevokedAt)
-	require.True(t, recs[0].At.Equal(*stored.RevokedAt), "revoke ts is the RevokedAt the transaction stamped")
+	require.False(t, recs[0].At.Before(*stored.RevokedAt), "revoke ts is at or after the transaction's RevokedAt (the commit)")
 }
 
 type lockProbeAuditor struct {
@@ -227,7 +227,7 @@ func TestAdminAudit_RotationTimestampFromTheTransaction(t *testing.T) {
 	recs := cap.take()
 	stored, _ := h.sm.GetAgentTokenByName("rt")
 	require.NotNil(t, stored.RotatedAt)
-	require.True(t, recs[len(recs)-1].At.Equal(*stored.RotatedAt))
+	require.False(t, recs[len(recs)-1].At.Before(*stored.RotatedAt), "rotate ts is the commit, at or after the transaction's RotatedAt")
 }
 
 func TestAdminAudit_CreateAndDeleteTimestampsFromTheTransaction(t *testing.T) {
@@ -238,7 +238,7 @@ func TestAdminAudit_CreateAndDeleteTimestampsFromTheTransaction(t *testing.T) {
 	require.NoError(t, err)
 	recs := cap.take()
 	stored, _ := h.sm.GetAgentTokenByName("cd")
-	require.True(t, recs[0].At.Equal(stored.CreatedAt), "create ts is the created_at the transaction stamped")
+	require.False(t, recs[0].At.Before(stored.CreatedAt), "create ts is the commit, at or after created_at")
 	deleted, err := h.cs.DeleteToken(ctx, a, "cd")
 	require.NoError(t, err)
 	recs = cap.take()
