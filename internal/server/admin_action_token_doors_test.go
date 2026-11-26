@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
@@ -84,6 +85,13 @@ func (e *adminE2E) rest(method, path, requestID string, body any) (int, []byte) 
 func (e *adminE2E) adminLines(seen *int) []map[string]interface{} {
 	e.t.Helper()
 	all := e.sink.decoded(e.t)
+	// The recording sink does not sanitize: run the production whole-line
+	// pass here so a builder leak is caught (it must be the identity).
+	for i, raw := range e.sink.snapshot()[*seen:] {
+		if out, hit := audit.SanitizeLine(raw); hit || !bytes.Equal(out, raw) {
+			e.t.Fatalf("line %d: whole-line sanitizer fired on builder output: %s", *seen+i, raw)
+		}
+	}
 	var out []map[string]interface{}
 	for _, l := range all[*seen:] {
 		if l["event"] == "admin_action" {
@@ -192,7 +200,6 @@ func TestAdminActionDoors_RESTTokenDoors(t *testing.T) {
 	require.NotContains(t, string(raw), pat)
 	require.Equal(t, true, lines[0]["request_id_masked"])
 
-	require.Zero(t, e.sink.SanitizerHits())
 }
 
 func TestAdminActionDoors_MCPCredentialsTool(t *testing.T) {
@@ -219,9 +226,12 @@ func TestAdminActionDoors_MCPCredentialsTool(t *testing.T) {
 	require.NotEmpty(t, rid, "an MCP admin line carries the wrapper's request id")
 	// The wrapper row and the profile_change row both carry the same id.
 	sm := e.env.proxyServer.runtime.StorageManager()
-	rows, _, err := sm.ListActivities(storage.ActivityFilter{RequestID: rid, Limit: 100})
-	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(rows), 2, "wrapper row and profile_change row share the line's request id")
+	// The wrapper row is written asynchronously; the profile_change row
+	// synchronously. Wait for both.
+	require.Eventually(t, func() bool {
+		rows, _, err := sm.ListActivities(storage.ActivityFilter{RequestID: rid, Limit: 100})
+		return err == nil && len(rows) >= 2
+	}, 10*time.Second, 50*time.Millisecond, "wrapper row and profile_change row share the line's request id")
 
 	res, err = c.CallTool(context.Background(), callReq("credentials", map[string]any{"operation": "revoke", "token": "worker"}))
 	require.NoError(t, err)

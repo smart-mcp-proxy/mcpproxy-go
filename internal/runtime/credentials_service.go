@@ -778,6 +778,7 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 	if err := s.tokens.CreateAgentToken(candidate, raw, key); err != nil {
 		return nil, s.classifyCreateError(req.Name, mcp, err, now)
 	}
+	committedAt := s.now() // Spec 133 FR-016b: ts is the commit time
 
 	// Post-commit: project from the committed record; nothing below can fail.
 	committed := candidate
@@ -788,7 +789,7 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 	if !committed.ExpiresAt.IsZero() {
 		changes = append(changes, audit.Literal(audit.FieldExpiresAt, nil, audit.Timestamp(committed.ExpiresAt)))
 	}
-	s.recordTokenEffect(ctx, audit.ActionTokenCreate, &committed, changes, now)
+	s.recordTokenEffect(ctx, audit.ActionTokenCreate, &committed, changes, committedAt)
 	s.announce(view, profile.ChangeIssue)
 	return &IssuedCredentialResult{View: view, Secret: raw, record: &committed}, nil
 }
@@ -1116,12 +1117,16 @@ func (s *CredentialsService) Revoke(ctx context.Context, a Actor, ref Credential
 		}
 		return nil, err
 	}
+	revokedAt := s.now()
+	if after.RevokedAt != nil {
+		revokedAt = *after.RevokedAt // stamped inside the revoking transaction
+	}
 	view := ViewOf(after, cfg, s.now())
 	s.writeLifecycle(ctx, a, profile.ChangeRevoke, view, map[string]interface{}{"changed": true})
 	// The storage transaction flipped Revoked false → true (a no-op revoke
 	// returned above). The revoked key's display prefix is `before`.
 	s.recordTokenEffect(ctx, audit.ActionTokenRevoke, after,
-		[]audit.Change{audit.Literal(audit.FieldTokenPrefix, audit.TokenPrefix(after.TokenPrefix), nil)}, s.now())
+		[]audit.Change{audit.Literal(audit.FieldTokenPrefix, audit.TokenPrefix(after.TokenPrefix), nil)}, revokedAt)
 	s.announce(view, profile.ChangeRevoke)
 	if s.clients != nil && s.clients.notifier != nil {
 		s.clients.notifier.NotifyBindingChanged(after.Name)
@@ -1171,6 +1176,7 @@ func (s *CredentialsService) Regenerate(ctx context.Context, a Actor, name strin
 		}
 		return nil, err
 	}
+	rotatedAt := s.now() // taken before the activity write, so ts is the commit time
 	oldPrefix := ""
 	if before != nil {
 		oldPrefix = before.TokenPrefix
@@ -1185,7 +1191,7 @@ func (s *CredentialsService) Regenerate(ctx context.Context, a Actor, name strin
 		oldP = audit.TokenPrefix(oldPrefix)
 	}
 	s.recordTokenEffect(ctx, audit.ActionTokenRotate, after,
-		[]audit.Change{audit.Literal(audit.FieldTokenPrefix, oldP, audit.TokenPrefix(after.TokenPrefix))}, s.now())
+		[]audit.Change{audit.Literal(audit.FieldTokenPrefix, oldP, audit.TokenPrefix(after.TokenPrefix))}, rotatedAt)
 	s.announce(view, profile.ChangeRotate)
 	return &RegenerateResult{View: view, Secret: secret}, nil
 }
@@ -1207,6 +1213,7 @@ func (s *CredentialsService) DeleteToken(ctx context.Context, a Actor, name stri
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	deleted, err := del.DeleteAgentTokenReport("", name)
+	deletedAt := s.now()
 	if err != nil {
 		if errors.Is(err, storage.ErrAgentTokenNotFound) {
 			return nil, s.notFound("token", name)
@@ -1219,7 +1226,7 @@ func (s *CredentialsService) DeleteToken(ctx context.Context, a Actor, name stri
 		if deleted.TokenPrefix != "" {
 			changes = []audit.Change{audit.Literal(audit.FieldTokenPrefix, audit.TokenPrefix(deleted.TokenPrefix), nil)}
 		}
-		s.recordTokenEffect(ctx, audit.ActionTokenDelete, deleted, changes, s.now())
+		s.recordTokenEffect(ctx, audit.ActionTokenDelete, deleted, changes, deletedAt)
 	}
 	return deleted, nil
 }
@@ -1229,6 +1236,13 @@ func (s *CredentialsService) DeleteToken(ctx context.Context, a Actor, name stri
 // stored one (a store that cannot report a ref gets one assigned on this copy).
 func (s *CredentialsService) recordTokenEffect(ctx context.Context, action string, rec *auth.AgentToken, changes []audit.Change, at time.Time) {
 	if s == nil || s.adminAudit == nil || rec == nil {
+		return
+	}
+	// A client credential's record (client-<id>, reached through the legacy
+	// token-name doors) is a `client` target, which needs the client ref and
+	// id origin of PR-1b; it is never written as an agent_token. Pending in
+	// the door registry until then.
+	if rec.Kind == auth.KindClient {
 		return
 	}
 	cp := *rec

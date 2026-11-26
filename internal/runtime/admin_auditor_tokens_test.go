@@ -148,6 +148,41 @@ func TestAdminAudit_MCPCreateTokenAndRevoke(t *testing.T) {
 	require.Equal(t, audit.ActionTokenRevoke, recs[0].Action)
 }
 
+// A client credential's record revoked through the legacy token-name door is
+// not an agent token: no token.* line (its client line is PR-1b's).
+func TestAdminAudit_LegacyClientRecordRevokeWritesNoTokenLine(t *testing.T) {
+	ctx := context.Background()
+	h, cap := newAuditedCredHarness(t)
+	_, err := h.cs.IssueClient(ctx, mcpActor(), mcpClientReq("my-worker", "ro", "1h"))
+	require.NoError(t, err)
+	cap.take()
+	_, err = h.cs.Revoke(ctx, mcpActor(), CredentialRef{Token: auth.ClientTokenName("my-worker")}, true)
+	require.NoError(t, err)
+	for _, r := range cap.take() {
+		require.NotEqual(t, audit.ActionTokenRevoke, r.Action, "a client record is never an agent_token target")
+	}
+	_, err = h.cs.DeleteToken(ctx, mcpActor(), auth.ClientTokenName("my-worker"))
+	require.NoError(t, err)
+	require.Empty(t, cap.take())
+}
+
+func TestAdminAudit_TimestampIsTheCommitTime(t *testing.T) {
+	ctx := context.Background()
+	h, cap := newAuditedCredHarness(t)
+	_, err := h.cs.Revoke(ctx, mcpActor(), CredentialRef{Token: "none"}, false)
+	require.Error(t, err)
+	_, err = h.cs.IssueToken(ctx, mcpActor(), mcpTokenReq("tsk", "ro", "1h"))
+	require.NoError(t, err)
+	cap.take()
+	_, err = h.cs.Revoke(ctx, mcpActor(), CredentialRef{Token: "tsk"}, false)
+	require.NoError(t, err)
+	recs := cap.take()
+	require.Len(t, recs, 1)
+	stored, _ := h.sm.GetAgentTokenByName("tsk")
+	require.NotNil(t, stored.RevokedAt)
+	require.True(t, recs[0].At.Equal(*stored.RevokedAt), "revoke ts is the RevokedAt the transaction stamped")
+}
+
 func TestAdminAudit_NoAuditorIsANoOp(t *testing.T) {
 	h := newCredHarness(t)
 	_, err := h.cs.IssueToken(context.Background(), mcpActor(), mcpTokenReq("quiet", "ro", "1h"))
