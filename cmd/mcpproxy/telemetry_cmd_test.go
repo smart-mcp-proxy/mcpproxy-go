@@ -64,10 +64,6 @@ func sandboxHome(t *testing.T) string {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 	// On macOS config.Load() might consult USERPROFILE on some paths; harmless on unix.
 	t.Setenv("USERPROFILE", home)
-	// On Windows the default data dir's pipe is named after USERNAME, not the
-	// home dir, so a sandboxed home still reaches the real daemon without this.
-	t.Setenv("USERNAME", "mcpproxy-test-sandbox")
-	t.Setenv("MCPPROXY_TRAY_ENDPOINT", "")
 	return home
 }
 
