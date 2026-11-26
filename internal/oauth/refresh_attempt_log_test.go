@@ -149,7 +149,7 @@ func toString(v interface{}) string {
 
 // Review round 1: the logged status is the provider's (before 201→200), the
 // logged grant is the one sent (an extra_params grant_type wins), and a
-// request the retired gate refused is "not_sent".
+// request of a retired instance is "retired".
 func TestOAuthTransportWrapper_TokenRequestLogMatchesWhatWasSent(t *testing.T) {
 	created := roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusCreated, Status: "201 Created", Body: io.NopCloser(strings.NewReader(`{}`)), Header: http.Header{}}, nil
@@ -173,7 +173,7 @@ func TestOAuthTransportWrapper_TokenRequestLogMatchesWhatWasSent(t *testing.T) {
 	require.NoError(t, err)
 	_, err = w.RoundTrip(req)
 	require.Error(t, err)
-	assert.Equal(t, "not_sent", logs.FilterMessage("OAuth token request finished").All()[0].ContextMap()["outcome"])
+	assert.Equal(t, "retired", logs.FilterMessage("OAuth token request finished").All()[0].ContextMap()["outcome"])
 }
 
 type failingBody struct {
@@ -207,4 +207,30 @@ func TestPeekTokenGrantType_ReadErrorStillFailsUpload(t *testing.T) {
 	assert.EqualError(t, rerr, "upload broke")
 	require.NoError(t, out.Body.Close())
 	assert.True(t, body.closed)
+}
+
+// Review round 2: flight numbers do not restart for another server key or
+// binding, so two flights' lines are never confused.
+func TestRefreshCoordinator_FlightNumbersAreProcessWide(t *testing.T) {
+	c := newTestCoordinator()
+	var got []uint64
+	for _, name := range []string{"a", "b"} {
+		f := newCoordFixture(t, "cid")
+		req := f.req(RefreshTriggerProactive, "rt-0")
+		req.Key = GenerateServerKey(name, "https://x.example/mcp")
+		req.Load = func() (*storage.OAuthTokenRecord, error) {
+			rec, err := f.load()
+			if rec != nil {
+				rec.ServerName = req.Key
+			}
+			return rec, err
+		}
+		req.Refresh = func(ctx context.Context, rec *storage.OAuthTokenRecord) (*client.Token, error) {
+			info, _ := RefreshFlightInfoFrom(ctx)
+			got = append(got, info.Flight)
+			return nil, &net.OpError{Op: "read", Net: "tcp", Err: io.ErrUnexpectedEOF}
+		}
+		_, _, _ = c.Do(context.Background(), req)
+	}
+	assert.Equal(t, []uint64{1, 2}, got)
 }

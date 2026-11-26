@@ -746,14 +746,16 @@ Every refresh leaves INFO lines in the main log and in that server's own log
 file, so a rejection seen by the provider can be matched to one client attempt:
 
 - `OAuth refresh flight started`: `trigger` (`proactive` for the schedule,
-  `reactive` when a request needed a token), `flight` (a number per server that
-  grows with each flight that may send a request) and
+  `reactive` when a request needed a token), `flight` (a number that grows with
+  each flight that may send a request, unique while the process runs) and
   `prior_transient_failures`. It is written before any request is sent.
 - `OAuth token request finished`: one line per request to the token endpoint,
   with `grant_type` (`refresh_token`, `authorization_code`, ... or `other`),
   the `flight` and `trigger` that sent it (`0` and `none` for a request outside
   a refresh, such as a sign-in), `http_status`, `outcome` (`http_response` when
-  an answer arrived, else the failure class such as `network`) and `duration`.
+  an answer arrived, `retired` when the server instance was replaced under it,
+  else the failure class such as `network`) and `duration`. A redirect the
+  request follows is part of that one line.
 - `OAuth refresh flight finished`: the same `flight` with its `outcome` class.
 
 With `refresh_replay_enabled` a flight can send two token requests; both carry

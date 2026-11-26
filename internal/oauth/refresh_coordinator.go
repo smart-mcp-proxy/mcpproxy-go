@@ -80,8 +80,8 @@ type RefreshRequest struct {
 }
 
 // RefreshFlightInfo identifies the refresh flight a token request belongs to
-// (GH #1827). Flight numbers count, per server key and credential binding,
-// the flights that went on to call the refresh function; 0 means the request
+// (GH #1827). Flight numbers count, process-wide, the flights that went on
+// to call a refresh function; 0 means the request
 // was not sent by a refresh flight (an authorization-code exchange, say).
 type RefreshFlightInfo struct {
 	Flight  uint64
@@ -152,9 +152,6 @@ type refreshKeyState struct {
 	// so the connectivity watcher still knows the credential needs a refresh.
 	transientPending  bool
 	transientFailures int
-	// flightSeq numbers the flights that called the refresh function (GH
-	// #1827), so each token request in the log can be told apart.
-	flightSeq uint64
 	// savesInProgress counts token responses being written for this key
 	// (BeginTokenSaveFor). A successful token response settles the
 	// transient state, but the write commits before NoteTokenSavedFor runs
@@ -202,6 +199,10 @@ type RefreshCoordinator struct {
 	audit  func(RefreshAttemptFailure)
 	now    func() time.Time
 	logger *zap.Logger
+	// flightSeq numbers, process-wide, the flights that called a refresh
+	// function (GH #1827), so each flight's lines in the log can be told
+	// apart, across servers, re-logins and replaced instances. Guarded by mu.
+	flightSeq uint64
 }
 
 // NewRefreshCoordinator returns an empty coordinator.
@@ -596,8 +597,8 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 		c.mu.Unlock()
 		return nil, 0, true, fmt.Errorf("%w (retry after %s): %w", ErrTokenRefreshTransient, until.Format(time.RFC3339), last)
 	}
-	st.flightSeq++
-	*seq = st.flightSeq
+	c.flightSeq++
+	*seq = c.flightSeq
 	priorFailures := st.transientFailures
 	c.mu.Unlock()
 

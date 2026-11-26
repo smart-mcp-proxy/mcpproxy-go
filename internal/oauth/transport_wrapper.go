@@ -185,7 +185,7 @@ func (w *OAuthTransportWrapper) RoundTrip(req *http.Request) (*http.Response, er
 		// grant type, the refresh flight that sent it, status and duration.
 		var grantType string
 		req, grantType = peekTokenGrantType(req)
-		if v, ok := w.extraParams["grant_type"]; ok {
+		if v, ok := w.extraParams["grant_type"]; ok && !w.matchesAuthorization(req) {
 			grantType = tokenRequestGrantType(v) // what injectFormParams sends
 		}
 		start := time.Now()
@@ -462,7 +462,9 @@ func tokenRequestGrantType(v string) string {
 // grant type, the refresh flight and trigger that sent it (from ctx; flight
 // 0 outside a refresh flight), the HTTP status, an outcome class and the
 // duration. outcome is "http_response" when a response arrived (its status
-// says what it was) or the refresh error class of a transport failure. It
+// says what it was), "retired" when the instance was retired under it, or the
+// refresh error class of a transport failure. Redirects followed inside the
+// request are not logged separately. It
 // logs no URL, body, token, code or error text.
 func LogTokenRequest(ctx context.Context, logger *zap.Logger, grantType string, status int, err error, d time.Duration) {
 	if logger == nil {
@@ -472,8 +474,9 @@ func LogTokenRequest(ctx context.Context, logger *zap.Logger, grantType string, 
 	outcome := "http_response"
 	switch {
 	case dialgate.IsRetired(err):
-		// The retired instance's gate refused it: nothing reached the provider.
-		outcome = "not_sent"
+		// The instance was retired: its gate refused the request or closed
+		// the connection under it, so whether the provider saw it is unknown.
+		outcome = "retired"
 	case err != nil:
 		cls, _ := ClassifyRefreshError(err)
 		outcome = string(cls)
