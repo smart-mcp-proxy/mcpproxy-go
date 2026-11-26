@@ -372,6 +372,9 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	// Step 3: Close the MCP client. For stdio this follows the MCP lifecycle:
 	// it closes the server's stdin at once, waits, then (Unix) sends SIGTERM
 	// and finally SIGKILL to the process.
+	if stdioProc != nil && !isDocker && pgid > 0 {
+		defer holdProcessID(pgid)() // before the close reaps it: step 5 may still signal its PID
+	}
 	closeDone := make(chan struct{})
 	go func() {
 		defer close(closeDone)
@@ -425,7 +428,7 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 		case <-closeDone:
 		case <-time.After(stdinCloseGrace):
 			select {
-			case <-closeDone: // both were ready: the child is reaped, so its PID may be another's
+			case <-closeDone: // both were ready: the child is reaped, nothing left to ask
 			default:
 				// Windows has no SIGTERM: ask the process tree to exit in its place.
 				requestProcessTreeExit(pgid)
