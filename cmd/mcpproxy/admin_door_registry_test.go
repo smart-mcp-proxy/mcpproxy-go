@@ -14,6 +14,12 @@ func TestAdminDoorRegistry_CoversEveryCLICommand(t *testing.T) {
 	var doors []string
 	var walk func(c *cobra.Command)
 	walk = func(c *cobra.Command) {
+		// Cobra adds `help` and `completion` to a tree the first time a
+		// command in it executes (other tests in this package execute
+		// shared package-level commands); they are generated, not doors.
+		if c.Name() == "help" || c.Name() == "completion" {
+			return
+		}
 		if c.Runnable() {
 			doors = append(doors, "CLI "+c.CommandPath())
 		}
