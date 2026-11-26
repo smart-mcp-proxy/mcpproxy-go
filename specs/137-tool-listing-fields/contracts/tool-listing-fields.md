@@ -9,7 +9,7 @@
 | `defer_loading` | when true | — | — | `defer_loading: true` | — | `defer_loading` | `defer_loading` | — | "loaded on demand" badge |
 | `execution.taskSupport` | **never** | — | — | `task_support` | — | `task_support` | `task_support` | — | badge; `required` = not callable yet |
 
-"Emitted" = the approval record's current value when it is valid and equals its approved value, read when the response is built; else absent (spec FR-008). Caches never supply a title.
+"Emitted" = **servable**, not merely approved: the approval record's current value is valid and equals its approved value, the current process has observed the tool at the current server incarnation, and the tool is not suppressed (spec FR-008, FR-010b), all read under the per-server title lock when the response is built; on the direct surfaces the rendered value must also equal it (FR-017a). Caches never supply a title.
 
 ## REST `contracts.Tool` additions
 

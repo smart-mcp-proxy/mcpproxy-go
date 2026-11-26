@@ -33,7 +33,7 @@ No migration marker: a record without approved titles (pre-upgrade, new, or rewr
 ## Title state per field (derived, never stored)
 
 ```
-approved   : live == approved                → emitted
+approved   : live == approved                → emitted only if also servable (observed in this process at the current incarnation, not suppressed; direct surfaces: rendered == live)
 withheld   : live != approved, live valid    → not emitted; review item
 invalid    : live fails FR-002               → not emitted; shown to admins
 absent     : live == ""                      → nothing emitted
