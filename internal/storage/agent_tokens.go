@@ -214,6 +214,8 @@ func (m *Manager) CreateAgentToken(token auth.AgentToken, rawToken string, hmacK
 	if token.CreatedAt.IsZero() {
 		token.CreatedAt = time.Now().UTC()
 	}
+	// Spec 133: the stable audit ref is assigned at create.
+	auth.EnsureAuditRef(&token)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -469,6 +471,9 @@ func (m *Manager) RevokeAgentTokenReport(userID, name string) (before, after *au
 			return ErrAgentTokenNotFound
 		}
 
+		// Spec 133: a legacy record gets its audit ref the first time a
+		// reported transaction touches it, persisted with the revoke.
+		auth.EnsureAuditRef(token)
 		prior := *token
 		before = &prior
 		markRevoked(token, time.Now())
@@ -597,14 +602,24 @@ func (m *Manager) DeleteAgentToken(name string) error {
 // userID. Returns ErrAgentTokenNotFound when the (owner, name) pair does not
 // resolve, whether because it is absent or because it belongs to someone else.
 func (m *Manager) DeleteAgentTokenForOwner(userID, name string) error {
+	_, err := m.DeleteAgentTokenReport(userID, name)
+	return err
+}
+
+// DeleteAgentTokenReport is DeleteAgentTokenForOwner that also returns the
+// record the transaction deleted (Spec 133 rule 1: the audit line reports
+// what the storage transaction changed). A legacy record with no audit ref
+// gets one for the report; it is not persisted, the record is gone.
+func (m *Manager) DeleteAgentTokenReport(userID, name string) (*auth.AgentToken, error) {
 	if name == "" {
-		return fmt.Errorf("agent token name cannot be empty")
+		return nil, fmt.Errorf("agent token name cannot be empty")
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return m.db.db.Update(func(tx *bbolt.Tx) error {
+	var deleted *auth.AgentToken
+	err := m.db.db.Update(func(tx *bbolt.Tx) error {
 		// Resolve first; the scan must finish before any Delete below.
 		hash, token, err := m.findAgentTokenHashLocked(tx, userID, name)
 		if err != nil {
@@ -633,8 +648,14 @@ func (m *Manager) DeleteAgentTokenForOwner(userID, name string) error {
 			}
 		}
 
+		auth.EnsureAuditRef(token)
+		deleted = token
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return deleted, nil
 }
 
 // RegenerateAgentToken creates a new hash for an existing token, preserving
@@ -670,8 +691,17 @@ func (m *Manager) RegenerateAgentToken(name string, newRawToken string, hmacKey 
 // held, so the caller computes the entitled set before the call and passes a
 // pure filter.
 func (m *Manager) RegenerateAgentTokenForOwner(userID, name string, newRawToken string, hmacKey []byte, narrowScope func([]string) []string) (*auth.AgentToken, error) {
+	_, after, err := m.RegenerateAgentTokenReport(userID, name, newRawToken, hmacKey, narrowScope)
+	return after, err
+}
+
+// RegenerateAgentTokenReport is RegenerateAgentTokenForOwner that also returns
+// the record as the rotating transaction read it (Spec 133: the old display
+// prefix comes from the transaction, not from a read before it). A legacy
+// record gets its audit ref here, persisted with the rotation.
+func (m *Manager) RegenerateAgentTokenReport(userID, name string, newRawToken string, hmacKey []byte, narrowScope func([]string) []string) (before, after *auth.AgentToken, err error) {
 	if name == "" {
-		return nil, fmt.Errorf("agent token name cannot be empty")
+		return nil, nil, fmt.Errorf("agent token name cannot be empty")
 	}
 
 	newHash := auth.HashToken(newRawToken, hmacKey)
@@ -680,9 +710,9 @@ func (m *Manager) RegenerateAgentTokenForOwner(userID, name string, newRawToken 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	var updated *auth.AgentToken
+	var updated, prior *auth.AgentToken
 
-	err := m.db.db.Update(func(tx *bbolt.Tx) error {
+	err = m.db.db.Update(func(tx *bbolt.Tx) error {
 		// Resolve first; the scan must finish before the Delete/Put below.
 		oldHash, token, err := m.findAgentTokenHashLocked(tx, userID, name)
 		if err != nil {
@@ -722,6 +752,10 @@ func (m *Manager) RegenerateAgentTokenForOwner(userID, name string, newRawToken 
 		if tokenBucket == nil {
 			return ErrAgentTokenNotFound
 		}
+
+		auth.EnsureAuditRef(token)
+		snapshot := *token
+		prior = &snapshot
 
 		// Remove old hash entry
 		if err := tokenBucket.Delete(oldHash); err != nil {
@@ -791,8 +825,10 @@ func (m *Manager) RegenerateAgentTokenForOwner(userID, name string, newRawToken 
 		updated = token
 		return nil
 	})
-
-	return updated, err
+	if err != nil {
+		return nil, nil, err
+	}
+	return prior, updated, nil
 }
 
 // intersectAllowedServers returns the entries of proposed that the token's

@@ -449,6 +449,9 @@ type Runtime struct {
 	// credentialsService is Spec 115's issuance/revocation facade over both
 	// credential kinds; it shares bindingWriteMu with clientsService.
 	credentialsService *CredentialsService
+	// adminAudit is the late-bound Spec 133 admin_action writer, shared by
+	// the services that report committed administrative effects.
+	adminAudit *adminAuditHolder
 	// oauthLoginService is Spec 132's browser-login service; it shares
 	// bindingWriteMu with the two services above.
 	oauthLoginService *OAuthLoginService
@@ -717,6 +720,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	}
 
 	rt := &Runtime{
+		adminAudit:     &adminAuditHolder{},
 		oauthTokenKey:  oauthTokenKey,
 		oauthKeySource: oauthKeySource,
 		cfg:            cfg,
@@ -775,8 +779,9 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// Spec 115: one issuance and revocation path for client credentials and
 	// agent tokens (MCP, REST, CLI). Same mutex as the clients service.
 	rt.credentialsService = NewCredentialsService(CredentialsServiceDeps{
-		Tokens:  storageManager,
-		Clients: rt.clientsService,
+		adminAudit: rt.adminAudit,
+		Tokens:     storageManager,
+		Clients:    rt.clientsService,
 		HMACKey: func() ([]byte, error) {
 			return auth.GetOrCreateHMACKey(rt.Config().DataDir)
 		},

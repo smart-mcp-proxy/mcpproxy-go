@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"regexp"
 	"sort"
 	"strings"
@@ -46,6 +47,9 @@ type CredentialsService struct {
 	generate func() (string, error)
 	// oauth revokes one browser login (Spec 132). Nil in tests that do not wire it.
 	oauth *OAuthLoginService
+	// adminAudit receives one record per committed token effect (Spec 133).
+	// Nil = audit off.
+	adminAudit *adminAuditHolder
 }
 
 // CredentialTokenStore is the token-store surface the service needs. Every
@@ -72,6 +76,20 @@ type tokenRegenerator interface {
 	RegenerateAgentToken(name string, newRawToken string, hmacKey []byte) (*auth.AgentToken, error)
 }
 
+// tokenRegenerateReporter is the optional store method that reports the
+// record as the rotating transaction read it and as it wrote it
+// (*storage.Manager), so the audit line's old prefix is the transaction's,
+// not a read before it (Spec 133 plan D-3).
+type tokenRegenerateReporter interface {
+	RegenerateAgentTokenReport(userID, name string, newRawToken string, hmacKey []byte, narrowScope func([]string) []string) (before, after *auth.AgentToken, err error)
+}
+
+// tokenDeleteReporter is the store method behind DeleteToken: it permanently
+// deletes the ownerless token called name and returns the deleted record.
+type tokenDeleteReporter interface {
+	DeleteAgentTokenReport(userID, name string) (*auth.AgentToken, error)
+}
+
 // RegenerateResult is a Regenerate outcome: the rotated record's view and the
 // new secret, shown once.
 type RegenerateResult struct {
@@ -96,6 +114,10 @@ type CredentialsServiceDeps struct {
 	Logger   *zap.Logger
 	// Generate mints a raw agent-token secret (tests inject a spy).
 	Generate func() (string, error)
+	// AdminAuditor, when set, receives the service's admin_action records
+	// (Spec 133). The runtime passes its own late-bound holder instead.
+	AdminAuditor AdminAuditor
+	adminAudit   *adminAuditHolder
 }
 
 // NewCredentialsService builds the service from its dependencies.
@@ -103,6 +125,11 @@ func NewCredentialsService(d CredentialsServiceDeps) *CredentialsService {
 	s := &CredentialsService{
 		tokens: d.Tokens, clients: d.Clients, hmacKey: d.HMACKey, cfg: d.Config, guard: d.Guard,
 		activity: d.Activity, publish: d.Publish, now: d.Now, mu: d.Mu, logger: d.Logger, generate: d.Generate,
+		adminAudit: d.adminAudit,
+	}
+	if s.adminAudit == nil && d.AdminAuditor != nil {
+		s.adminAudit = &adminAuditHolder{}
+		s.adminAudit.set(d.AdminAuditor)
 	}
 	if s.now == nil {
 		s.now = time.Now
@@ -715,6 +742,9 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 		Name: req.Name, AllowedServers: allowed, Permissions: perms, ExpiresAt: expiresAt, CreatedAt: now,
 		ProfilePin: pin, Issuer: issuerOf(a), Purpose: req.Purpose, GuardBound: req.EnforceGuard,
 		RateLimit: req.RateLimit,
+		// Spec 133: the audit ref is assigned here so the line names exactly
+		// what the store persisted (the store keeps a valid ref as given).
+		AuditRef: auth.NewAuditRef(auth.AuditRefKindAgentToken),
 	}
 	if n := utf8.RuneCountInString(req.Purpose); n > auth.MaxCredentialPurpose {
 		return nil, credErr(profile.CredentialErrorCodeInvalidArgument, "purpose",
@@ -754,6 +784,11 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 	committed.TokenPrefix = auth.TokenPrefix(raw)
 	view := ViewOf(&committed, cfg, now)
 	s.writeLifecycle(ctx, a, profile.ChangeIssue, view, nil)
+	changes := []audit.Change{audit.Literal(audit.FieldTokenPrefix, nil, audit.TokenPrefix(committed.TokenPrefix))}
+	if !committed.ExpiresAt.IsZero() {
+		changes = append(changes, audit.Literal(audit.FieldExpiresAt, nil, audit.Timestamp(committed.ExpiresAt)))
+	}
+	s.recordTokenEffect(ctx, audit.ActionTokenCreate, &committed, changes, now)
 	s.announce(view, profile.ChangeIssue)
 	return &IssuedCredentialResult{View: view, Secret: raw, record: &committed}, nil
 }
@@ -1083,6 +1118,10 @@ func (s *CredentialsService) Revoke(ctx context.Context, a Actor, ref Credential
 	}
 	view := ViewOf(after, cfg, s.now())
 	s.writeLifecycle(ctx, a, profile.ChangeRevoke, view, map[string]interface{}{"changed": true})
+	// The storage transaction flipped Revoked false → true (a no-op revoke
+	// returned above). The revoked key's display prefix is `before`.
+	s.recordTokenEffect(ctx, audit.ActionTokenRevoke, after,
+		[]audit.Change{audit.Literal(audit.FieldTokenPrefix, audit.TokenPrefix(after.TokenPrefix), nil)}, s.now())
 	s.announce(view, profile.ChangeRevoke)
 	if s.clients != nil && s.clients.notifier != nil {
 		s.clients.notifier.NotifyBindingChanged(after.Name)
@@ -1106,16 +1145,6 @@ func (s *CredentialsService) Regenerate(ctx context.Context, a Actor, name strin
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// The read is for the old prefix only; existence is the store's call, so
-	// its refusal (not found, revoked, client credential) decides the answer.
-	before, err := s.tokens.GetAgentTokenByName(name)
-	if err != nil {
-		return nil, fmt.Errorf("cannot read credentials: %w", err)
-	}
-	oldPrefix := ""
-	if before != nil {
-		oldPrefix = before.TokenPrefix
-	}
 	secret, err := s.generate()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate token: %w", err)
@@ -1124,20 +1153,89 @@ func (s *CredentialsService) Regenerate(ctx context.Context, a Actor, name strin
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize token security: %w", err)
 	}
-	after, err := regen.RegenerateAgentToken(name, secret, key)
+	// The old prefix comes from the rotating transaction itself when the
+	// store can report it (Spec 133); otherwise from a read just before it.
+	var before, after *auth.AgentToken
+	if rep, ok := s.tokens.(tokenRegenerateReporter); ok {
+		before, after, err = rep.RegenerateAgentTokenReport("", name, secret, key, nil)
+	} else {
+		before, err = s.tokens.GetAgentTokenByName(name)
+		if err != nil {
+			return nil, fmt.Errorf("cannot read credentials: %w", err)
+		}
+		after, err = regen.RegenerateAgentToken(name, secret, key)
+	}
 	if err != nil {
 		if errors.Is(err, storage.ErrAgentTokenNotFound) {
 			return nil, s.notFound("token", name)
 		}
 		return nil, err
 	}
+	oldPrefix := ""
+	if before != nil {
+		oldPrefix = before.TokenPrefix
+	}
 	view := ViewOf(after, s.cfg(), s.now())
 	s.writeLifecycle(ctx, a, profile.ChangeRotate, view, map[string]interface{}{
 		"old_token_prefix": oldPrefix,
 		"new_token_prefix": after.TokenPrefix,
 	})
+	var oldP audit.LiteralValue
+	if oldPrefix != "" {
+		oldP = audit.TokenPrefix(oldPrefix)
+	}
+	s.recordTokenEffect(ctx, audit.ActionTokenRotate, after,
+		[]audit.Change{audit.Literal(audit.FieldTokenPrefix, oldP, audit.TokenPrefix(after.TokenPrefix))}, s.now())
 	s.announce(view, profile.ChangeRotate)
 	return &RegenerateResult{View: view, Secret: secret}, nil
+}
+
+// DeleteToken permanently deletes the ownerless token record called name
+// (REST DELETE /tokens/{name}/permanent, CLI `token delete`), freeing the
+// name. It writes the token.delete audit line from the deleted record. A
+// client credential's record (client-<id>) is deleted the same way; its line
+// (target.kind client) lands with the client lines (Spec 133 PR-1b) and is
+// not written yet.
+func (s *CredentialsService) DeleteToken(ctx context.Context, a Actor, name string) (*auth.AgentToken, error) {
+	if s == nil || s.tokens == nil {
+		return nil, ErrCredentialsUnavailable
+	}
+	del, ok := s.tokens.(tokenDeleteReporter)
+	if !ok {
+		return nil, ErrCredentialsUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	deleted, err := del.DeleteAgentTokenReport("", name)
+	if err != nil {
+		if errors.Is(err, storage.ErrAgentTokenNotFound) {
+			return nil, s.notFound("token", name)
+		}
+		return nil, err
+	}
+	_ = a // the caller is derived from ctx by the auditor (Spec 133 FR-008)
+	if deleted.Kind != auth.KindClient {
+		var changes []audit.Change
+		if deleted.TokenPrefix != "" {
+			changes = []audit.Change{audit.Literal(audit.FieldTokenPrefix, audit.TokenPrefix(deleted.TokenPrefix), nil)}
+		}
+		s.recordTokenEffect(ctx, audit.ActionTokenDelete, deleted, changes, s.now())
+	}
+	return deleted, nil
+}
+
+// recordTokenEffect hands one committed agent-token effect to the auditor.
+// rec is the record the storage transaction reported; its audit ref is the
+// stored one (a store that cannot report a ref gets one assigned on this copy).
+func (s *CredentialsService) recordTokenEffect(ctx context.Context, action string, rec *auth.AgentToken, changes []audit.Change, at time.Time) {
+	if s == nil || s.adminAudit == nil || rec == nil {
+		return
+	}
+	cp := *rec
+	auth.EnsureAuditRef(&cp)
+	s.adminAudit.record(ctx, AdminRecord{
+		At: at, Action: action, Target: agentTokenTarget(cp.Name, cp.AuditRef, cp.UserID), Changes: changes,
+	})
 }
 
 func (s *CredentialsService) revokeTokenStore(name string) (*auth.AgentToken, error) {

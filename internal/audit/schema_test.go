@@ -69,41 +69,6 @@ func publishedSchema(t *testing.T) *jsonschema.Schema {
 	return permissiveSchema
 }
 
-// strictifyAdditionalProperties walks every JSON-Schema "object"-shaped node
-// reachable from the document (properties/items/allOf/anyOf/oneOf/if/then/
-// else) and sets additionalProperties:false wherever the node declares
-// "properties" but no explicit additionalProperties — deriving the
-// producer-strict variant referenced by T097 without touching the published
-// (consumer-tolerant) file on disk.
-func strictifyAdditionalProperties(node interface{}) interface{} {
-	switch v := node.(type) {
-	case map[string]interface{}:
-		out := make(map[string]interface{}, len(v))
-		for k, val := range v {
-			out[k] = strictifyAdditionalProperties(val)
-		}
-		if _, hasProps := out["properties"]; hasProps {
-			out["additionalProperties"] = false
-		}
-		return out
-	case []interface{}:
-		out := make([]interface{}, len(v))
-		for i, val := range v {
-			out[i] = strictifyAdditionalProperties(val)
-		}
-		return out
-	default:
-		return node
-	}
-}
-
-func producerStrictSchema(t *testing.T) *jsonschema.Schema {
-	t.Helper()
-	doc := loadSchemaDoc(t, contractSchemaPath)
-	strict := strictifyAdditionalProperties(doc).(map[string]interface{})
-	return compileSchemaFromDoc(t, "mem://audit-line-strict.json", strict)
-}
-
 func validateAgainstPublishedSchema(t *testing.T, line audit.Line) {
 	t.Helper()
 	raw, err := line.JSON()
@@ -162,8 +127,6 @@ func TestSchemaExamplesValidate(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestProducerStrictSchema_BuilderOutputHasExactKeySet(t *testing.T) {
-	strict := producerStrictSchema(t)
-
 	sum, n := argsHash(`{}`)
 	att := baseAttempt()
 	att.ArgsSHA256, att.ArgsBytes = sum, n
@@ -183,17 +146,246 @@ func TestProducerStrictSchema_BuilderOutputHasExactKeySet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAuthEvent: %v", err)
 	}
+	adminLine, err := audit.NewAdminAction(tokenRotateInput())
+	if err != nil {
+		t.Fatalf("NewAdminAction: %v", err)
+	}
 
 	for name, line := range map[string]audit.Line{
-		"authz":      authzLine,
-		"tool_call":  toolCallLine,
-		"auth_event": authEventLine,
+		"authz":        authzLine,
+		"tool_call":    toolCallLine,
+		"auth_event":   authEventLine,
+		"admin_action": adminLine,
 	} {
-		raw, err := line.JSON()
-		if err != nil {
-			t.Fatalf("%s: line.JSON(): %v", name, err)
+		t.Run(name, func(t *testing.T) {
+			validateAgainstPublishedSchema(t, line)
+			validateProducerKeys(t, line)
+		})
+	}
+}
+
+// producerKeys is the exact key set each event kind may emit (Spec 133 plan
+// "Schema": event-specific exact-key checks replace the recursive
+// additionalProperties strictifier, which closed partial if/then schemas and
+// could not express per-event exclusivity). The published schema stays
+// consumer-tolerant; this is the producer property.
+var (
+	commonKeys   = []string{"schema_version", "ts", "event", "request_id", "origin", "source", "caller", "client", "profile"}
+	dispatchKeys = []string{"transport_request_id", "parent_id", "session_id", "work_session_id", "surface", "server", "tool", "operation", "args_sha256", "args_bytes"}
+
+	producerTopKeys = map[string][]string{
+		"authz":        append(append([]string{"decision", "reason", "disclosed"}, commonKeys...), dispatchKeys...),
+		"tool_call":    append(append([]string{"outcome", "reason", "error_class", "duration_ms", "request_bytes", "response_bytes"}, commonKeys...), dispatchKeys...),
+		"auth_event":   append([]string{"surface", "reason", "flags"}, commonKeys...),
+		"admin_action": append([]string{"action", "target", "outcome", "changes", "changes_truncated", "changes_count", "request_id_masked", "trigger", "policy"}, commonKeys...),
+	}
+	legacyCallerKeys   = []string{"kind", "user_id", "user_email", "email_hash", "role", "provider", "token_name", "token_prefix", "profile_pin"}
+	producerCallerKeys = map[string][]string{
+		"authz":        legacyCallerKeys,
+		"tool_call":    legacyCallerKeys,
+		"auth_event":   legacyCallerKeys,
+		"admin_action": {"kind", "user_id", "user_email", "role", "provider", "token_name", "token_prefix", "profile_pin", "token_name_withheld", "ref"},
+	}
+	producerClientKeys = map[string][]string{
+		"authz":        {"name", "version", "ip"},
+		"tool_call":    {"name", "version", "ip"},
+		"auth_event":   {"name", "version", "ip"},
+		"admin_action": {"name", "version", "ip", "surface"},
+	}
+	adminTargetKeys = []string{"kind", "name", "name_withheld", "ref", "owner_user_id", "client_id", "client_id_withheld", "client_ref",
+		"grant_id", "authorization_id", "server", "server_withheld", "server_ref", "count", "names", "truncated", "names_withheld",
+		"source", "authority", "digest_prefix"}
+	adminChangeKeys = []string{"field", "before", "after", "withheld", "field_masked", "segment_ref", "added", "removed",
+		"added_count", "removed_count", "unresolved", "truncated"}
+)
+
+func keyViolations(where string, obj map[string]interface{}, allowed []string) []string {
+	set := map[string]bool{}
+	for _, k := range allowed {
+		set[k] = true
+	}
+	var out []string
+	for k := range obj {
+		if !set[k] {
+			out = append(out, where+"."+k)
 		}
-		validateBytesAgainstSchema(t, strict, raw)
+	}
+	return out
+}
+
+// producerKeyViolations returns every key the producer may not emit on the
+// line's event kind.
+func producerKeyViolations(obj map[string]interface{}) []string {
+	event, _ := obj["event"].(string)
+	top, ok := producerTopKeys[event]
+	if !ok {
+		return []string{"event:" + event}
+	}
+	out := keyViolations("line", obj, top)
+	if c, ok := obj["caller"].(map[string]interface{}); ok {
+		out = append(out, keyViolations("caller", c, producerCallerKeys[event])...)
+	}
+	if c, ok := obj["client"].(map[string]interface{}); ok {
+		out = append(out, keyViolations("client", c, producerClientKeys[event])...)
+	}
+	if event == "admin_action" {
+		if tg, ok := obj["target"].(map[string]interface{}); ok {
+			out = append(out, keyViolations("target", tg, adminTargetKeys)...)
+		}
+		if chs, ok := obj["changes"].([]interface{}); ok {
+			for _, ch := range chs {
+				if m, ok := ch.(map[string]interface{}); ok {
+					out = append(out, keyViolations("changes[]", m, adminChangeKeys)...)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func validateProducerKeys(t *testing.T, line audit.Line) {
+	t.Helper()
+	obj := decodeLine(t, line)
+	if v := producerKeyViolations(obj); len(v) > 0 {
+		raw, _ := line.JSON()
+		t.Fatalf("producer emitted keys outside its event's set: %v\nline: %s", v, raw)
+	}
+}
+
+// TestLegacyLinesStillValidate pins FR-002/FR-003: every pre-133 example, and
+// an old line carrying shipper extension keys that collide with the new
+// admin_action keys (target, changes, action, client.surface), validates
+// under the widened published schema unchanged; the producer-strict check
+// rejects the extension keys (it was never meant for consumers).
+func TestLegacyLinesStillValidate(t *testing.T) {
+	raw, err := os.ReadFile("testdata/legacy_pre133_lines.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sch := publishedSchema(t)
+	lines := splitLines(raw)
+	if len(lines) < 7 {
+		t.Fatalf("expected the six pre-133 examples and one extension-key line, got %d", len(lines))
+	}
+	for i, l := range lines {
+		if len(l) == 0 {
+			continue
+		}
+		var obj map[string]interface{}
+		if err := json.Unmarshal(l, &obj); err != nil {
+			t.Fatalf("line %d: %v", i, err)
+		}
+		if err := sch.Validate(obj); err != nil {
+			t.Fatalf("legacy line %d no longer validates: %v\n%s", i, err, l)
+		}
+		_, hasExt := obj["target"]
+		if v := producerKeyViolations(obj); hasExt != (len(v) > 0) {
+			t.Fatalf("legacy line %d: producer-strict violations %v (extension keys present: %v)", i, v, hasExt)
+		}
+	}
+}
+
+func baseAdminFixture(overrides map[string]interface{}) map[string]interface{} {
+	fx := map[string]interface{}{
+		"schema_version": 1, "ts": "2026-09-17T10:00:00.000000001Z", "event": "admin_action",
+		"request_id": "req-1", "origin": "local", "source": "api", "caller": map[string]interface{}{"kind": "api_key"},
+		"action": "token.revoke", "outcome": "success",
+		"target": map[string]interface{}{"kind": "agent_token", "name": "ci", "ref": "tok_ABCDEFGH"},
+	}
+	for k, v := range overrides {
+		if v == nil {
+			delete(fx, k)
+			continue
+		}
+		fx[k] = v
+	}
+	return fx
+}
+
+func TestAdminActionSchema_PositiveAndNegative(t *testing.T) {
+	sch := publishedSchema(t)
+	ok := []map[string]interface{}{
+		baseAdminFixture(nil),
+		baseAdminFixture(map[string]interface{}{"request_id": nil, "source": "internal", "caller": map[string]interface{}{"kind": "internal"}, "trigger": "policy", "policy": "rotation_reconcile"}),
+		baseAdminFixture(map[string]interface{}{"request_id": nil, "caller": map[string]interface{}{"kind": "cli_offline"}}),
+		baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "agent_token", "token_prefix": "mcp_agt_ab12", "token_name_withheld": true, "ref": "cli_ABCDEFGH"}}),
+		baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "session_user", "user_id": "u1", "role": "user", "provider": "oidc"}}),
+		baseAdminFixture(map[string]interface{}{"target": map[string]interface{}{"kind": "agent_token", "name_withheld": true, "ref": "tok_ABCDEFGH"}}),
+	}
+	for i, fx := range ok {
+		if err := sch.Validate(roundTrip(t, fx)); err != nil {
+			t.Fatalf("positive fixture %d rejected: %v", i, err)
+		}
+	}
+	bad := map[string]map[string]interface{}{
+		"unknown action":                 baseAdminFixture(map[string]interface{}{"action": "token.explode"}),
+		"outcome error":                  baseAdminFixture(map[string]interface{}{"outcome": "error"}),
+		"missing target":                 baseAdminFixture(map[string]interface{}{"target": nil}),
+		"forbidden server":               baseAdminFixture(map[string]interface{}{"server": "jira"}),
+		"forbidden surface":              baseAdminFixture(map[string]interface{}{"surface": "rest"}),
+		"forbidden transport id":         baseAdminFixture(map[string]interface{}{"transport_request_id": "x"}),
+		"trigger on api_key":             baseAdminFixture(map[string]interface{}{"trigger": "startup"}),
+		"internal without trigger":       baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "internal"}}),
+		"policy without trigger":         baseAdminFixture(map[string]interface{}{"policy": "scan_clean"}),
+		"trigger policy no policy":       baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "internal"}, "trigger": "policy"}),
+		"none with request_id":           baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "none"}, "trigger": "config_file"}),
+		"cli_offline with request":       baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "cli_offline"}}),
+		"name and name_withheld":         baseAdminFixture(map[string]interface{}{"target": map[string]interface{}{"kind": "agent_token", "name": "a", "name_withheld": true, "ref": "tok_ABCDEFGH"}}),
+		"agent target without ref":       baseAdminFixture(map[string]interface{}{"target": map[string]interface{}{"kind": "agent_token", "name": "a"}}),
+		"malformed ref":                  baseAdminFixture(map[string]interface{}{"target": map[string]interface{}{"kind": "agent_token", "name": "a", "ref": "ci-bot"}}),
+		"identity on internal":           baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "internal", "user_id": "u1"}, "trigger": "startup", "request_id": nil}),
+		"agent without prefix":           baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "agent_token", "token_name": "t"}}),
+		"agent both shapes":              baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "agent_token", "token_prefix": "mcp_agt_ab12", "token_name": "t", "token_name_withheld": true, "ref": "cli_ABCDEFGH"}}),
+		"user_id without provider":       baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "session_admin", "user_id": "u1", "role": "admin"}}),
+		"masked flag without id":         baseAdminFixture(map[string]interface{}{"request_id": nil, "request_id_masked": true, "caller": map[string]interface{}{"kind": "cli_offline"}}),
+		"changes_count alone":            baseAdminFixture(map[string]interface{}{"changes_count": 3}),
+		"change with value and withheld": baseAdminFixture(map[string]interface{}{"changes": []interface{}{map[string]interface{}{"field": "/enabled", "before": true, "withheld": "value"}}}),
+		"change with object value":       baseAdminFixture(map[string]interface{}{"changes": []interface{}{map[string]interface{}{"field": "/args", "after": map[string]interface{}{"x": 1}}}}),
+		"change field not a pointer":     baseAdminFixture(map[string]interface{}{"changes": []interface{}{map[string]interface{}{"field": "enabled", "withheld": "value"}}}),
+		"bad client surface":             baseAdminFixture(map[string]interface{}{"client": map[string]interface{}{"surface": "tray"}}),
+		"secret target with name":        baseAdminFixture(map[string]interface{}{"target": map[string]interface{}{"kind": "secret", "name": "GITHUB_TOKEN", "name_withheld": true, "ref": "sec_ABCDEFGH"}}),
+		"none on authz":                  baseAuthzFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "none"}}),
+	}
+	for name, fx := range bad {
+		t.Run(name, func(t *testing.T) { mustFail(t, sch, fx, name) })
+	}
+}
+
+func roundTrip(t *testing.T, v interface{}) interface{} {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out interface{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestAdminActionVocabularyMatchesSchema pins the builder's closed action
+// list to the schema's action enum.
+func TestAdminActionVocabularyMatchesSchema(t *testing.T) {
+	doc := loadSchemaDoc(t, contractSchemaPath)
+	var enum []interface{}
+	for _, b := range doc["allOf"].([]interface{}) {
+		m := b.(map[string]interface{})
+		cond, _ := m["if"].(map[string]interface{})
+		props, _ := cond["properties"].(map[string]interface{})
+		ev, _ := props["event"].(map[string]interface{})
+		if ev["const"] == "admin_action" {
+			enum = m["then"].(map[string]interface{})["properties"].(map[string]interface{})["action"].(map[string]interface{})["enum"].([]interface{})
+		}
+	}
+	got := audit.AdminActionSorted()
+	if len(enum) != len(got) {
+		t.Fatalf("schema has %d actions, builder %d", len(enum), len(got))
+	}
+	for i, a := range enum {
+		if a.(string) != got[i] {
+			t.Fatalf("action %d: schema %q, builder %q (keep both sorted and identical)", i, a, got[i])
+		}
 	}
 }
 

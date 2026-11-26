@@ -236,6 +236,14 @@ func auditCallerFromContext(ctx context.Context) audit.Caller {
 	if ac == nil {
 		return audit.Caller{Kind: "anonymous"}
 	}
+	return auditCallerFromAuthContext(ctx, ac)
+}
+
+// auditCallerFromAuthContext is the credential mapping of the caller
+// derivation (contracts/audit-line-events.md "caller.kind derivation"),
+// shared by every event kind. Spec 133 admin_action lines use it without the
+// dispatch-only SourceInternal shortcut and the nil-means-anonymous default.
+func auditCallerFromAuthContext(ctx context.Context, ac *auth.AuthContext) audit.Caller {
 	switch ac.Type {
 	case auth.AuthTypeAgent:
 		c := audit.Caller{

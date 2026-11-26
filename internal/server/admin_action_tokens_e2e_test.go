@@ -1,0 +1,289 @@
+package server
+
+// Spec 133 PR-1a door table test (FR-023): every agent-token door, driven
+// through the real REST router and the real MCP `credentials` tool of an
+// in-process daemon, writes exactly the admin_action lines the contract
+// names, with the caller, source, client surface and request id of the door
+// it came through, schema-valid, and nothing for a refusal or a no-op.
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
+	"github.com/stretchr/testify/require"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+)
+
+const adminE2EAPIKey = "test-api-key-admin-action-0123456789abcdef"
+
+type adminE2E struct {
+	t    *testing.T
+	env  *TestEnvironment
+	sink *recordingAuditSink
+	base string
+}
+
+func newAdminE2E(t *testing.T) *adminE2E {
+	t.Helper()
+	e := &adminE2E{t: t, sink: &recordingAuditSink{}}
+	e.env = NewTestEnvironmentWithOptions(t, TestEnvironmentOptions{
+		Mutate: func(cfg *config.Config, _ string) {
+			cfg.APIKey = adminE2EAPIKey
+			cfg.RequireMCPAuth = true
+			cfg.Profiles = append(cfg.Profiles, config.ProfileConfig{Name: "ro", Servers: []string{"*"}})
+		},
+		ServerOptions: []ServerOption{WithAuditSink(e.sink)},
+	})
+	t.Cleanup(e.env.Cleanup)
+	e.base = strings.TrimSuffix(e.env.proxyAddr, "/mcp")
+	return e
+}
+
+func (e *adminE2E) rest(method, path, requestID string, body any) (int, []byte) {
+	e.t.Helper()
+	var rdr io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		require.NoError(e.t, err)
+		rdr = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequest(method, e.base+path, rdr)
+	require.NoError(e.t, err)
+	req.Header.Set("X-API-Key", adminE2EAPIKey)
+	req.Header.Set("X-MCPProxy-Client", "cli/0.77.0")
+	if requestID != "" {
+		req.Header.Set("X-Request-Id", requestID)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(e.t, err)
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, out
+}
+
+// adminLines returns the admin_action lines written since the last call,
+// each validated against the contract schema and the forbidden-key rule.
+func (e *adminE2E) adminLines(seen *int) []map[string]interface{} {
+	e.t.Helper()
+	all := e.sink.decoded(e.t)
+	var out []map[string]interface{}
+	for _, l := range all[*seen:] {
+		if l["event"] == "admin_action" {
+			out = append(out, l)
+		}
+	}
+	*seen = len(all)
+	return out
+}
+
+func (e *adminE2E) activityRequestIDs(requestID string) int {
+	e.t.Helper()
+	sm := e.env.proxyServer.runtime.StorageManager()
+	rows, _, err := sm.ListActivities(storage.ActivityFilter{Types: []string{string(storage.ActivityTypeProfileChange)}, RequestID: requestID, Limit: 100})
+	require.NoError(e.t, err)
+	return len(rows)
+}
+
+func TestAdminActionE2E_RESTTokenDoors(t *testing.T) {
+	e := newAdminE2E(t)
+	seen := 0
+
+	// POST /tokens → token.create
+	code, body := e.rest(http.MethodPost, "/api/v1/tokens", "req-create-1", map[string]any{"name": "ci-bot", "expires_in": "1h"})
+	require.Equal(t, http.StatusCreated, code, string(body))
+	var created struct {
+		Data struct {
+			Token       string `json:"token"`
+			TokenPrefix string `json:"token_prefix"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(body, &created))
+	lines := e.adminLines(&seen)
+	require.Len(t, lines, 1, "token.create: exactly one line")
+	l := lines[0]
+	require.Equal(t, "token.create", l["action"])
+	require.Equal(t, "api", l["source"])
+	require.Equal(t, "local", l["origin"])
+	require.Equal(t, map[string]interface{}{"kind": "api_key"}, l["caller"])
+	require.Equal(t, "req-create-1", l["request_id"])
+	require.Equal(t, 1, e.activityRequestIDs("req-create-1"), "the line joins the activity row by request_id")
+	client := l["client"].(map[string]interface{})
+	require.Equal(t, "cli", client["surface"])
+	require.Equal(t, "cli/0.77.0", client["name"])
+	tgt := l["target"].(map[string]interface{})
+	require.Equal(t, "agent_token", tgt["kind"])
+	require.Equal(t, "ci-bot", tgt["name"])
+	ref := tgt["ref"].(string)
+	raw, _ := json.Marshal(l)
+	if created.Data.Token != "" {
+		require.NotContains(t, string(raw), created.Data.Token, "the secret never reaches the line")
+	}
+
+	// POST /tokens/{name}/regenerate → token.rotate with both prefixes.
+	code, body = e.rest(http.MethodPost, "/api/v1/tokens/ci-bot/regenerate", "req-rotate-1", nil)
+	require.Equal(t, http.StatusOK, code, string(body))
+	lines = e.adminLines(&seen)
+	require.Len(t, lines, 1)
+	require.Equal(t, "token.rotate", lines[0]["action"])
+	require.Equal(t, ref, lines[0]["target"].(map[string]interface{})["ref"], "rotation keeps the ref")
+	require.Equal(t, "req-rotate-1", lines[0]["request_id"])
+	ch := lines[0]["changes"].([]interface{})[0].(map[string]interface{})
+	require.Equal(t, "/token_prefix", ch["field"])
+	require.NotEqual(t, ch["before"], ch["after"])
+	require.Equal(t, 1, e.activityRequestIDs("req-rotate-1"))
+
+	// DELETE /tokens/{name} → token.revoke; again → no line.
+	code, _ = e.rest(http.MethodDelete, "/api/v1/tokens/ci-bot", "req-revoke-1", nil)
+	require.Equal(t, http.StatusNoContent, code)
+	lines = e.adminLines(&seen)
+	require.Len(t, lines, 1)
+	require.Equal(t, "token.revoke", lines[0]["action"])
+	code, _ = e.rest(http.MethodDelete, "/api/v1/tokens/ci-bot", "req-revoke-2", nil)
+	require.Equal(t, http.StatusNoContent, code)
+	require.Empty(t, e.adminLines(&seen), "an already revoked token writes no line")
+
+	// Regenerate a revoked token: 409, no line.
+	code, _ = e.rest(http.MethodPost, "/api/v1/tokens/ci-bot/regenerate", "", nil)
+	require.Equal(t, http.StatusConflict, code)
+	require.Empty(t, e.adminLines(&seen))
+
+	// DELETE /tokens/{name}/permanent → token.delete; again → 404, no line.
+	code, _ = e.rest(http.MethodDelete, "/api/v1/tokens/ci-bot/permanent", "req-delete-1", nil)
+	require.Equal(t, http.StatusNoContent, code)
+	lines = e.adminLines(&seen)
+	require.Len(t, lines, 1)
+	require.Equal(t, "token.delete", lines[0]["action"])
+	require.Equal(t, ref, lines[0]["target"].(map[string]interface{})["ref"])
+	code, _ = e.rest(http.MethodDelete, "/api/v1/tokens/ci-bot/permanent", "", nil)
+	require.Equal(t, http.StatusNotFound, code)
+	require.Empty(t, e.adminLines(&seen))
+
+	// A refused create (invalid name) writes nothing.
+	code, _ = e.rest(http.MethodPost, "/api/v1/tokens", "", map[string]any{"name": "bad name"})
+	require.Equal(t, http.StatusBadRequest, code)
+	require.Empty(t, e.adminLines(&seen))
+
+	// A credential-shaped X-Request-Id is rejected by the REST id rule (it
+	// carries no '_'-free shape issue) or masked: either way never verbatim.
+	pat := "github_pat_11ABCDEFGHIJKLMNOPQRSTUV_0123456789"
+	code, body = e.rest(http.MethodPost, "/api/v1/tokens", pat, map[string]any{"name": "masked-id", "expires_in": "1h"})
+	require.Equal(t, http.StatusCreated, code, string(body))
+	lines = e.adminLines(&seen)
+	require.Len(t, lines, 1)
+	raw, _ = json.Marshal(lines[0])
+	require.NotContains(t, string(raw), pat)
+	require.Equal(t, true, lines[0]["request_id_masked"])
+
+	require.Zero(t, e.sink.SanitizerHits())
+}
+
+func TestAdminActionE2E_MCPCredentialsTool(t *testing.T) {
+	e := newAdminE2E(t)
+	seen := 0
+	tr, err := transport.NewStreamableHTTP(e.base+"/mcp", transport.WithHTTPHeaders(map[string]string{"X-API-Key": adminE2EAPIKey}))
+	require.NoError(t, err)
+	c := client.NewClient(tr)
+	e.env.ConnectClient(c)
+	t.Cleanup(func() { _ = c.Close() })
+
+	res, err := c.CallTool(context.Background(), callReq("credentials", map[string]any{
+		"operation": "create_token", "name": "worker", "profile": "ro", "expires_in": "1h",
+	}))
+	require.NoError(t, err)
+	require.False(t, res.IsError, getToolResultText(res))
+	lines := e.adminLines(&seen)
+	require.Len(t, lines, 1)
+	l := lines[0]
+	require.Equal(t, "token.create", l["action"])
+	require.Equal(t, "mcp", l["source"])
+	require.Equal(t, "mcp", l["client"].(map[string]interface{})["surface"])
+	rid, _ := l["request_id"].(string)
+	require.NotEmpty(t, rid, "an MCP admin line carries the wrapper's request id")
+	// The wrapper row and the profile_change row both carry the same id.
+	sm := e.env.proxyServer.runtime.StorageManager()
+	rows, _, err := sm.ListActivities(storage.ActivityFilter{RequestID: rid, Limit: 100})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(rows), 2, "wrapper row and profile_change row share the line's request id")
+
+	res, err = c.CallTool(context.Background(), callReq("credentials", map[string]any{"operation": "revoke", "token": "worker"}))
+	require.NoError(t, err)
+	require.False(t, res.IsError, getToolResultText(res))
+	lines = e.adminLines(&seen)
+	require.Len(t, lines, 1)
+	require.Equal(t, "token.revoke", lines[0]["action"])
+
+	// A refused operation (unknown token) writes nothing.
+	res, err = c.CallTool(context.Background(), callReq("credentials", map[string]any{"operation": "revoke", "token": "nope"}))
+	require.NoError(t, err)
+	require.True(t, res.IsError)
+	require.Empty(t, e.adminLines(&seen))
+}
+
+// TestAdminActionE2E_SaturatedBus pins SC-003 at the token-revocation scale
+// this slice owns: with the event bus saturated (nobody draining it), every
+// committed revocation still writes its line — the line never goes through
+// the bus.
+func TestAdminActionE2E_SaturatedBus(t *testing.T) {
+	if testing.Short() {
+		t.Skip("bus saturation is slow")
+	}
+	e := newAdminE2E(t)
+	rt := e.env.proxyServer.runtime
+	// Subscribe and never read: the subscriber's buffer fills and the bus
+	// drops for it, exactly as a stuck consumer would.
+	_ = rt.SubscribeEvents()
+	cs := rt.CredentialsService()
+	ctx := adminTestContext()
+	seen := len(e.sink.snapshot())
+	a := runtime.Actor{Kind: "api_key", Surface: profile.SurfaceAPI}
+	// The token cap (auth.MaxTokens) bounds how many exist at once, so the
+	// revocations are create → revoke → delete cycles. 300 cycles publish
+	// 900 credentials.changed events into a 256-slot subscriber buffer that
+	// nobody drains — well past saturation. (SC-003 names 2,000; each cycle
+	// is three fsynced bbolt transactions, ~100 ms, so 2,000 would add over
+	// three minutes to every CI run for no extra coverage: the line path
+	// never touches the bus whatever the count.)
+	const n = 300
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("sat-%d", i)
+		_, err := cs.IssueToken(ctx, a, runtime.IssueTokenRequest{Name: name, ExpiresIn: "1h", Expiry: runtime.ExpiryTokenDefault})
+		require.NoError(t, err)
+		_, err = cs.Revoke(ctx, a, runtime.CredentialRef{Token: name}, true)
+		require.NoError(t, err)
+		_, err = cs.DeleteToken(ctx, a, name)
+		require.NoError(t, err)
+	}
+	revokes := 0
+	for _, l := range e.adminLines(&seen) {
+		if l["action"] == audit.ActionTokenRevoke {
+			revokes++
+		}
+	}
+	require.Equal(t, n, revokes, "every committed revocation writes one line with the bus saturated")
+}
+
+// adminTestContext is an administrator REST request context (API key over
+// TCP, API mount), as the REST middleware chain builds it.
+func adminTestContext() context.Context {
+	ctx := auth.WithAuthContext(context.Background(), auth.AdminContext())
+	ctx = reqcontext.WithRequestMeta(ctx, reqcontext.RequestMeta{Mount: reqcontext.MountAPI, Surface: "api"})
+	return ctx
+}

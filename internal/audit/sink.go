@@ -66,6 +66,13 @@ type writerSink struct {
 	failures      uint64 // atomic
 	sanitizerHits uint64 // atomic
 
+	// torn is true while the underlying writer may end mid-record (a short
+	// write, or a file reopened with no trailing newline). The next Write
+	// first restores the record boundary with a lone newline, and appends
+	// nothing while that repair fails (Spec 133 FR-017, plan D-C). Guarded
+	// by mu.
+	torn bool
+
 	clock         func() time.Time
 	failureLogger func(error)
 	logMu         sync.Mutex
@@ -109,12 +116,39 @@ func (s *writerSink) Write(line []byte) error {
 		buf = append(buf, '\n')
 	}
 
+	// Restore the record boundary first, as its own write, so a torn tail
+	// is repaired in the file that holds it — before a rotation triggered by
+	// this record could move on to a new file.
+	if s.torn {
+		n, err := s.w.Write([]byte{'\n'})
+		if err == nil && n != 1 {
+			err = io.ErrShortWrite
+		}
+		if n == 1 {
+			s.torn = false
+		}
+		if s.torn {
+			if err == nil {
+				err = io.ErrShortWrite
+			}
+			atomic.AddUint64(&s.failures, 1)
+			s.maybeLogFailure(err)
+			return fmt.Errorf("audit: record boundary not restored, record not appended: %w", err)
+		}
+	}
+
 	n, err := s.w.Write(buf)
 	if err == nil && n != len(buf) {
 		// io.Writer permits a short write with a nil error; treated as a
 		// failure here so a partial JSON record never counts as a
 		// successfully written line (round-1 cross-review finding, PR-D).
 		err = io.ErrShortWrite
+	}
+	// A partial record (some bytes, not all) leaves the stream mid-record.
+	// Nothing written, or everything written (even with an error), leaves it
+	// at a boundary.
+	if n > 0 && n < len(buf) {
+		s.torn = true
 	}
 	if err != nil {
 		atomic.AddUint64(&s.failures, 1)
@@ -181,6 +215,10 @@ func NewFileSink(path string, maxSizeMB, maxBackups, maxAgeDays int, compress bo
 	if err := probeWritable(path); err != nil {
 		return nil, err
 	}
+	torn, err := endsMidRecord(path)
+	if err != nil {
+		return nil, err
+	}
 	lj := &lumberjack.Logger{
 		Filename:   path,
 		MaxSize:    maxSizeMB,
@@ -188,7 +226,32 @@ func NewFileSink(path string, maxSizeMB, maxBackups, maxAgeDays int, compress bo
 		MaxAge:     maxAgeDays,
 		Compress:   compress,
 	}
-	return newWriterSink(lj, opts...), nil
+	s := newWriterSink(lj, opts...)
+	s.torn = torn
+	return s, nil
+}
+
+// endsMidRecord reports whether the file at path is non-empty and does not
+// end in a newline: a previous process was cut off mid-record, and the first
+// write must restore the boundary (Spec 133 FR-017).
+func endsMidRecord(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("audit: cannot open %s: %w", path, err)
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return false, fmt.Errorf("audit: cannot stat %s: %w", path, err)
+	}
+	if st.Size() == 0 {
+		return false, nil
+	}
+	last := make([]byte, 1)
+	if _, err := f.ReadAt(last, st.Size()-1); err != nil {
+		return false, fmt.Errorf("audit: cannot read %s: %w", path, err)
+	}
+	return last[0] != '\n', nil
 }
 
 func probeWritable(path string) error {

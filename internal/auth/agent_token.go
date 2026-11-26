@@ -134,6 +134,14 @@ type AgentToken struct {
 	PendingPrefix     string     `json:"pending_prefix,omitempty"`
 	RotationStartedAt *time.Time `json:"rotation_started_at,omitempty"`
 
+	// AuditRef is the token's opaque audit identifier (Spec 133 §Target):
+	// assigned at create, kept across rotation, never derived from the name.
+	// An admin_action line names the token by it, so two names that look
+	// alike once capped stay distinguishable. A legacy record gets one the
+	// first time a transaction that a line reports touches it. Additive and
+	// omitempty.
+	AuditRef string `json:"audit_ref,omitempty"`
+
 	// MatchedPrefix is the display prefix of the secret that authenticated
 	// this request. It is set by validation, never stored. It differs from
 	// TokenPrefix only while a staged rotation is open and the PENDING secret

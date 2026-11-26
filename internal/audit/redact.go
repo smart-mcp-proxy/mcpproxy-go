@@ -7,7 +7,10 @@ package audit
 // rule: it would mask every args_sha256/email_hash and break the schema
 // after validation.
 
-import "regexp"
+import (
+	"regexp"
+	"sync/atomic"
+)
 
 // maxFieldLength is the length cap FR-015/FR-016 require for every
 // per-field-sanitised caller/operator-controlled string (client.name,
@@ -43,6 +46,12 @@ var credentialPatterns = []*regexp.Regexp{
 	// matched the legacy form).
 	regexp.MustCompile(`sk-[A-Za-z0-9_-]{16,}`),
 	regexp.MustCompile(`gh[poushr]_[A-Za-z0-9]{16,}`),
+	// Spec 133 FR-016: GitHub fine-grained PATs and the proxy's own token
+	// shapes (agent token, client credential, browser-login access and
+	// refresh tokens). Sixteen or more characters after the kind prefix, so a
+	// display token_prefix (8–16 characters in all) never matches.
+	regexp.MustCompile(`github_pat_[A-Za-z0-9_]{22,}`),
+	regexp.MustCompile(`mcp_(agt|cli|oat|ort)_[A-Za-z0-9_-]{16,}`),
 	regexp.MustCompile(`AKIA[0-9A-Za-z]{8,}`),
 	regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`),
 	regexp.MustCompile(`Bearer\s+[A-Za-z0-9\-_.~+/]+=*`),
@@ -73,9 +82,33 @@ func applyMasking(s string) (masked string, hit bool) {
 // (FR-015). A value with no credential-shaped substring and within the cap
 // survives verbatim.
 func maskCredential(s string) string {
-	masked, _ := applyMasking(s)
+	masked, hit := applyMasking(s)
+	if hit {
+		noteFieldMask()
+	}
 	return truncateField(masked)
 }
+
+// fieldMaskHits counts per-field mask hits across every event kind (Spec 133
+// plan D-1): a credential-shaped label masked at build time. Distinct from the
+// sink's SanitizerHits, which counts builder bugs. Process-wide.
+var fieldMaskHits atomic.Uint64
+
+func noteFieldMask() { fieldMaskHits.Add(1) }
+
+// FieldMaskHits returns the process-wide count of per-field mask hits.
+func FieldMaskHits() uint64 { return fieldMaskHits.Load() }
+
+// buildFailures counts lines a builder rejected or that could not be
+// serialized (Spec 133 plan D-1). Process-wide; incremented by the writers
+// (NoteBuildFailure), surfaced by doctor.
+var buildFailures atomic.Uint64
+
+// NoteBuildFailure records one rejected or unserialisable audit line.
+func NoteBuildFailure() { buildFailures.Add(1) }
+
+// BuildFailures returns the process-wide count of rejected lines.
+func BuildFailures() uint64 { return buildFailures.Load() }
 
 // SanitizeLine is the defence-in-depth whole-line pass applied before a
 // sink write: it must be the identity on well-formed builder output (every
