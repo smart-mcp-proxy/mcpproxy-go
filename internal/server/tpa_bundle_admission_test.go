@@ -4,7 +4,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -12,6 +14,7 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 )
 
@@ -79,4 +82,59 @@ func TestMaybeAutoApproveScanSettled_DegradedBundleSuspendsAutoApproval(t *testi
 
 		assert.Equal(t, []string{"srv"}, fake.approvedServers())
 	})
+}
+
+// TestServerShutdown_RoutingListenerDoesNotTouchBundleAfterward is #2036: the
+// routing listener handles config.reloaded by re-applying THIS server's bundle
+// config (an empty path here) to the process-global bundle runtime. Shutdown
+// unsubscribes the listener, but a closed channel still delivers its buffered
+// events and nothing joined the goroutine, so a handler could run after
+// Shutdown returned, when the next test had installed its own bundle, and
+// silently drop it.
+func TestServerShutdown_RoutingListenerDoesNotTouchBundleAfterward(t *testing.T) {
+	srv := newConsistencyServer(t)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	routingListenerBeforeEvent = func(runtime.Event) {
+		once.Do(func() { close(entered) })
+		<-release
+	}
+	t.Cleanup(func() {
+		routingListenerBeforeEvent = nil
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+
+	// A config.reloaded the listener has not handled yet when Shutdown runs.
+	srv.routingEventsCh <- runtime.Event{Type: runtime.EventTypeConfigReloaded}
+	<-entered
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		_ = srv.Shutdown()
+		close(shutdownDone)
+	}()
+	require.Eventually(t, func() bool {
+		srv.mu.RLock()
+		defer srv.mu.RUnlock()
+		return srv.shutdown
+	}, 5*time.Second, time.Millisecond)
+
+	// The next test's bundle, installed after this server began shutting down.
+	configureUnsignedDropBundle(t)
+	close(release)
+	<-shutdownDone
+	select {
+	case <-srv.routingListenerDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("routing listener still running after Shutdown returned")
+	}
+
+	degraded, reason := scanner.BundleCoverageDegraded()
+	assert.True(t, degraded, "a shut-down server's listener re-applied its own bundle config (reason %q)", reason)
 }

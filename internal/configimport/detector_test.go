@@ -27,6 +27,86 @@ func TestDetectFormat(t *testing.T) {
 			wantConfidence: "high",
 		},
 		{
+			name: "claude_code_sse_with_oauth",
+			content: `{
+				"mcpServers": {
+					"remote": {
+						"type": "sse",
+						"url": "https://example.com/sse",
+						"oauth": {"clientId": "example-client", "callbackPort": 8080}
+					}
+				}
+			}`,
+			wantFormat:     FormatClaudeCode,
+			wantConfidence: "medium",
+		},
+		{
+			name: "gemini_oauth_is_not_claude_code",
+			content: `{
+				"mcpServers": {
+					"remote": {
+						"url": "https://example.com/sse",
+						"oauth": {"enabled": true, "clientId": "example-client"}
+					}
+				}
+			}`,
+			wantFormat:     FormatCursor,
+			wantConfidence: "low",
+		},
+		{
+			name: "gemini_style_oauth_without_enabled_is_not_claude_code",
+			content: `{
+				"mcpServers": {
+					"remote": {
+						"url": "https://example.com/sse",
+						"oauth": {"clientId": "example-client", "scopes": ["read"]}
+					}
+				}
+			}`,
+			wantFormat:     FormatCursor,
+			wantConfidence: "low",
+		},
+		{
+			name: "gemini_enabled_with_claude_code_marker_is_not_claude_code",
+			content: `{
+				"mcpServers": {
+					"remote": {
+						"url": "https://example.com/sse",
+						"oauth": {"enabled": true, "callbackPort": 8080}
+					}
+				}
+			}`,
+			wantFormat:     FormatCursor,
+			wantConfidence: "low",
+		},
+		{
+			name: "claude_code_sse_with_client_id_only",
+			content: `{
+				"mcpServers": {
+					"remote": {
+						"type": "sse",
+						"url": "https://example.com/sse",
+						"oauth": {"clientId": "example-client"}
+					}
+				}
+			}`,
+			wantFormat:     FormatClaudeCode,
+			wantConfidence: "medium",
+		},
+		{
+			name: "gemini_client_secret_without_enabled_is_not_claude_code",
+			content: `{
+				"mcpServers": {
+					"remote": {
+						"url": "https://example.com/sse",
+						"oauth": {"clientId": "example-client", "clientSecret": "example-secret"}
+					}
+				}
+			}`,
+			wantFormat:     FormatCursor,
+			wantConfidence: "low",
+		},
+		{
 			name: "claude_desktop_stdio_only",
 			content: `{
 				"mcpServers": {
@@ -304,9 +384,9 @@ func TestTryDetectJSON(t *testing.T) {
 			want:    nil,
 		},
 		{
-			name: "json_with_mcpservers_not_object",
+			name:    "json_with_mcpservers_not_object",
 			content: `{"mcpServers": "not an object"}`,
-			want: nil,
+			want:    nil,
 		},
 	}
 

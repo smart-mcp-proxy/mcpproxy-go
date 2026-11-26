@@ -1,0 +1,200 @@
+import { test, expect, type Page } from '@playwright/test'
+import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { userInfo } from 'node:os'
+import { dirname } from 'node:path'
+import { join } from 'node:path'
+
+// Spec 132 (issue #1971): the Connect dialog's browser-login choice, driven in a
+// real browser. "+ Add -> Client" lists the supported clients; Claude Code is the
+// one that offers "Sign in with browser" when mcp_oauth_enabled is on.
+//
+// SAFETY: Connect writes the client's real config file under the core's HOME
+// (~/.claude.json for Claude Code). Run this only against a core started with a
+// scratch HOME (the launcher's smoke core uses the real HOME, so this spec skips
+// unless MCPPROXY_SWEEP_SCRATCH_HOME names that scratch HOME, and the core must
+// report its Claude Code config path inside it).
+//
+// Environment:
+//   MCPPROXY_BASE_URL / MCPPROXY_API_KEY   the scratch core (browser login ON)
+//   MCPPROXY_SWEEP_SCRATCH_HOME=<dir>      the core's scratch HOME (absolute path)
+//   SWEEP_SCREENSHOT_DIR                   optional: keep a PNG of every step
+//   SWEEP_BROWSER_LOGIN_OFF=1              run the feature-off checks instead
+const BASE = process.env.MCPPROXY_BASE_URL || ''
+const KEY = process.env.MCPPROXY_API_KEY || ''
+const OFF = process.env.SWEEP_BROWSER_LOGIN_OFF === '1'
+const shotDir = process.env.SWEEP_SCREENSHOT_DIR || ''
+
+test.describe.configure({ mode: 'serial' })
+test.skip(!BASE || !KEY, 'MCPPROXY_BASE_URL and MCPPROXY_API_KEY are required')
+const HOME_DIR = (process.env.MCPPROXY_SWEEP_SCRATCH_HOME || '').replace(/\/+$/, '')
+test.skip(!HOME_DIR.startsWith('/'), 'needs a core with a scratch HOME (Connect writes client configs); set MCPPROXY_SWEEP_SCRATCH_HOME=<absolute dir>')
+
+// The core itself must say its Claude Code config lives inside the scratch HOME
+// and the feature must be in the state this run expects; otherwise fail before
+// any click, so a stray flag cannot let the spec touch a real config.
+test.beforeAll(async () => {
+  const res = await fetch(`${BASE}/api/v1/clients`, { headers: { 'X-API-Key': KEY } })
+  const body = (await res.json()) as { data: { clients: { id: string; config_path: string }[] } }
+  const cc = body.data.clients.find((c) => c.id === 'claude-code')
+  expect(cc, 'core lists no claude-code client').toBeTruthy()
+  // Canonical paths: a symlink or a flag naming the real HOME must not pass.
+  const scratch = realpathSync(HOME_DIR)
+  expect(scratch).not.toBe(realpathSync(userInfo().homedir))
+  expect(realpathSync(dirname(cc!.config_path)), 'the core writes outside the scratch HOME').toBe(scratch)
+  expect(cc!.config_path).toBe(`${HOME_DIR}/.claude.json`)
+  const st = lstatSync(cc!.config_path)
+  expect(st.isSymbolicLink(), '.claude.json must not be a symlink').toBe(false)
+  expect(st.nlink, '.claude.json must not be hard-linked').toBe(1)
+  // The effective flag, read from the core's own config (the metadata route also
+  // answers 404 on an enabled core reached through a non-loopback listener).
+  const cfg = (await (await fetch(`${BASE}/api/v1/config`, { headers: { 'X-API-Key': KEY } })).json()) as { data: { config: { mcp_oauth_enabled?: boolean; listen?: string; data_dir?: string } } }
+  expect(!!cfg.data.config.mcp_oauth_enabled, OFF ? 'feature-off run against a core with mcp_oauth_enabled on' : 'feature-on run against a core with mcp_oauth_enabled off').toBe(!OFF)
+  // The data dir (onboarding state is written there on Connect) must not be inside the real home.
+  const dataDir = cfg.data.config.data_dir ?? ''
+  expect(dataDir.startsWith('/'), 'core reports no data_dir').toBe(true)
+  expect(realpathSync(dataDir).startsWith(realpathSync(userInfo().homedir) + '/'), `data dir ${dataDir} is inside the real home`).toBe(false)
+  // The expected address assumes the sweep's plain-HTTP loopback core (a TLS or
+  // wildcard listener changes what Connect writes, and is not what this checks).
+  expect(cfg.data.config.listen ?? '', 'sweep core must listen on plain 127.0.0.1').toMatch(/^127\.0\.0\.1:\d+$/)
+  ORIGIN = `http://${cfg.data.config.listen}`
+  const metadata = (await fetch(`${BASE}/.well-known/oauth-authorization-server`)).status
+  expect(metadata, OFF ? 'a feature-off core still serves browser login discovery' : 'browser login is not served').toBe(OFF ? 404 : 200)
+})
+// Connect derives the address from the core's configured listener, not from the
+// origin the browser used.
+let ORIGIN = ''
+const CLAUDE_JSON = `${HOME_DIR}/.claude.json`
+// Restore the fixture after every test so a failed assertion cannot leave the
+// client connected for a retry.
+let pristine = ''
+test.beforeEach(() => { pristine = readFileSync(CLAUDE_JSON, 'utf8') })
+test.afterEach(() => { writeFileSync(CLAUDE_JSON, pristine) })
+
+const t = (page: Page, id: string) => page.locator(`[data-test="${id}"]`)
+
+async function shot(page: Page, name: string) {
+  if (!shotDir) return
+  mkdirSync(shotDir, { recursive: true })
+  await page.screenshot({ path: join(shotDir, `${name}.png`), fullPage: true })
+}
+
+async function openConnect(page: Page) {
+  await page.addInitScript((k) => localStorage.setItem('mcpproxy-api-key', k), KEY)
+  const onboarding = page.waitForResponse((r) => r.url().includes('/api/v1/onboarding'), { timeout: 15_000 }).catch(() => null)
+  await page.goto(`${BASE}/ui/`, { waitUntil: 'domcontentloaded' })
+  await onboarding
+  // A fresh data dir opens the setup wizard, which embeds the same client list;
+  // otherwise open it from "+ Add -> Client".
+  await page.locator('header [data-test="header-add-menu"]').waitFor({ state: 'visible' })
+  await page.waitForTimeout(2000) // let the auto-opening setup wizard settle first
+  if (!(await t(page, 'client-connect-list').isVisible().catch(() => false))) {
+    await page.locator('header [data-test="header-add-menu"]').click()
+    await t(page, 'add-menu-client').click()
+  }
+  await expect(t(page, 'client-connect-list')).toBeVisible()
+}
+
+// Preview every client the scratch HOME makes installable (except `skip`) and
+// assert none offers the browser-login choice. Cursor and VS Code have a config
+// in the scratch HOME, so their buttons must exist: a missing one fails here.
+async function expectNoChoiceForOtherClients(page: Page, skip: string[]) {
+  await openConnect(page)
+  const res = await fetch(`${BASE}/api/v1/connect`, { headers: { 'X-API-Key': KEY } })
+  const ids = ((await res.json()) as { data: { id: string }[] }).data.map((c) => c.id).filter((id) => !skip.includes(id))
+  for (const id of ['cursor', 'vscode']) await expect(t(page, `connect-${id}`)).toBeVisible()
+  for (const id of ids) {
+    const btn = t(page, `connect-${id}`)
+    if ((await btn.count()) === 0) continue // not installed under the scratch HOME
+    await btn.click()
+    await expect(t(page, `client-preview-${id}`)).toBeVisible()
+    await expect(t(page, `connect-auth-choice-${id}`)).toHaveCount(0)
+    await t(page, `client-preview-cancel-${id}`).click()
+  }
+}
+
+test.describe(OFF ? 'browser login off' : 'browser login on', () => {
+  test('offers the choice only for Claude Code, previews, connects, undoes', async ({ page }) => {
+    test.skip(OFF, 'feature-off run')
+    const errors: string[] = []
+    page.on('pageerror', (e) => errors.push(e.message))
+    // Seed unrelated settings and another MCP server, so "nothing else changed" is a real check.
+    const seed = { theme: 'dark', mcpServers: { other: { type: 'http', url: 'http://example.invalid/mcp' } } }
+    writeFileSync(CLAUDE_JSON, JSON.stringify(seed, null, 2) + '\n')
+    const original = readFileSync(CLAUDE_JSON, 'utf8')
+    await openConnect(page)
+
+    // Only a client with a recorded real-client check shows the choice.
+    await t(page, 'connect-claude-code').click()
+    await expect(t(page, 'client-preview-claude-code')).toBeVisible()
+    await expect(t(page, 'connect-auth-choice-claude-code')).toBeVisible()
+    await expect(t(page, 'connect-auth-key-claude-code')).toBeChecked()
+    await shot(page, '01-preview-key')
+
+    await t(page, 'connect-auth-oauth-claude-code').check()
+    await expect(t(page, 'connect-auth-oauth-notice-claude-code')).toBeVisible()
+    // The diff carries the per-client address and no credential.
+    // (the preview is re-fetched when the choice changes, so wait for it)
+    await expect(t(page, 'client-preview-entry-claude-code')).toContainText('/mcp/oauth/claude-code')
+    const entry = await t(page, 'client-preview-entry-claude-code').innerText()
+    const shown = JSON.parse(entry) as Record<string, Record<string, unknown>>
+    expect(Object.keys(shown)).toHaveLength(1)
+    const [name, shownEntry] = Object.entries(shown)[0]
+    expect(name, 'the new entry must not reuse the seeded unrelated server name').not.toBe('other')
+    expect(shownEntry.url).toBe(`${ORIGIN}/mcp/oauth/claude-code`)
+    expect(shownEntry.type).toBe('http')
+    expect(Object.keys(shownEntry).sort()).toEqual(['type', 'url'])
+    await expect(t(page, 'client-preview-credential-claude-code')).toHaveCount(0)
+    await shot(page, '02-preview-oauth')
+
+    // Cancel writes nothing; a second preview works.
+    await t(page, 'client-preview-cancel-claude-code').click()
+    await expect(t(page, 'client-preview-claude-code')).toHaveCount(0)
+    expect(readFileSync(CLAUDE_JSON, 'utf8')).toBe(original) // Cancel wrote nothing
+    await t(page, 'connect-claude-code').click()
+    await t(page, 'connect-auth-oauth-claude-code').check()
+    await expect(t(page, 'client-preview-entry-claude-code')).toContainText('/mcp/oauth/claude-code')
+    // The preview that is confirmed is the one compared to disk below.
+    expect(JSON.parse(await t(page, 'client-preview-entry-claude-code').innerText())).toEqual(shown)
+
+    await t(page, 'client-preview-confirm-claude-code').click()
+    await expect(t(page, 'connect-backup-path')).toBeVisible() // the file existed, so a backup is named
+    await expect(t(page, 'connect-undo-offer')).toBeVisible()
+    await shot(page, '03-connected')
+
+    // The client row now reads connected with Disconnect; the file holds the address.
+    await expect(t(page, 'connect-disconnect-claude-code')).toBeVisible()
+    const written = readFileSync(CLAUDE_JSON, 'utf8')
+    // Exactly the credential-free address: no headers, no query, nothing else.
+    // The whole file is the seed plus exactly the previewed entry under the previewed name.
+    expect(JSON.parse(written)).toEqual({ ...seed, mcpServers: { ...seed.mcpServers, [name]: shownEntry } })
+
+    // Undo restores the pre-connect state.
+    await t(page, 'connect-undo').click()
+    await expect(t(page, 'connect-undo-panel')).toBeVisible()
+    await shot(page, '04-undo-panel')
+    await t(page, 'connect-undo-confirm').click()
+    await expect(t(page, 'connect-claude-code')).toBeVisible()
+    await shot(page, '05-after-undo')
+    expect(readFileSync(CLAUDE_JSON, 'utf8')).toBe(original) // Undo restored the file
+    expect(errors).toEqual([])
+  })
+
+  test('a client without a real-client check never shows the choice', async ({ page }) => {
+    test.skip(OFF, 'feature-off run')
+    await openConnect(page)
+    await expectNoChoiceForOtherClients(page, ['claude-code'])
+  })
+
+  test('feature off: no browser-login choice anywhere', async ({ page }) => {
+    test.skip(!OFF, 'feature-on run')
+    await openConnect(page)
+    await t(page, 'connect-claude-code').click()
+    await expect(t(page, 'client-preview-claude-code')).toBeVisible()
+    await expect(t(page, 'connect-auth-choice-claude-code')).toHaveCount(0)
+    await expect(t(page, 'connect-auth-oauth-claude-code')).toHaveCount(0)
+    await expect(t(page, 'client-preview-credential-claude-code')).toBeVisible()
+    await shot(page, '06-feature-off')
+    await t(page, 'client-preview-cancel-claude-code').click()
+    await expectNoChoiceForOtherClients(page, [])
+  })
+})

@@ -252,7 +252,7 @@
       "tests": [
         "vitest:frontend/tests/unit/header-layout.spec.ts",
         "vitest:frontend/tests/unit/add-menu.spec.ts",
-        "vitest:frontend/tests/unit/status-pill-awaiting-review.spec.ts",
+        "vitest:frontend/tests/unit/header-status-awaiting-review.spec.ts",
         "pw:e2e/web-ui-sweep/navigation-consistency.spec.ts",
         "pw:e2e/web-ui-sweep/usertest-web-fixes.spec.ts"
       ]

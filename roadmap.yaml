@@ -852,7 +852,7 @@ epics:
   # ── MERGED-BUT-UNIMPLEMENTED specs (cross-spec audit 2026-07-01) ───────────
   # These specs are checked into specs/ but materially absent from code. Most
   # "drafted/0%" specs are actually SHIPPED (stale tasks.md checkboxes) — these
-  # are the genuinely-unbuilt ones. See docs/personal-edition-polish.md audit.
+  # are the genuinely-unbuilt ones.
   - id: mcp-2026-upgrade
     title: MCP protocol upgrade to 2026-07-28 revision
     status: in_progress

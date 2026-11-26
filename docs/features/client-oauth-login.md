@@ -109,10 +109,14 @@ handed over. Everything the app reports is shown as plain text.
   Approve is enabled. "Replace the previous browser login" appears only when this same
   registration signed in before.
 - **Generic address**: the page opens with a client selected and you can change it. When the
-  reported name equals exactly one existing client's id, display name or known client name
+  reported name equals exactly one client's id, display name or known client name (clients with a key or login are tried first, built-in clients without records only when none of those matched)
   (`Claude Code (my-server)` is also tried as `Claude Code`), that client is pre-selected with
   the note `Suggested because the app calls itself "<name>". MCPProxy cannot verify that.`
   Otherwise "New client" is selected, with an editable id and name filled from the reported name.
+  The list offers every client that has an API key or a login, and also each supported built-in
+  client (VS Code, Cursor, ...) that has neither yet. Picking such a built-in client creates its
+  record when the app completes the sign-in (not at approval) and asks for a profile, the same as its per-client address; a built-in
+  client is not available through "New client". VS Code reports itself as `Visual Studio Code` on both of its agent harnesses, so that name fits two clients: `GitHub Copilot (VS Code, Copilot CLI)` (`copilot`, the harness VS Code uses by default) and `VS Code` (`vscode`, the older Local harness). The page suggests the one that already has a key or a login (if both do, or neither does, the next two steps decide; if several clients match and any of them matches by id or display name, no client is suggested); else the one whose MCP client name this installation saw most recently in the last 30 days (any Copilot client name counts for `copilot`, such as `vscode-agent-host` or `copilot-cli`, so daily Copilot CLI use also points at it); else `copilot`. Both stay in the list, so you can pick the other.
   The suggestion decides nothing: approval carries the client the page sent, and a request with
   no client is refused (`client_required`).
 - The binding guard's verdict is fetched through the preview call whenever the choice is
@@ -239,9 +243,9 @@ not enough.
 | Client | Offered by Connect | What was verified |
 |---|---|---|
 | Claude Code | **yes** (`claude-code`) | Claude Code CLI 2.1.318 on macOS completed the login flow over plain HTTP loopback: it accepted the `http://127.0.0.1` issuer, registered itself, sent the authorize request for the per-client address (`resource` equal to it), and after approval reported "Connected" and made MCP calls with the token. **Not** verified: token refresh, the order of the metadata requests, the browser-and-callback path (the check pasted the redirect URL at the CLI prompt), tool calls inside an interactive session, the generic `/mcp/oauth` address, Windows and Linux |
-| Cursor | no | not verified (needs its real config and a GUI) |
-| VS Code, GitHub Copilot | no | not verified (needs its real settings and a GUI) |
-| MCP Inspector | not a Connect client | not verified (needs a TTY and a browser) |
+| Cursor | no | not verified: a scratch Cursor 3.12.30 asks for a Cursor account sign-in before it will use MCP, which a check must not do. Its documentation says the desktop app registers dynamically and returns to `http://localhost:8787/callback`, a loopback address this server accepts, so it may work; keep using the API key until it is checked |
+| VS Code, GitHub Copilot | no | not verified: VS Code 1.122.0 could not be driven in a scratch profile (the check could only click, and the window could not be told apart from another VS Code window already open) |
+| MCP Inspector 2.13.0 (web) | not a Connect client (it has no config file Connect can write) | **verified** at the generic `/mcp/oauth` address: it registered, was approved, connected over MCP 2025-11-25 and listed the 10 tools. The per-client address `/mcp/oauth/inspector` answered `404` on a fresh core (the per-client address needs an existing client id); start from the generic address and approve it as a new client on the consent page |
 | MCP TypeScript SDK 1.32.2 | not a Connect client | login, refresh and tool calls verified with a script |
 | Every other Connect client | no | not checked |
 
@@ -267,5 +271,5 @@ logins simply stop being usable.
 The issuer is `http://127.0.0.1:<port>`, not HTTPS. The specifications ask for HTTPS for
 non-loopback issuers; loopback HTTP is the common local-tool case. Client behaviour is
 checked in `specs/132-client-oauth-login/verification/real-clients.md`; the MCP
-TypeScript SDK client flow and the Claude Code CLI login flow are verified so far (Cursor, VS
-Code and MCP Inspector are not; see [Clients checked so far](#clients-checked-so-far)).
+TypeScript SDK client flow, the Claude Code CLI login flow and the MCP Inspector web login are verified so far (Cursor and VS
+Code are not; see [Clients checked so far](#clients-checked-so-far)).
