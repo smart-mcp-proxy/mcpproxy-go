@@ -141,6 +141,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // One tray per instance root, checked before anything is set up or
+        // recorded. exit(), not terminate(): this process owns no core, and
+        // applicationWillTerminate would journal a termination for it.
+        switch TrayInstanceLock.acquire(at: InstancePaths.trayLockURL) {
+        case .acquired:
+            break
+        case .heldByAnotherTray:
+            NSLog("[MCPProxy] Another MCPProxy tray is already running for %@ - exiting",
+                  InstancePaths.root.path)
+            exit(0)
+        case .unavailable(let reason):
+            NSLog("[MCPProxy] Cannot check for another running tray (%@) - starting anyway", reason)
+        }
+
         // Prevent focus steal on launch — no Dock icon, no Cmd+Tab entry
         NSApp.setActivationPolicy(.prohibited)
 

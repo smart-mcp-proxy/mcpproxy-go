@@ -47,6 +47,10 @@ enum InstancePaths {
     static let sidecarFileName = "tray-autostart.json"
     static let configFileName = "mcp_config.json"
 
+    /// Held by the running tray so a second one exits (`TrayInstanceLock`).
+    /// Same name as the Go tray's lock, so the two exclude each other.
+    static let trayLockFileName = "mcpproxy-tray.lock"
+
     /// The bbolt database the core takes an exclusive `flock` on before it
     /// creates its listener (`internal/storage/bbolt.go`). Named here because
     /// the liveness check in `CoreProcessManager` asks whether a live process
@@ -95,6 +99,11 @@ enum InstancePaths {
     static func dataLockURL(environment: [String: String], home: URL) -> URL {
         root(environment: environment, home: home)
             .appendingPathComponent(databaseFileName, isDirectory: false)
+    }
+
+    static func trayLockURL(environment: [String: String], home: URL) -> URL {
+        root(environment: environment, home: home)
+            .appendingPathComponent(trayLockFileName, isDirectory: false)
     }
 
     /// Arguments for a core this tray spawns.
@@ -156,6 +165,9 @@ enum InstancePaths {
     }
     static var dataLockURL: URL {
         dataLockURL(environment: processEnvironment, home: currentHome)
+    }
+    static var trayLockURL: URL {
+        trayLockURL(environment: processEnvironment, home: currentHome)
     }
     static var coreArguments: [String] {
         coreArguments(environment: processEnvironment, home: currentHome)
