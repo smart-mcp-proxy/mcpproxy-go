@@ -69,7 +69,8 @@ unbound ──(re-seal would exceed 1 MiB, FR-011a)──► unbound
           tx rolled back, no plaintext write, no release; MCPX_OAUTH_REAUTH_REQUIRED, size-only log
 bound(B) ──(snapshot S with Matches(B, S); under skip possibly !Equal)──► bound(B)
           refresh continues under the full stored B; the unchecked issuer is never adopted
-          a login reuses the stored registration only when Equal(B, S); otherwise it registers anew
+          a login reuses the stored registration only when Equal(B, S); otherwise it uses fresh DCR
+          or an operator-configured public client id; any class-4 credential failing provenance refuses it
 bound(B) ──(snapshot B' with !Matches(B, B'))──► changed(B→B')
           nothing sent, access token not attached; MCPX_OAUTH_ISSUER_CHANGED
 changed / bound(B) ──(first write bound to B' with !Equal — issuer, target, source class, regardless of skip: DCR registration or login)──► bound(B')
