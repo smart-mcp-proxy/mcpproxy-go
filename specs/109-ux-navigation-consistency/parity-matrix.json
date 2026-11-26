@@ -66,7 +66,7 @@
         "web": {
           "status": "must",
           "ids": [
-            "component:frontend/src/components/ServerCard.vue",
+            "component:frontend/src/components/ServerRow.vue",
             "symbol:frontend/src/utils/health.ts#healthStatusLabel"
           ],
           "tests": [
@@ -121,7 +121,7 @@
         "web": {
           "status": "must",
           "ids": [
-            "component:frontend/src/components/ServerCard.vue"
+            "component:frontend/src/components/ServerRow.vue"
           ],
           "tests": [
             "vitest:frontend/tests/unit/server-card-next-action.spec.ts"

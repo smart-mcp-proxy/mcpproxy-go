@@ -5,13 +5,16 @@ import (
 	"fmt"
 	"math/big"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/dockernaming"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shutdown"
 )
 
 // Command and package manager constants
@@ -513,6 +516,10 @@ func imageHasRegistryHost(image string) bool {
 	return strings.ContainsAny(host, ".:") || host == "localhost"
 }
 
+// containerStopTimeout is how many seconds `docker stop` waits before SIGKILL: what a native server
+// gets, instead of Docker's 10s.
+var containerStopTimeout = strconv.Itoa(int(shutdown.ContainerStop / time.Second))
+
 // BuildDockerArgs constructs Docker run arguments for isolation
 func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, runtimeType string) ([]string, error) {
 	image, err := im.GetDockerImage(serverConfig, runtimeType)
@@ -552,7 +559,8 @@ func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, r
 		}
 	}
 
-	args := []string{"run", "--rm", "-i"}
+	// ExtraArgs come later on the command line, so a server can override these.
+	args := []string{"run", "--rm", "-i", "--stop-timeout", containerStopTimeout}
 
 	// Add container name for easier identification
 	containerName := generateContainerName(serverConfig.Name)

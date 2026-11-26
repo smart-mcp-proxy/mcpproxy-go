@@ -1,11 +1,16 @@
 package core
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"go.uber.org/zap"
@@ -51,6 +56,18 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 		return shellCmd, shellArgs, true, ""
 	}
 
+	// Right after "run", so that extra_args can override these.
+	//
+	// Without --sig-proxy=false the docker client would pass its own SIGTERM on, and the server
+	// would get two: many programs take the second one as "force quit". Where our own docker
+	// commands can miss the container, that SIGTERM is the only one it gets.
+	if !c.dockerOtherDaemon {
+		dockerRunArgs = slices.Insert(dockerRunArgs, 1, "--sig-proxy=false")
+	}
+	if c.dockerInit {
+		dockerRunArgs = slices.Insert(dockerRunArgs, 1, "--init")
+	}
+
 	// Extract container name from Docker args for tracking
 	c.containerName = c.extractContainerNameFromArgs(dockerRunArgs)
 
@@ -89,6 +106,121 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 	// (connectStdio) via resolveDockerSpawn so both spawn paths behave identically
 	// (#696 / MCP-2868).
 	return c.resolveDockerSpawn(finalArgs)
+}
+
+// loginShellEnv is a variable so that tests can stub the user's login profile.
+var loginShellEnv = shellwrap.LoginShellEnv
+
+// probeDockerSpawn decides the flags that depend on the daemon `docker run` will use, given env as
+// its environment.
+func (c *Client) probeDockerSpawn(ctx context.Context, env []string) {
+	c.dockerInit = c.dockerHasInit(ctx, env)
+	c.dockerOtherDaemon = c.dockerRunMayUseOtherDaemon(env)
+}
+
+// dockerRunMayUseOtherDaemon reports whether `docker run` can reach another daemon than the docker
+// commands that look up and stop its container. Those get the server's env too (newDockerCmd), but
+// not the login profile, nor the working_dir that `docker run` starts in.
+func (c *Client) dockerRunMayUseOtherDaemon(env []string) bool {
+	login := map[string]string{}
+	viaLoginShell := runtime.GOOS != osWindows && !dockerDaemonEnvGuaranteed()
+	if viaLoginShell {
+		if login = loginShellEnv(c.logger); login == nil {
+			return true // cannot tell
+		}
+	}
+	ours := os.Environ() // what newDockerCmd gives our own docker commands
+	if c.envManager != nil {
+		ours = c.envManager.BuildSecureEnvironment()
+	}
+	for _, key := range []string{"DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG"} {
+		own, _ := lastEnvValue(ours, key)
+		run, _ := lastEnvValue(env, key)
+		if viaLoginShell && login[key] != os.Getenv(key) {
+			run = login[key] // the profile sets its own
+		}
+		if run != own {
+			return true
+		}
+		// A relative DOCKER_CONFIG names another directory from working_dir.
+		if key == "DOCKER_CONFIG" && run != "" && !filepath.IsAbs(run) && c.config.WorkingDir != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// lastEnvValue returns key's value in env, where the last entry wins as in os/exec.
+func lastEnvValue(env []string, key string) (value string, ok bool) {
+	for _, kv := range env {
+		if v, found := strings.CutPrefix(kv, key+"="); found {
+			value, ok = v, true
+		}
+	}
+	return value, ok
+}
+
+// forgetDockerInit makes the next spawn ask the daemon again after one with --init failed: the
+// remembered answer can be about another daemon, for example after `docker context use`.
+func (c *Client) forgetDockerInit() {
+	if c.dockerInit {
+		clearDockerInitKnown()
+	}
+}
+
+// dockerInitKnown remembers dockerHasInit's answers, so that a daemon is asked once per process.
+var (
+	dockerInitMu    sync.Mutex
+	dockerInitKnown = map[string]bool{} // probe command and DOCKER_* environment -> answer
+)
+
+// clearDockerInitKnown swaps in a new map, so that a probe still running stores its answer in the
+// old one, which nobody reads any more.
+func clearDockerInitKnown() {
+	dockerInitMu.Lock()
+	defer dockerInitMu.Unlock()
+	dockerInitKnown = map[string]bool{}
+}
+
+// dockerHasInit reports whether the Docker daemon can run containers with --init. The daemon lists
+// the docker-init component only when it found and ran that binary. Podman lists none, and may
+// lack an init binary, so it never gets --init.
+//
+// The probe is spawned as `docker run` will be, with env as its environment: a DOCKER_HOST that
+// only a login shell or the server's own env sets must reach it too, or it could ask another daemon.
+func (c *Client) dockerHasInit(ctx context.Context, env []string) bool {
+	command, args, _, dockerDir := c.resolveDockerSpawn([]string{"version", "--format", "{{range .Server.Components}}{{println .Name}}{{end}}"})
+	env = prependDockerDirToPath(env, dockerDir)
+
+	key := command + "\x00" + strings.Join(args, "\x00")
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "DOCKER_") {
+			key += "\x00" + kv
+		}
+	}
+	dockerInitMu.Lock()
+	known := dockerInitKnown
+	has, ok := known[key]
+	dockerInitMu.Unlock()
+	if ok {
+		return has
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, command, args...)
+	shellwrap.UseVerbatimCmdLine(cmd)
+	cmd.Env = env
+	cmd.WaitDelay = time.Second // a killed shell can leave docker holding the output pipe
+	out, err := cmd.Output()
+	if err != nil {
+		return false // not remembered: the daemon may be starting
+	}
+	has = slices.Contains(strings.Fields(string(out)), "docker-init")
+	dockerInitMu.Lock()
+	known[key] = has
+	dockerInitMu.Unlock()
+	return has
 }
 
 // resolveDockerSpawn decides how to spawn `docker` given the fully built docker

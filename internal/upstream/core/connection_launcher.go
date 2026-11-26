@@ -244,7 +244,7 @@ func (c *Client) watchLauncher(handle launcher.Handle) {
 // child must outlive Connect: its lifetime is owned by launcher.Handle
 // instead. Stdio's connection_stdio.go uses the same pattern (persistent
 // ctx for client.Start).
-func (c *Client) buildLauncherCmd(_ context.Context, willUseDocker bool) (*exec.Cmd, bool, string, error) {
+func (c *Client) buildLauncherCmd(ctx context.Context, willUseDocker bool) (*exec.Cmd, bool, string, error) {
 	envVars := c.envManager.BuildSecureEnvironment()
 	for k, v := range c.config.Env {
 		found := false
@@ -281,6 +281,7 @@ func (c *Client) buildLauncherCmd(_ context.Context, willUseDocker bool) (*exec.
 	if c.isolationManager != nil && c.isolationManager.ShouldIsolate(c.config) {
 		var dockerShellWrapped bool
 		var dockerDir string
+		c.probeDockerSpawn(ctx, envVars)
 		finalCommand, finalArgs, dockerShellWrapped, dockerDir = c.setupDockerIsolation(c.config.Command, args)
 		// Prepend the docker bundle dir to the child PATH so the spawned docker
 		// can exec its sibling credential helper / tooling on a registry pull

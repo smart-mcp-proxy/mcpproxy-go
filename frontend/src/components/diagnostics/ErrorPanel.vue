@@ -1,7 +1,7 @@
 <template>
   <div
     v-if="diagnostic && diagnostic.code"
-    class="alert"
+    class="soft-panel flex items-start gap-3 rounded px-4 py-3"
     :class="severityAlertClass"
     role="alert"
     :aria-label="`Diagnostic ${diagnostic.code}`"
@@ -14,15 +14,15 @@
         d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
       />
     </svg>
-    <div class="w-full">
-      <div class="flex items-start justify-between gap-3">
-        <div>
+    <div class="w-full min-w-0">
+      <div class="flex items-start justify-between gap-3 flex-wrap sm:flex-nowrap">
+        <div class="min-w-0">
           <div class="flex items-center gap-2 flex-wrap">
-            <h3 class="font-bold">{{ headerTitle }}</h3>
-            <span class="badge badge-sm" :class="severityBadgeClass" data-testid="error-panel-severity">
+            <h3 class="font-bold soft-panel__title">{{ headerTitle }}</h3>
+            <span class="badge badge-sm badge-outline" :class="severityBadgeClass" data-testid="error-panel-severity">
               {{ reconnecting ? 'temporary' : diagnostic.severity }}
             </span>
-            <code class="text-xs opacity-80" data-testid="error-panel-code">{{ diagnostic.code }}</code>
+            <code class="text-xs font-mono bg-transparent p-0" data-testid="error-panel-code">{{ diagnostic.code }}</code>
           </div>
           <p v-if="reconnecting && reconnectingDetail" class="text-sm mt-1" data-testid="error-panel-reconnecting">
             {{ reconnectingDetail }}
@@ -191,19 +191,16 @@ onBeforeUnmount(() => {
 })
 
 const severityAlertClass = computed(() => {
-  if (props.reconnecting) return 'alert-warning'
+  if (props.reconnecting) return 'tone-review'
   const sev = props.diagnostic?.severity
-  if (sev === 'error') return 'alert-error'
-  if (sev === 'warn') return 'alert-warning'
-  return 'alert-info'
+  if (sev === 'error') return 'tone-error'
+  if (sev === 'warn') return 'tone-review'
+  return 'tone-busy'
 })
 
 const severityBadgeClass = computed(() => {
-  if (props.reconnecting) return 'badge-warning'
-  const sev = props.diagnostic?.severity
-  if (sev === 'error') return 'badge-error'
-  if (sev === 'warn') return 'badge-warning'
-  return 'badge-info'
+  if (props.reconnecting) return 'soft-panel__title'
+  return 'soft-panel__title'
 })
 
 const headerTitle = computed(() => {

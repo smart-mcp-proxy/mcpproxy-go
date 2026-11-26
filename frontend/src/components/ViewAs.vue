@@ -3,7 +3,7 @@
     <div class="flex items-center gap-1">
       <button
         type="button"
-        class="btn btn-sm btn-outline gap-2 max-w-[22rem] normal-case min-h-10 md:min-h-8"
+        class="btn btn-sm btn-outline gap-2 max-w-[22rem] normal-case min-h-11 md:min-h-8"
         :class="hasValue && 'btn-active'"
         aria-haspopup="dialog"
         :aria-expanded="open ? 'true' : 'false'"
@@ -27,7 +27,7 @@
       <button
         v-if="hasValue"
         type="button"
-        class="btn btn-sm btn-ghost btn-square min-h-10 min-w-10 md:min-h-8 md:min-w-8"
+        class="btn btn-sm btn-ghost btn-square min-h-11 min-w-11 md:min-h-8 md:min-w-8"
         aria-label="Clear view filter"
         data-test="viewing-filter-clear"
         @click="clear"
@@ -49,7 +49,7 @@
       <p class="text-xs opacity-70" data-test="viewing-filter-help">{{ TOOLTIP }}</p>
       <div class="form-control">
         <label class="label py-1" for="viewing-profile"><span class="label-text font-medium">Profile</span></label>
-        <select id="viewing-profile" class="select select-bordered select-sm w-full" :value="profileValue" data-test="viewing-profile-select" @change="setParam('profile', ($event.target as HTMLSelectElement).value)">
+        <select id="viewing-profile" class="select select-bordered select-sm w-full" :disabled="profiles.loading" :value="profileValue" data-test="viewing-profile-select" @change="setParam('profile', ($event.target as HTMLSelectElement).value)">
           <option value="">All</option>
           <option v-for="profile in profiles.profiles" :key="profile.name" :value="profile.name">{{ profile.title || profile.name }}</option>
           <option v-if="profileValue && !profiles.byName.has(profileValue)" :value="profileValue">{{ profileValue }}</option>
@@ -63,7 +63,7 @@
           <option v-if="clientValue && !credentialedClients.some(client => client.id === clientValue)" :value="clientValue">{{ clientValue }}</option>
         </select>
       </div>
-      <div class="flex justify-end"><button type="button" class="btn btn-ghost btn-xs" :disabled="!hasValue" @click="clear">Clear</button></div>
+      <div class="flex justify-end"><button type="button" class="btn btn-ghost btn-xs min-h-11 md:min-h-0" :disabled="!hasValue" @click="clear">Clear</button></div>
     </div>
     <div v-if="open" class="fixed inset-0 z-[calc(var(--z-dropdown)-1)]" @click="open = false" />
   </div>

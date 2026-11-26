@@ -20,6 +20,27 @@ export function skillStateChip(entry: Pick<SkillEntry, 'status' | 'blocked'>): {
   }
 }
 
+import type { StatusTone } from '@/utils/healthTone'
+
+/** Spec 134 FR-037: the status tone of each of the five state labels. Colour only; the words stay `skillStateChip`'s. */
+export function skillStateTone(entry: Pick<SkillEntry, 'status' | 'blocked'>): StatusTone {
+  if (entry.blocked) return 'error'
+  switch (entry.status) {
+    case 'approved': return 'ok'
+    case 'pending': case 'changed': return 'review'
+    case 'unusable': return 'off'
+    default: return 'neutral'
+  }
+}
+
+/** The one action of a skill row (FR-036). It opens the skill card, where the guarded decision is made. */
+export function skillRowAction(entry: Pick<SkillEntry, 'status' | 'blocked'>): 'Review' | 'Review changes' | 'View' | 'Unblock' {
+  if (entry.blocked) return 'Unblock'
+  if (entry.status === 'pending') return 'Review'
+  if (entry.status === 'changed') return 'Review changes'
+  return 'View'
+}
+
 export type FileDiffState = 'added' | 'removed' | 'changed' | 'same'
 export interface FileDiffRow {
   path: string
