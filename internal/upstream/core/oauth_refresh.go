@@ -236,6 +236,7 @@ func (c *Client) oauthRefreshRequest(serverKey string, handler *transport.OAuthH
 		ClearClientAt: func(rec *storage.OAuthTokenRecord) (bool, error) {
 			return oauth.ClearClientIfBound(c.storage, serverKey, c.config.Name, binding, rec)
 		},
+		Logger: c.oauthLogger(),
 	}
 }
 
@@ -255,6 +256,7 @@ func (c *Client) bindOAuthRefresher(oauthConfig *client.OAuthConfig) {
 	oauth.BindRefresher(oauthConfig.TokenStore, oauth.RefreshBinding{
 		Refresh:      c.oauthRefreshFunc(handler),
 		StaticClient: c.isStaticOAuthClient(),
+		Logger:       c.oauthLogger(),
 	})
 }
 

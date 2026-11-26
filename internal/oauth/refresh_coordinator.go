@@ -73,6 +73,35 @@ type RefreshRequest struct {
 	// R7.3): it clears the DCR registration of exactly the record the flight
 	// read (its revision), bound to Binding.
 	ClearClientAt func(rec *storage.OAuthTokenRecord) (bool, error)
+	// Logger, when set, receives the flight's start and finish lines (GH
+	// #1827): the server's OAuth logger, so they reach the server's own log
+	// file as well as the main log. nil uses the coordinator's logger.
+	Logger *zap.Logger
+}
+
+// RefreshFlightInfo identifies the refresh flight a token request belongs to
+// (GH #1827). Flight numbers count, per server key and credential binding,
+// the flights that went on to call the refresh function; 0 means the request
+// was not sent by a refresh flight (an authorization-code exchange, say).
+type RefreshFlightInfo struct {
+	Flight  uint64
+	Trigger RefreshTrigger
+}
+
+type refreshFlightInfoKey struct{}
+
+func withRefreshFlightInfo(ctx context.Context, info RefreshFlightInfo) context.Context {
+	return context.WithValue(ctx, refreshFlightInfoKey{}, info)
+}
+
+// RefreshFlightInfoFrom returns the flight a token request's context was
+// created by, if any.
+func RefreshFlightInfoFrom(ctx context.Context) (RefreshFlightInfo, bool) {
+	if ctx == nil {
+		return RefreshFlightInfo{}, false
+	}
+	info, ok := ctx.Value(refreshFlightInfoKey{}).(RefreshFlightInfo)
+	return info, ok
 }
 
 // RefreshOutcome is passed to the completion hook for a terminal flight
@@ -123,6 +152,9 @@ type refreshKeyState struct {
 	// so the connectivity watcher still knows the credential needs a refresh.
 	transientPending  bool
 	transientFailures int
+	// flightSeq numbers the flights that called the refresh function (GH
+	// #1827), so each token request in the log can be told apart.
+	flightSeq uint64
 	// savesInProgress counts token responses being written for this key
 	// (BeginTokenSaveFor). A successful token response settles the
 	// transient state, but the write commits before NoteTokenSavedFor runs
@@ -274,6 +306,13 @@ func (c *RefreshCoordinator) SetAuditObserver(observer func(RefreshAttemptFailur
 	c.mu.Lock()
 	c.audit = observer
 	c.mu.Unlock()
+}
+
+func (c *RefreshCoordinator) logFor(req RefreshRequest) *zap.Logger {
+	if req.Logger != nil {
+		return req.Logger
+	}
+	return c.log()
 }
 
 func (c *RefreshCoordinator) log() *zap.Logger {
@@ -498,12 +537,14 @@ func (c *RefreshCoordinator) run(callerCtx context.Context, req RefreshRequest, 
 	defer cancel()
 
 	start := c.now()
-	tok, rev, skipped, err := c.flight(fctx, req, st)
+	var seq uint64
+	tok, rev, skipped, err := c.flight(fctx, req, st, &seq)
 
 	cls, status := ClassifyRefreshError(err)
-	c.log().Info("OAuth refresh flight finished",
+	c.logFor(req).Info("OAuth refresh flight finished",
 		zap.String("server", req.ServerName),
 		zap.String("trigger", string(req.Trigger)),
+		zap.Uint64("flight", seq),
 		zap.String("outcome", string(cls)),
 		zap.Int("http_status", status),
 		zap.Bool("network_skipped", skipped),
@@ -516,7 +557,9 @@ func (c *RefreshCoordinator) run(callerCtx context.Context, req RefreshRequest, 
 	close(f.done)
 }
 
-func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st *refreshKeyState) (*client.Token, uint64, bool, error) {
+// flight runs one refresh flight. *seq is set to the flight's number once it
+// goes on to call the refresh function (0 when it answered without one).
+func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st *refreshKeyState, seq *uint64) (*client.Token, uint64, bool, error) {
 	rec, err := req.Load()
 	if err != nil || rec == nil || (rec.AccessToken == "" && rec.RefreshToken == "") {
 		return nil, 0, true, &RefreshFailure{Class: RefreshClassTerminalOther, Message: "no stored OAuth token; sign in again", Err: ErrNoRefreshToken}
@@ -553,7 +596,19 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 		c.mu.Unlock()
 		return nil, 0, true, fmt.Errorf("%w (retry after %s): %w", ErrTokenRefreshTransient, until.Format(time.RFC3339), last)
 	}
+	st.flightSeq++
+	*seq = st.flightSeq
+	priorFailures := st.transientFailures
 	c.mu.Unlock()
+
+	// GH #1827: logged before any token request is sent, so a request the
+	// provider saw can be matched to the flight that sent it even when the
+	// flight never finishes (a crash, a sleeping laptop).
+	c.logFor(req).Info("OAuth refresh flight started",
+		zap.String("server", req.ServerName),
+		zap.String("trigger", string(req.Trigger)),
+		zap.Uint64("flight", *seq),
+		zap.Int("prior_transient_failures", priorFailures))
 
 	saved := &atomic.Uint64{}
 	// A refresh function that sends more than one token request (the replay
@@ -562,6 +617,7 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 	refreshCtx := WithAttemptFailureReporter(ctx, func(attemptErr error, at time.Time) {
 		c.auditAttempt(req, attemptErr, at)
 	})
+	refreshCtx = withRefreshFlightInfo(refreshCtx, RefreshFlightInfo{Flight: *seq, Trigger: req.Trigger})
 	tok, refreshErr := req.Refresh(withFlightSavedRevision(withFlightGeneration(refreshCtx, gen), saved), rec)
 	// The time of the outcome, before the storage reads below: an audit row
 	// must not be placed after calls that only waited for those reads.

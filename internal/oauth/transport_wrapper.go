@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 )
 
 // wrapperEndpoints is the Spec 113-b discovery context of one wrapper: the
@@ -177,30 +180,44 @@ func (w *OAuthTransportWrapper) RoundTrip(req *http.Request) (*http.Response, er
 
 	tokenReq := w.matchesToken(req)
 
+	if tokenReq {
+		// GH #1827: every token request leaves one line after it returns:
+		// grant type, the refresh flight that sent it, status and duration.
+		var grantType string
+		req, grantType = peekTokenGrantType(req)
+		if v, ok := w.extraParams["grant_type"]; ok {
+			grantType = tokenRequestGrantType(v) // what injectFormParams sends
+		}
+		start := time.Now()
+		status := 0 // the provider's status, before any normalization
+		resp, err := w.roundTripParams(req, tokenReq, &status)
+		LogTokenRequest(req.Context(), w.logger, grantType, status, err, time.Since(start))
+		return resp, err
+	}
+	return w.roundTripParams(req, tokenReq, nil)
+}
+
+// roundTripParams injects the extra params, sends the request and normalizes
+// a token response. *rawStatus, when non-nil, receives the response status as
+// the provider sent it.
+func (w *OAuthTransportWrapper) roundTripParams(req *http.Request, tokenReq bool, rawStatus *int) (*http.Response, error) {
+	send := req
 	if len(w.extraParams) > 0 {
 		// Clone request to avoid modifying original
-		clonedReq := req.Clone(req.Context())
+		send = req.Clone(req.Context())
 
 		// Detect OAuth endpoint type and inject params appropriately
 		if w.matchesAuthorization(req) {
-			w.injectQueryParams(clonedReq)
+			w.injectQueryParams(send)
 		} else if tokenReq {
-			w.injectFormParams(clonedReq)
+			w.injectFormParams(send)
 		}
-
-		resp, err := w.inner.RoundTrip(clonedReq)
-		if err != nil {
-			return resp, err
-		}
-
-		if tokenReq {
-			w.normalizeTokenResponse(req, resp)
-		}
-
-		return resp, nil
 	}
 
-	resp, err := w.inner.RoundTrip(req)
+	resp, err := w.inner.RoundTrip(send)
+	if rawStatus != nil && resp != nil {
+		*rawStatus = resp.StatusCode
+	}
 	if err != nil {
 		return resp, err
 	}
@@ -379,6 +396,99 @@ func isAllDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// peekTokenGrantType returns a copy of req whose body can still be read,
+// and the request's grant_type as one of a closed set of names. The caller's
+// request is not modified.
+func peekTokenGrantType(req *http.Request) (*http.Request, string) {
+	if req.Body == nil || req.Body == http.NoBody {
+		return req, tokenRequestGrantType("")
+	}
+	bodyBytes, err := io.ReadAll(io.LimitReader(req.Body, maxTokenRequestPeek+1))
+	if err != nil || len(bodyBytes) > maxTokenRequestPeek {
+		// Not peeked: the outgoing body yields the bytes read so far, then
+		// the rest of the original (or its read error again), and closing
+		// it closes the original.
+		rest := io.Reader(req.Body)
+		if err != nil {
+			rest = errReader{err}
+		}
+		clone := req.Clone(req.Context())
+		clone.Body = readCloser{Reader: io.MultiReader(bytes.NewReader(bodyBytes), rest), Closer: req.Body}
+		return clone, tokenRequestGrantType("")
+	}
+	_ = req.Body.Close()
+	clone := req.Clone(req.Context())
+	clone.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	clone.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(bodyBytes)), nil }
+	values, perr := url.ParseQuery(string(bodyBytes))
+	if perr != nil {
+		return clone, tokenRequestGrantType("")
+	}
+	return clone, tokenRequestGrantType(values.Get("grant_type"))
+}
+
+type readCloser struct {
+	io.Reader
+	io.Closer
+}
+
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
+
+// maxTokenRequestPeek bounds how much of a token request body is read to
+// learn its grant type; token requests are a few hundred bytes.
+const maxTokenRequestPeek = 64 << 10
+
+// tokenRequestGrantType maps a grant_type value to a name safe to log: the
+// standard grants by name, anything else as "other", none as "unknown".
+func tokenRequestGrantType(v string) string {
+	switch v {
+	case "":
+		return "unknown"
+	case "refresh_token", "authorization_code", "client_credentials",
+		"urn:ietf:params:oauth:grant-type:device_code",
+		"urn:ietf:params:oauth:grant-type:token-exchange",
+		"urn:ietf:params:oauth:grant-type:jwt-bearer":
+		return v
+	default:
+		return "other"
+	}
+}
+
+// LogTokenRequest records one finished token-endpoint request (GH #1827):
+// grant type, the refresh flight and trigger that sent it (from ctx; flight
+// 0 outside a refresh flight), the HTTP status, an outcome class and the
+// duration. outcome is "http_response" when a response arrived (its status
+// says what it was) or the refresh error class of a transport failure. It
+// logs no URL, body, token, code or error text.
+func LogTokenRequest(ctx context.Context, logger *zap.Logger, grantType string, status int, err error, d time.Duration) {
+	if logger == nil {
+		return
+	}
+	info, _ := RefreshFlightInfoFrom(ctx)
+	outcome := "http_response"
+	switch {
+	case dialgate.IsRetired(err):
+		// The retired instance's gate refused it: nothing reached the provider.
+		outcome = "not_sent"
+	case err != nil:
+		cls, _ := ClassifyRefreshError(err)
+		outcome = string(cls)
+	}
+	trigger := string(info.Trigger)
+	if trigger == "" {
+		trigger = "none"
+	}
+	logger.Info("OAuth token request finished",
+		zap.String("grant_type", grantType),
+		zap.Uint64("flight", info.Flight),
+		zap.String("trigger", trigger),
+		zap.Int("http_status", status),
+		zap.String("outcome", outcome),
+		zap.Duration("duration", d))
 }
 
 // isAuthorizationRequest detects if this is an OAuth authorization request
