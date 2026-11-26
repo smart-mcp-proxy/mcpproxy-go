@@ -529,6 +529,8 @@ func (c *Client) closeUpstreamLog() {
 		_ = c.upstreamLogger.Sync()
 	}
 	if c.upstreamLogCloser != nil {
+		c.upstreamLogSinkMu.Lock()
+		defer c.upstreamLogSinkMu.Unlock()
 		if err := c.upstreamLogCloser.Close(); err != nil {
 			c.logger.Debug("Failed to close upstream log sink", zap.Error(err))
 		}

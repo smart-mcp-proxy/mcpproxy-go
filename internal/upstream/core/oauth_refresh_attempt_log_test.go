@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -79,4 +80,32 @@ func TestRetiredDropCore_WriteAfterRetireIsDropped(t *testing.T) {
 	retired = true
 	ce.Write()
 	assert.Equal(t, 0, fileLogs.Len(), "retired between Check and Write")
+}
+
+type countingCloser struct{ n int }
+
+func (c *countingCloser) Close() error { c.n++; return nil }
+
+// Review round 7: whatever the order of Disconnect and Retire, a sink a late
+// write reopened is closed again by Retire, and writes wait for a close in
+// progress.
+func TestRetire_ClosesServerLogSink(t *testing.T) {
+	closer := &countingCloser{}
+	fileCore, fileLogs := observer.New(zapcore.InfoLevel)
+	c := &Client{config: &config.ServerConfig{Name: "s"}, logger: zap.NewNop(), upstreamLogger: zap.New(fileCore), upstreamLogCloser: closer}
+	l := c.oauthLogger()
+	c.upstreamLogSinkMu.Lock()
+	done := make(chan struct{})
+	go func() { l.Info("late"); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("a write must wait while the sink is being closed")
+	case <-time.After(50 * time.Millisecond):
+	}
+	c.Gate().Retire() // retired while the close holds the lock
+	c.upstreamLogSinkMu.Unlock()
+	<-done
+	assert.Equal(t, 0, fileLogs.Len(), "the waiting write saw the retirement")
+	c.Retire()
+	assert.Equal(t, 1, closer.n)
 }

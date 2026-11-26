@@ -42,7 +42,13 @@ func (c *Client) SetGate(g *dialgate.Gate) {
 // calls it, through the managed client, when it unregisters the instance.
 // Teardown (Disconnect: the MCP close, the process-group kill, `docker stop`)
 // is not gated and still runs afterwards.
-func (c *Client) Retire() { c.Gate().Retire() }
+func (c *Client) Retire() {
+	c.Gate().Retire()
+	// GH #1827 review: an OAuth line written after a Disconnect that came
+	// before this Retire may have reopened the server log; close it again.
+	// From here on retiredDropCore drops those writes.
+	c.closeUpstreamLog()
+}
 
 // Retired reports whether the instance's gate is retired.
 func (c *Client) Retired() bool { return c.Gate().Retired() }

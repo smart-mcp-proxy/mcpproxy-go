@@ -61,6 +61,10 @@ type Client struct {
 	// closes it (issue #1266); the sink reopens on the next write, so a
 	// reconnecting server logs on as before. nil for console (CLI) loggers.
 	upstreamLogCloser io.Closer
+	// upstreamLogSinkMu orders OAuth log writes against closing the sink
+	// (GH #1827 review): retiredDropCore writes under the read lock and
+	// re-checks retirement; closeUpstreamLog closes under the write lock.
+	upstreamLogSinkMu sync.RWMutex
 
 	// MCP client and server info
 	client     *client.Client
@@ -1210,9 +1214,9 @@ func (c *Client) oauthLogger() *zap.Logger {
 	case c.upstreamLogger == nil:
 		return c.logger
 	case c.logger == nil:
-		return zap.New(retiredDropCore{Core: c.upstreamLogger.Core(), retired: c.retiredNow})
+		return zap.New(retiredDropCore{Core: c.upstreamLogger.Core(), retired: c.retiredNow, mu: &c.upstreamLogSinkMu})
 	default:
-		return zap.New(zapcore.NewTee(c.logger.Core(), retiredDropCore{Core: c.upstreamLogger.Core(), retired: c.retiredNow}))
+		return zap.New(zapcore.NewTee(c.logger.Core(), retiredDropCore{Core: c.upstreamLogger.Core(), retired: c.retiredNow, mu: &c.upstreamLogSinkMu}))
 	}
 }
 
@@ -1223,10 +1227,11 @@ func (c *Client) oauthLogger() *zap.Logger {
 type retiredDropCore struct {
 	zapcore.Core
 	retired func() bool
+	mu      *sync.RWMutex // nil: no sink to order against
 }
 
 func (r retiredDropCore) With(fields []zapcore.Field) zapcore.Core {
-	return retiredDropCore{Core: r.Core.With(fields), retired: r.retired}
+	return retiredDropCore{Core: r.Core.With(fields), retired: r.retired, mu: r.mu}
 }
 
 func (r retiredDropCore) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
@@ -1236,9 +1241,14 @@ func (r retiredDropCore) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapco
 	return ce.AddCore(e, r)
 }
 
-// Write checks again: the instance may have been retired between Check and
-// Write.
+// Write checks again, under the sink lock: the instance may have been
+// retired between Check and Write, and a sink closed under the write lock is
+// not reopened by a write that started before.
 func (r retiredDropCore) Write(e zapcore.Entry, fields []zapcore.Field) error {
+	if r.mu != nil {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+	}
 	if r.retired() {
 		return nil
 	}
