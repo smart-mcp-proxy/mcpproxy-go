@@ -183,7 +183,7 @@ func (w *OAuthTransportWrapper) RoundTrip(req *http.Request) (*http.Response, er
 	if tokenReq {
 		// GH #1827: every token request leaves one line after it returns:
 		// grant type, the refresh flight that sent it, status and duration.
-		authz := w.matchesAuthorization(req) // one answer for injection and log
+		authz := len(w.extraParams) > 0 && w.matchesAuthorization(req) // one answer for injection and log
 		grantType, parsed := peekTokenGrantType(req)
 		if v, ok := w.extraParams["grant_type"]; ok && parsed && !authz {
 			grantType = tokenRequestGrantType(v) // what injectFormParams sends
@@ -198,7 +198,7 @@ func (w *OAuthTransportWrapper) RoundTrip(req *http.Request) (*http.Response, er
 		LogTokenRequest(req.Context(), w.logger, grantType, obs.status, logErr, time.Since(start))
 		return resp, err
 	}
-	return w.roundTripParams(req, w.matchesAuthorization(req), tokenReq, nil)
+	return w.roundTripParams(req, len(w.extraParams) > 0 && w.matchesAuthorization(req), tokenReq, nil)
 }
 
 // tokenResponseObs is what a token request's log line reports about the
