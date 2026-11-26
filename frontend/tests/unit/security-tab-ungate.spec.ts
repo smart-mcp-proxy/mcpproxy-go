@@ -90,7 +90,8 @@ beforeEach(() => {
 describe('ServerDetail — Security tab is un-gated (Spec 088 T022, FR-016)', () => {
   it('renders the Security tab with zero enabled deep scanners', async () => {
     const { wrapper } = await mountDetail('tools')
-    expect(wrapper.find('[data-test="security-tab"]').exists()).toBe(true)
+    // Spec 134: the scan part lives in the "Review and scans" tab.
+    expect(wrapper.find('[data-test="review-tab"]').exists()).toBe(true)
     wrapper.unmount()
   })
 

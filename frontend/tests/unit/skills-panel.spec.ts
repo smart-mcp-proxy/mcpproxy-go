@@ -49,8 +49,8 @@ describe('SkillsPanel', () => {
     const chip = (p: string) => w.get(`[data-test="skill-chip-${p}"]`).text()
     expect([chip('plain'), chip('changed'), chip('ok'), chip('bad'), chip('blk')])
       .toEqual(['Awaiting review', 'Changed', 'Approved', 'Unusable', 'Blocked'])
-    expect(w.get('[data-test="skill-row-ok"]').text()).toContain('Offered to agents')
-    expect(w.get('[data-test="skill-row-plain"]').text()).toContain('Not offered')
+    expect(w.get('[data-test="skill-tr-ok"]').text()).toContain('Offered to agents')
+    expect(w.get('[data-test="skill-tr-plain"]').text()).toContain('Not offered')
   })
 
   it('shows only listed, unblocked pending and changed skills in Needs review', async () => {

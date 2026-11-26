@@ -11,10 +11,13 @@ function srv(over: Record<string, unknown> = {}): Server {
 }
 
 describe('ServerFacts', () => {
-  it('shows the id only when a title hides it', () => {
-    expect(mount(ServerFacts, { props: { server: srv() } }).find('[data-test="server-facts-id"]').exists()).toBe(false)
+  it('always shows the id, and the title beside it only when it differs (PR 3)', () => {
+    const plain = mount(ServerFacts, { props: { server: srv() } })
+    expect(plain.get('[data-test="fact-id"]').text()).toBe('io.github/x')
+    expect(plain.find('[data-test="fact-title"]').exists()).toBe(false)
     const w = mount(ServerFacts, { props: { server: srv({ title: 'Nice name' }) } })
-    expect(w.get('[data-test="server-facts-id"]').text()).toContain('io.github/x')
+    expect(w.get('[data-test="fact-id"]').text()).toContain('io.github/x')
+    expect(w.get('[data-test="fact-title"]').text()).toBe('Nice name')
   })
 
   it('shows trust mode with its label as text', () => {
@@ -29,24 +32,25 @@ describe('ServerFacts', () => {
     expect(q.find('[data-test="server-facts-held"]').exists()).toBe(false)
   })
 
-  it('"Full diagnostic" opens the untruncated detail, diagnostic and raw error', async () => {
+  it('"Full diagnostic" opens a dialog with the untruncated detail, diagnostic and raw error', async () => {
     const long = 'x'.repeat(400)
     const w = mount(ServerFacts, {
       props: { server: srv({ last_error: `a: b: ${long}`, health: { level: 'unhealthy', admin_state: 'enabled', summary: 's', detail: `detail ${long}`, status: 'error', usable: false, actions: [] }, diagnostic: { code: 'MCPX_X', severity: 'error', user_message: 'It broke', cause: 'because' } }) },
       attachTo: document.body,
     })
-    const details = w.get('[data-test="server-facts-diagnostic"]')
-    expect(details.find('summary').text()).toBe('Full diagnostic')
+    expect(w.get('[data-test="open-diagnostic"]').text()).toBe('Full diagnostic')
     expect(w.text()).not.toContain('It broke')
-    ;(details.element as HTMLDetailsElement).open = true
-    await details.trigger('toggle')
-    expect(w.get('[data-test="server-facts-raw-error"]').text()).toBe(`a: b: ${long}`)
-    expect(w.get('[data-test="server-facts-health-detail"]').text()).toBe(`detail ${long}`)
-    expect(w.get('[data-test="server-facts-diagnostic-message"]').text()).toContain('It broke (MCPX_X)')
+    await w.get('[data-test="open-diagnostic"]').trigger('click')
+    const text = w.findAll('[data-test="diagnostic-value"]').map(x => x.text()).join('\n')
+    expect(text).toContain(`a: b: ${long}`)
+    expect(text).toContain(`detail ${long}`)
+    expect(text).toContain('It broke')
+    expect(text).toContain('MCPX_X')
     w.unmount()
   })
 
-  it('has no diagnostic control when there is nothing to show', () => {
-    expect(mount(ServerFacts, { props: { server: srv() } }).find('[data-test="server-facts-diagnostic"]').exists()).toBe(false)
+  it('shows no diagnostic text until the dialog is opened', () => {
+    const w = mount(ServerFacts, { props: { server: srv() } })
+    expect(w.find('[data-test="diagnostic-value"]').exists()).toBe(false)
   })
 })

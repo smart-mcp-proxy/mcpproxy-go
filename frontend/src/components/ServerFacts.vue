@@ -1,88 +1,160 @@
 <template>
-  <!-- Spec 134 PR 2 (FR-020): the facts the Servers card used to carry and the
-       row no longer does, on the first screen of server detail. Small and
-       self-contained on purpose: PR 3 restructures this page and moves this
-       block into its summary. -->
-  <section class="server-facts flex flex-wrap items-start gap-x-6 gap-y-2 text-sm" aria-label="Server facts" data-test="server-facts">
-    <div v-if="showId" data-test="server-facts-id">
-      <span class="text-base-content/60">ID</span> <code class="text-xs break-all">{{ server.name }}</code>
+  <section class="space-y-2 rounded border bg-base-100 p-3" style="border-color: var(--ds-border)" aria-label="Server facts" data-test="server-facts">
+    <dl class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-x-6 gap-y-2 text-sm">
+      <div class="flex items-center gap-1.5 min-w-0" data-test="fact-identity">
+        <dt class="text-base-content/70">Id</dt>
+        <dd class="font-mono break-all" data-test="fact-id">{{ server.name }}</dd>
+        <template v-if="titleDiffers">
+          <dt class="text-base-content/70 ml-2">Title</dt>
+          <dd data-test="fact-title">{{ server.title }}</dd>
+        </template>
+      </div>
+      <div class="flex items-center gap-1.5" data-test="fact-transport">
+        <dt class="text-base-content/70">Transport</dt>
+        <dd>{{ server.protocol }}<span class="text-base-content/70">, {{ connectionText }}</span></dd>
+      </div>
+      <div v-if="adminState" class="flex items-center gap-1.5" data-test="fact-admin-state">
+        <dt class="text-base-content/70">State</dt>
+        <dd><span class="font-medium" :class="adminTone" data-test="server-admin-state">{{ adminState }}</span><span class="text-base-content/70">, <span data-test="server-admin-state-desc">{{ adminStateDesc }}</span></span></dd>
+      </div>
+      <div v-if="toolCount !== undefined" class="flex items-center gap-1.5" data-test="fact-tools">
+        <dt class="text-base-content/70">Tools</dt>
+        <dd data-test="server-tools-count"><span>{{ toolCount }} available</span><span v-if="(disabledTools ?? 0) > 0" class="text-error">, {{ disabledTools }} disabled</span></dd>
+      </div>
+      <div class="flex items-center gap-1.5" data-test="fact-trust">
+        <dt class="text-base-content/70">Trust mode</dt>
+        <dd class="flex items-center gap-1" :title="trust.title">
+          <span role="img" :class="['tooltip tooltip-bottom', trust.tone]" :data-tip="trust.title" :title="trust.title" :aria-label="trust.title" data-test="server-trust-mode" :data-trust-invalid="trust.invalid ? 'true' : undefined"><UiIcon name="shield" class="w-4 h-4" /></span>
+          <span data-test="server-facts-trust-label">{{ trust.label }}{{ trust.invalid ? ' (configured value not recognised)' : '' }}</span>
+        </dd>
+        <dd class="text-base-content/70 w-full" data-test="server-facts-trust-detail">{{ trust.detail }}</dd>
+      </div>
+      <div v-if="security" class="flex items-center gap-1.5" data-test="fact-scan">
+        <span data-test="server-facts-security" class="flex items-center gap-1.5"><dt class="text-base-content/70">Scan</dt>{{ ' ' }}<dd><span :class="securityToneClass" :data-test="server.quarantined ? 'server-card-quarantine-scan-note' : 'security-scan-badge'">{{ security }}</span></dd></span>
+      </div>
+      <div class="flex items-center gap-1.5" data-test="fact-held">
+        <dt class="text-base-content/70">Held tools</dt>
+        <dd data-test="fact-held-counts">
+          <template v-if="held.total > 0"><span :data-test="server.quarantined ? undefined : 'server-facts-held'">{{ held.pending }} pending, {{ held.changed }} changed</span></template>
+          <template v-else>none</template>
+        </dd>
+      </div>
+      <div class="flex items-center gap-1.5" data-test="fact-activity">
+        <dt class="sr-only">Activity</dt>
+        <dd><router-link :to="activityLink" class="link link-hover" data-test="fact-activity-link">{{ activityText }}</router-link></dd>
+      </div>
+      <div class="flex items-center">
+        <button type="button" class="btn btn-sm btn-outline min-h-11" data-test="open-diagnostic" aria-haspopup="dialog" @click="openDiagnostic">Full diagnostic</button>
+      </div>
+    </dl>
+
+    <!-- The launch line (or URL) on its own row: monospace, wraps cleanly, with Copy. -->
+    <div v-if="launchLine" class="flex flex-wrap items-start gap-2 border-t pt-2 text-sm" style="border-color: var(--ds-border)" data-test="fact-launch">
+      <span class="text-base-content/70 shrink-0">{{ server.command ? 'Launch line' : 'URL' }}</span>
+      <code class="min-w-0 flex-1 basis-60 break-all whitespace-pre-wrap font-mono text-xs bg-base-200 rounded px-2 py-1" data-test="fact-endpoint">{{ launchLine }}</code>
+      <button type="button" class="btn btn-xs min-h-11 sm:min-h-0" data-test="fact-launch-copy" @click="copyLaunch">{{ launchCopied ? 'Copied' : 'Copy' }}</button>
     </div>
 
-    <div class="flex items-center gap-1.5" data-test="server-facts-trust">
-      <span class="text-base-content/60">Trust mode</span>
-      <!-- Effective mode; an unrecognised configured value shows the fail-closed
-           mode with its raw value in the title (spec 088 FR-007). -->
-      <span
-        :class="['inline-flex items-center gap-1 tooltip tooltip-bottom', trust.tone]"
-        :data-tip="trust.title"
-        :title="trust.title"
-        role="img"
-        :aria-label="trust.title"
-        :data-trust-invalid="trust.invalid ? 'true' : undefined"
-        data-test="server-trust-mode"
-      >
-        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 2L3.5 6.5V11c0 5.55 3.84 10.74 8.5 12 4.66-1.26 8.5-6.45 8.5-12V6.5L12 2zm0 2.18l6.5 3.35V11c0 4.52-3.15 8.76-6.5 9.93C8.65 19.76 5.5 15.52 5.5 11V7.53L12 4.18z"/>
-        </svg>
-        <span data-test="server-facts-trust-label">{{ trust.label }}{{ trust.invalid ? ' (configured value not recognised)' : '' }}</span>
-      </span>
-      <!-- The tooltip is not the only place: the meaning is plain text too, so a
-           keyboard or touch user reads it without hovering. -->
-      <span class="text-base-content/60" data-test="server-facts-trust-detail">{{ trust.detail }}</span>
-    </div>
+    <ul v-if="lines.length" class="space-y-1 border-t pt-2" style="border-color: var(--ds-border)" data-test="attention-lines">
+      <li v-for="line in lines" :key="line.id">
+        <button type="button" class="link link-primary text-left text-sm min-h-11 sm:min-h-0" :data-test="`attention-${line.id}`" @click="$emit('go', line.id)">{{ line.text }}</button>
+      </li>
+    </ul>
 
-    <div v-if="security" data-test="server-facts-security">
-      <span class="text-base-content/60">Scan</span>{{ ' ' }}<span :class="[securityToneClass]" :data-test="server.quarantined ? 'server-card-quarantine-scan-note' : 'security-scan-badge'">{{ security }}</span>
-    </div>
-
-    <div v-if="held && !server.quarantined" class="text-warning" data-test="server-facts-held">
-      <span data-test="server-card-tool-quarantine-note">{{ held }}</span>
-    </div>
-
-    <details v-if="hasDiagnostic" class="w-full" data-test="server-facts-diagnostic" @toggle="diagOpen = ($event.target as HTMLDetailsElement).open">
-      <summary class="cursor-pointer link link-primary min-h-11 md:min-h-0 inline-flex items-center">Full diagnostic</summary>
-      <dl v-if="diagOpen" class="mt-2 space-y-2 [overflow-wrap:anywhere]">
-        <div v-if="server.health?.detail"><dt class="text-base-content/60">Health detail</dt><dd data-test="server-facts-health-detail">{{ server.health.detail }}</dd></div>
-        <div v-if="server.diagnostic?.user_message"><dt class="text-base-content/60">Diagnostic</dt><dd data-test="server-facts-diagnostic-message">{{ server.diagnostic.user_message }}<span v-if="server.diagnostic.code" class="text-base-content/60"> ({{ server.diagnostic.code }})</span></dd></div>
-        <div v-if="server.diagnostic?.code && !server.diagnostic?.user_message"><dt class="text-base-content/60">Diagnostic code</dt><dd data-test="server-facts-diagnostic-code">{{ server.diagnostic.code }}</dd></div>
-        <div v-if="server.diagnostic?.fix_steps?.length">
-          <dt class="text-base-content/60">Suggested fixes</dt>
-          <dd>
-            <ul class="list-disc pl-5 space-y-1" data-test="server-facts-fix-steps">
-              <li v-for="(step, i) in server.diagnostic.fix_steps" :key="i">
-                <a v-if="step.url && /^https:\/\//.test(step.url)" :href="step.url" class="link link-primary" target="_blank" rel="noopener noreferrer">{{ step.label }}</a>
-                <template v-else>{{ step.label }}</template>
-                <code v-if="step.command" class="ml-1 text-xs break-all">{{ step.command }}</code>
-              </li>
-            </ul>
-          </dd>
+    <dialog ref="dialogEl" class="modal" data-test="diagnostic-dialog" aria-labelledby="diag-title" @close="onClose">
+      <div v-if="isOpen" class="modal-box max-w-3xl">
+        <h3 id="diag-title" class="font-bold text-lg">Full diagnostic for {{ server.name }}</h3>
+        <p v-if="sections.length === 0" class="py-3 text-base-content/70" data-test="diagnostic-empty">This server reports no diagnostic and no error.</p>
+        <dl v-else class="py-3 space-y-3 text-sm">
+          <div v-for="s in sections" :key="s.label" class="min-w-0">
+            <dt class="font-medium">{{ s.label }}</dt>
+            <dd><pre class="whitespace-pre-wrap break-words font-mono text-xs bg-base-200 rounded p-2 overflow-x-auto" data-test="diagnostic-value">{{ s.value }}</pre></dd>
+          </div>
+        </dl>
+        <div class="modal-action">
+          <button v-if="sections.length" type="button" class="btn min-h-11" data-test="diagnostic-copy" @click="copy">{{ copied ? 'Copied' : 'Copy' }}</button>
+          <button type="button" class="btn min-h-11" data-test="diagnostic-close" @click="closeDiagnostic">Close</button>
         </div>
-        <div v-if="server.diagnostic?.docs_url"><dt class="text-base-content/60">Documentation</dt><dd><a :href="server.diagnostic.docs_url" class="link link-primary break-all" target="_blank" rel="noopener noreferrer" data-test="server-facts-docs">{{ server.diagnostic.docs_url }}</a></dd></div>
-        <div v-if="server.diagnostic?.cause"><dt class="text-base-content/60">Cause</dt><dd>{{ server.diagnostic.cause }}</dd></div>
-        <div v-if="server.last_error"><dt class="text-base-content/60">Raw error</dt><dd><pre class="whitespace-pre-wrap text-xs" data-test="server-facts-raw-error">{{ server.last_error }}</pre></dd></div>
-      </dl>
-    </details>
+      </div>
+    </dialog>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import api from '@/services/api'
+import { formatLaunchCommand } from '@/utils/reviewPresentation'
 import type { Server } from '@/types'
-import { serverDisplayName } from '@/utils/serverRoute'
-import { securityLine, securityTone, toolQuarantineSummary, trustBadge } from '@/utils/serverFacts'
+import UiIcon from '@/components/UiIcon.vue'
+import { attentionLines, diagnosticSections, heldCounts, type AttentionTarget } from '@/utils/serverDetailFacts'
+import { securityLine, securityTone, trustBadge } from '@/utils/serverFacts'
 
-const props = defineProps<{ server: Server }>()
+const props = defineProps<{ server: Server; primaryAction?: string; primaryLabel?: string; adminState?: string; adminStateDesc?: string; adminTone?: string; toolCount?: number; disabledTools?: number }>()
+defineEmits<{ go: [target: AttentionTarget] }>()
 
-// The text is rendered only while the control is open: a collapsed fault in the
-// DOM would read as a second, louder copy of the calm quarantine banner (#1076).
-const diagOpen = ref(false)
+const dialogEl = ref<HTMLDialogElement | null>(null)
+const copied = ref(false)
+const isOpen = ref(false)
+let opener: HTMLElement | null = null
 
-// The id is shown only when the display title hides it.
-const showId = computed(() => serverDisplayName(props.server) !== props.server.name)
+const titleDiffers = computed(() => !!props.server.title && props.server.title !== props.server.name)
 const trust = computed(() => trustBadge(props.server))
 const security = computed(() => securityLine(props.server))
 const securityToneClass = computed(() => securityTone(props.server))
-const held = computed(() => toolQuarantineSummary(props.server))
-const hasDiagnostic = computed(() =>
-  !!(props.server.health?.detail || props.server.last_error || props.server.diagnostic?.user_message || props.server.diagnostic?.cause || props.server.diagnostic?.code || props.server.diagnostic?.fix_steps?.length || props.server.diagnostic?.docs_url))
+const held = computed(() => heldCounts(props.server))
+const sections = computed(() => diagnosticSections(props.server))
+const lines = computed(() => attentionLines(props.server, { primaryAction: props.primaryAction, primaryLabel: props.primaryLabel }))
+const connectionText = computed(() => {
+  const s = props.server
+  if (s.enabled === false) return 'not running (disabled)'
+  if (s.connected) return 'connected'
+  if (s.connecting) return 'connecting'
+  return 'not connected'
+})
+const launchLine = computed(() => props.server.command ? formatLaunchCommand(props.server.command, props.server.args ?? []) : (props.server.url || ''))
+const launchCopied = ref(false)
+async function copyLaunch() {
+  try { await navigator.clipboard.writeText(launchLine.value) } catch { /* the line is selectable */ }
+  launchCopied.value = true
+  setTimeout(() => { launchCopied.value = false }, 1500)
+}
+
+// The 24 h numbers come from the same summary the Servers list reads; until they load the link says so plainly.
+const calls24h = ref<{ calls: number; errors: number } | null>(null)
+let statsSeq = 0
+async function loadActivityStats() {
+  const seq = ++statsSeq
+  calls24h.value = null
+  if (typeof api.getActivitySummary !== 'function') return
+  try {
+    const res = await api.getActivitySummary('24h')
+    if (seq !== statsSeq || !res?.success) return
+    const entry = (res.data?.per_server ?? []).find(e => e.name === props.server.name)
+    calls24h.value = { calls: entry?.calls ?? 0, errors: entry?.errors ?? 0 }
+  } catch { /* the fallback label stays */ }
+}
+onMounted(loadActivityStats)
+watch(() => props.server.name, loadActivityStats)
+const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`
+const activityText = computed(() => calls24h.value ? `Last 24 h: ${plural(calls24h.value.calls, 'call')}, ${plural(calls24h.value.errors, 'error')}` : 'Calls in Activity')
+const activityLink = computed(() => {
+  const base = `/activity?server=${encodeURIComponent(props.server.name)}&from=-24h`
+  return (calls24h.value?.errors ?? 0) > 0 ? `${base}&status=error` : base
+})
+
+// The text is rendered only while the dialog is open, so a closed dialog adds nothing to the page.
+async function openDiagnostic(e: Event) {
+  opener = e.currentTarget as HTMLElement
+  isOpen.value = true
+  await nextTick()
+  dialogEl.value?.showModal?.()
+}
+function closeDiagnostic() { dialogEl.value?.close?.(); onClose() }
+function onClose() { isOpen.value = false; opener?.focus?.() }
+async function copy() {
+  const text = sections.value.map(s => `${s.label}: ${s.value}`).join('\n')
+  try { await navigator.clipboard.writeText(text) } catch { /* the text is selectable in the dialog */ }
+  copied.value = true
+  setTimeout(() => { copied.value = false }, 1500)
+}
 </script>

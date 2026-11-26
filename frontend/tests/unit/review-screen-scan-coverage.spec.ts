@@ -44,23 +44,23 @@ describe('ReviewScreen scan coverage banner', () => {
   it('shows a covering clean scan as success with its risk score and coverage', async () => {
     const wrapper = await mountScreen({ verdict: 'clean', risk_score: 0, coverage: 'current', tools_scanned: 5 })
     const banner = wrapper.get('[data-test="review-scan-summary"]')
-    expect(banner.classes()).toContain('alert-success')
+    expect(banner.classes()).toContain('tone-ok')
     expect(banner.text()).toContain('Baseline scan: clean · risk 0/100 · covers all 5 tools')
     expect(wrapper.find('[data-test="review-scan-action"]').exists()).toBe(false)
   })
 
   it('shows covering warnings and dangerous scans as warning and error', async () => {
     const warn = await mountScreen({ verdict: 'warnings', risk_score: 30, coverage: 'current', tools_scanned: 5 })
-    expect(warn.get('[data-test="review-scan-summary"]').classes()).toContain('alert-warning')
+    expect(warn.get('[data-test="review-scan-summary"]').classes()).toContain('tone-review')
     expect(warn.get('[data-test="review-scan-summary"]').text()).toContain('risk 30/100')
     const bad = await mountScreen({ verdict: 'dangerous', risk_score: 90, coverage: 'current', tools_scanned: 5 })
-    expect(bad.get('[data-test="review-scan-summary"]').classes()).toContain('alert-error')
+    expect(bad.get('[data-test="review-scan-summary"]').classes()).toContain('tone-error')
   })
 
   it('shows a stale scan as a warning naming the tools, without a risk score, and Rescan starts a scan', async () => {
     const wrapper = await mountScreen({ verdict: 'clean', risk_score: 0, coverage: 'stale', tools_scanned: 5, unscanned_tools: ['a', 'b'] }, { verdicts: { a: 'not_scanned', b: 'not_scanned' } })
     const banner = wrapper.get('[data-test="review-scan-summary"]')
-    expect(banner.classes()).toContain('alert-warning')
+    expect(banner.classes()).toContain('tone-review')
     expect(banner.text()).toContain('Scan out of date: 2 tool definitions changed or were added after the last scan (a, b). Last result: clean.')
     expect(banner.text()).not.toContain('risk')
     expect(banner.text()).not.toContain('Baseline scan: clean')
@@ -81,7 +81,7 @@ describe('ReviewScreen scan coverage banner', () => {
   it('does not reassure when definitions are not captured and keeps the fetch button in its own block', async () => {
     const wrapper = await mountScreen({ verdict: 'clean', risk_score: 0, coverage: 'not_captured' }, { captured: false })
     const banner = wrapper.get('[data-test="review-scan-summary"]')
-    expect(banner.classes()).toContain('alert-warning')
+    expect(banner.classes()).toContain('tone-review')
     expect(banner.text()).toContain('they have not been captured yet')
     expect(banner.text()).not.toContain('clean')
     expect(banner.text()).not.toContain('risk')
@@ -92,7 +92,7 @@ describe('ReviewScreen scan coverage banner', () => {
   it('shows a scan that exported no tools as a warning with Rescan', async () => {
     const wrapper = await mountScreen({ verdict: 'clean', risk_score: 0, coverage: 'tools_not_scanned' })
     const banner = wrapper.get('[data-test="review-scan-summary"]')
-    expect(banner.classes()).toContain('alert-warning')
+    expect(banner.classes()).toContain('tone-review')
     expect(banner.text()).toContain('The last scan did not analyse tool definitions (0 exported).')
     expect(banner.text()).not.toContain('risk')
     expect(wrapper.get('[data-test="review-scan-action"]').text()).toBe('Rescan')
@@ -100,7 +100,7 @@ describe('ReviewScreen scan coverage banner', () => {
 
   it('offers Scan now when there is no completed scan', async () => {
     const wrapper = await mountScreen({ verdict: 'not_scanned', coverage: 'none' })
-    expect(wrapper.get('[data-test="review-scan-summary"]').classes()).toContain('alert-warning')
+    expect(wrapper.get('[data-test="review-scan-summary"]').classes()).toContain('tone-review')
     expect(wrapper.get('[data-test="review-scan-summary"]').text()).toContain('Not scanned yet.')
     await wrapper.get('[data-test="review-scan-action"]').trigger('click')
     await flushPromises()
@@ -115,7 +115,7 @@ describe('ReviewScreen scan coverage banner', () => {
 
   it('shows a running scan as info without an action', async () => {
     const wrapper = await mountScreen({ verdict: 'not_scanned', coverage: 'scanning' })
-    expect(wrapper.get('[data-test="review-scan-summary"]').classes()).toContain('alert-info')
+    expect(wrapper.get('[data-test="review-scan-summary"]').classes()).toContain('tone-busy')
     expect(wrapper.get('[data-test="review-scan-summary"]').text()).toContain('Scan in progress…')
     expect(wrapper.find('[data-test="review-scan-action"]').exists()).toBe(false)
   })

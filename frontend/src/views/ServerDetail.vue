@@ -1,5 +1,5 @@
 <template>
-  <div class="space-y-6">
+  <div class="space-y-6 touch-44">
     <!-- Loading State -->
     <div v-if="loading" class="text-center py-12">
       <span class="loading loading-spinner loading-lg"></span>
@@ -36,28 +36,40 @@
 
     <!-- Server Details -->
     <div v-else>
-      <!-- Header -->
+      <!-- Header (Spec 134 FR-030): the persistent summary, once: name, status,
+           reason, primary action; every other action lives in Actions. -->
       <div class="flex flex-col lg:flex-row lg:justify-between lg:items-start gap-4">
-        <div>
-          <div class="breadcrumbs text-sm mb-2">
+        <div class="min-w-0">
+          <div class="breadcrumbs text-sm mb-2 overflow-y-visible">
             <ul>
               <li><router-link to="/servers">Servers</router-link></li>
               <li>{{ displayName }}</li>
             </ul>
           </div>
-          <h1 class="text-3xl font-bold" :title="server.name">{{ displayName }}</h1>
-          <p class="text-base-content/70 mt-1">{{ server.protocol }} • {{ server.url || server.command || 'No endpoint' }}</p>
+          <h1 class="text-3xl font-bold break-words" :title="server.name">{{ displayName }}</h1>
+          <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span data-test="server-status-badge">
+              <StatusPill v-if="server.health?.status" :status="server.health.status" />
+              <span v-else :class="['badge badge-lg', statusBadgeClass]">{{ statusBadgeText }}</span>
+            </span>
+            <span v-if="reasonLine" class="text-sm text-base-content/80 min-w-0 [overflow-wrap:anywhere]" data-test="server-detail-reason">{{ reasonLine }}</span>
+          </div>
         </div>
 
-        <div class="flex items-center space-x-2">
-          <div
-            :class="['badge badge-lg', statusBadgeClass]"
-            data-test="server-status-badge"
+        <div class="flex flex-wrap items-center gap-2">
+          <button
+            v-if="primaryAction && primaryKind"
+            type="button"
+            class="btn btn-primary min-h-11"
+            :disabled="actionLoading"
+            data-test="server-detail-primary-action"
+            @click="runPrimaryAction"
           >
-            {{ statusBadgeText }}
-          </div>
-          <div class="dropdown dropdown-end">
-            <div tabindex="0" role="button" class="btn btn-outline">
+            <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
+            {{ primaryLabel }}
+          </button>
+          <div class="dropdown lg:dropdown-end">
+            <div tabindex="0" role="button" class="btn btn-outline min-h-11" data-test="server-actions-menu">
               Actions
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
@@ -105,84 +117,10 @@
         </div>
       </div>
 
-      <!-- Spec 134 PR 2: facts the Servers row no longer shows (id, trust mode,
-           scan verdict, held tools, full diagnostic). PR 3 folds this into the
-           restructured summary. -->
-      <ServerFacts :server="server" class="mt-3" />
-
-      <!-- Status Cards -->
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <div class="stats shadow bg-base-100">
-          <div class="stat">
-            <div class="stat-figure text-primary">
-              <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-              </svg>
-            </div>
-            <div class="stat-title">Tools</div>
-            <div class="stat-value">{{ serverTools.length }}</div>
-            <div
-              class="stat-desc"
-              :class="blockedToolCount > 0 ? 'text-error' : ''"
-            >
-              {{ blockedToolCount > 0 ? `${blockedToolCount} disabled` : 'available tools' }}
-            </div>
-          </div>
-        </div>
-
-        <!-- Audit F11: this row used to speak three vocabularies at once
-             (Enabled/Active + Online/Offline + the Disconnected badge), one of
-             them green on a server that was down. It now carries exactly two
-             axes: the admin state you set, and the health we observe. -->
-        <div class="stats shadow bg-base-100">
-          <div class="stat">
-            <!-- A power symbol, not the Tools tile's gear: this is the on/off
-                 decision you made, not a configuration detail. -->
-            <div class="stat-figure" :class="adminStateTone">
-              <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.636 5.636a9 9 0 1012.728 0M12 3v9" />
-              </svg>
-            </div>
-            <div class="stat-title">Admin state</div>
-            <div class="stat-value text-sm" data-test="server-admin-state">{{ adminStateLabel }}</div>
-            <!-- Audit F10: quarantine-on-add is the DEFAULT for a newly added
-                 server, so "set by you" was false in exactly the case where the
-                 user most needs to know why their client cannot reach it. -->
-            <div class="stat-desc" data-test="server-admin-state-desc">{{ adminStateDesc }}</div>
-          </div>
-        </div>
-
-        <div class="stats shadow bg-base-100">
-          <div class="stat">
-            <div class="stat-figure text-info">
-              <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
-            </div>
-            <div class="stat-title">Protocol</div>
-            <div class="stat-value text-sm">{{ server.protocol }}</div>
-            <div class="stat-desc">communication type</div>
-          </div>
-        </div>
-
-        <div class="stats shadow bg-base-100">
-          <div class="stat">
-            <div class="stat-figure" :class="healthLevelTone">
-              <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-            </div>
-            <div class="stat-title">Health</div>
-            <div class="stat-value text-sm" :class="healthLevelTone" data-test="server-health-level">
-              {{ healthLevelLabel }}
-            </div>
-            <div class="stat-desc [overflow-wrap:anywhere]" data-test="server-health-summary">{{ statusBadgeText }}</div>
-          </div>
-        </div>
-      </div>
+      <ServerFacts :server="server" :admin-state="adminStateLabel" :admin-state-desc="adminStateDesc" :admin-tone="adminStateTone" :tool-count="serverTools.length" :disabled-tools="blockedToolCount" :primary-action="alertsRegionHasContent ? primaryAction : ''" :primary-label="primaryLabel" @go="goToAttention" />
 
       <!-- Alerts -->
-      <div class="space-y-4">
+      <div class="space-y-4" id="server-alerts" ref="alertsRegion" tabindex="-1" data-test="server-alerts">
         <!-- MCP-1821 — calm OAuth Sign-in CTA. Takes precedence over the red
              ErrorPanel whenever the server simply needs the user to sign in
              (health.action==='login' or an MCPX_OAUTH_* code). -->
@@ -234,7 +172,7 @@
         <div
           v-if="quarantineBanner"
           data-test="security-quarantine-banner"
-          class="alert"
+          class="soft-banner-wrap flex flex-col sm:flex-row sm:items-center gap-3 rounded px-4 py-3"
           :class="quarantineBannerAlertClass"
         >
           <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -304,7 +242,7 @@
               data-test="quarantine-action-approve"
               @click="handleApproveClick"
               :disabled="actionLoading"
-              class="btn btn-sm btn-warning"
+              class="btn btn-sm btn-outline"
             >
               <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
               Review &amp; approve
@@ -313,37 +251,23 @@
         </div>
       </div>
 
-      <!-- Tabs -->
-      <div class="tabs tabs-border">
+      <!-- Tabs (Spec 134 FR-030): Tools, Review and scans, Skills, Logs, Configuration. -->
+      <div class="tabs tabs-border overflow-x-auto" role="tablist" aria-label="Server sections">
         <button
-          :class="['tab tab-lg', activeTab === 'tools' ? 'tab-active' : '']"
+          role="tab" :aria-selected="activeTab === 'tools'"
+          :class="['tab tab-lg min-h-11', activeTab === 'tools' ? 'tab-active' : '']"
           @click="activeTab = 'tools'"
         >
           Tools ({{ serverTools.length }})
         </button>
-        <button data-test="review-tab" :class="['tab tab-lg', activeTab === 'review' ? 'tab-active' : '']" @click="activeTab = 'review'">Review</button>
-        <!-- Spec 125: shown when skills are on and the server supports them (or has records); never for a tenant. -->
-        <button v-if="skillsTabVisible" data-test="skills-tab" :class="['tab tab-lg', activeTab === 'skills' ? 'tab-active' : '']" @click="activeTab = 'skills'">Skills</button>
+        <!-- Spec 088 US4 (FR-016): the deterministic offline baseline scanner always runs, so the scan part is
+             always present. Spec 134: Review and the scan part (the former Security tab) share this tab; the
+             dot and the spinner of the scan state stay on it. -->
         <button
-          :class="['tab tab-lg', activeTab === 'logs' ? 'tab-active' : '']"
-          @click="activeTab = 'logs'"
-        >
-          Logs
-        </button>
-        <button
-          :class="['tab tab-lg', activeTab === 'config' ? 'tab-active' : '']"
-          @click="activeTab = 'config'"
-        >
-          Configuration
-        </button>
-        <!-- Spec 088 US4 (FR-016): the deterministic offline baseline scanner
-             always runs, so the Security tab is always present. It used to be
-             hidden unless an OPTIONAL Docker deep scanner was enabled, which
-             made a real capability unreachable on every default install. -->
-        <button
-          data-test="security-tab"
-          :class="['tab tab-lg', activeTab === 'security' ? 'tab-active' : '']"
-          @click="activeTab = 'security'; loadScannerNames(); loadScanReport()"
+          role="tab" :aria-selected="reviewScansActive"
+          data-test="review-tab"
+          :class="['tab tab-lg min-h-11', reviewScansActive ? 'tab-active' : '']"
+          @click="openReviewScans"
         >
           <span class="flex items-center gap-2">
             <span
@@ -356,8 +280,24 @@
               class="inline-block w-2.5 h-2.5 rounded-full"
               :class="securityDotClass"
             ></span>
-            Security{{ securityTabSuffix }}
+            Review and scans{{ securityTabSuffix }}
           </span>
+        </button>
+        <!-- Spec 125: shown when skills are on and the server supports them (or has records); never for a tenant. -->
+        <button v-if="skillsTabVisible" role="tab" :aria-selected="activeTab === 'skills'" data-test="skills-tab" :class="['tab tab-lg min-h-11', activeTab === 'skills' ? 'tab-active' : '']" @click="activeTab = 'skills'">Skills</button>
+        <button
+          role="tab" :aria-selected="activeTab === 'logs'"
+          :class="['tab tab-lg min-h-11', activeTab === 'logs' ? 'tab-active' : '']"
+          @click="activeTab = 'logs'"
+        >
+          Logs
+        </button>
+        <button
+          role="tab" :aria-selected="activeTab === 'config'"
+          :class="['tab tab-lg min-h-11', activeTab === 'config' ? 'tab-active' : '']"
+          @click="activeTab = 'config'"
+        >
+          Configuration
         </button>
       </div>
 
@@ -413,7 +353,7 @@
             />
 
             <!-- Tool Quarantine Panel (Spec 032) -->
-            <div v-if="quarantinedTools.length > 0" data-test="tool-quarantine-banner" class="alert alert-warning shadow-lg mb-4">
+            <div v-if="quarantinedTools.length > 0" data-test="tool-quarantine-banner" class="soft-banner-wrap tone-review flex flex-col sm:flex-row sm:items-center gap-3 rounded px-4 py-3 mb-4">
               <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
@@ -472,7 +412,7 @@
                   data-test="quarantine-approve-all"
                   @click="approveAllTools"
                   :disabled="approvalLoading"
-                  class="btn btn-sm btn-warning"
+                  class="btn btn-sm btn-outline"
                 >
                   <span v-if="approvalLoading" class="loading loading-spinner loading-xs"></span>
                   Review all tools
@@ -621,7 +561,7 @@
                 </button>
                 <button
                   v-if="hasEnabledTool"
-                  class="btn btn-sm btn-warning"
+                  class="btn btn-sm btn-outline"
                   :disabled="bulkToolToggleLoading"
                   @click="bulkToggleAllTools(false)"
                   data-test="tools-disable-all"
@@ -763,9 +703,6 @@
         </div>
         <div v-else-if="activeTab === 'skills' && !skillsTabChecked" class="text-center py-8" data-test="skills-tab-checking">
           <span class="loading loading-spinner"></span>
-        </div>
-        <div v-if="activeTab === 'review'">
-          <ReviewScreen :server-name="server.name" @approved="refreshData" />
         </div>
 
         <!-- Logs Tab -->
@@ -1328,7 +1265,16 @@
         </div>
 
         <!-- Security Tab (Spec 039) -->
-        <div v-if="activeTab === 'security'">
+        <div v-if="reviewScansActive" class="space-y-10" data-test="review-and-scans">
+          <nav class="part-nav" aria-label="Review and scans sections" data-test="review-scans-nav">
+            <button type="button" class="part-nav__link" :aria-current="activeTab === 'review' ? 'true' : undefined" data-test="review-part-link" @click="jumpToPart('review')">Review</button>
+            <button type="button" class="part-nav__link" :aria-current="activeTab === 'security' ? 'true' : undefined" data-test="scans-part-link" @click="jumpToPart('security')">Scans</button>
+          </nav>
+          <section id="review-part" ref="reviewPart" tabindex="-1" class="focus:outline-none" aria-label="Review" data-test="review-part">
+            <ReviewScreen ref="reviewScreen" :server-name="server.name" @approved="refreshData" />
+          </section>
+          <section id="scans-part" ref="scansPart" tabindex="-1" class="focus:outline-none" aria-labelledby="scans-heading" data-test="scans-part">
+          <h2 id="scans-heading" class="text-xl font-semibold mb-4">Scans for {{ displayName }}</h2>
           <div class="space-y-6">
             <!-- Header: Scan button + Risk Score -->
             <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
@@ -1617,6 +1563,7 @@
               </div>
             </template>
           </div>
+          </section>
         </div>
       </div>
     </div>
@@ -1680,7 +1627,6 @@ import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import AnnotationBadges from '@/components/AnnotationBadges.vue'
-import ServerFacts from '@/components/ServerFacts.vue'
 import ErrorPanel from '@/components/diagnostics/ErrorPanel.vue'
 import { formatDateTime } from '@/utils/datetime'
 import SignInPanel from '@/components/diagnostics/SignInPanel.vue'
@@ -1691,6 +1637,10 @@ import ToolDescription from '@/components/ToolDescription.vue'
 import FindingChip from '@/components/FindingChip.vue'
 import FlaggedToolsPanel from '@/components/FlaggedToolsPanel.vue'
 import ReviewScreen from '@/components/ReviewScreen.vue'
+import StatusPill from '@/components/StatusPill.vue'
+import { serverReason } from '@/utils/serverReason'
+import ServerFacts from '@/components/ServerFacts.vue'
+import type { AttentionTarget } from '@/utils/serverDetailFacts'
 import SkillsPanel from '@/components/skills/SkillsPanel.vue'
 import { useAuthStore } from '@/stores/auth'
 import { skillsChangeIncludesServer, skillsTabVisible as listingOffersSkills } from '@/utils/skills'
@@ -1885,6 +1835,133 @@ function readTabFromQuery() {
   leaveSkillsTabIfNotOffered()
 }
 const actionLoading = ref(false)
+
+// ---- Spec 134 PR 3: Review and scans, primary action, first-screen links ----
+// "Review and scans" is one tab with two anchored parts. activeTab keeps its two
+// values so ?tab=review lands on the review part and ?tab=security on the scan part.
+const reviewScansActive = computed(() => activeTab.value === 'review' || activeTab.value === 'security')
+const reviewScreen = ref<InstanceType<typeof ReviewScreen> | null>(null)
+const reviewPart = ref<HTMLElement | null>(null)
+const scansPart = ref<HTMLElement | null>(null)
+const alertsRegion = ref<HTMLElement | null>(null)
+
+// A click on the tab keeps the part already open (a ?tab=security visit stays on the scans). Entering from
+// another tab loads the scanner names and the report, as the former Security tab did on click.
+function openReviewScans() {
+  if (!reviewScansActive.value) {
+    activeTab.value = 'review'
+    void loadScannerNames()
+    void loadScanReport()
+  } else void scrollToPart(activeTab.value === 'security' ? 'security' : 'review')
+}
+// A part that is not on screen yet (the server is still loading, a direct ?tab=security load) is
+// scrolled to and focused as soon as it mounts.
+let pendingPart: 'review' | 'security' | null = null
+async function scrollToPart(part: 'review' | 'security') {
+  await nextTick()
+  const el = part === 'security' ? scansPart.value : reviewPart.value
+  if (!el) { pendingPart = part; return }
+  pendingPart = null
+  el.scrollIntoView?.({ block: 'start' })
+  el.focus?.({ preventScroll: true })
+}
+watch([scansPart, reviewPart], () => { if (pendingPart) void scrollToPart(pendingPart) })
+async function jumpToPart(part: 'review' | 'security') {
+  if (activeTab.value !== part) {
+    activeTab.value = part
+    if (part === 'security') { void loadScannerNames(); void loadScanReport() }
+  }
+  await scrollToPart(part)
+}
+watch(activeTab, (tab) => {
+  // Landing on the scan part (a ?tab=security link, a banner action) scrolls to it.
+  if (tab === 'security') void scrollToPart('security')
+})
+
+// The primary action: health.actions[0] with its Spec 109 label (FR-021 rules, shared with the card).
+const primaryAction = computed<string>(() => {
+  const s = server.value
+  if (!s) return ''
+  const health = s.health
+  let action = ''
+  if (health) {
+    if (health.actions && health.actions.length > 0) action = health.actions[0]
+    else if (health.action) action = health.action
+  } else if (signInState.value) {
+    action = 'login'
+  }
+  // Stale-login guard: a disable lands before `health` catches up.
+  if (action === 'login' && !s.enabled) return 'enable'
+  return action
+})
+const primaryLabel = computed(() => healthActionLabel(primaryAction.value))
+const primaryKind = computed(() => {
+  switch (primaryAction.value) {
+    case 'login': case 'restart': case 'enable': case 'approve':
+    case 'set_secret': case 'configure': case 'edit_url': case 'view_logs':
+      return primaryAction.value
+    default:
+      return ''
+  }
+})
+async function runPrimaryAction() {
+  const s = server.value
+  if (!s) return
+  switch (primaryAction.value) {
+    case 'login': await triggerOAuth(); break
+    case 'restart': await restartServer(); break
+    case 'enable': await toggleEnabled(); break
+    case 'approve': handleApproveClick(); break
+    case 'set_secret': void router.push('/secrets'); break
+    case 'configure': activeTab.value = 'config'; break
+    case 'edit_url': {
+      // The endpoint editor opens in place (the same action as ?focus=endpoint on a fresh load).
+      activeTab.value = 'config'
+      await nextTick()
+      if (server.value?.url && !editingUrl.value) { endpointHighlighted.value = true; startEditUrl() }
+      break
+    }
+    case 'view_logs': activeTab.value = 'logs'; break
+    default: break
+  }
+}
+
+// One-line reason beside the status pill (FR-030): the health summary, else the diagnostic message,
+// else the raw error's first line. Never the full text; the Full diagnostic control has it.
+const reasonLine = computed(() => {
+  const s = server.value
+  if (!s) return ''
+  // The same pure function as the Servers table (FR-022): a short plain sentence, never the raw error.
+  const label = s.health?.status ? healthStatusLabel(s.health.status) : statusBadgeText.value
+  // A quarantined server's connection fault is by design (the page suppresses it): its reason is the core's summary.
+  const line = quarantineSuppressesFaultAlerts.value ? (s.health?.summary || label) : serverReason(s)
+  return line && line.toLowerCase() !== label.toLowerCase() ? line : ''
+})
+
+const alertsRegionHasContent = computed(() => {
+  const s = server.value
+  if (!s) return false
+  return !!signInState.value || showDiagnosticPanel.value || (!!s.last_error && !quarantineSuppressesFaultAlerts.value)
+})
+
+// FR-035: a summary line in the first screen reveals and focuses what is below it, even where a filter hid it.
+async function goToAttention(target: AttentionTarget) {
+  if (target === 'held-tools') {
+    if (activeTab.value !== 'review' && activeTab.value !== 'security') activeTab.value = 'review'
+    await nextTick()
+    await reviewScreen.value?.revealHeld?.()
+    return
+  }
+  if (target === 'scan') {
+    await jumpToPart('security')
+    return
+  }
+  await nextTick()
+  const el = alertsRegion.value
+  el?.scrollIntoView?.({ block: 'start' })
+  const focusable = el?.querySelector<HTMLElement>('button, a[href], [tabindex]:not([tabindex="-1"])')
+  ;(focusable ?? el)?.focus?.({ preventScroll: true })
+}
 
 // Tools
 const serverTools = ref<Tool[]>([])
@@ -2127,9 +2204,9 @@ const adminStateTone = computed(() => {
     case 'Quarantined':
       return 'text-warning'
     case 'Disabled':
-      return 'text-base-content/50'
+      return 'text-base-content/60'
     default:
-      return 'text-secondary'
+      return ''
   }
 })
 
@@ -2367,12 +2444,12 @@ function quarantineBannerHas(action: QuarantineBannerAction): boolean {
 
 const quarantineBannerAlertClass = computed(() => {
   switch (quarantineBanner.value?.tone) {
-    case 'info': return 'alert-info'
-    case 'threat': return 'alert-error'
-    // A failed scan is a precaution, not a verdict: warning tone, never error.
+    case 'info': return 'tone-busy'
+    case 'threat': return 'tone-error'
+    // A failed scan is a precaution, not a verdict: review tone, never error.
     case 'precaution':
     case 'warning':
-    default: return 'alert-warning'
+    default: return 'tone-review'
   }
 })
 
@@ -2524,7 +2601,7 @@ watch(
     // synchronously, so readTabFromQuery never judges ?tab=skills by it.
     void checkSkillsTab()
     readTabFromQuery()
-    if (activeTab.value === 'security') {
+    if (reviewScansActive.value) {
       loadScannerNames()
     }
     void loadServerDetails().then(() => {
@@ -4481,7 +4558,7 @@ onMounted(() => {
     // whose description carries the flagged words.
     applyToolFocus()
     // Pre-load scanner names if opening security tab
-    if (activeTab.value === 'security') {
+    if (reviewScansActive.value) {
       loadScannerNames()
     }
     // Spec 088: the quarantine banner (US3) and every hold-evidence report link
