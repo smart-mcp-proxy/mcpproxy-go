@@ -116,10 +116,11 @@ const isExpanded = ref(props.defaultExpanded)
 
 const root = ref<HTMLElement | null>(null)
 const toggleExpanded = () => {
+  const hadFocus = !!root.value?.contains(document.activeElement)
   isExpanded.value = !isExpanded.value
   // The button is replaced by its other state: hand focus to the new one so a
   // second Space/Enter collapses again.
-  void nextTick(() => root.value?.querySelector<HTMLElement>('[data-test="hints-toggle"]')?.focus())
+  if (hadFocus) void nextTick(() => root.value?.querySelector<HTMLElement>('[data-test="hints-toggle"]')?.focus())
 }
 
 const getSummaryText = () => {
