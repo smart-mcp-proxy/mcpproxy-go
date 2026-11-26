@@ -16,7 +16,10 @@ the [Activity Log](activity-log.md): where the activity log is a rich, queryable
 history read back through REST/CLI, the audit log exists only to answer "who called
 what, and what happened" from an external file or stream, with a stable schema a
 security reviewer signs off once. Since Spec 133 it also answers "who changed the
-rules": every committed administrative change writes an `admin_action` line.
+rules" with `admin_action` lines. They ship slice by slice: today only agent-token
+changes are recorded (see [Administrative changes](#administrative-changes-admin_action)),
+so the absence of a line for any other change means "not audited yet", not a
+logging failure.
 
 There is **no** REST, SSE, MCP, CLI or Web UI surface that reads or lists audit
 lines. The file or stdout stream is the only reader's surface — point a log shipper
@@ -121,7 +124,8 @@ and is logged at most once per minute. There is no `audit_log.strict` mode.
 After a short write the sink resumes at a record boundary: before the next record
 it writes a lone newline, so a torn tail is never glued onto the next line; while
 that repair fails it appends nothing. On open it checks that the file ends in a
-newline and repairs it the same way. A line the builder rejects is not written;
+newline and repairs it the same way, in that file, before anything can rotate it
+(a write-only file, which the daemon cannot read, is not checked on open). A line the builder rejects is not written;
 rejections are counted apart from write failures and reported by `mcpproxy
 doctor`. Counters count attempts, not records: verify records by reading the file,
 and have the shipper skip a malformed line independently (below).
@@ -383,8 +387,10 @@ different, case by case:
   constraint on those keys lives inside the `admin_action` block;
 - a shipper filtering on `schema_version == 1` receives `admin_action` lines with
   no change on its side;
-- a consumer should **route or filter on `event` before validating**, and ignore
-  values it does not know;
+- a consumer **must route or filter on `event` before validating**, and ignore
+  values it does not know — a shipper that validates every v1 line with one
+  cached validator rejects the first `admin_action` line even though
+  `schema_version` is unchanged;
 - a consumer that validates against a **cached copy** of the v1 schema must refresh
   it: `event` and `caller.kind` are closed enums, so the old copy rejects
   `admin_action` lines (and `caller.kind: none` / `cli_offline`).

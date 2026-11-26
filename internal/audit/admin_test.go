@@ -358,3 +358,37 @@ func TestChange_PointerSegmentRules(t *testing.T) {
 		t.Fatalf("mask before cap: %v", straddle)
 	}
 }
+
+func TestChange_DynamicSegmentOnlyWhereAllowed(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
+	in.Changes = []audit.Change{audit.Withheld(audit.Path("args", "positional-password"), audit.WithheldValue)}
+	line, obj := mustAdmin(t, in)
+	assertSentinelAbsent(t, line, "positional-password")
+	ch := obj["changes"].([]interface{})[0].(map[string]interface{})
+	if ch["field"] != "/args" || ch["field_masked"] != true {
+		t.Fatalf("a segment below a non-map root collapses to the root: %v", ch)
+	}
+}
+
+func TestChange_UnicodePointerWithinCapsKeepsItsKey(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
+	key := strings.Repeat("\U0001F600", 64)
+	in.Changes = []audit.Change{audit.Withheld(audit.Path("env", key), audit.WithheldSecret)}
+	_, obj := mustAdmin(t, in)
+	ch := obj["changes"].([]interface{})[0].(map[string]interface{})
+	if ch["field"] != "/env/"+key {
+		t.Fatalf("a 69-character pointer is within the 256-character cap: %v", ch["field"])
+	}
+}
+
+func TestNewAdminAction_CapCannotDropTheRequiredPrefix(t *testing.T) {
+	in := tokenRotateInput()
+	for i := 0; i < 130; i++ {
+		in.Changes = append(in.Changes, audit.Withheld(audit.Path("env", "K"+strings.Repeat("a", i%5)+string(rune('a'+i%26))+string(rune('a'+i/26))), audit.WithheldSecret))
+	}
+	if _, err := audit.NewAdminAction(in); err == nil {
+		t.Fatal("a line whose caps drop the required /token_prefix entry must be rejected")
+	}
+}

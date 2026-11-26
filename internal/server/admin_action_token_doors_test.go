@@ -10,10 +10,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -179,6 +181,10 @@ func TestAdminActionDoors_RESTTokenDoors(t *testing.T) {
 	lines = e.adminLines(&seen)
 	require.Len(t, lines, 1)
 	require.Equal(t, "token.revoke", lines[0]["action"])
+	require.Equal(t, "req-revoke-1", lines[0]["request_id"])
+	require.Equal(t, map[string]interface{}{"kind": "api_key"}, lines[0]["caller"])
+	require.Equal(t, ref, lines[0]["target"].(map[string]interface{})["ref"])
+	require.Equal(t, 1, e.activityRequestIDs("req-revoke-1"))
 	code, _ = e.rest(http.MethodDelete, "/api/v1/tokens/ci-bot", "req-revoke-2", nil)
 	require.Equal(t, http.StatusNoContent, code)
 	require.Empty(t, e.adminLines(&seen), "an already revoked token writes no line")
@@ -195,6 +201,8 @@ func TestAdminActionDoors_RESTTokenDoors(t *testing.T) {
 	require.Len(t, lines, 1)
 	require.Equal(t, "token.delete", lines[0]["action"])
 	require.Equal(t, ref, lines[0]["target"].(map[string]interface{})["ref"])
+	require.Equal(t, "req-delete-1", lines[0]["request_id"])
+	require.Equal(t, map[string]interface{}{"kind": "api_key"}, lines[0]["caller"])
 	code, _ = e.rest(http.MethodDelete, "/api/v1/tokens/ci-bot/permanent", "", nil)
 	require.Equal(t, http.StatusNotFound, code)
 	require.Empty(t, e.adminLines(&seen))
@@ -324,5 +332,39 @@ func TestAdminActionDoors_SaturatedBus(t *testing.T) {
 func adminTestContext() context.Context {
 	ctx := auth.WithAuthContext(context.Background(), auth.AdminContext())
 	ctx = reqcontext.WithRequestMeta(ctx, reqcontext.RequestMeta{Mount: reqcontext.MountAPI, Surface: "api"})
-	return ctx
+	return reqcontext.WithRequestID(ctx, "req-saturated")
+}
+
+// failingAuditSink fails every write, as a full disk would.
+type failingAuditSink struct{ failures atomic.Uint64 }
+
+func (s *failingAuditSink) Write([]byte) error {
+	s.failures.Add(1)
+	return errors.New("no space left on device")
+}
+func (s *failingAuditSink) WriteFailures() uint64 { return s.failures.Load() }
+func (s *failingAuditSink) SanitizerHits() uint64 { return 0 }
+func (s *failingAuditSink) Close() error          { return nil }
+
+// US1 scenario 4 / FR-017: with the audit disk full the change still
+// succeeds, and the failure is counted (doctor reports the counter).
+func TestAdminActionDoors_WriteFailureNeverRefusesTheChange(t *testing.T) {
+	sink := &failingAuditSink{}
+	env := NewTestEnvironmentWithOptions(t, TestEnvironmentOptions{
+		Mutate:        func(cfg *config.Config, _ string) { cfg.APIKey = adminE2EAPIKey },
+		ServerOptions: []ServerOption{WithAuditSink(sink)},
+	})
+	t.Cleanup(env.Cleanup)
+	e := &adminE2E{t: t, env: env, sink: &recordingAuditSink{}, base: strings.TrimSuffix(env.proxyAddr, "/mcp")}
+	code, body := e.rest(http.MethodPost, "/api/v1/tokens", "", map[string]any{"name": "full-disk", "expires_in": "1h"})
+	require.Equal(t, http.StatusCreated, code, string(body))
+	code, _ = e.rest(http.MethodDelete, "/api/v1/tokens/full-disk", "", nil)
+	require.Equal(t, http.StatusNoContent, code, "the revoke succeeds with every audit write failing")
+	stored, _ := env.proxyServer.runtime.StorageManager().GetAgentTokenByName("full-disk")
+	require.True(t, stored.Revoked)
+	require.GreaterOrEqual(t, sink.WriteFailures(), uint64(2), "both attempts were made and counted")
+	code, diag := e.rest(http.MethodGet, "/api/v1/diagnostics", "", nil)
+	require.Equal(t, http.StatusOK, code)
+	require.Contains(t, string(diag), "audit_log: ", "doctor reports the audit write failures")
+	require.Contains(t, string(diag), "write failures since start")
 }

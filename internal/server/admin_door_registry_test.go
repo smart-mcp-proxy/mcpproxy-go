@@ -11,7 +11,7 @@ import (
 )
 
 // Spec 133 FR-022: every built-in MCP tool registered on any routing surface
-// (with the optional surfaces switched on) is classified in the door
+// (with the optional surfaces switched on, and a lazily built single-server surface) is classified in the door
 // registry, and every MCP row still names a registered tool. Per-surface
 // comparison and the admin tools' operation descriptors land in PR-1b.
 func TestAdminDoorRegistry_CoversEveryBuiltinTool(t *testing.T) {
@@ -29,6 +29,13 @@ func TestAdminDoorRegistry_CoversEveryBuiltinTool(t *testing.T) {
 				names[n] = true
 			}
 		}
+	}
+	// The single-server surface (/mcp/s/<name>) is built lazily; build one.
+	sp, _, _ := newProfilesV3FixtureUpstreams(t, nil)
+	single := sp.SingleServerMCP("github")
+	require.NotNil(t, single, "single-server surface must be constructible in the fixture")
+	for n := range single.ListTools() {
+		names[n] = true
 	}
 	var doors []string
 	for n := range names {

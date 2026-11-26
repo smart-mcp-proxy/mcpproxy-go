@@ -9,6 +9,7 @@ package audit
 // mid-write.
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -230,7 +231,13 @@ func NewFileSink(path string, maxSizeMB, maxBackups, maxAgeDays int, compress bo
 	}
 	torn, err := endsMidRecord(path)
 	if err != nil {
-		return nil, err
+		if !errors.Is(err, os.ErrPermission) {
+			return nil, err
+		}
+		// A write-only audit file (the daemon may append but not read)
+		// cannot have its tail checked. It keeps working as before; the
+		// in-memory repair after a short write still applies.
+		torn = false
 	}
 	lj := &lumberjack.Logger{
 		Filename:   path,

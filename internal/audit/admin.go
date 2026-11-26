@@ -360,6 +360,11 @@ func NewAdminAction(in AdminActionInput) (Line, error) {
 	if err := fitAdminBudget(f, len(in.Changes)); err != nil {
 		return Line{}, err
 	}
+	// The caps can drop entries: the required display prefix must survive
+	// them, or the line is rejected rather than written incomplete.
+	if err := checkRenderedPrefixes(in.Action, f); err != nil {
+		return Line{}, err
+	}
 	return Line{fields: f}, nil
 }
 
@@ -546,4 +551,26 @@ func checkRequiredPrefixes(action string, changes []Change) error {
 		}
 	}
 	return fmt.Errorf("audit.NewAdminAction: %s requires its /token_prefix display-prefix entry", action)
+}
+
+// checkRenderedPrefixes re-checks the required /token_prefix entry on the
+// rendered (capped) changes.
+func checkRenderedPrefixes(action string, f map[string]interface{}) error {
+	want, ok := requiredPrefixSides[action]
+	if !ok {
+		return nil
+	}
+	entries, _ := f["changes"].([]interface{})
+	for _, e := range entries {
+		m, _ := e.(map[string]interface{})
+		if m["field"] != "/token_prefix" {
+			continue
+		}
+		_, hasBefore := m["before"]
+		_, hasAfter := m["after"]
+		if (!want.before || hasBefore) && (!want.after || hasAfter) {
+			return nil
+		}
+	}
+	return fmt.Errorf("audit.NewAdminAction: %s lost its /token_prefix entry to the size caps", action)
 }

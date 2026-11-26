@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // FieldPath is a structured JSON Pointer path (RFC 6901), kept as segments so
@@ -67,6 +68,13 @@ const (
 // a change is reported at the fixed parent (contract §Changes).
 var opaqueRoots = map[string]bool{"server_edition": true}
 
+// nestedRoots are the only roots below which a path may continue (contract
+// §Changes, FR-015b): map keys under env/headers, server and profile names,
+// and the fixed oauth sub-schema. Anywhere else a deeper path is collapsed
+// to its fixed root, so a value smuggled in as a path segment never
+// serializes (a positional argument under /args, say).
+var nestedRoots = map[string]bool{"env": true, "headers": true, "oauth": true, "mcpServers": true, "profiles": true}
+
 // render returns the escaped pointer and whether it was shortened, masked or
 // collapsed to a parent (field_masked). Order per segment (contract §Size):
 // private-key check on the original, mask, then the 64-character cap, then
@@ -75,7 +83,7 @@ var opaqueRoots = map[string]bool{"server_edition": true}
 func (f FieldPath) render() (string, bool) {
 	segs := f.segs
 	masked := false
-	if len(segs) > 1 && opaqueRoots[segs[0]] {
+	if len(segs) > 1 && (opaqueRoots[segs[0]] || !nestedRoots[segs[0]]) {
 		segs = segs[:1]
 		masked = true
 	}
@@ -104,7 +112,7 @@ func (f FieldPath) render() (string, bool) {
 		// to report; the root pointer names "a field changed".
 		return "/", true
 	}
-	if len(out) > maxPointerLength && len(segs) > 0 {
+	if utf8.RuneCountInString(out) > maxPointerLength && len(segs) > 0 {
 		return "/" + escapeSeg(segs[0]), true
 	}
 	return out, masked
