@@ -23,7 +23,7 @@ func tokenRotateInput() audit.AdminActionInput {
 		ClientName:    "cli/0.77.0",
 		ClientSurface: "cli",
 		Action:        audit.ActionTokenRotate,
-		Target:        audit.AgentTokenTarget("ci-bot", "tok_7Q2M9X4KAB", ""),
+		Target:        audit.AgentTokenTarget("ci-bot", "tok_7q2m9x4kab", ""),
 		Changes: []audit.Change{
 			audit.Literal(audit.FieldTokenPrefix, audit.TokenPrefix("mcp_agt_a1b2"), audit.TokenPrefix("mcp_agt_9f8e")),
 		},
@@ -43,7 +43,7 @@ func mustAdmin(t *testing.T, in audit.AdminActionInput) (audit.Line, map[string]
 
 func TestNewAdminAction_TokenRotateMatchesContractExample(t *testing.T) {
 	_, obj := mustAdmin(t, tokenRotateInput())
-	want := `{"action":"token.rotate","caller":{"kind":"socket"},"changes":[{"after":"mcp_agt_9f8e","before":"mcp_agt_a1b2","field":"/token_prefix"}],"client":{"name":"cli/0.77.0","surface":"cli"},"event":"admin_action","origin":"socket","outcome":"success","request_id":"01JD5QREQ","schema_version":1,"source":"api","target":{"kind":"agent_token","name":"ci-bot","ref":"tok_7Q2M9X4KAB"},"ts":"2026-09-17T10:00:00.000000001Z"}`
+	want := `{"action":"token.rotate","caller":{"kind":"socket"},"changes":[{"after":"mcp_agt_9f8e","before":"mcp_agt_a1b2","field":"/token_prefix"}],"client":{"name":"cli/0.77.0","surface":"cli"},"event":"admin_action","origin":"socket","outcome":"success","request_id":"01JD5QREQ","schema_version":1,"source":"api","target":{"kind":"agent_token","name":"ci-bot","ref":"tok_7q2m9x4kab"},"ts":"2026-09-17T10:00:00.000000001Z"}`
 	got, _ := json.Marshal(obj)
 	if string(got) != want {
 		t.Fatalf("line mismatch\n got: %s\nwant: %s", got, want)
@@ -157,7 +157,7 @@ func TestNewAdminAction_ProxyTokenShapesMasked(t *testing.T) {
 		"mcp_ort_0123456789abcdef0123",
 	} {
 		in := tokenRotateInput()
-		in.Target = audit.AgentTokenTarget("x-"+secret, "tok_7Q2M9X4KAB", "")
+		in.Target = audit.AgentTokenTarget("x-"+secret, "tok_7q2m9x4kab", "")
 		line, _ := mustAdmin(t, in)
 		assertSentinelAbsent(t, line, secret)
 	}
@@ -172,7 +172,7 @@ func TestNewAdminAction_ProxyTokenShapesMasked(t *testing.T) {
 func TestNewAdminAction_PrivateKeyLabelWithheld(t *testing.T) {
 	pem := "-----BEGIN RSA PRIVATE KEY-----MIIEsecretbody"
 	in := tokenRotateInput()
-	in.Target = audit.AgentTokenTarget(pem, "tok_7Q2M9X4KAB", "")
+	in.Target = audit.AgentTokenTarget(pem, "tok_7q2m9x4kab", "")
 	in.ClientName = pem
 	line, obj := mustAdmin(t, in)
 	assertSentinelAbsent(t, line, "MIIEsecretbody")
@@ -190,7 +190,7 @@ func TestNewAdminAction_LabelCappedAt64AfterMasking(t *testing.T) {
 	// A credential that straddles the 64-character cap is masked before the cut.
 	name := strings.Repeat("n", 50) + "ghp_0123456789abcdefghij"
 	in := tokenRotateInput()
-	in.Target = audit.AgentTokenTarget(name, "tok_7Q2M9X4KAB", "")
+	in.Target = audit.AgentTokenTarget(name, "tok_7q2m9x4kab", "")
 	line, obj := mustAdmin(t, in)
 	assertSentinelAbsent(t, line, "ghp_0123456789")
 	got := obj["target"].(map[string]interface{})["name"].(string)
@@ -390,5 +390,31 @@ func TestNewAdminAction_CapCannotDropTheRequiredPrefix(t *testing.T) {
 	}
 	if _, err := audit.NewAdminAction(in); err == nil {
 		t.Fatal("a line whose caps drop the required /token_prefix entry must be rejected")
+	}
+}
+
+func TestMask_ProxyTokenAfterPATIsFullyMasked(t *testing.T) {
+	in := tokenRotateInput()
+	in.RequestID = "github_pat_11ABCDEFGHIJKLMNOPQRSTUVmcp_agt_secret-tail-0123456789"
+	line, _ := mustAdmin(t, in)
+	assertSentinelAbsent(t, line, "secret-tail-0123456789")
+}
+
+func TestTarget_RefMustBeStable(t *testing.T) {
+	in := tokenRotateInput()
+	in.Target = audit.AgentTokenTarget("ci", "tok_AKIAABCDEFGH", "")
+	if _, err := audit.NewAdminAction(in); err == nil {
+		t.Fatal("an upper-case ref (which the sanitizer could rewrite) must be rejected")
+	}
+}
+
+func TestChange_OAuthPathStopsAtTheFixedField(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
+	in.Changes = []audit.Change{audit.Withheld(audit.Path("oauth", "client_secret", "the-secret-value"), audit.WithheldSecret)}
+	line, obj := mustAdmin(t, in)
+	assertSentinelAbsent(t, line, "the-secret-value")
+	if f := obj["changes"].([]interface{})[0].(map[string]interface{})["field"]; f != "/oauth/client_secret" {
+		t.Fatalf("got %v", f)
 	}
 }

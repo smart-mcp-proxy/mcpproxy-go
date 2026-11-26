@@ -188,3 +188,27 @@ func TestNewFileSink_TornFileAtSizeLimitIsRepairedInPlace(t *testing.T) {
 		}
 	}
 }
+
+func TestNewFileSink_WriteOnlyFileGetsABoundaryAtOpen(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root can read a write-only file")
+	}
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	if err := os.WriteFile(path, []byte("{\"seq\":1}\n{\"se"), 0o200); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewFileSink(path, 10, 1, 1, false)
+	if err != nil {
+		t.Fatalf("a write-only file keeps working: %v", err)
+	}
+	if err := s.Write([]byte(`{"seq":2}`)); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+	_ = os.Chmod(path, 0o600)
+	raw, _ := os.ReadFile(path)
+	recs := assertWellDelimited(t, raw)
+	if len(recs) != 2 || recs[1] != `{"seq":2}` {
+		t.Fatalf("the new record must start on its own line: %q", raw)
+	}
+}

@@ -125,7 +125,8 @@ After a short write the sink resumes at a record boundary: before the next recor
 it writes a lone newline, so a torn tail is never glued onto the next line; while
 that repair fails it appends nothing. On open it checks that the file ends in a
 newline and repairs it the same way, in that file, before anything can rotate it
-(a write-only file, which the daemon cannot read, is not checked on open). A line the builder rejects is not written;
+(a write-only file, which the daemon cannot read, gets one newline at open instead:
+an empty line on a clean file, which shippers skip). A line the builder rejects is not written;
 rejections are counted apart from write failures and reported by `mcpproxy
 doctor`. Counters count attempts, not records: verify records by reading the file,
 and have the shipper skip a malformed line independently (below).
@@ -155,7 +156,7 @@ entry for this page — see `verification.md`.)
 | `schema_version` | ✔ | Always `1` |
 | `ts` | ✔ | RFC 3339, UTC (`Z`), fixed nine fractional digits: `2006-01-02T15:04:05.000000000Z` — not `RFC3339Nano`, which trims trailing zeros |
 | `event` | ✔ | `authz` \| `tool_call` \| `auth_event` \| `admin_action` |
-| `request_id` | ✔ (optional on `admin_action`) | Activity request id — the join key to `mcpproxy activity show <id>` / `activity list --request-id <id>`. On `admin_action` it is present iff a request caused the effect |
+| `request_id` | ✔ (optional on `admin_action`) | Activity request id — the join key to `mcpproxy activity list --request-id <id>` (`activity show` takes the activity record's own id, not this one). On `admin_action` it is present iff a request caused the effect |
 | `transport_request_id` | optional | REST only; equals `request_id` on REST-originated direct dispatch |
 | `parent_id` | optional | Nested `code_execution` children only — the wrapper's activity request id (a correlation key; the wrapper writes no line of its own) |
 | `session_id`, `work_session_id` | optional | Activity resolver values |
@@ -268,7 +269,7 @@ writes no line yet.
 Example (the CLI over the tray socket rotating a token):
 
 ```json
-{"schema_version":1,"ts":"2026-11-24T10:15:02.123456789Z","event":"admin_action","origin":"socket","source":"api","request_id":"01JD5QX7","caller":{"kind":"socket"},"client":{"name":"cli/0.77.0","surface":"cli"},"action":"token.rotate","target":{"kind":"agent_token","name":"ci-bot","ref":"tok_7Q2M9X4K"},"outcome":"success","changes":[{"field":"/token_prefix","before":"mcp_agt_a1b2","after":"mcp_agt_9f8e"}]}
+{"schema_version":1,"ts":"2026-11-24T10:15:02.123456789Z","event":"admin_action","origin":"socket","source":"api","request_id":"01JD5QX7","caller":{"kind":"socket"},"client":{"name":"cli/0.77.0","surface":"cli"},"action":"token.rotate","target":{"kind":"agent_token","name":"ci-bot","ref":"tok_7q2m9x4k"},"outcome":"success","changes":[{"field":"/token_prefix","before":"mcp_agt_a1b2","after":"mcp_agt_9f8e"}]}
 ```
 
 | Key | Required | Notes |
@@ -313,6 +314,13 @@ not — check the activity log or the stored state as well.
 by `ts`, not by position in the file.
 
 ## Caller identity
+
+The table below is the rule for `authz`, `tool_call` and `auth_event`.
+`admin_action` differs in three ways (its schema block states them): an agent
+token may be named by `token_name_withheld: true` plus `ref` instead of
+`token_name`; an owned caller's `user_email` is omitted when it is not a valid
+address (`user_id` still requires `role` and `provider`); and `session_user`,
+`none` and `cli_offline` are legal.
 
 `caller.kind` is derived from `auth.AuthContextFromContext(ctx)` +
 `transport.GetConnectionSource(ctx)` — never from arguments, a caller-supplied

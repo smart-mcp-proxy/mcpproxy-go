@@ -39,6 +39,13 @@ func truncateField(s string) string {
 // e.g. sk-ant- before sk-) so a longer, more specific match is consumed
 // before a shorter pattern could also match a prefix of it.
 var credentialPatterns = []*regexp.Regexp{
+	// Spec 133 FR-016: the proxy's own token shapes (agent token, client
+	// credential, browser-login access and refresh tokens) first, so a
+	// broader pattern that stops at '-' cannot consume their prefix and
+	// leave the secret tail; sixteen or more characters after the kind
+	// prefix, so a display token_prefix (8–16 characters) never matches.
+	// GitHub fine-grained PATs (github_pat_) follow the classic gh*_ shape.
+	regexp.MustCompile(`mcp_(agt|cli|oat|ort)_[A-Za-z0-9_-]{16,}`),
 	regexp.MustCompile(`sk-ant-[A-Za-z0-9-]{10,}`),
 	// OpenAI keys: legacy sk-{48}, and current sk-proj-/sk-svcacct-/sk-admin-
 	// forms, which insert a hyphen-delimited segment before the random
@@ -46,12 +53,7 @@ var credentialPatterns = []*regexp.Regexp{
 	// matched the legacy form).
 	regexp.MustCompile(`sk-[A-Za-z0-9_-]{16,}`),
 	regexp.MustCompile(`gh[poushr]_[A-Za-z0-9]{16,}`),
-	// Spec 133 FR-016: GitHub fine-grained PATs and the proxy's own token
-	// shapes (agent token, client credential, browser-login access and
-	// refresh tokens). Sixteen or more characters after the kind prefix, so a
-	// display token_prefix (8–16 characters in all) never matches.
 	regexp.MustCompile(`github_pat_[A-Za-z0-9_]{22,}`),
-	regexp.MustCompile(`mcp_(agt|cli|oat|ort)_[A-Za-z0-9_-]{16,}`),
 	regexp.MustCompile(`AKIA[0-9A-Za-z]{8,}`),
 	regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`),
 	regexp.MustCompile(`Bearer\s+[A-Za-z0-9\-_.~+/]+=*`),

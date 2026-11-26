@@ -75,6 +75,11 @@ var opaqueRoots = map[string]bool{"server_edition": true}
 // serializes (a positional argument under /args, say).
 var nestedRoots = map[string]bool{"env": true, "headers": true, "oauth": true, "mcpServers": true, "profiles": true}
 
+// maxDepth bounds how far a path may go below a root whose children are map
+// keys or fixed fields: one key under env/headers, one fixed field under
+// oauth. A deeper path collapses to that depth.
+var maxDepth = map[string]int{"env": 2, "headers": 2, "oauth": 2}
+
 // render returns the escaped pointer and whether it was shortened, masked or
 // collapsed to a parent (field_masked). Order per segment (contract §Size):
 // private-key check on the original, mask, then the 64-character cap, then
@@ -85,6 +90,10 @@ func (f FieldPath) render() (string, bool) {
 	masked := false
 	if len(segs) > 1 && (opaqueRoots[segs[0]] || !nestedRoots[segs[0]]) {
 		segs = segs[:1]
+		masked = true
+	}
+	if d, ok := maxDepth[segs[0]]; ok && len(segs) > d {
+		segs = segs[:d]
 		masked = true
 	}
 	var b strings.Builder

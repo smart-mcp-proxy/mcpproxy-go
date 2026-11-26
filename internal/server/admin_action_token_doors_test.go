@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	goruntime "runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -25,10 +27,12 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -41,7 +45,7 @@ type adminE2E struct {
 	base string
 }
 
-func newAdminE2E(t *testing.T) *adminE2E {
+func newAdminE2E(t *testing.T, extra ...func(*config.Config)) *adminE2E {
 	t.Helper()
 	e := &adminE2E{t: t, sink: &recordingAuditSink{}}
 	e.env = NewTestEnvironmentWithOptions(t, TestEnvironmentOptions{
@@ -49,6 +53,9 @@ func newAdminE2E(t *testing.T) *adminE2E {
 			cfg.APIKey = adminE2EAPIKey
 			cfg.RequireMCPAuth = true
 			cfg.Profiles = append(cfg.Profiles, config.ProfileConfig{Name: "ro", Servers: []string{"*"}})
+			for _, f := range extra {
+				f(cfg)
+			}
 		},
 		ServerOptions: []ServerOption{WithAuditSink(e.sink)},
 	})
@@ -166,13 +173,12 @@ func TestAdminActionDoors_RESTTokenDoors(t *testing.T) {
 	require.Equal(t, createdPrefix, ch["before"], "before is the prefix the create line recorded")
 	var rotated struct {
 		Data struct {
-			TokenPrefix string `json:"token_prefix"`
+			Token string `json:"token"`
 		} `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(body, &rotated))
-	if rotated.Data.TokenPrefix != "" {
-		require.Equal(t, rotated.Data.TokenPrefix, ch["after"], "after is the prefix the regenerate returned")
-	}
+	require.NotEmpty(t, rotated.Data.Token, "regenerate returns the new secret once")
+	require.Equal(t, auth.TokenPrefix(rotated.Data.Token), ch["after"], "after is the display prefix of the secret the regenerate returned")
 	require.Equal(t, 1, e.activityRequestIDs("req-rotate-1"))
 
 	// DELETE /tokens/{name} → token.revoke; again → no line.
@@ -367,4 +373,41 @@ func TestAdminActionDoors_WriteFailureNeverRefusesTheChange(t *testing.T) {
 	require.Equal(t, http.StatusOK, code)
 	require.Contains(t, string(diag), "audit_log: ", "doctor reports the audit write failures")
 	require.Contains(t, string(diag), "write failures since start")
+}
+
+// US1 scenario 1: the real CLI HTTP client over the tray socket — caller
+// socket, origin socket, client.surface cli, the CLI's X-MCPProxy-Client.
+func TestAdminActionDoors_CLIOverTraySocket(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("named-pipe transport; the socket path is the Unix tray transport")
+	}
+	e := newAdminE2E(t, func(cfg *config.Config) { cfg.EnableSocket = true })
+	endpoint := socket.GetDefaultSocketPath(e.env.proxyServer.runtime.Config().DataDir)
+	socketPath := strings.TrimPrefix(endpoint, "unix://")
+	require.Eventually(t, func() bool { _, err := os.Stat(socketPath); return err == nil }, 10*time.Second, 50*time.Millisecond, "tray socket")
+	cli := cliclient.NewClient(endpoint, nil)
+	seen := len(e.sink.snapshot())
+
+	resp, err := cli.DoRaw(context.Background(), http.MethodPost, "/api/v1/tokens", []byte(`{"name":"sock-bot","expires_in":"1h"}`))
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	resp, err = cli.DoRaw(context.Background(), http.MethodPost, "/api/v1/tokens/sock-bot/regenerate", nil)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	lines := e.adminLines(&seen)
+	require.Len(t, lines, 2)
+	rot := lines[1]
+	require.Equal(t, "token.rotate", rot["action"])
+	require.Equal(t, map[string]interface{}{"kind": "socket"}, rot["caller"])
+	require.Equal(t, "socket", rot["origin"])
+	require.Equal(t, "api", rot["source"])
+	client := rot["client"].(map[string]interface{})
+	require.Equal(t, "cli", client["surface"])
+	require.True(t, strings.HasPrefix(client["name"].(string), "cli/"), "the CLI's own X-MCPProxy-Client header")
+	rid, _ := rot["request_id"].(string)
+	require.NotEmpty(t, rid)
+	require.Equal(t, 1, e.activityRequestIDs(rid))
 }

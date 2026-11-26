@@ -290,7 +290,7 @@ func baseAdminFixture(overrides map[string]interface{}) map[string]interface{} {
 		"schema_version": 1, "ts": "2026-09-17T10:00:00.000000001Z", "event": "admin_action",
 		"request_id": "req-1", "origin": "local", "source": "api", "caller": map[string]interface{}{"kind": "api_key"},
 		"action": "token.revoke", "outcome": "success",
-		"target":  map[string]interface{}{"kind": "agent_token", "name": "ci", "ref": "tok_ABCDEFGH"},
+		"target":  map[string]interface{}{"kind": "agent_token", "name": "ci", "ref": "tok_abcdefgh"},
 		"changes": []interface{}{map[string]interface{}{"field": "/token_prefix", "before": "mcp_agt_ab12"}},
 	}
 	for k, v := range overrides {
@@ -309,9 +309,9 @@ func TestAdminActionSchema_PositiveAndNegative(t *testing.T) {
 		baseAdminFixture(nil),
 		baseAdminFixture(map[string]interface{}{"request_id": nil, "source": "internal", "caller": map[string]interface{}{"kind": "internal"}, "trigger": "policy", "policy": "rotation_reconcile"}),
 		baseAdminFixture(map[string]interface{}{"request_id": nil, "caller": map[string]interface{}{"kind": "cli_offline"}}),
-		baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "agent_token", "token_prefix": "mcp_agt_ab12", "token_name_withheld": true, "ref": "cli_ABCDEFGH"}}),
+		baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "agent_token", "token_prefix": "mcp_agt_ab12", "token_name_withheld": true, "ref": "cli_abcdefgh"}}),
 		baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "session_user", "user_id": "u1", "role": "user", "provider": "oidc"}}),
-		baseAdminFixture(map[string]interface{}{"target": map[string]interface{}{"kind": "agent_token", "name_withheld": true, "ref": "tok_ABCDEFGH"}}),
+		baseAdminFixture(map[string]interface{}{"target": map[string]interface{}{"kind": "agent_token", "name_withheld": true, "ref": "tok_abcdefgh"}}),
 	}
 	for i, fx := range ok {
 		if err := sch.Validate(roundTrip(t, fx)); err != nil {
@@ -331,12 +331,12 @@ func TestAdminActionSchema_PositiveAndNegative(t *testing.T) {
 		"trigger policy no policy":       baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "internal"}, "trigger": "policy"}),
 		"none with request_id":           baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "none"}, "trigger": "config_file"}),
 		"cli_offline with request":       baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "cli_offline"}}),
-		"name and name_withheld":         baseAdminFixture(map[string]interface{}{"target": map[string]interface{}{"kind": "agent_token", "name": "a", "name_withheld": true, "ref": "tok_ABCDEFGH"}}),
+		"name and name_withheld":         baseAdminFixture(map[string]interface{}{"target": map[string]interface{}{"kind": "agent_token", "name": "a", "name_withheld": true, "ref": "tok_abcdefgh"}}),
 		"agent target without ref":       baseAdminFixture(map[string]interface{}{"target": map[string]interface{}{"kind": "agent_token", "name": "a"}}),
 		"malformed ref":                  baseAdminFixture(map[string]interface{}{"target": map[string]interface{}{"kind": "agent_token", "name": "a", "ref": "ci-bot"}}),
 		"identity on internal":           baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "internal", "user_id": "u1"}, "trigger": "startup", "request_id": nil}),
 		"agent without prefix":           baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "agent_token", "token_name": "t"}}),
-		"agent both shapes":              baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "agent_token", "token_prefix": "mcp_agt_ab12", "token_name": "t", "token_name_withheld": true, "ref": "cli_ABCDEFGH"}}),
+		"agent both shapes":              baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "agent_token", "token_prefix": "mcp_agt_ab12", "token_name": "t", "token_name_withheld": true, "ref": "cli_abcdefgh"}}),
 		"user_id without provider":       baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "session_admin", "user_id": "u1", "role": "admin"}}),
 		"masked flag without id":         baseAdminFixture(map[string]interface{}{"request_id": nil, "request_id_masked": true, "caller": map[string]interface{}{"kind": "cli_offline"}}),
 		"changes_count alone":            baseAdminFixture(map[string]interface{}{"changes_count": 3}),
@@ -344,7 +344,7 @@ func TestAdminActionSchema_PositiveAndNegative(t *testing.T) {
 		"change with object value":       baseAdminFixture(map[string]interface{}{"changes": []interface{}{map[string]interface{}{"field": "/args", "after": map[string]interface{}{"x": 1}}}}),
 		"change field not a pointer":     baseAdminFixture(map[string]interface{}{"changes": []interface{}{map[string]interface{}{"field": "enabled", "withheld": "value"}}}),
 		"bad client surface":             baseAdminFixture(map[string]interface{}{"client": map[string]interface{}{"surface": "tray"}}),
-		"secret target with name":        baseAdminFixture(map[string]interface{}{"target": map[string]interface{}{"kind": "secret", "name": "GITHUB_TOKEN", "name_withheld": true, "ref": "sec_ABCDEFGH"}}),
+		"secret target with name":        baseAdminFixture(map[string]interface{}{"target": map[string]interface{}{"kind": "secret", "name": "GITHUB_TOKEN", "name_withheld": true, "ref": "sec_abcdefgh"}}),
 		"none on authz":                  baseAuthzFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "none"}}),
 	}
 	for name, fx := range bad {

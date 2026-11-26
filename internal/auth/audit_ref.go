@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base32"
 	"regexp"
+	"strings"
 )
 
 // Audit ref kinds (Spec 133 §Target): the three-letter prefix of an opaque
@@ -13,7 +14,9 @@ const (
 	AuditRefKindClient     = "cli"
 )
 
-var auditRefPattern = regexp.MustCompile(`^[a-z]{3}_[A-Z0-9]{8,32}$`)
+// Lower case on purpose: the audit credential mask matches upper-case
+// shapes (AKIA…), so an upper-case ref could be rewritten by the sanitizer.
+var auditRefPattern = regexp.MustCompile(`^[a-z]{3}_[a-z0-9]{8,32}$`)
 
 // NewAuditRef returns a fresh opaque audit identifier "<kind>_<16 base32>".
 // It is random, never derived from a name or a value, so it can stand in for
@@ -25,7 +28,7 @@ func NewAuditRef(kind string) string {
 		// would make two targets indistinguishable, so fail loudly.
 		panic("auth: crypto/rand unavailable: " + err.Error())
 	}
-	return kind + "_" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b[:])
+	return kind + "_" + strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b[:]))
 }
 
 // ValidAuditRef reports whether r has the audit ref shape.

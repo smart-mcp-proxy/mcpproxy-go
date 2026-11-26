@@ -200,13 +200,15 @@ func validRef(r string) bool {
 		}
 	}
 	for _, c := range r[4:] {
-		upper := c >= 'A' && c <= 'Z'
+		lower := c >= 'a' && c <= 'z'
 		digit := c >= '0' && c <= '9'
-		if !upper && !digit {
+		if !lower && !digit {
 			return false
 		}
 	}
-	return true
+	// A ref the whole-line sanitizer would rewrite is not stable.
+	_, hit := applyMasking(r)
+	return !hit
 }
 
 // AdminActionInput builds one admin_action line. Every value comes from the
@@ -279,6 +281,9 @@ func NewAdminAction(in AdminActionInput) (Line, error) {
 	// by request_id (FR-009). Only the background kinds may omit it.
 	if !backgroundKinds[kind] && in.RequestID == "" {
 		return Line{}, fmt.Errorf("audit.NewAdminAction: caller.kind %s requires request_id", kind)
+	}
+	if strings.HasPrefix(in.Action, "token.") && in.Target.kind != "agent_token" && !(in.Action == ActionTokenDelete && in.Target.kind == "client") {
+		return Line{}, fmt.Errorf("audit.NewAdminAction: %s requires an agent_token target", in.Action)
 	}
 	if err := checkRequiredPrefixes(in.Action, in.Changes); err != nil {
 		return Line{}, err

@@ -235,9 +235,11 @@ func NewFileSink(path string, maxSizeMB, maxBackups, maxAgeDays int, compress bo
 			return nil, err
 		}
 		// A write-only audit file (the daemon may append but not read)
-		// cannot have its tail checked. It keeps working as before; the
-		// in-memory repair after a short write still applies.
-		torn = false
+		// cannot have its tail checked, so the boundary is established
+		// unconditionally: torn stays set and the repair below appends one
+		// newline. On a clean file that is one empty line, which shippers
+		// skip; on a torn one it ends the partial record.
+		torn = true
 	}
 	lj := &lumberjack.Logger{
 		Filename:   path,

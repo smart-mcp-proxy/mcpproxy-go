@@ -780,10 +780,15 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 		s.logger.Error("failed to get HMAC key", zap.Error(err))
 		return nil, credErr("", "", "Failed to initialize token security", 500)
 	}
+	// Spec 133 FR-016b: ts is the commit time. The persisted created_at is
+	// stamped immediately before the minting transaction (the store keeps a
+	// non-zero CreatedAt as given) and the line uses that same value, as
+	// revoke uses RevokedAt and rotate RotatedAt from inside theirs.
+	candidate.CreatedAt = s.now().UTC()
 	if err := s.tokens.CreateAgentToken(candidate, raw, key); err != nil {
 		return nil, s.classifyCreateError(req.Name, mcp, err, now)
 	}
-	committedAt := s.now() // Spec 133 FR-016b: ts is the commit time
+	committedAt := candidate.CreatedAt
 
 	// Post-commit: project from the committed record; nothing below can fail.
 	committed := candidate
@@ -1235,8 +1240,11 @@ func (s *CredentialsService) DeleteToken(ctx context.Context, a Actor, name stri
 	defer out.flush(ctx, s.adminAudit)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	deleted, err := del.DeleteAgentTokenReport("", name)
+	// Deletion leaves no record to stamp: ts is taken immediately before the
+	// deleting transaction, under the same lock, so no other effect of this
+	// service can commit in between.
 	deletedAt := s.now()
+	deleted, err := del.DeleteAgentTokenReport("", name)
 	if err != nil {
 		if errors.Is(err, storage.ErrAgentTokenNotFound) {
 			return nil, s.notFound("token", name)
