@@ -32,7 +32,7 @@ func TestResidualStatsContributingTools(t *testing.T) {
 func TestResidualDetectionEventIdentity(t *testing.T) {
 	ctx := auth.WithAuthContext(context.Background(), &auth.AuthContext{Type: auth.AuthTypeAgent, AllowedServers: []string{"alpha"}})
 	for _, name := range []string{"alpha", "beta", ""} {
-		event := rt.Event{Type: rt.EventTypeSensitiveDataDetected, Payload: map[string]any{"server_name": name, "activity_id": "activity"}}
+		event := rt.Event{Type: rt.EventTypeSensitiveDataDetected, Payload: map[string]any{"server_name": name, "activity_id": "activity", "activity_type": "tool_call"}}
 		assert.Equal(t, name == "alpha", eventVisibleToCaller(ctx, event), name)
 		assert.True(t, eventVisibleToCaller(context.Background(), event))
 	}

@@ -23,7 +23,9 @@ var playwrightTestLine = regexp.MustCompile(`"\$PLAYWRIGHT_BIN"\s+test\s+(.+)`)
 // sweepLaunchers are the scripts the web-ui-sweep job runs. run-web-smoke.sh
 // is the standing sweep; run-skills-tab-sweep.sh (spec 125) runs the spec that
 // needs a skills-capable upstream and enable_skills.
-var sweepLaunchers = []string{"run-web-smoke.sh", "run-skills-tab-sweep.sh"}
+// run-connect-sweep.sh (spec 132) runs the Connect-screen spec against scratch-HOME
+// cores, because Connect writes client config files.
+var sweepLaunchers = []string{"run-web-smoke.sh", "run-skills-tab-sweep.sh", "run-connect-sweep.sh"}
 
 // sweepSpecsRun parses the spec names off every launcher's `playwright test` line.
 func sweepSpecsRun(t *testing.T) []string {
@@ -77,7 +79,7 @@ func specListProblems(run, onDisk []string, docs map[string]string) []string {
 	}
 	for _, name := range onDisk {
 		if !has(run, name) {
-			problems = append(problems, name+" exists in e2e/web-ui-sweep but no sweep launcher (scripts/run-web-smoke.sh, scripts/run-skills-tab-sweep.sh) runs it (an orphan spec never gates a release)")
+			problems = append(problems, name+" exists in e2e/web-ui-sweep but no sweep launcher (scripts/run-web-smoke.sh, scripts/run-skills-tab-sweep.sh, scripts/run-connect-sweep.sh) runs it (an orphan spec never gates a release)")
 		}
 	}
 	for _, name := range run {

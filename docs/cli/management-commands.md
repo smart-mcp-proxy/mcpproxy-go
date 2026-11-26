@@ -194,16 +194,16 @@ touching any other header. The same applies to env vars on stdio servers.
 
 ```bash
 # Rotate the Authorization header on a connected server
-mcpproxy upstream patch synapbus --header "Authorization: Bearer new-token"
+mcpproxy upstream patch my-server --header "Authorization: Bearer new-token"
 
 # Add a custom header without disturbing existing ones
-mcpproxy upstream patch synapbus --header "X-Trace: on"
+mcpproxy upstream patch my-server --header "X-Trace: on"
 
 # Remove a stale header
-mcpproxy upstream patch synapbus --header-remove "X-Old"
+mcpproxy upstream patch my-server --header-remove "X-Old"
 
 # Set + remove in one round-trip
-mcpproxy upstream patch synapbus --header "X-New: v" --header-remove "X-Old"
+mcpproxy upstream patch my-server --header "X-New: v" --header-remove "X-Old"
 
 # Update env vars on a stdio server
 mcpproxy upstream patch obsidian-pilot \

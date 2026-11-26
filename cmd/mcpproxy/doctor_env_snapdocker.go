@@ -58,7 +58,7 @@ func homeOutsideHome(home string) bool {
 //
 //  1. command == "docker" (direct stdio docker)
 //  2. command == "/bin/bash" (or similar shell) whose args contain "docker"
-//     — the kubic linkedin-direct pattern that sources an env file then execs
+//     — a wrapper script that sources an env file and then execs
 //     docker run.
 //  3. docker_isolation == true regardless of command — the Spec-027 Docker
 //     isolation flag spawns docker run on any upstream.

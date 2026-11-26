@@ -109,7 +109,7 @@ func sseIdentityEventFixtures(server string) []internalRuntime.Event {
 	}
 	return []internalRuntime.Event{
 		evt(internalRuntime.EventTypeSensitiveDataDetected, map[string]any{
-			"server_name": server, "activity_id": "detection", "detection_count": 1,
+			"server_name": server, "activity_id": "detection", "activity_type": "tool_call", "detection_count": 1,
 		}),
 		// affected_entity
 		evt(internalRuntime.EventTypeActivityConfigChange, map[string]any{
