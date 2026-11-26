@@ -9,6 +9,7 @@ Date: 2026-11-23. Build: `feat/client-oauth-login-e2e` (slices 1a-1e), scratch c
 | Client | Status | Evidence |
 |---|---|---|
 | MCP TypeScript SDK 1.32.2 (`@modelcontextprotocol/sdk`, the OAuth client code that MCP clients build on), driven by `sdk-client.mjs` | **VERIFIED** over plain HTTP | below |
+| MCP Inspector web UI 2.13.0 | **VERIFIED** (2026-11-25, see "Follow-up check 2026-11-25") |
 | MCP Inspector CLI 2.13.0 | **NOT verified** | it needs a TTY and a browser for OAuth (`auth_required: Interactive OAuth requires a TTY ... or MCP_AUTO_OPEN_ENABLED=true`); a pty wrapper produced no request to the core within 20 s; not pursued further |
 | Claude Code CLI 2.1.318 | **VERIFIED** for the login flow over plain HTTP loopback (see "Claude Code observations"); refresh, metadata order, browser callback path and in-session tool calls NOT verified | below |
 | Cursor | **NOT verified** | needs its real config and a GUI |
@@ -55,7 +56,7 @@ Findings that matter for the design:
 
 ## Manual checklist (needs a human, not done)
 
-For each of Cursor, VS Code, MCP Inspector (web UI) (and, for the items marked NOT verified above, Claude Code), with an isolated scratch core (below) and the client configured with `http://127.0.0.1:18080/mcp/oauth/<client-id>` (back up the client config first):
+For each of Cursor, VS Code, MCP Inspector (web UI; use the generic `/mcp/oauth` address, the per-client one is 404 until that client id exists) (and, for the items marked NOT verified above, Claude Code), with an isolated scratch core (below) and the client configured with `http://127.0.0.1:18080/mcp/oauth/<client-id>` (back up the client config first):
 
 1. Start the client; does it show a sign-in step instead of failing on the 401?
 2. In the core log or with `GET /api/v1/oauth/authorizations`, note: name it registered (`reported_name`), redirect URI shape, whether `resource` was sent, and the metadata URLs it fetched in order.
@@ -79,3 +80,19 @@ env $(compgen -e | grep -E '^(MCPPROXY_|MCPP_)' | sed 's/^/-u /') \
 ```
 
 If none of the four accepts a plain-HTTP loopback issuer, stop before PR-2 (research R13 fallback: serve the OAuth endpoints only when local TLS is on).
+
+## Follow-up check 2026-11-25 (issue #1971, gaps 1-3)
+
+Build: main at 793b3e81f plus this branch, scratch core on `127.0.0.1:18080`, scratch HOME and data dir, `mcp_oauth_enabled` on, plain HTTP. No real client configuration was read or changed.
+
+| Client | Result |
+|---|---|
+| **MCP Inspector 2.13.0 (web, `npx @modelcontextprotocol/inspector`, scratch HOME)** | **VERIFIED** at `http://127.0.0.1:18080/mcp/oauth`: 401 challenge, registration ("mcp inspector", redirect `http://127.0.0.1:16274/oauth/callback`), authorize, consent, code exchange, `initialize` (MCP 2025-11-25), `prompts/list`, and `tools/list` showing 10 tools. The login row shows `observed_name` `mcp-inspector`, `name_mismatch` true (the approver chose the client id, as designed for the generic address). The per-client address `/mcp/oauth/inspector` returned 404 on a fresh core: no client with that id existed yet. Consent in this run was the admin REST `approve` (the core had no embedded Web UI); the consent page is covered by `client-oauth-consent.spec.ts`, 12 of 12 passing on the rebuilt core. Not verified: refresh, revoke, Windows/Linux |
+| **Cursor 3.12.30** | **NOT verified**: launched in a scratch HOME and user-data dir with an `mcp.json` pointing at the core; it shows "Log In / Sign Up" ("Cursor's AI features require you to be logged in") and made no MCP request. Signing in would use the user's account, so it was stopped. Documentation (cursor.com/docs/context/mcp, read 2026-11-25): remote servers use dynamic client registration unless `auth.CLIENT_ID` is set; the desktop app's redirect is `http://localhost:8787/callback` |
+| **VS Code 1.122.0** | **NOT verified**: a scratch profile (`--user-data-dir`, `mcp.json` in its `User` folder) was started, but the check can only click in an IDE window, and the only VS Code window the tool listed was a different, already-open one, so nothing was driven |
+
+Therefore `SupportsBrowserLogin` stays `true` for `claude-code` only. Cursor and VS Code get the existing refusal ("does not support browser login in MCPProxy yet"); MCP Inspector is not a Connect client.
+
+### Connect screen sweep (Playwright)
+
+`e2e/web-ui-sweep/connect-browser-login.spec.ts`, run twice on a scratch-HOME core (`MCPPROXY_SWEEP_SCRATCH_HOME=<dir>`; the spec skips otherwise because Connect writes real client configs, and checks the core's reported path and feature state first): login on (choice shown for Claude Code only, diff shows `/mcp/oauth/claude-code` with no credential, Cancel writes nothing, connect, the file is byte-identical after Cancel and after Undo; Cursor and VS Code show no choice) and `SWEEP_BROWSER_LOGIN_OFF=1` on a core with the feature off (no choice, key credential notice present). 3 of 3 pass across the two runs, no page errors, no defect found. Screenshots: `connect-sweep/`.

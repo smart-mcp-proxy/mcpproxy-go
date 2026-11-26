@@ -171,7 +171,7 @@ func (s *ActivityService) handleClientRequest(evt Event) {
 		s.workersWG.Add(1)
 		go func() {
 			defer s.workersWG.Done()
-			s.runAsyncDetection(record.ID, arguments, "", record.ServerName)
+			s.runAsyncDetection(record, arguments, "")
 		}()
 	}
 }

@@ -122,9 +122,17 @@ func TestDescribe_GenericAddressListsClientsNothingPreselected(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "generic", v.AddressKind)
 	assert.Nil(t, v.Client, "the generic address fixes nothing")
-	require.Len(t, v.ExistingClients, 2)
+	// Clients with records come first; supported built-ins without records
+	// follow (#1971) and are marked.
+	require.Greater(t, len(v.ExistingClients), 2)
 	assert.Equal(t, "codex", v.ExistingClients[0].ID)
 	assert.Equal(t, "zed", v.ExistingClients[1].ID)
+	assert.False(t, v.ExistingClients[0].Builtin)
+	assert.False(t, v.ExistingClients[1].Builtin)
+	for _, c := range v.ExistingClients[2:] {
+		assert.True(t, c.Builtin, c.ID)
+		assert.Nil(t, c.Binding, c.ID)
+	}
 	assert.True(t, v.ProfileRequired)
 	require.NotNil(t, v.SuggestedNewClient)
 	assert.Equal(t, "cursor-ide", v.SuggestedNewClient.ID)

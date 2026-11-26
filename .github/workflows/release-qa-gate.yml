@@ -260,7 +260,7 @@ jobs:
         # `go test -race ./internal/...` pulls in the binary/protocol/E2E suites
         # (TestBinary*, TestMCP*, TestE2E_*) which hard-Fatal without a staged
         # `mcpproxy` binary and blow the 25m budget when run in one job. We fall
-        # back to the exact fast unit-race command proven green in e2e-tests.yml:
+        # back to the exact fast unit-race command e2e-tests.yml used to run:
         # `-short -race` + `-skip` for the binary-dependent entry points. Those
         # skipped suites are NOT lost coverage — the candidate binary is exercised
         # end-to-end by the server-type matrix job (matrix-invariants) here, and

@@ -170,6 +170,10 @@ type Server struct {
 	// routingEventsCh is listenForRoutingModeRefresh's event subscription.
 	// Shutdown unsubscribes it, which closes it and ends the listener.
 	routingEventsCh chan runtime.Event
+	// routingListenerDone is closed when listenForRoutingModeRefresh returns.
+	// Shutdown waits for it, so no handler (config.reloaded re-applies the
+	// process-global TPA bundle) runs after Shutdown returns.
+	routingListenerDone chan struct{}
 	// listenersDone is closed by Shutdown to stop forwardRuntimeStatus. The
 	// runtime's status channel is never closed (its senders outlive no
 	// shutdown step that could close it safely), so the forwarder cannot end
@@ -532,6 +536,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// direct surface stays blank until an unrelated reconcile. Subscribing here
 	// closes the window rather than depending on goroutine scheduling.
 	server.routingEventsCh = server.runtime.SubscribeEvents()
+	server.routingListenerDone = make(chan struct{})
 	go server.listenForRoutingModeRefresh(server.routingEventsCh)
 
 	// Spec 105 FR-004: index every config snapshot before it is published —
@@ -968,13 +973,32 @@ func (s *Server) forwardRuntimeStatus() {
 	}
 }
 
+// routingListenerBeforeEvent is a test seam: it runs in the routing listener
+// before each event is handled. Nil in production.
+var routingListenerBeforeEvent func(runtime.Event)
+
 // listenForRoutingModeRefresh subscribes to server events and refreshes routing
 // mode tool sets when upstream servers change (Spec 031), and re-applies the
 // security scanner's opt-in deep-scan gate on config hot-reload (Spec 077 US3).
 func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
+	if s.routingListenerDone != nil { // nil for fixtures that start the listener by hand
+		defer close(s.routingListenerDone)
+	}
 	defer s.runtime.UnsubscribeEvents(eventCh)
 
 	for evt := range eventCh {
+		if routingListenerBeforeEvent != nil {
+			routingListenerBeforeEvent(evt)
+		}
+		// Unsubscribing closes the channel but leaves its buffered events to be
+		// delivered; a handler for one of them must not run once Shutdown has
+		// begun (config.reloaded re-applies process-global scanner state).
+		s.mu.RLock()
+		down := s.shutdown
+		s.mu.RUnlock()
+		if down {
+			continue
+		}
 		// Every config event follows a snapshot publication (config.saved,
 		// config.reloaded and servers.changed are all emitted after the new
 		// *Config is current), so index the new snapshot here rather than in
@@ -1610,6 +1634,15 @@ func (s *Server) Shutdown() error {
 	// shutdown flag above makes this run once, so listenersDone is closed once.
 	if s.routingEventsCh != nil {
 		s.runtime.UnsubscribeEvents(s.routingEventsCh)
+	}
+	// Join the routing listener so none of its handlers runs after Shutdown
+	// returns. Bounded: a handler stuck on upstream work must not hang shutdown.
+	if s.routingListenerDone != nil {
+		select {
+		case <-s.routingListenerDone:
+		case <-time.After(10 * time.Second):
+			s.logger.Warn("Routing-mode listener did not stop within 10s of shutdown")
+		}
 	}
 	if s.listenersDone != nil {
 		close(s.listenersDone)

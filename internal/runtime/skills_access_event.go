@@ -174,7 +174,7 @@ func (s *ActivityService) handleSkillAccess(evt Event) {
 		s.workersWG.Add(1)
 		go func() {
 			defer s.workersWG.Done()
-			s.runAsyncDetection(record.ID, nil, text, record.ServerName)
+			s.runAsyncDetection(record, nil, text)
 		}()
 	}
 }
