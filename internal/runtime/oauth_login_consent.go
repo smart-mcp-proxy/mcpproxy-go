@@ -181,6 +181,14 @@ func (s *OAuthLoginService) hasClientRecords(clientID string) bool {
 	return err == nil && b != nil
 }
 
+// builtinClient is the supported connect-registry client with this id, or nil.
+func (s *OAuthLoginService) builtinClient(clientID string) *connect.ClientDef {
+	if def := connect.FindClient(clientID); def != nil && def.Supported {
+		return def
+	}
+	return nil
+}
+
 // --- views ---------------------------------------------------------------------------
 
 // BindingView is a client's binding and its revision.
@@ -205,6 +213,9 @@ type ExistingClientView struct {
 	ID          string       `json:"id"`
 	DisplayName string       `json:"display_name"`
 	Binding     *BindingView `json:"binding,omitempty"`
+	// Builtin marks a supported built-in client that has no API key and no
+	// login yet: choosing it creates its record, like the per-client address.
+	Builtin bool `json:"builtin,omitempty"`
 }
 
 // SuggestedClient is the new-client suggestion derived from the reported name.
@@ -426,9 +437,17 @@ func (s *OAuthLoginService) Describe(ctx context.Context, requestID string) (*Au
 			}
 			v.ExistingClients = append(v.ExistingClients, ev)
 		}
+		// Supported built-in clients with no records yet are choosable too
+		// (#1971): the same set a per-client address could already fix.
+		for _, def := range connect.GetAllClients() {
+			if !def.Supported || ids[def.ID] {
+				continue
+			}
+			v.ExistingClients = append(v.ExistingClients, ExistingClientView{ID: def.ID, DisplayName: def.Name, Builtin: true})
+		}
 		v.ProfileRequired = len(v.Profiles) > 0
 		v.SuggestedNewClient = s.suggestNewClient(reg.ReportedName, ids)
-		v.SuggestedClient = suggestExistingClient(reg.ReportedName, v.ExistingClients)
+		v.SuggestedClient = suggestExistingClient(reg.ReportedName, v.ExistingClients, s.seenNames(), s.now())
 	}
 	return v, nil
 }
@@ -490,9 +509,11 @@ func stripTrailingGroup(s string) (string, bool) {
 // without regard to case, with each offered client's id, display name and (for
 // a connect-registry client) known client names. The whole name is tried and,
 // when it ends with a parenthesised suffix, also the part before it. Matches
-// are counted by distinct client id: exactly one client yields a suggestion,
-// none or several yield nil. Pure advice, computed on read, never stored.
-func suggestExistingClient(reported string, clients []ExistingClientView) *SuggestedExisting {
+// are counted by distinct client id within a tier (clients with records, then
+// built-ins without): exactly one client yields a suggestion, none yields nil,
+// and several yield nil unless every match is a known client name, which
+// tieBreakSuggestion separates (VS Code, #1971). Pure advice, computed on read, never stored.
+func suggestExistingClient(reported string, clients []ExistingClientView, seen map[string]time.Time, now time.Time) *SuggestedExisting {
 	name := strings.TrimSpace(reported)
 	if name == "" {
 		return nil
@@ -513,9 +534,115 @@ func suggestExistingClient(reported string, clients []ExistingClientView) *Sugge
 		}
 		return false
 	}
-	var found *SuggestedExisting
+	// Clients with records are tried first; built-ins without records only when
+	// none of those matched, so offering them never removes an older suggestion.
+	for _, builtin := range []bool{false, true} {
+		ms := suggestAmong(clients, builtin, eq)
+		switch len(ms) {
+		case 0:
+			continue
+		case 1:
+			return &SuggestedExisting{ID: ms[0].id, Matched: ms[0].matched}
+		}
+		return tieBreakSuggestion(ms, seen, now)
+	}
+	return nil
+}
+
+// suggestionMatch is one client the reported name matched.
+type suggestionMatch struct{ id, matched string }
+
+// presenceWindow bounds how old a clientInfo sighting may be to count.
+const presenceWindow = 30 * 24 * time.Hour
+
+// tieBreakSuggestion separates clients that one reported name matched, only
+// when every match came from a known client name (VS Code reports the same
+// registration name on its Local and Copilot harnesses, #1971): the client
+// whose clientInfo name this installation saw most recently, else the one the
+// registry prefers, else no suggestion. A match on an id or display name is
+// never broken this way.
+func tieBreakSuggestion(ms []suggestionMatch, seen map[string]time.Time, now time.Time) *SuggestedExisting {
+	for _, m := range ms {
+		if m.matched != "known_name" {
+			return nil
+		}
+	}
+	var best *suggestionMatch
+	var bestAt time.Time
+	tied := false
+	for i := range ms {
+		def := connect.FindClient(ms[i].id)
+		if def == nil {
+			continue
+		}
+		at, ok := recentSighting(seen, def.ClientInfoNames, now)
+		if !ok {
+			continue
+		}
+		switch {
+		case best == nil || at.After(bestAt):
+			best, bestAt, tied = &ms[i], at, false
+		case at.Equal(bestAt):
+			tied = true
+		}
+	}
+	if best != nil && !tied {
+		return &SuggestedExisting{ID: best.id, Matched: best.matched}
+	}
+	var pref *suggestionMatch
+	for i := range ms {
+		if def := connect.FindClient(ms[i].id); def != nil && def.PreferredForRegistration {
+			if pref != nil {
+				return nil
+			}
+			pref = &ms[i]
+		}
+	}
+	if pref == nil {
+		return nil
+	}
+	return &SuggestedExisting{ID: pref.id, Matched: pref.matched}
+}
+
+// recentSighting is the newest sighting among the aliases that falls inside
+// the window. Each alias is filtered on its own, so a timestamp from the
+// future (clock moved back) or an old one never hides a valid sighting of
+// another alias of the same client.
+func recentSighting(seen map[string]time.Time, aliases []string, now time.Time) (time.Time, bool) {
+	var latest time.Time
+	found := false
+	for _, alias := range aliases {
+		at, ok := seen[sanitizeClientName(alias)]
+		if !ok {
+			continue
+		}
+		if age := now.Sub(at); age > presenceWindow || age < 0 {
+			continue
+		}
+		if !found || at.After(latest) {
+			latest, found = at, true
+		}
+	}
+	return latest, found
+}
+
+// seenNames is the installation's clientInfo sightings, or nil.
+func (s *OAuthLoginService) seenNames() map[string]time.Time {
+	if s.presence == nil {
+		return nil
+	}
+	return s.presence()
+}
+
+// suggestAmong returns the clients whose Builtin flag equals builtin that the
+// reported name matches, each once, with the first field that matched.
+func suggestAmong(clients []ExistingClientView, builtin bool, eq func(string) bool) []suggestionMatch {
+	var out []suggestionMatch
 	for i := range clients {
 		c := &clients[i]
+		if c.Builtin != builtin {
+			continue
+		}
 		matched := ""
 		switch {
 		case eq(c.ID):
@@ -524,7 +651,7 @@ func suggestExistingClient(reported string, clients []ExistingClientView) *Sugge
 			matched = "display_name"
 		default:
 			if def := connect.FindClient(c.ID); def != nil {
-				for _, n := range def.ClientInfoNames {
+				for _, n := range append(append([]string{}, def.ClientInfoNames...), def.OAuthRegistrationNames...) {
 					if eq(n) {
 						matched = "known_name"
 						break
@@ -532,15 +659,11 @@ func suggestExistingClient(reported string, clients []ExistingClientView) *Sugge
 				}
 			}
 		}
-		if matched == "" {
-			continue
+		if matched != "" {
+			out = append(out, suggestionMatch{id: c.ID, matched: matched})
 		}
-		if found != nil {
-			return nil // several distinct clients
-		}
-		found = &SuggestedExisting{ID: c.ID, Matched: matched}
 	}
-	return found
+	return out
 }
 
 // suggestNewClient derives an id from the reported name: lower-case slug of
@@ -720,10 +843,20 @@ func (s *OAuthLoginService) resolveChoice(req mcplogin.Request, c ApprovalChoice
 		}
 		rc.clientID, rc.newClient, rc.display = n.ID, true, n.DisplayName
 	case c.Client.ID != "":
-		if !s.hasClientRecords(c.Client.ID) {
-			return nil, ErrOAuthClientUnknown
-		}
 		rc.clientID = c.Client.ID
+		if !s.hasClientRecords(rc.clientID) {
+			// A supported built-in client without records is created when the
+			// approved code is exchanged, exactly as on its per-client address.
+			def := s.builtinClient(rc.clientID)
+			if def == nil {
+				return nil, ErrOAuthClientUnknown
+			}
+			if c.BindingRevision != "" {
+				// The page saw this client with a binding that is gone now.
+				return nil, ErrOAuthBindingChanged
+			}
+			rc.newClient, rc.display = true, def.Name
+		}
 	default:
 		rc.complete = false
 	}

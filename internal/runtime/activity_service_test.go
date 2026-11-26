@@ -325,6 +325,7 @@ func TestEmitSensitiveDataDetected(t *testing.T) {
 	detectionTypes := []string{"credit_card", "api_key"}
 	rt.EmitSensitiveDataDetected(
 		"activity-123",
+		storage.ActivityTypeToolCall,
 		3,
 		"high",
 		detectionTypes,
@@ -337,6 +338,7 @@ func TestEmitSensitiveDataDetected(t *testing.T) {
 		assert.Equal(t, EventTypeSensitiveDataDetected, evt.Type, "Event type should be sensitive_data.detected")
 		assert.NotNil(t, evt.Payload, "Event payload should not be nil")
 		assert.Equal(t, "activity-123", evt.Payload["activity_id"], "Event should contain activity_id")
+		assert.Equal(t, "tool_call", evt.Payload["activity_type"], "Event should name the scanned row's type")
 		assert.Equal(t, 3, evt.Payload["detection_count"], "Event should contain detection_count")
 		assert.Equal(t, "high", evt.Payload["max_severity"], "Event should contain max_severity")
 		assert.NotNil(t, evt.Payload["detection_types"], "Event should contain detection_types")

@@ -329,12 +329,12 @@ mask string.
 # Rotate a Bearer token without touching anything else on the server
 curl -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   -d '{"headers":{"Authorization":"Bearer new-token"}}' \
-  http://127.0.0.1:8080/api/v1/servers/synapbus
+  http://127.0.0.1:8080/api/v1/servers/my-server
 
 # Remove a stale header (the JSON null is the delete signal)
 curl -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   -d '{"headers":{"X-Stale":null}}' \
-  http://127.0.0.1:8080/api/v1/servers/synapbus
+  http://127.0.0.1:8080/api/v1/servers/my-server
 
 # Upsert one env var and delete another in a single round-trip
 curl -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
@@ -366,7 +366,7 @@ it in the keyring under `secret_name`, and rewrites the config field with
 {
   "scope": "header",
   "key": "Authorization",
-  "secret_name": "synapbus-auth"
+  "secret_name": "my-server-auth"
 }
 ```
 
@@ -382,8 +382,8 @@ it in the keyring under `secret_name`, and rewrites the config field with
 {
   "success": true,
   "data": {
-    "message": "header \"Authorization\" on \"synapbus\" now references keyring secret \"synapbus-auth\"",
-    "reference": "${keyring:synapbus-auth}"
+    "message": "header \"Authorization\" on \"my-server\" now references keyring secret \"my-server-auth\"",
+    "reference": "${keyring:my-server-auth}"
   }
 }
 ```
@@ -1939,7 +1939,8 @@ read door uses):
 | `active_profile.changed` | **Yes**, but the slug is rendered per subscriber exactly as `GET /api/v1/profiles/active` answers it: `""` unless the profile is one the caller may select (a pinned token: its own pin; an unpinned scoped token: a profile its `allowed_servers` reaches). |
 | `config.reloaded`, `config.saved`, `secrets.changed` | **No.** They announce mutations of the admin config document, which `GET /api/v1/config` already answers `403` for this caller. |
 | `profiles.changed`, `client.binding_changed`, `credentials.changed` | **No.** They name profiles, clients and bindings a scoped caller may not reach. `profiles.changed {name, change: create|update|delete|anonymous, previous_name?}` is an invalidation, not a log: refetch `GET /api/v1/profiles`. One event per changed profile, published after the new configuration is live, for service writes and hand edits alike. |
-| Everything else (`activity.system.*`, `sensitive_data.detected`, `security.scanner_changed`, …) | **Yes**, unchanged: no server identity to scope. |
+| `sensitive_data.detected` (`{server_name, activity_id, activity_type, detection_count, max_severity, detection_types}`) | **Only** when the server is in scope **and** the scanned row is one the caller may read. A detection on an administrator-only row (`skill_access`, `client_request`, `skill_quarantine_change`) or one whose `activity_type` is missing is dropped, so the event never names a row the activity endpoints hide. |
+| Everything else (`activity.system.*`, `security.scanner_changed`, …) | **Yes**, unchanged: no server identity to scope. |
 
 ## Error Responses
 

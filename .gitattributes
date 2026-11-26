@@ -33,7 +33,6 @@ internal/server/testdata/toolslist_goldens/**/*.json text eol=lf
 # source. Mark them linguist-generated so GitHub's language stats reflect the
 # actual Go/Vue/Swift source instead of being dominated by these reports.
 specs/**/verification/*.html linguist-generated
-docs/qa/*.html linguist-generated
 
 # Spec 108-l: the profile contract goldens (Go, vitest and XCTest all read
 # them), the SC-006 activity record-set golden and the CLI goldens are
