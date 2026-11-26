@@ -99,7 +99,7 @@ describe('scanner gate wording — the panel and the dialog agree (F09)', () => 
 
   // The force-approve dialog itself (both modes) is covered by
   // server-detail-approve-dialog.spec.ts. Spec 109 (PR 109-e, FR-005/FR-014)
-  // removed ServerCard's own copy of that dialog: the card's primary action
+  // removed ServerRow's own copy of that dialog: the card's primary action
   // for `approve` is now a plain "Review" link to `/review/<name>` — it never
   // approves — so ServerDetail.vue's Security tab is the one place left that
   // performs the approval and owns this wording.

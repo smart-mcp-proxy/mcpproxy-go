@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createWebHistory } from 'vue-router'
-import ServerCard from '@/components/ServerCard.vue'
+import ServerRow from '@/components/ServerRow.vue'
 import ServerDetail from '@/views/ServerDetail.vue'
 import { useServersStore } from '@/stores/servers'
 import { canStartOAuthLogin } from '@/utils/oauthActions'
@@ -51,7 +51,7 @@ describe('manual OAuth sign-in', () => {
   })
   it('starts a fresh OAuth flow from the card even when reconnect is the primary action', async () => {
     const spy = vi.spyOn(useServersStore(), 'triggerOAuthLogin').mockResolvedValue({ browser_opened: true })
-    const card = mount(ServerCard, { props: { server }, global: { stubs: { RouterLink: true } } })
+    const card = mount(ServerRow, { props: { server }, global: { stubs: { RouterLink: true } } })
     const action = card.find('[data-test="server-card-menu-login"]')
     expect(action.text()).toBe('Sign in again')
     expect(action.attributes('disabled')).toBeUndefined()

@@ -137,14 +137,17 @@ test('5. /servers?profile= lists the profile\'s servers with a removable chip', 
   await open(page, `/servers?profile=${RO_PROFILE}`)
   await scoped
   await expect(page.locator('[data-test="scope-chip-profile"]')).toContainText('E2E Read-only')
-  await expect(page.locator('[data-test="servers-profile-select"]')).toHaveValue(RO_PROFILE)
+  // Spec 134: the profile picker is the View as control.
+  await page.locator('[data-test="viewing-filter-button"]').click()
+  await expect(page.locator('[data-test="viewing-profile-select"]')).toHaveValue(RO_PROFILE)
+  await page.keyboard.press('Escape')
   // Only the profile's server (the fixture adds -2/-3/-4-quarantined outside it).
-  const total = page.locator('[data-test="kpi-card-total"] .stat-value')
-  await expect(total).toHaveText('1')
-  await expect(page.locator('main').getByRole('link', { name: 'Details' })).toHaveCount(1)
+  const total = page.locator('[data-test="kpi-card-total"]')
+  await expect(total).toHaveText('All (1)')
+  await expect(page.locator('[data-test="server-row"]')).toHaveCount(1)
   await page.locator('[data-test="scope-chip-remove-profile"]').click()
-  await expect(total).not.toHaveText('1')
-  await expect(page.locator('main').getByRole('link', { name: 'Details' })).not.toHaveCount(1)
+  await expect(total).not.toHaveText('All (1)')
+  await expect(page.locator('[data-test="server-row"]')).not.toHaveCount(1)
 })
 
 test('6. an expiring client credential becomes a needs-attention item, ranked first', async ({ page }) => {

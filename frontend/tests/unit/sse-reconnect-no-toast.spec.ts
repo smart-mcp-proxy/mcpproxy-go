@@ -11,7 +11,7 @@ import api from '@/services/api'
 // Invariant this test locks in: replayed SSE state (servers.changed /
 // config.reloaded) is a passive snapshot, NOT a user-initiated transition, so
 // it MUST NOT emit any toast. Toasts are reserved for user actions
-// (button clicks, form submits) — see ServerCard.vue / Servers.vue handlers.
+// (button clicks, form submits) — see ServerRow.vue / Servers.vue handlers.
 //
 // system.ts forwards each SSE event onto `window` as a CustomEvent; the
 // servers store subscribes to those. Firing the same window events the SSE

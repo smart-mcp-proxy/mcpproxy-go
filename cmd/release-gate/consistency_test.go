@@ -45,10 +45,10 @@ const mcpFixture = `{"total":4,"servers":[
 // What the Web UI reader (e2e/web-ui-sweep/surface-snapshot.mjs) extracts
 // from the rendered server cards.
 const webuiFixture = `{"ok":true,"rows":[
- {"name":"stdio-ok","chip_class":"badge-success","chip_text":"Connected (3 tools)","tool_count":3,"enabled":true,"quarantined":false},
- {"name":"quar","chip_class":"badge-secondary","chip_text":"Quarantined for review","tool_count":0,"enabled":true,"quarantined":true},
- {"name":"off","chip_class":"badge-neutral","chip_text":"Disabled","tool_count":0,"enabled":false,"quarantined":false},
- {"name":"broken","chip_class":"badge-error","chip_text":"Connection refused","tool_count":0,"enabled":true,"quarantined":false}
+ {"name":"stdio-ok","chip_class":"ok","chip_text":"Online","tool_count":3,"enabled":true,"quarantined":false},
+ {"name":"quar","chip_class":"review","chip_text":"Needs review","tool_count":0,"enabled":true,"quarantined":true},
+ {"name":"off","chip_class":"off","chip_text":"Disabled","tool_count":0,"enabled":false,"quarantined":false},
+ {"name":"broken","chip_class":"error","chip_text":"Error","tool_count":0,"enabled":true,"quarantined":false}
 ]}`
 
 func mustSnapshots(t *testing.T, cli, mcp, webui string) (map[string]surfaceRow, []surfaceSnapshot) {
@@ -106,10 +106,10 @@ func TestCompareSurfaces_MCPConnectionStateDiverges(t *testing.T) {
 }
 
 func TestCompareSurfaces_WebUIShowsQuarantinedAsHealthy(t *testing.T) {
-	bad := strings.Replace(webuiFixture, `"chip_class":"badge-secondary"`, `"chip_class":"badge-success"`, 1)
+	bad := strings.Replace(webuiFixture, `"chip_class":"review"`, `"chip_class":"ok"`, 1)
 	core, snaps := mustSnapshots(t, cliFixture, mcpFixture, bad)
 	mm := compareSurfaces(core, snaps)
-	want := fieldMismatch{Surface: surfaceWebUI, Server: "quar", Field: fieldChipClass, Core: "badge-secondary", Got: "badge-success"}
+	want := fieldMismatch{Surface: surfaceWebUI, Server: "quar", Field: fieldChipClass, Core: "review", Got: "ok"}
 	if len(mm) != 1 || mm[0] != want {
 		t.Fatalf("mismatches = %+v, want exactly %+v", mm, want)
 	}
@@ -177,8 +177,13 @@ func TestExpectedWebUIChip(t *testing.T) {
 }
 
 func TestExpectedWebUIChipText(t *testing.T) {
-	// summary wins; sign-in overrides it unless disabled; else the status label.
-	if got := expectedWebUIRow(surfaceRow{fieldAdmin: "enabled", hiddenSummary: "Connected (3 tools)", fieldStatus: "ready"})[fieldChipText]; got != "Connected (3 tools)" {
+	// With health.status the pill prints the Spec 109 label (Spec 134 FR-003),
+	// whatever the summary says; without it the legacy chip applies: summary
+	// wins, sign-in overrides it unless disabled, else the status label.
+	if got := expectedWebUIRow(surfaceRow{fieldAdmin: "enabled", hiddenSummary: "Connected (3 tools)", fieldStatus: "ready"})[fieldChipText]; got != "Online" {
+		t.Fatalf("pill text = %q", got)
+	}
+	if got := expectedWebUIRow(surfaceRow{fieldAdmin: "enabled", hiddenSummary: "Connected (3 tools)"})[fieldChipText]; got != "Connected (3 tools)" {
 		t.Fatalf("summary text = %q", got)
 	}
 	if got := expectedWebUIRow(surfaceRow{fieldAdmin: "enabled", hiddenHealthAction: "login", hiddenSummary: "x"})[fieldChipText]; got != "Sign-in required" {
@@ -244,7 +249,7 @@ func TestCompareSurfaces_InactiveServerConnectionState(t *testing.T) {
 	}
 }
 
-// Sol 6.1 round 1, finding 2: the Web UI expectation mirrors ServerCard.vue's
+// Sol 6.1 round 1, finding 2: the Web UI expectation mirrors ServerRow.vue's
 // no-health branch and healthStatusText's usable=false fallback.
 func TestExpectedWebUIRow_Fallbacks(t *testing.T) {
 	cases := []struct {
@@ -260,6 +265,9 @@ func TestExpectedWebUIRow_Fallbacks(t *testing.T) {
 			fieldConnected: "true", hiddenUsable: "false"}, "badge-warning", "Unavailable"},
 		{"health, empty text, connected", surfaceRow{hiddenHasHealth: "true", fieldAdmin: "enabled", fieldLevel: "healthy",
 			fieldConnected: "true", hiddenUsable: "true"}, "badge-success", "Connected"},
+		{"health with status: the pill", surfaceRow{hiddenHasHealth: "true", fieldAdmin: "enabled", fieldLevel: "healthy",
+			fieldStatus: "ready", hiddenSummary: "Connected (3 tools)"}, "ok", "Online"},
+		{"health with unknown status: raw, neutral", surfaceRow{hiddenHasHealth: "true", fieldAdmin: "enabled", fieldStatus: "frob"}, "neutral", "frob"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

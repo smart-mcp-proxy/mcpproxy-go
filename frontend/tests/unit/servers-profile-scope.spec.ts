@@ -61,7 +61,7 @@ async function mountServersAt(path: string) {
   profiles.loaded = true
 
   const Servers = (await import('@/views/Servers.vue')).default
-  const ServerCard = (await import('@/components/ServerCard.vue')).default
+  const ServerRow = (await import('@/components/ServerRow.vue')).default
   const router = createRouter({
     history: createWebHistory(),
     routes: [
@@ -73,12 +73,12 @@ async function mountServersAt(path: string) {
   await router.isReady()
   const wrapper = mount(Servers, { global: { plugins: [pinia, router] } })
   await flushPromises()
-  return { wrapper, ServerCard, router }
+  return { wrapper, ServerRow, router }
 }
 
-function shownNames(wrapper: ReturnType<typeof mount>, ServerCard: unknown): string[] {
+function shownNames(wrapper: ReturnType<typeof mount>, ServerRow: unknown): string[] {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return wrapper.findAllComponents(ServerCard as any).map(c => (c.props('server') as { name: string }).name).sort()
+  return wrapper.findAllComponents(ServerRow as any).map(c => (c.props('server') as { name: string }).name).sort()
 }
 
 describe('Servers page — profile scope (Spec 109-l)', () => {
@@ -94,40 +94,44 @@ describe('Servers page — profile scope (Spec 109-l)', () => {
   })
 
   it('?profile= requests GET /servers once with the profile and shows only that profile\'s servers', async () => {
-    const { wrapper, ServerCard } = await mountServersAt('/servers?profile=work-readonly')
+    const { wrapper, ServerRow } = await mountServersAt('/servers?profile=work-readonly')
     const scopedCalls = getServers.mock.calls.filter(call => call[0]?.profile)
     expect(scopedCalls).toEqual([[{ profile: 'work-readonly' }]])
     expect(getServers.mock.calls.filter(call => !call[0]?.profile)).toHaveLength(0)
-    expect(shownNames(wrapper, ServerCard)).toEqual(['github'])
+    expect(shownNames(wrapper, ServerRow)).toEqual(['github'])
     expect(wrapper.find('[data-test="scope-chip-profile"]').text()).toContain('Work (read-only)')
-    const select = wrapper.find('[data-test="servers-profile-select"]')
+    // Spec 134: the profile picker is the View as control (maintainer decision).
+    expect(wrapper.find('[data-test="servers-profile-select"]').exists()).toBe(false)
+    await wrapper.find('[data-test="viewing-filter-button"]').trigger('click')
+    const select = wrapper.find('[data-test="viewing-profile-select"]')
     expect(select.exists()).toBe(true)
     expect((select.element as HTMLSelectElement).value).toBe('work-readonly')
-    expect(wrapper.find('label[for="servers-profile-select"]').text()).toBe('Profile')
+    expect(wrapper.find('label[for="viewing-profile"]').text()).toBe('Profile')
   })
 
   it('removing the chip clears the URL parameter and shows the full list without another profile request', async () => {
-    const { wrapper, ServerCard, router } = await mountServersAt('/servers?profile=work-readonly')
+    const { wrapper, ServerRow, router } = await mountServersAt('/servers?profile=work-readonly')
     await wrapper.find('[data-test="scope-chip-remove-profile"]').trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.query.profile).toBeUndefined()
-    expect(shownNames(wrapper, ServerCard)).toEqual(['filesystem', 'github', 'notion'])
+    expect(shownNames(wrapper, ServerRow)).toEqual(['filesystem', 'github', 'notion'])
     expect(getServers.mock.calls.filter(call => call[0]?.profile)).toHaveLength(1)
   })
 
   it('choosing a profile in the select writes ?profile= and fetches the scoped list; All clears it', async () => {
-    const { wrapper, ServerCard, router } = await mountServersAt('/servers')
+    const { wrapper, ServerRow, router } = await mountServersAt('/servers')
     expect(getServers).not.toHaveBeenCalled()
-    await wrapper.find('[data-test="servers-profile-select"]').setValue('work-full')
+    await wrapper.find('[data-test="viewing-filter-button"]').trigger('click')
+    await wrapper.find('[data-test="viewing-profile-select"]').setValue('work-full')
     await flushPromises()
     expect(router.currentRoute.value.query.profile).toBe('work-full')
     expect(getServers).toHaveBeenCalledWith({ profile: 'work-full' })
-    expect(shownNames(wrapper, ServerCard)).toEqual(['github'])
+    expect(shownNames(wrapper, ServerRow)).toEqual(['github'])
 
-    await wrapper.find('[data-test="servers-profile-select"]').setValue('')
+    await wrapper.find('[data-test="viewing-profile-select"]').setValue('')
     await flushPromises()
     expect(router.currentRoute.value.query.profile).toBeUndefined()
-    expect(shownNames(wrapper, ServerCard)).toEqual(['filesystem', 'github', 'notion'])
+    expect(shownNames(wrapper, ServerRow)).toEqual(['filesystem', 'github', 'notion'])
   })
 
   it('refetches the scoped list when a profile changes elsewhere (#1460)', async () => {
@@ -162,14 +166,14 @@ describe('Servers page — profile scope (Spec 109-l)', () => {
   })
 
   it('profile=- renders a disabled chip and is never sent', async () => {
-    const { wrapper, ServerCard } = await mountServersAt('/servers?profile=-')
+    const { wrapper, ServerRow } = await mountServersAt('/servers?profile=-')
     expect(getServers).not.toHaveBeenCalled()
     const chip = wrapper.find('[data-test="scope-chip-profile"]')
     expect(chip.text()).toContain('Unattributed applies to Activity and Usage only')
     // Spec 134: a not-applied chip is marked, not aria-disabled: its remove button works.
     expect(chip.attributes('data-not-applied')).toBe('true')
     expect(chip.attributes('aria-disabled')).toBeUndefined()
-    expect(shownNames(wrapper, ServerCard)).toEqual(['filesystem', 'github', 'notion'])
+    expect(shownNames(wrapper, ServerRow)).toEqual(['filesystem', 'github', 'notion'])
   })
 
   it('a 404 shows "Profile not found" inline with a Clear that removes the parameter', async () => {
@@ -191,11 +195,11 @@ describe('Servers page — profile scope (Spec 109-l)', () => {
 
   it('without the feature: no select, no chip, no profile request, and the URL keeps the parameter (rule 7)', async () => {
     statusFeatures = undefined
-    const { wrapper, ServerCard, router } = await mountServersAt('/servers?profile=work-readonly')
+    const { wrapper, ServerRow, router } = await mountServersAt('/servers?profile=work-readonly')
     expect(wrapper.find('[data-test="servers-profile-select"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="scope-chip-profile"]').exists()).toBe(false)
     expect(getServers.mock.calls.filter(call => call[0]?.profile)).toHaveLength(0)
     expect(router.currentRoute.value.query.profile).toBe('work-readonly')
-    expect(shownNames(wrapper, ServerCard)).toEqual(['filesystem', 'github', 'notion'])
+    expect(shownNames(wrapper, ServerRow)).toEqual(['filesystem', 'github', 'notion'])
   })
 })
