@@ -2,6 +2,7 @@ package progressrelay
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -135,6 +136,10 @@ func TestDispatch_Malformed(t *testing.T) {
 	assert.False(t, r.Dispatch(bad))
 	bad.Params.AdditionalFields["progress"] = "1"
 	assert.False(t, r.Dispatch(bad))
+	for _, v := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		assert.False(t, r.Dispatch(progressNote(tok, v, nil, "")), "progress %v", v)
+		assert.False(t, r.Dispatch(progressNote(tok, 1, v, "")), "total %v", v)
+	}
 	assert.Equal(t, 0, n)
 }
 
@@ -148,6 +153,19 @@ func TestDispatch_MessageCapped(t *testing.T) {
 	assert.LessOrEqual(t, len(got), MaxMessageBytes)
 	assert.True(t, strings.HasPrefix(got, "xé"))
 	assert.True(t, strings.HasSuffix(got, "é"), "cut on a rune boundary")
+}
+
+// Two tokens of one registry share nothing an upstream could extend.
+func TestBegin_TokensUnguessable(t *testing.T) {
+	r, _ := newRegistry()
+	ctx := WithSink(context.Background(), func(Update) {})
+	t1, e1 := r.Begin(ctx)
+	t2, e2 := r.Begin(ctx)
+	defer e1()
+	defer e2()
+	s1, s2 := t1.(string), t2.(string)
+	assert.Len(t, s1, len("mcpproxy-1-")+24)
+	assert.NotEqual(t, s1[len(s1)-24:], s2[len(s2)-24:])
 }
 
 func TestSessionSink_NoTokenOrNoSession(t *testing.T) {

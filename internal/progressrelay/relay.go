@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -107,9 +108,7 @@ func SessionSink(ctx context.Context, clientToken mcp.ProgressToken, clean func(
 // Registry maps the tokens one upstream client minted to the calls they
 // belong to. The zero value is ready to use.
 type Registry struct {
-	once   sync.Once
-	prefix string
-	seq    atomic.Uint64
+	seq atomic.Uint64
 
 	mu    sync.Mutex
 	calls map[string]*call
@@ -143,12 +142,7 @@ func (r *Registry) Begin(ctx context.Context) (token mcp.ProgressToken, end func
 	if sink == nil {
 		return nil, func() {}
 	}
-	r.once.Do(func() {
-		var b [8]byte
-		_, _ = rand.Read(b[:])
-		r.prefix = "mcpproxy-" + hex.EncodeToString(b[:])
-	})
-	tok := fmt.Sprintf("%s-%d", r.prefix, r.seq.Add(1))
+	tok := newToken(r.seq.Add(1))
 	c := &call{sink: sink}
 	r.mu.Lock()
 	if r.calls == nil {
@@ -157,29 +151,43 @@ func (r *Registry) Begin(ctx context.Context) (token mcp.ProgressToken, end func
 	r.calls[tok] = c
 	r.mu.Unlock()
 	return tok, func() {
+		// Closed first: a Dispatch that already found c sees it closed, and
+		// a Clear that no longer finds c cannot return while c may still fire.
+		c.close()
 		r.mu.Lock()
 		if r.calls[tok] == c {
 			delete(r.calls, tok)
 		}
 		r.mu.Unlock()
-		c.mu.Lock()
-		c.closed = true
-		c.mu.Unlock()
 	}
+}
+
+func (c *call) close() {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+}
+
+// newToken mints an unguessable token: an upstream that saw one token cannot
+// name a call it has not been sent yet.
+func newToken(seq uint64) string {
+	var b [12]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("mcpproxy-%d-%s", seq, hex.EncodeToString(b[:]))
 }
 
 // Clear forgets every call; their sinks are never called again. It runs when
 // the upstream connection goes away.
 func (r *Registry) Clear() {
+	// Held while closing, so an overlapping Clear cannot return before every
+	// call is closed. Lock order is r.mu then c.mu; nothing takes them the
+	// other way round.
 	r.mu.Lock()
-	calls := r.calls
-	r.calls = nil
-	r.mu.Unlock()
-	for _, c := range calls {
-		c.mu.Lock()
-		c.closed = true
-		c.mu.Unlock()
+	defer r.mu.Unlock()
+	for _, c := range r.calls {
+		c.close()
 	}
+	r.calls = nil
 }
 
 // Len reports how many calls are registered.
@@ -213,6 +221,8 @@ func (r *Registry) Dispatch(n mcp.JSONRPCNotification) bool {
 	u := Update{Progress: progress}
 	if t, ok := number(f["total"]); ok {
 		u.Total = &t
+	} else if _, present := f["total"]; present {
+		return false
 	}
 	if m, ok := f["message"].(string); ok {
 		u.Message = capMessage(m)
@@ -237,18 +247,25 @@ func (r *Registry) Dispatch(n mcp.JSONRPCNotification) bool {
 	return true
 }
 
+// number reads a finite JSON number.
 func number(v any) (float64, bool) {
-	switch x := v.(type) {
+	var x float64
+	switch n := v.(type) {
 	case float64:
-		return x, true
+		x = n
 	case float32:
-		return float64(x), true
+		x = float64(n)
 	case int:
-		return float64(x), true
+		x = float64(n)
 	case int64:
-		return float64(x), true
+		x = float64(n)
+	default:
+		return 0, false
 	}
-	return 0, false
+	if math.IsNaN(x) || math.IsInf(x, 0) {
+		return 0, false
+	}
+	return x, true
 }
 
 // capMessage cuts m to at most MaxMessageBytes on a rune boundary.
