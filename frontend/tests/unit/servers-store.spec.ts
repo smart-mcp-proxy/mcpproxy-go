@@ -37,7 +37,7 @@ describe('useServersStore — mergeServers field-clearing (issue #438)', () => {
     // when pending > 0 || changed > 0. After "Approve all tools" the field
     // disappears from the JSON entirely; without a clear-on-merge path the
     // old `pending_count: 5` would survive on the in-place reactive object
-    // and ServerCard would keep rendering the "5 pending approval" badge.
+    // and ServerRow would keep rendering the "5 pending approval" badge.
     ;(api.getServers as any).mockResolvedValueOnce({
       success: true,
       data: { servers: [mkServer({ quarantine: { pending_count: 5, changed_count: 0 } })] },
@@ -118,7 +118,7 @@ describe('useServersStore — mergeServers field-clearing (issue #438)', () => {
     await store.fetchServers()
     const ref2 = store.servers[0]
 
-    // Same reactive object — v-memo on ServerCard still sees stable identity.
+    // Same reactive object — v-memo on ServerRow still sees stable identity.
     expect(ref2).toBe(ref1)
     expect(ref2.quarantine).toBeUndefined()
   })

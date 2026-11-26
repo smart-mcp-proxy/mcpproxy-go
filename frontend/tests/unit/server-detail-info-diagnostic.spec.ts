@@ -125,3 +125,16 @@ describe('ServerDetail — info-severity diagnostics reach the panel', () => {
     expect(wrapper.find('[data-test="server-detail-generic-error"]').exists()).toBe(false)
   })
 })
+
+// Spec 134 PR 2 (FR-020): the facts the Servers row dropped are on the first
+// screen of server detail, whichever tab is open.
+describe('ServerDetail — facts moved off the Servers row (Spec 134 PR 2)', () => {
+  it('mounts the facts block with trust mode and the full-diagnostic control', async () => {
+    serverExtra = { title: 'Remote API', trust_mode: 'manual', last_error: 'connect aborted: context canceled', diagnostic: canceledDiagnostic }
+    const wrapper = await mountDetail()
+    expect(wrapper.find('[data-test="server-facts"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="fact-id"]').text()).toContain('remote-api')
+    expect(wrapper.find('[data-test="server-facts-trust-label"]').text()).toBe('Manual')
+    expect(wrapper.find('[data-test="open-diagnostic"]').text()).toBe('Full diagnostic')
+  })
+})

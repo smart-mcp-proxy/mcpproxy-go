@@ -24,18 +24,18 @@
       <div class="flex items-center gap-1.5" data-test="fact-trust">
         <dt class="text-base-content/70">Trust mode</dt>
         <dd class="flex items-center gap-1" :title="trust.title">
-          <span role="img" :aria-label="trust.title" data-test="server-trust-mode" :data-trust-invalid="trust.invalid ? 'true' : undefined"><UiIcon name="shield" class="w-4 h-4" /></span>
-          {{ trust.label }}<span v-if="trust.invalid" class="text-warning">(unrecognized value)</span>
+          <span role="img" :class="['tooltip tooltip-bottom', trust.tone]" :data-tip="trust.title" :title="trust.title" :aria-label="trust.title" data-test="server-trust-mode" :data-trust-invalid="trust.invalid ? 'true' : undefined"><UiIcon name="shield" class="w-4 h-4" /></span>
+          <span data-test="server-facts-trust-label">{{ trust.label }}{{ trust.invalid ? ' (configured value not recognised)' : '' }}</span>
         </dd>
+        <dd class="text-base-content/70 w-full" data-test="server-facts-trust-detail">{{ trust.detail }}</dd>
       </div>
-      <div v-if="scan" class="flex items-center gap-1.5" data-test="fact-scan">
-        <dt class="text-base-content/70">Scan</dt>
-        <dd><StateTag :tone="scan.tone">{{ scan.text }}</StateTag></dd>
+      <div v-if="security" class="flex items-center gap-1.5" data-test="fact-scan">
+        <span data-test="server-facts-security" class="flex items-center gap-1.5"><dt class="text-base-content/70">Scan</dt>{{ ' ' }}<dd><span :class="securityToneClass" :data-test="server.quarantined ? 'server-card-quarantine-scan-note' : 'security-scan-badge'">{{ security }}</span></dd></span>
       </div>
       <div class="flex items-center gap-1.5" data-test="fact-held">
         <dt class="text-base-content/70">Held tools</dt>
         <dd data-test="fact-held-counts">
-          <template v-if="held.total > 0">{{ held.pending }} pending, {{ held.changed }} changed</template>
+          <template v-if="held.total > 0"><span :data-test="server.quarantined ? undefined : 'server-facts-held'">{{ held.pending }} pending, {{ held.changed }} changed</span></template>
           <template v-else>none</template>
         </dd>
       </div>
@@ -85,9 +85,9 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import api from '@/services/api'
 import { formatLaunchCommand } from '@/utils/reviewPresentation'
 import type { Server } from '@/types'
-import StateTag from '@/components/StateTag.vue'
 import UiIcon from '@/components/UiIcon.vue'
-import { attentionLines, diagnosticSections, heldCounts, scanFact, trustFact, type AttentionTarget } from '@/utils/serverDetailFacts'
+import { attentionLines, diagnosticSections, heldCounts, type AttentionTarget } from '@/utils/serverDetailFacts'
+import { securityLine, securityTone, trustBadge } from '@/utils/serverFacts'
 
 const props = defineProps<{ server: Server; primaryAction?: string; primaryLabel?: string; adminState?: string; adminStateDesc?: string; adminTone?: string; toolCount?: number; disabledTools?: number }>()
 defineEmits<{ go: [target: AttentionTarget] }>()
@@ -98,8 +98,9 @@ const isOpen = ref(false)
 let opener: HTMLElement | null = null
 
 const titleDiffers = computed(() => !!props.server.title && props.server.title !== props.server.name)
-const trust = computed(() => trustFact(props.server))
-const scan = computed(() => scanFact(props.server))
+const trust = computed(() => trustBadge(props.server))
+const security = computed(() => securityLine(props.server))
+const securityToneClass = computed(() => securityTone(props.server))
 const held = computed(() => heldCounts(props.server))
 const sections = computed(() => diagnosticSections(props.server))
 const lines = computed(() => attentionLines(props.server, { primaryAction: props.primaryAction, primaryLabel: props.primaryLabel }))

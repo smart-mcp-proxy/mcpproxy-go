@@ -47,6 +47,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shutdown"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
@@ -1306,8 +1307,7 @@ func (r *Runtime) Close() error {
 	if r.upstreamManager != nil {
 		// Use ShutdownAll instead of DisconnectAll to ensure proper container cleanup
 		// ShutdownAll handles both graceful disconnection and Docker container cleanup
-		// Use 45-second timeout to allow parallel container cleanup to complete
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 45*time.Second)
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdown.Upstreams)
 		defer shutdownCancel()
 
 		if err := r.upstreamManager.ShutdownAll(shutdownCtx); err != nil {

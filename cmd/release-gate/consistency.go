@@ -29,9 +29,10 @@ import (
 //	tray     — Spec 081 T3 (macOS runner)            not compared here; recorded as not-compared
 //
 // The Web UI never prints health.level as text (Spec 109 FR-011), so its
-// expected row is DERIVED from the core row with the same rules ServerCard.vue
-// applies (expectedWebUIRow): chip colour from admin_state/level/sign-in, chip
-// text from summary → status label.
+// expected row is DERIVED from the core row with the same rules ServerRow.vue
+// applies (expectedWebUIRow): a row with health.status shows the status pill
+// (Spec 134 FR-003: its tone, its Spec 109 label); a row without one keeps the
+// legacy chip (colour from admin_state/level/sign-in, text from summary → label).
 
 // surfaceRow is one server's state as one surface shows it: field → value.
 type surfaceRow map[string]string
@@ -268,9 +269,10 @@ var oauthReauthCodes = map[string]bool{
 	"MCPX_OAUTH_REFRESH_403":     true,
 }
 
-// expectedWebUIRow derives what ServerCard.vue must render for a core row
-// (statusBadgeClass / statusText; oauthSignInState and healthStatusText from
-// utils/health.ts), including the no-health fallback branch.
+// expectedWebUIRow derives what ServerRow.vue must render for a core row: the
+// status pill (utils/healthTone.ts) when health.status is present, otherwise the
+// legacy chip (oauthSignInState and healthStatusText from utils/health.ts),
+// including the no-health fallback branch.
 func expectedWebUIRow(core surfaceRow) surfaceRow {
 	code := core[hiddenDiagnosticCode]
 	signIn := oauthReauthCodes[code] || core[hiddenHealthAction] == health.ActionLogin ||
@@ -281,7 +283,11 @@ func expectedWebUIRow(core surfaceRow) surfaceRow {
 	connected := core[fieldConnected] == "true"
 
 	var chip, text string
-	if hasHealth {
+	if hasHealth && core[fieldStatus] != "" {
+		// Spec 134 FR-003: the one status pill. Its tone is colour only; the
+		// words are the Spec 109 label (an unknown status prints raw, neutral).
+		chip, text = statusPillTone(core[fieldStatus]), health.StatusLabel(core[fieldStatus])
+	} else if hasHealth {
 		switch {
 		case admin == health.StateDisabled:
 			chip = "badge-neutral"
@@ -334,6 +340,24 @@ func expectedWebUIRow(core surfaceRow) surfaceRow {
 		fieldToolCount:   core[fieldToolCount],
 		fieldChipClass:   chip,
 		fieldChipText:    text,
+	}
+}
+
+// statusPillTone mirrors frontend/src/utils/healthTone.ts.
+func statusPillTone(status string) string {
+	switch status {
+	case health.StatusReady:
+		return "ok"
+	case health.StatusNeedsReview:
+		return "review"
+	case health.StatusConnecting:
+		return "busy"
+	case health.StatusDisabled:
+		return "off"
+	case health.StatusSignInRequired, health.StatusNeedsSecret, health.StatusNeedsConfig, health.StatusError:
+		return "error"
+	default:
+		return "neutral"
 	}
 }
 

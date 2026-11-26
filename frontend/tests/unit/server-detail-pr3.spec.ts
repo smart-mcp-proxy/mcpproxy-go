@@ -158,7 +158,7 @@ describe('facts on the first screen (FR-020, FR-030)', () => {
       expect(wrapper.get('[data-test="fact-title"]').text()).toBe('GitHub tools')
       expect(wrapper.get('[data-test="fact-transport"]').text()).toContain('connected')
       expect(wrapper.get('[data-test="server-trust-mode"]').attributes('aria-label')).toContain('Manual')
-      expect(wrapper.get('[data-test="fact-scan"]').text()).toContain('3 scan warnings')
+      expect(wrapper.get('[data-test="fact-scan"]').text()).toContain('3 warnings')
       expect(wrapper.get('[data-test="fact-held-counts"]').text()).toBe('2 pending, 1 changed')
       wrapper.unmount()
     }
