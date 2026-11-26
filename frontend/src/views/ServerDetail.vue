@@ -536,11 +536,11 @@
                           :key="section.key"
                           :data-test="'tool-diff-' + section.key"
                         >
-                          <div class="text-[11px] font-semibold text-base-content/80 mb-0.5">{{ section.label }}</div>
-                          <div v-if="section.hint" class="text-[10px] text-base-content/50 mb-1">{{ section.hint }}</div>
+                          <div class="text-xs font-semibold text-base-content/80 mb-0.5">{{ section.label }}</div>
+                          <div v-if="section.hint" class="text-xs text-base-content/50 mb-1">{{ section.hint }}</div>
                           <div class="space-y-2">
                             <div>
-                              <div class="text-[10px] font-semibold uppercase tracking-wide text-base-content/60 mb-1">Before (approved)</div>
+                              <div class="text-xs font-semibold uppercase tracking-wide text-base-content/60 mb-1">Before (approved)</div>
                               <div class="bg-error/5 border border-error/20 px-2 py-1.5 rounded font-mono leading-relaxed whitespace-pre-wrap">
                                 <template v-for="(part, i) in computeWordDiff(section.before, section.after)" :key="'b'+i">
                                   <span v-if="part.type === 'removed'" class="bg-error/20 text-error font-semibold px-0.5 rounded">{{ part.text }}</span>
@@ -549,7 +549,7 @@
                               </div>
                             </div>
                             <div>
-                              <div class="text-[10px] font-semibold uppercase tracking-wide text-base-content/60 mb-1">After (current)</div>
+                              <div class="text-xs font-semibold uppercase tracking-wide text-base-content/60 mb-1">After (current)</div>
                               <div class="bg-success/5 border border-success/20 px-2 py-1.5 rounded font-mono leading-relaxed whitespace-pre-wrap">
                                 <template v-for="(part, i) in computeWordDiff(section.before, section.after)" :key="'a'+i">
                                   <span v-if="part.type === 'added'" class="bg-success/20 text-success font-semibold px-0.5 rounded">{{ part.text }}</span>
@@ -565,7 +565,7 @@
                       <span
                         class="badge badge-neutral badge-sm ml-4 self-center"
                         title="Tool is denied by mcp_config.json; approval has no effect while the config lock is active"
-                      >🔒 locked by config</span>
+                      ><UiIcon name="lock" class="w-3 h-3 inline" /> locked by config</span>
                     </template>
                     <div v-else class="flex items-center gap-2 ml-4 self-center">
                       <button
@@ -685,7 +685,7 @@
                         v-if="isToolConfigDenied(tool.name)"
                         class="badge badge-neutral badge-sm"
                         title="Disabled by mcp_config.json (enabled_tools / disabled_tools)"
-                      >🔒 locked by config</span>
+                      ><UiIcon name="lock" class="w-3 h-3 inline" /> locked by config</span>
                       <!-- Scan status. Absent (renders nothing) for every tool
                            the scan did not flag — never a "safe" badge. -->
                       <FindingChip
@@ -714,7 +714,7 @@
                       v-else-if="isToolConfigDenied(tool.name)"
                       class="text-xs text-base-content/40 shrink-0 italic"
                       title="Remove from disabled_tools or add to enabled_tools in mcp_config.json to unlock"
-                    >🔒 locked by config</span>
+                    ><UiIcon name="lock" class="w-3 h-3 inline" /> locked by config</span>
                   </div>
                   <div
                     class="transition-opacity"
@@ -1668,6 +1668,7 @@
 </template>
 
 <script setup lang="ts">
+import UiIcon from '@/components/UiIcon.vue'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch, toRaw } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
@@ -4379,7 +4380,7 @@ function handleServersChangedEvent(event: Event) {
 const serverDetailHints = computed<Hint[]>(() => {
   const hints: Hint[] = [
     {
-      icon: '🔧',
+      icon: 'wrench',
       title: 'Server Management',
       description: 'Control and monitor this MCP server',
       sections: [
@@ -4400,7 +4401,7 @@ const serverDetailHints = computed<Hint[]>(() => {
       ]
     },
     {
-      icon: '🛠️',
+      icon: 'cog',
       title: 'Working with Tools',
       description: 'Use tools provided by this server',
       sections: [
@@ -4422,7 +4423,7 @@ const serverDetailHints = computed<Hint[]>(() => {
       ]
     },
     {
-      icon: '💡',
+      icon: 'lightbulb',
       title: 'Troubleshooting',
       description: 'Common issues and solutions',
       sections: [

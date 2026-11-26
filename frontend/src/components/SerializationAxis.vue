@@ -21,7 +21,7 @@
       <span class="text-xs font-medium">{{ title }}</span>
       <span class="flex items-baseline gap-2">
         <code
-          class="text-[0.65rem] font-mono text-base-content/60"
+          class="text-xs font-mono text-base-content/60"
           :data-test="`serialization-surface-${axisId}`"
         >{{ surface }}</code>
         <a

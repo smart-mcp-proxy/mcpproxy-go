@@ -5,7 +5,7 @@
       :key="item.name"
       class="badge badge-sm gap-1 h-auto min-h-6 py-1 whitespace-normal text-left"
       :class="item.note ? 'badge-ghost' : item.conflicting ? 'badge-warning' : 'badge-outline'"
-      :aria-disabled="item.note ? 'true' : undefined"
+      :data-not-applied="item.note ? 'true' : undefined"
       :data-conflicting="item.conflicting ? 'true' : undefined"
       :data-test="item.na ? `scope-chip-na-${item.name}` : `scope-chip-${item.name}`"
     >
@@ -14,7 +14,7 @@
       <button
         type="button"
         class="btn btn-ghost btn-xs btn-circle min-h-6 h-6 w-6"
-        :aria-label="`Remove ${item.label} filter`"
+        :aria-label="`Remove ${item.label} filter (${item.name})`"
         :data-test="`scope-chip-remove-${item.name}`"
         @click="item.remove()"
       >
@@ -66,7 +66,15 @@ const props = defineProps<{
 const SCOPE_NAMES = ['profile', 'client', 'token'] as const
 
 const route = useRoute()
-const { chipLabel } = useScopeLabels()
+const { chipLabel: baseChipLabel, valueLabel } = useScopeLabels()
+
+// Spec 134 FR-016: the profile and client filters are the "View as" scope, so
+// their chips read "Viewing as <name>". The token chip keeps its wording.
+function chipLabel(name: ScopeName, value: string): string {
+  return (name === 'profile' || name === 'client') && value !== '-'
+    ? `Viewing as ${valueLabel(name, value)}`
+    : baseChipLabel(name, value)
+}
 
 interface Item {
   name: ScopeName
@@ -85,7 +93,9 @@ const items = computed<Item[]>(() => {
     out.push({
       name,
       label: chipLabel(name, chip.value),
-      note: props.disabled?.[name],
+      // Spec 134 FR-016: a carried value this page does not apply is always
+      // marked the same way, with the page's own reason when it has one.
+      note: props.disabled?.[name] ? `not applied on this page: ${props.disabled[name]}` : undefined,
       conflicting: props.conflicting?.includes(name),
       remove: chip.remove,
     })
@@ -99,7 +109,7 @@ const items = computed<Item[]>(() => {
     out.push({
       name,
       label: chipLabel(name, value),
-      note: 'not applicable here',
+      note: 'not applied on this page',
       na: true,
       remove: () => props.scopeQuery.clear([name]),
     })

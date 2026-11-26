@@ -37,7 +37,7 @@ vi.mock('@/services/api', () => {
 // entirely for a tenant principal, not merely suppress its own fetch.
 
 import TopHeader from '@/components/TopHeader.vue'
-import ViewingFilter from '@/components/ViewingFilter.vue'
+import ViewingFilter from '@/components/ViewAs.vue'
 import { setAvailableFeatures } from '@/composables/useScopeQuery'
 import { useAuthStore } from '@/stores/auth'
 import { useProfilesStore } from '@/stores/profiles'
@@ -195,7 +195,7 @@ describe('TopHeader tenant gating (Spec 107 FR-041, cross-review round 2 P1)', (
 
   it('hides the status pill for a tenant (their servers store is never loaded)', async () => {
     const wrapper = await mountTopHeaderAs('user')
-    expect(wrapper.findComponent({ name: 'StatusPill' }).exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'HeaderStatus' }).exists()).toBe(false)
   })
 
   // Spec 107 PR-C cross-review round 3, chunk 4 (P2), carried to the Viewing

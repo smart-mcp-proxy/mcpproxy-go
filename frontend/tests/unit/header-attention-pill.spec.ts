@@ -74,7 +74,7 @@ describe('header needs-attention pill (Spec 109 FR-003/FR-051)', () => {
     expect(wrapper.find('[data-test="header-attention-pill"]').exists()).toBe(false)
   })
 
-  it('shows the count and, on click, a popover with at most the first 5 items plus "See all"', async () => {
+  it('shows the count and, on click, a popover with every item (also the sixth) plus "See all"', async () => {
     const items = Array.from({ length: 7 }, (_, i) => item(`server-${i}`))
     attentionSpy.mockResolvedValue({ success: true, data: { count: 7, items } })
     const wrapper = await mountHeader()
@@ -89,7 +89,7 @@ describe('header needs-attention pill (Spec 109 FR-003/FR-051)', () => {
     const popover = wrapper.find('[data-test="header-attention-popover"]')
     expect(popover.exists()).toBe(true)
     const rows = wrapper.findAll('[data-test^="header-attention-item-"]')
-    expect(rows).toHaveLength(5)
+    expect(rows).toHaveLength(7)
     expect(wrapper.find('[data-test="header-attention-see-all"]').exists()).toBe(true)
   })
 

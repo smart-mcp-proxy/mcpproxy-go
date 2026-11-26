@@ -145,7 +145,9 @@ describe('shell survives auth recovery (#1401)', () => {
 
     // Header and sidebar each own one attention fetch; nothing else may add more.
     expect(calls.getAttention - (before.getAttention ?? 0), 'getAttention').toBe(2)
-    for (const name of ['getReviewQueue', 'getGlobalTools', 'getConfigSecrets', 'getOnboardingState', 'getProfiles']) {
+    // Spec 134 FR-016: the profile list is loaded by the page-level "View as"
+    // control now, not by the header, so it is not part of the shell's reload.
+    for (const name of ['getReviewQueue', 'getGlobalTools', 'getConfigSecrets', 'getOnboardingState']) {
       expect(calls[name] - (before[name] ?? 0), name).toBe(1)
     }
   })

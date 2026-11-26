@@ -1,6 +1,6 @@
 <template>
-  <!-- Spec 109 FR-054: the command palette. Cmd/Ctrl+K or "/" opens it; the
-       header search field opens it on focus. One <dialog> driven through
+  <!-- Spec 109 FR-054: the command palette. Cmd/Ctrl+K or "/" opens it, and
+       so does the header search button (never focus or Tab, Spec 134 FR-013). One <dialog> driven through
        useDialogOpen (showModal → top layer, FR-055). -->
   <dialog
     ref="dialogEl"
@@ -36,7 +36,7 @@
         <template v-for="section in sections" :key="section.id">
           <li
             role="presentation"
-            class="px-4 pt-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40"
+            class="px-4 pt-3 pb-1 text-xs font-semibold uppercase tracking-[0.12em] text-base-content/40"
             :data-test="`palette-section-${section.id}`"
           >
             {{ section.label }}
@@ -83,6 +83,7 @@ import {
   SIDEBAR_FOOTER,
   SIDEBAR_GROUPS,
   SIDEBAR_HOME,
+  SIDEBAR_SETTINGS,
   TEAMS_ADMIN_MENU,
   TEAMS_USER_MENU,
   type NavItem,
@@ -162,7 +163,7 @@ const pageSpecs = computed<RowSpec[]>(() => {
   } else if (authStore.isTeamsEdition) {
     specs = [...TEAMS_USER_MENU, ...TEAMS_ADMIN_MENU].map((p) => ({ key: `page:${p.path}`, label: p.name, run: () => go(p.path) }))
   } else {
-    const items = [SIDEBAR_HOME, ...SIDEBAR_GROUPS.flatMap((g) => g.items), ...SIDEBAR_FOOTER]
+    const items = [SIDEBAR_HOME, ...SIDEBAR_GROUPS.flatMap((g) => g.items), SIDEBAR_SETTINGS, ...SIDEBAR_FOOTER]
     specs = items
       .filter((item) => hasRoutePath(item.requiresRoutePath))
       .map((item) => ({ key: `page:${item.id}`, label: item.label, run: item.external ? external(item) : () => go(item.path) }))

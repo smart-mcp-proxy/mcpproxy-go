@@ -6,7 +6,7 @@
       @click="toggleExpanded"
       class="hints-collapsed"
     >
-      <span class="bulb-icon">💡</span>
+      <UiIcon name="lightbulb" class="w-4 h-4 bulb-icon" />
       <span class="hints-title">Hints: {{ getSummaryText() }}</span>
       <svg class="expand-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
@@ -18,7 +18,7 @@
       <!-- Header with Collapse Button -->
       <div class="hints-header" @click="toggleExpanded">
         <div class="hints-header-left">
-          <span class="bulb-icon">💡</span>
+          <UiIcon name="lightbulb" class="w-4 h-4 bulb-icon" />
           <span class="hints-title">Hints</span>
         </div>
         <svg class="collapse-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -34,7 +34,7 @@
           class="hint-section"
         >
           <div class="hint-section-header">
-            <span class="hint-icon">{{ hint.icon }}</span>
+            <UiIcon :name="hint.icon" class="w-5 h-5 hint-icon" />
             <h3 class="hint-section-title">{{ hint.title }}</h3>
           </div>
 
@@ -55,7 +55,7 @@
                   class="copy-button"
                   title="Copy to clipboard"
                 >
-                  📋 Copy
+                  <UiIcon name="copy" class="w-4 h-4" /> Copy
                 </button>
               </div>
               <pre class="code-block"><code>{{ section.codeBlock.code }}</code></pre>
@@ -78,6 +78,8 @@
 </template>
 
 <script setup lang="ts">
+import UiIcon from '@/components/UiIcon.vue'
+import type { UiIconName } from '@/utils/uiIcons'
 import { ref } from 'vue'
 
 export interface HintSection {
@@ -92,7 +94,7 @@ export interface HintSection {
 }
 
 export interface Hint {
-  icon: string
+  icon: UiIconName
   title: string
   description?: string
   sections: HintSection[]

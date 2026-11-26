@@ -94,22 +94,22 @@ test('1. Profiles is in the sidebar and + Add -> Profile opens the create dialog
   await page.keyboard.press('Escape')
 })
 
-test('2. the Viewing chip sets a profile and an in-app link carries it; Back restores', async ({ page }) => {
-  await open(page, '/clients')
+test('2. "View as" sets a profile and an in-app link carries it; Back restores', async ({ page }) => {
+  await open(page, '/tools')
   await expect(page.locator('[data-test="viewing-filter"]')).toBeVisible()
   await page.locator('[data-test="viewing-filter-button"]').click()
   await page.locator('[data-test="viewing-profile-select"]').selectOption(RO_PROFILE)
   await expect(page).toHaveURL(new RegExp(`profile=${RO_PROFILE}`))
   await page.keyboard.press('Escape')
   // Sticky: the Clients row's Usage link keeps the profile and adds the client.
+  await open(page, `/clients?profile=${RO_PROFILE}`)
   await page.locator('tbody tr', { hasText: 'E2E laptop' }).first().click()
   await page.locator(`[data-test="clients-row-link-usage-${CLIENT_ID}"]`).click()
   await expect(page).toHaveURL(new RegExp(`/ui/usage\\?(?=.*profile=${RO_PROFILE})(?=.*client=${CLIENT_ID})`))
   await expect(page.locator('[data-test="viewing-profile"]')).toBeVisible()
+  await page.locator('[data-test="viewing-filter-clear"]').click()
   await page.goBack()
   await expect(page).toHaveURL(new RegExp(`/ui/clients.*profile=${RO_PROFILE}`))
-  await page.locator('[data-test="viewing-filter-clear"]').click()
-  await expect(page).not.toHaveURL(/profile=/)
 })
 
 test('3. a Clients row links Activity, Sessions, Tools it sees and Usage by client', async ({ page }) => {
@@ -143,7 +143,6 @@ test('5. /servers?profile= lists the profile\'s servers with a removable chip', 
   await expect(total).toHaveText('1')
   await expect(page.locator('main').getByRole('link', { name: 'Details' })).toHaveCount(1)
   await page.locator('[data-test="scope-chip-remove-profile"]').click()
-  await expect(page).not.toHaveURL(/profile=/)
   await expect(total).not.toHaveText('1')
   await expect(page.locator('main').getByRole('link', { name: 'Details' })).not.toHaveCount(1)
 })

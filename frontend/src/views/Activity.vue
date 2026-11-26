@@ -55,6 +55,7 @@
     <!-- Spec 108-j J4/J5 (FR-031, rules 5, 7, 8): the profile/client/token
          filters of the page as removable chips, in every view (the Sessions
          view is narrowed by the same three). -->
+    <div class="empty:hidden" data-test="activity-view-as"><ViewAs /></div>
     <div v-if="scopeChipsVisible" data-test="activity-scope-chips">
       <ScopeChips page="activity" :scope-query="scopeQuery" :unavailable="scopeUnavailableNames" />
     </div>
@@ -320,7 +321,7 @@
                       @change="toggleTypeFilter(type.value)"
                       class="checkbox checkbox-sm"
                     />
-                    <span class="text-lg">{{ type.icon }}</span>
+                    <UiIcon :name="type.icon" class="w-5 h-5" />
                     <span>{{ type.label }}</span>
                   </label>
                 </li>
@@ -368,8 +369,8 @@
             </label>
             <select v-model="filterAuthType" class="select select-bordered select-sm" aria-label="Filter by authentication type">
               <option value="">All</option>
-              <option value="admin">🔑 Admin</option>
-              <option value="agent">🤖 Agent</option>
+              <option value="admin">Admin</option>
+              <option value="agent">Agent</option>
             </select>
           </div>
 
@@ -393,7 +394,7 @@
             </label>
             <select v-model="filterSensitiveData" class="select select-bordered select-sm" aria-label="Filter by sensitive data">
               <option value="">All</option>
-              <option value="true">⚠️ Detected</option>
+              <option value="true">Detected</option>
               <option value="false">Clean</option>
             </select>
           </div>
@@ -405,10 +406,10 @@
             </label>
             <select v-model="filterSeverity" class="select select-bordered select-sm" aria-label="Filter by severity">
               <option value="">All</option>
-              <option value="critical">☢️ Critical</option>
-              <option value="high">⚠️ High</option>
-              <option value="medium">⚡ Medium</option>
-              <option value="low">ℹ️ Low</option>
+              <option value="critical">Critical</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
             </select>
           </div>
 
@@ -483,13 +484,13 @@
           <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
             <span class="font-medium text-base-content/70">Intent:</span>
             <span v-for="entry in INTENT_LEGEND" :key="entry.term" :title="entry.description">
-              <span aria-hidden="true">{{ entry.icon }}</span> {{ entry.term }}
+              <UiIcon :name="entry.icon" class="w-4 h-4 inline" /> {{ entry.term }}
             </span>
           </div>
           <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
             <span class="font-medium text-base-content/70">Sensitive data:</span>
             <span v-for="entry in SENSITIVE_LEGEND" :key="entry.term" :title="entry.description">
-              <span aria-hidden="true">{{ entry.icon }}</span> {{ entry.term }}
+              <UiIcon :name="entry.icon" class="w-4 h-4 inline" /> {{ entry.term }}
             </span>
             <span class="opacity-70">— the number is how many detections that row carries.</span>
           </div>
@@ -659,7 +660,7 @@
                 <td :class="typeColumnClass">
                   <div class="flex flex-col gap-1">
                     <div class="flex items-center gap-2">
-                      <span class="text-lg">{{ getTypeIcon(row.activity.type) }}</span>
+                      <UiIcon :name="getTypeIcon(row.activity.type)" class="w-5 h-5" />
                       <span class="text-sm">{{ formatType(row.activity.type) }}</span>
                     </div>
                     <!--
@@ -685,7 +686,7 @@
                       class="badge badge-xs badge-ghost w-fit font-normal text-base-content/60"
                       title="Sandboxed script run — may have dispatched sub-calls"
                     >
-                      🧩 code_execution
+                      <UiIcon name="puzzle" class="w-3 h-3 inline" /> code_execution
                     </span>
                   </div>
                 </td>
@@ -712,7 +713,7 @@
                       class="text-sm shrink-0"
                       :class="typeGlyphClass"
                       :title="formatType(row.activity.type)"
-                    >{{ getTypeIcon(row.activity.type) }}</span>
+                    ><UiIcon :name="getTypeIcon(row.activity.type)" class="w-4 h-4" /></span>
                     <!--
                       The parent marker, when the Details text already says
                       "code_execution": a quiet glyph instead of a second copy of
@@ -724,7 +725,7 @@
                       class="text-sm opacity-50 shrink-0"
                       title="Sandboxed script run — may have dispatched sub-calls"
                     >
-                      🧩
+                      <UiIcon name="puzzle" class="w-4 h-4" label="Sandboxed script run" />
                     </span>
                     <!--
                       Acceptance scenario 6 (Spec 109-k): a folded
@@ -796,7 +797,7 @@
                     :data-tip="(row.activity.detection_types || []).join(', ')"
                   >
                     <span class="badge badge-sm gap-1" :class="getSeverityBadgeClass(row.activity.max_severity)">
-                      <span aria-hidden="true">{{ getSeverityIcon(row.activity.max_severity) }}</span>
+                      <UiIcon :name="getSeverityIcon(row.activity.max_severity)" class="w-4 h-4" />
                       {{ row.activity.detection_types?.length || 0 }}
                       <!--
                         The badge is a glyph and a number; without this the column
@@ -824,7 +825,7 @@
                     class="flex items-center gap-1.5 min-w-0"
                     :title="intentOf(row.activity).title"
                   >
-                    <span class="text-sm leading-none shrink-0" aria-hidden="true">{{ intentOf(row.activity).icon }}</span>
+                    <UiIcon v-if="intentOf(row.activity).icon" :name="intentOf(row.activity).icon as UiIconName" class="w-4 h-4 shrink-0" />
                     <span data-test="activity-intent-label" class="text-xs font-medium shrink-0">
                       {{ intentOf(row.activity).label }}
                     </span>
@@ -1012,7 +1013,7 @@
             <div class="flex justify-between items-start">
               <div>
                 <h3 class="text-lg font-bold flex items-center gap-2">
-                  <span class="text-2xl">{{ getTypeIcon(selectedActivity.type) }}</span>
+                  <UiIcon :name="getTypeIcon(selectedActivity.type)" class="w-6 h-6" />
                   {{ formatType(selectedActivity.type) }}
                 </h3>
                 <p class="text-sm text-base-content/60">{{ formatTimestamp(selectedActivity.timestamp) }}</p>
@@ -1154,7 +1155,7 @@
             <!-- Sensitive Data Detection (Spec 026) -->
             <div v-if="selectedActivity.has_sensitive_data">
               <h4 class="font-semibold mb-2 text-warning flex items-center gap-2">
-                <span>{{ getSeverityIcon(selectedActivity.max_severity) }}</span>
+                <UiIcon :name="getSeverityIcon(selectedActivity.max_severity)" class="w-4 h-4" />
                 Sensitive Data Detected
               </h4>
               <div class="alert" :class="selectedActivity.max_severity === 'critical' ? 'alert-error' : 'alert-warning'">
@@ -1162,7 +1163,7 @@
                   <div class="flex items-center gap-2">
                     <span class="font-semibold">Severity:</span>
                     <span class="badge" :class="getSeverityBadgeClass(selectedActivity.max_severity)">
-                      {{ getSeverityIcon(selectedActivity.max_severity) }} {{ selectedActivity.max_severity || 'unknown' }}
+                      <UiIcon :name="getSeverityIcon(selectedActivity.max_severity)" class="w-3 h-3 inline" /> {{ selectedActivity.max_severity || 'unknown' }}
                     </span>
                   </div>
                   <div v-if="selectedActivity.detection_types && selectedActivity.detection_types.length > 0" class="flex flex-col gap-1">
@@ -1217,7 +1218,7 @@
             -->
             <div v-if="isSecurityScanActivity(selectedActivity)" data-test="activity-scan-verdict">
               <h4 class="font-semibold mb-2 flex items-center gap-2">
-                <span aria-hidden="true">🛡️</span>
+                <UiIcon name="shield" class="w-4 h-4" />
                 Scan Verdict
               </h4>
               <div class="bg-base-200 rounded p-3 space-y-3">
@@ -1302,7 +1303,7 @@
                   <router-link
                     data-test="activity-scan-open-security"
                     class="btn btn-sm btn-outline"
-                    :to="{ name: 'security' }"
+                    to="/security"
                   >
                     Security &amp; scan reports
                   </router-link>
@@ -1313,7 +1314,7 @@
             <!-- Preflight verdict (Spec 098) -->
             <div v-if="isPreflightActivity(selectedActivity)">
               <h4 class="font-semibold mb-2 flex items-center gap-2">
-                <span>🛫</span>
+                <UiIcon name="send" class="w-4 h-4" />
                 Preflight Verdict
               </h4>
               <div class="bg-base-200 rounded p-3 space-y-3">
@@ -1455,7 +1456,7 @@
                 <div v-if="selectedActivity.metadata.intent.operation_type" class="flex gap-2">
                   <span class="text-sm text-base-content/60">Operation:</span>
                   <span class="badge badge-sm" :class="getIntentBadgeClass(selectedActivity.metadata.intent.operation_type)">
-                    {{ getIntentIcon(selectedActivity.metadata.intent.operation_type) }} {{ selectedActivity.metadata.intent.operation_type }}
+                    <UiIcon :name="getIntentIcon(selectedActivity.metadata.intent.operation_type)" class="w-3 h-3 inline" /> {{ selectedActivity.metadata.intent.operation_type }}
                   </span>
                 </div>
                 <div v-if="selectedActivity.metadata.intent.data_sensitivity" class="flex gap-2">
@@ -1485,6 +1486,8 @@
 </template>
 
 <script setup lang="ts">
+import UiIcon from '@/components/UiIcon.vue'
+import type { UiIconName } from '@/utils/uiIcons'
 import { activityColumnClasses } from '@/utils/activityColumns'
 import { serverDetailPath } from '@/utils/serverRoute'
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
@@ -1499,6 +1502,7 @@ import SessionsPanel from '@/components/activity/SessionsPanel.vue'
 import AttributionChips from '@/components/activity/AttributionChips.vue'
 import AccessExplainer from '@/components/AccessExplainer.vue'
 import ScopeChips from '@/components/scope/ScopeChips.vue'
+import ViewAs from '@/components/ViewAs.vue'
 import ScopeFilterSelects from '@/components/scope/ScopeFilterSelects.vue'
 import { useProfilesStore } from '@/stores/profiles'
 import { isScopeParamAvailable } from '@/composables/useScopeQuery'
@@ -2979,14 +2983,14 @@ const parseResponseData = (response: string | object): unknown => {
 }
 
 // Spec 026: Sensitive data severity helpers
-const getSeverityIcon = (severity?: string): string => {
-  const icons: Record<string, string> = {
-    'critical': '☢️',
-    'high': '⚠️',
-    'medium': '⚡',
-    'low': 'ℹ️'
+const getSeverityIcon = (severity?: string): UiIconName => {
+  const icons: Record<string, UiIconName> = {
+    'critical': 'alertOctagon',
+    'high': 'alert',
+    'medium': 'bolt',
+    'low': 'info'
   }
-  return icons[severity || ''] || '⚠️'
+  return icons[severity || ''] || 'alert'
 }
 
 const getSeverityBadgeClass = (severity?: string): string => {

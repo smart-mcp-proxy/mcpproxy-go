@@ -232,7 +232,9 @@ describe('Tools view-as (Spec 108-j)', () => {
     expect(getGlobalToolsMock).toHaveBeenCalledTimes(1)
     expect(getGlobalToolsMock.mock.calls[0]).toHaveLength(0)
     const chip = wrapper.get('[data-test="scope-chip-client"]')
-    expect(chip.attributes('aria-disabled')).toBe('true')
+    // Spec 134: a not-applied chip is marked, not aria-disabled: its remove button works.
+    expect(chip.attributes('data-not-applied')).toBe('true')
+    expect(chip.attributes('aria-disabled')).toBeUndefined()
     expect(chip.text()).toContain('Viewing as a client requires an administrator')
   })
 
@@ -262,7 +264,9 @@ describe('Tools view-as (Spec 108-j)', () => {
     const { wrapper } = await mountToolsAt('/tools?client=-')
     expect(getGlobalToolsMock.mock.calls[0]).toHaveLength(0)
     const chip = wrapper.get('[data-test="scope-chip-client"]')
-    expect(chip.attributes('aria-disabled')).toBe('true')
+    // Spec 134: a not-applied chip is marked, not aria-disabled: its remove button works.
+    expect(chip.attributes('data-not-applied')).toBe('true')
+    expect(chip.attributes('aria-disabled')).toBeUndefined()
     expect(chip.text()).toContain('Unattributed applies to Activity and Usage only')
     expect(wrapper.find('[data-test="tools-view-as-banner"]').exists()).toBe(false)
   })

@@ -1,24 +1,26 @@
 <template>
   <div id="app" class="drawer lg:drawer-open">
-    <input id="sidebar-drawer" v-model="drawerOpen" type="checkbox" class="drawer-toggle" />
+    <!-- Spec 134 FR-013: first tab stop on an ordinary load. Moves focus to
+         <main> (tabindex -1) so the next Tab starts inside the page. -->
+    <a href="#main-content" class="skip-link" data-test="skip-link" :inert="(overlayMode && drawerOpen) || undefined" @click.prevent="skipToContent">Skip to content</a>
+    <input id="sidebar-drawer" v-model="drawerOpen" type="checkbox" class="drawer-toggle" tabindex="-1" aria-hidden="true" />
 
     <!-- Main content area. The left padding is bound to sidebar collapsed
          state so the content fluidly reclaims space when the sidebar shrinks
          to its icon rail. -->
     <div
       class="drawer-content grid grid-rows-[auto_1fr_auto] h-screen bg-base-200 transition-[padding] duration-200 ease-out"
+      :inert="(overlayMode && drawerOpen) || undefined"
       :class="systemStore.sidebarCollapsed ? 'lg:pl-14' : 'lg:pl-64'"
     >
       <!-- Top Header -->
-      <TopHeader v-if="authStore.shellPresented">
-        <template #viewing><ViewingFilter /></template>
-      </TopHeader>
+      <TopHeader v-if="authStore.shellPresented" />
 
       <!-- Page content. `min-h-0` / `min-w-0`: a grid item defaults to
            `min-height:auto`, so a tall page pushed this scroll container past
            its track and the footer ended up overlapping the last row at 390px
            (UX audit F14). -->
-      <main class="overflow-y-auto min-h-0 min-w-0 p-4 sm:p-6">
+      <main id="main-content" tabindex="-1" class="overflow-y-auto min-h-0 min-w-0 p-4 sm:p-6 outline-none">
         <!-- #1065: keyed on authEpoch so repairing a failed auth remounts the
              current view. Views hold their load errors in component-local refs
              that nothing outside can reach, so a successful sign-in used to
@@ -26,6 +28,7 @@
              header. Key on authEpoch ONLY -- folding in the route path would
              remount ServerDetail on every :serverName change and break the
              Dashboard's single instance across /, /usage and /overview. -->
+        <CarriedScopeChips v-if="authStore.shellPresented" />
         <router-view :key="systemStore.authEpoch" />
       </main>
 
@@ -55,12 +58,12 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { nextTick, onMounted, onUnmounted, reactive, watch } from 'vue'
 import { isNavigationFailure, NavigationFailureType, useRouter } from 'vue-router'
 import SidebarNav from '@/components/SidebarNav.vue'
 import TopHeader from '@/components/TopHeader.vue'
-import ViewingFilter from '@/components/ViewingFilter.vue'
 import AppFooter from '@/components/AppFooter.vue'
+import CarriedScopeChips from '@/components/scope/CarriedScopeChips.vue'
 import ToastContainer from '@/components/ToastContainer.vue'
 import ConnectionStatus from '@/components/ConnectionStatus.vue'
 import AuthErrorModal from '@/components/AuthErrorModal.vue'
@@ -68,12 +71,45 @@ import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import { useAuthStore } from '@/stores/auth'
 import api, { type APIAuthEvent } from '@/services/api'
+import { useSidebarDrawer } from '@/composables/useSidebarDrawer'
 
 const systemStore = useSystemStore()
 const serversStore = useServersStore()
 const authStore = useAuthStore()
 const router = useRouter()
-const drawerOpen = ref(false)
+const { drawerOpen, overlayMode, watchOverlayMode } = useSidebarDrawer()
+drawerOpen.value = false
+
+function skipToContent() {
+  const main = document.getElementById('main-content')
+  main?.focus({ preventScroll: false })
+}
+
+// Spec 134 FR-014: Escape closes the phone overlay and returns focus to the
+// menu button; opening moves focus into the sidebar so it can be walked.
+function onDrawerKeydown(event: KeyboardEvent) {
+  // A layer above the drawer (the palette, a dialog) handles its own Escape.
+  if (event.key !== 'Escape' || !drawerOpen.value || event.defaultPrevented || document.querySelector('dialog[open]')) return
+  drawerOpen.value = false
+}
+// The daisyUI drawer reveals the sidebar through a delayed visibility
+// transition, and a hidden element cannot take focus: retry until it does.
+function focusSidebarWhenVisible(attempt = 0) {
+  const target = document.querySelector<HTMLElement>('[data-test="sidebar-overlay"] a[href], [data-test="sidebar-overlay"] button')
+  target?.focus()
+  if (target && document.activeElement !== target && attempt < 10 && drawerOpen.value) {
+    setTimeout(() => focusSidebarWhenVisible(attempt + 1), 60)
+  }
+}
+watch(drawerOpen, async (open, wasOpen) => {
+  await nextTick()
+  if (open) {
+    focusSidebarWhenVisible()
+  } else if (wasOpen) {
+    document.querySelector<HTMLElement>('[data-test="header-drawer-toggle"]')?.focus()
+  }
+})
+let stopWatchingOverlay: (() => void) | null = null
 
 // The checkbox controls the mobile overlay only; desktop collapse state stays
 // in the system store. Keep the destination visible after navigation, including
@@ -189,6 +225,8 @@ function handleAuthError(event: APIAuthEvent) {
 }
 
 onMounted(async () => {
+  stopWatchingOverlay = watchOverlayMode()
+  window.addEventListener('keydown', onDrawerKeydown)
   // Set up API error listener
   removeAPIListener = api.addEventListener(handleAuthError)
 
@@ -197,6 +235,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  stopWatchingOverlay?.()
+  window.removeEventListener('keydown', onDrawerKeydown)
   removeDrawerNavigationHook()
   systemStore.disconnectEventSource()
 

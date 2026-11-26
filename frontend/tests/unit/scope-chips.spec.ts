@@ -46,31 +46,33 @@ describe('ScopeChips (Spec 108-j J4)', () => {
 
   it('labels come from the stores: profile title, client display name, token name', async () => {
     const { wrapper } = await mountChips('/activity?profile=work-ro&client=cursor&token=ro-bot', 'activity')
-    expect(wrapper.get('[data-test="scope-chip-profile"]').text()).toContain('Profile: Work')
-    expect(wrapper.get('[data-test="scope-chip-client"]').text()).toContain('Client: Cursor')
+    expect(wrapper.get('[data-test="scope-chip-profile"]').text()).toContain('Viewing as Work')
+    expect(wrapper.get('[data-test="scope-chip-client"]').text()).toContain('Viewing as Cursor')
     expect(wrapper.get('[data-test="scope-chip-token"]').text()).toContain('Token: ro-bot')
   })
 
   it('an unknown value falls back to the raw id; - renders as unattributed', async () => {
     const { wrapper } = await mountChips('/activity?client=ghost&profile=-', 'activity')
-    expect(wrapper.get('[data-test="scope-chip-client"]').text()).toContain('Client: ghost')
+    expect(wrapper.get('[data-test="scope-chip-client"]').text()).toContain('Viewing as ghost')
     expect(wrapper.get('[data-test="scope-chip-profile"]').text()).toContain('Profile: unattributed')
   })
 
   it('every remove button has an aria-label naming the filter, and removing writes the URL without it', async () => {
     const { wrapper, router } = await mountChips('/activity?client=cursor&status=blocked', 'activity')
     const remove = wrapper.get('[data-test="scope-chip-remove-client"]')
-    expect(remove.attributes('aria-label')).toBe('Remove Client: Cursor filter')
+    expect(remove.attributes('aria-label')).toBe('Remove Viewing as Cursor filter (client)')
     await remove.trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.query).toEqual({ status: 'blocked' })
   })
 
-  it('rule 5: a sticky param the page does not register renders as a disabled "not applicable here" chip (token on Tools)', async () => {
+  it('rule 5: a sticky param the page does not register renders as a removable "not applied on this page" chip (token on Tools, spec 134 FR-016)', async () => {
     const { wrapper, router } = await mountChips('/tools?token=ro-bot&client=cursor', 'tools')
     const na = wrapper.get('[data-test="scope-chip-na-token"]')
-    expect(na.attributes('aria-disabled')).toBe('true')
-    expect(na.text()).toContain('not applicable here')
+    // Spec 134: a not-applied chip is marked, not aria-disabled: its remove button works.
+    expect(na.attributes('data-not-applied')).toBe('true')
+    expect(na.attributes('aria-disabled')).toBeUndefined()
+    expect(na.text()).toContain('not applied on this page')
     expect(wrapper.find('[data-test="scope-chip-client"]').exists()).toBe(true)
     await wrapper.get('[data-test="scope-chip-remove-token"]').trigger('click')
     await flushPromises()
@@ -80,7 +82,10 @@ describe('ScopeChips (Spec 108-j J4)', () => {
   it('a disabled explanation renders the chip disabled with the sentence in visible text', async () => {
     const { wrapper } = await mountChips('/tools?client=-', 'tools', { disabled: { client: 'Unattributed applies to Activity and Usage only' } })
     const chip = wrapper.get('[data-test="scope-chip-client"]')
-    expect(chip.attributes('aria-disabled')).toBe('true')
+    // Spec 134: a not-applied chip is marked, not aria-disabled: its remove button works.
+    expect(chip.attributes('data-not-applied')).toBe('true')
+    expect(chip.attributes('aria-disabled')).toBeUndefined()
+    expect(chip.text()).toContain('not applied on this page')
     expect(chip.text()).toContain('Unattributed applies to Activity and Usage only')
   })
 

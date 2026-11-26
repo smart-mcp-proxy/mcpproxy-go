@@ -28,7 +28,7 @@
       </template>
       <template v-else>
         <p v-if="rotatePreview" class="text-sm">The client's config is rewritten with a new credential. <code class="text-xs break-all">{{ rotatePreview.display_path || rotatePreview.config_path }}</code></p>
-        <pre v-if="rotatePreview" class="text-[11px] font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-success px-2 py-1.5" data-test="rotate-preview-entry">{{ rotatePreview.entry_text }}</pre>
+        <pre v-if="rotatePreview" class="text-xs font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-success px-2 py-1.5" data-test="rotate-preview-entry">{{ rotatePreview.entry_text }}</pre>
         <span v-else-if="!rotateError" class="loading loading-spinner loading-sm" />
       </template>
       <div v-if="rotateError" role="alert" class="alert alert-error text-sm" data-test="rotate-error">{{ rotateError }}</div>

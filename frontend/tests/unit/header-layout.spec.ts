@@ -81,69 +81,58 @@ describe('TopHeader layout (Spec 109-i FR-053)', () => {
     hasAPIKey.mockReturnValue(true)
   })
 
-  it('orders search < viewing slot < status pill < attention pill < add menu', async () => {
-    const wrapper = await mountHeader({ slots: { viewing: '<span data-test="viewing-content">V</span>' }, count: 2 })
-    const order = ['header-search-input', 'header-viewing-slot', 'header-status-pill', 'header-attention-pill', 'header-add-menu']
+  it('orders search < status pill < attention pill < Add server < add menu (Spec 134 FR-011)', async () => {
+    const wrapper = await mountHeader({ count: 2 })
+    const order = ['header-search-input', 'header-status-pill', 'header-attention-pill', 'header-add-server', 'header-add-menu']
     for (let i = 0; i < order.length - 1; i++) {
       expect(before(el(wrapper, order[i]), el(wrapper, order[i + 1])), `${order[i]} before ${order[i + 1]}`).toBe(true)
     }
     wrapper.unmount()
   })
 
-  it('has no Search button, header Add Server button, ModeSwitcher or endpoints dropdown', async () => {
+  it('has no Search text field, ModeSwitcher or endpoints dropdown; "Add server" is a direct button', async () => {
     const wrapper = await mountHeader()
-    for (const gone of ['header-search-button', 'header-add-server', 'mode-switcher']) {
+    for (const gone of ['header-search-button', 'mode-switcher']) {
       expect(wrapper.find(`[data-test="${gone}"]`).exists(), gone).toBe(false)
     }
+    expect(wrapper.find('input[data-test="header-search-input"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="header-add-server"]').exists()).toBe(true)
     expect(wrapper.findComponent({ name: 'ModeSwitcher' }).exists()).toBe(false)
     expect(wrapper.text()).not.toContain('MCP Endpoints')
     expect(wrapper.find('code').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('renders a single search input with a shortcut hint and a narrow-width icon button', async () => {
+  it('renders a single search button with a shortcut hint and a narrow-width icon button', async () => {
     const wrapper = await mountHeader()
-    const input = wrapper.get('[data-test="header-search-input"]')
-    expect(input.attributes('placeholder')).toBe('Search servers, tools, settings…')
-    expect(input.attributes('aria-keyshortcuts')).toBe('Meta+K Control+K')
+    const field = wrapper.get('[data-test="header-search-input"]')
+    expect(field.element.tagName).toBe('BUTTON')
+    expect(field.text()).toContain('Search servers, tools, settings…')
+    expect(field.attributes('aria-keyshortcuts')).toBe('Meta+K Control+K')
     expect(wrapper.get('[data-test="header-search-icon"]').attributes('aria-label')).toBe('Search')
     expect(wrapper.get('[data-test="header-search-hint"]').text()).toMatch(/⌘K|Ctrl K/)
     wrapper.unmount()
   })
 
-  it('renders no viewing wrapper with no profiles and no slot content', async () => {
-    const wrapper = await mountHeader()
-    expect(wrapper.find('[data-test="header-viewing-slot"]').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('renders the viewing slot content when filled (Spec 108-i: App passes the ViewingFilter chip)', async () => {
+  it('renders no viewing slot at all: View as lives in the page filter rows (Spec 134 FR-016)', async () => {
     useProfilesStore().profiles = [{ name: 'work', servers: ['a'], tool_count: 1 }] as any
-    const wrapper = await mountHeader({ slots: { viewing: '<span data-test="viewing-content">V</span>' } })
-    expect(wrapper.find('[data-test="header-viewing-slot"]').exists()).toBe(true)
-    expect(wrapper.find('[data-test="viewing-content"]').exists()).toBe(true)
-    wrapper.unmount()
-  })
-
-  it('has no ProfileSwitcher fallback: profiles alone never fill the slot', async () => {
-    const api = (await import('@/services/api')).default as any
-    api.getProfiles.mockResolvedValue({ profiles: [{ name: 'work', servers: ['a'], tool_count: 1 }] })
     const wrapper = await mountHeader()
     expect(wrapper.find('[data-test="header-viewing-slot"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="viewing-filter"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="profile-switcher"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('opens the command palette when the search input is focused, seeding typed text', async () => {
+  it('opens the command palette from the search button, never on focus', async () => {
     const wrapper = await mountHeader()
     const input = wrapper.get('[data-test="header-search-input"]')
-    await input.setValue('notes')
     await input.trigger('focus')
+    await flushPromises()
+    expect(document.querySelector('dialog[data-test="command-palette"]')!.hasAttribute('open')).toBe(false)
+    await input.trigger('click')
     await flushPromises()
     const dialog = document.querySelector('dialog[data-test="command-palette"]')!
     expect(dialog.hasAttribute('open')).toBe(true)
-    expect((dialog.querySelector('input') as HTMLInputElement).value).toBe('notes')
-    expect((input.element as HTMLInputElement).value).toBe('')
     wrapper.unmount()
   })
 
@@ -165,6 +154,7 @@ describe('TopHeader layout (Spec 109-i FR-053)', () => {
     const wrapper = await mountHeader({ tenant: true })
     expect(wrapper.find('[data-test="header-status-pill"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="header-add-menu"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="header-add-server"]').exists()).toBe(false)
     wrapper.unmount()
   })
 })

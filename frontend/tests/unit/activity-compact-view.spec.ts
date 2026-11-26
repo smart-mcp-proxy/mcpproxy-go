@@ -230,7 +230,8 @@ describe('Activity Log — row treatment', () => {
     // The marker survives as a quiet glyph beside the Details text.
     const marker = parentRow.find('[data-test="activity-parent-badge"]')
     expect(marker.exists()).toBe(true)
-    expect(marker.text()).toBe('🧩')
+    expect(marker.find('[data-icon="puzzle"]').exists()).toBe(true)
+    expect(marker.text()).toBe('')
     expect(marker.classes().join(' ')).not.toContain('badge-accent')
   })
 

@@ -147,7 +147,7 @@ describe('OnboardingWizard Clients step paths/icons (Spec 109-b FR-037)', () => 
 
     const icon = wrapper.find('[data-test="client-icon-cursor"]')
     expect(icon.exists()).toBe(true)
-    expect(icon.text().length).toBeGreaterThan(0)
+    expect(icon.find('[data-icon]').exists()).toBe(true)
   })
 
   // The server sends `icon` as the id of the glyph to reuse, not as a glyph.
@@ -166,14 +166,14 @@ describe('OnboardingWizard Clients step paths/icons (Spec 109-b FR-037)', () => 
     })
     const wrapper = await mountOnClients([row('vscode', 'VS Code'), row('copilot', 'GitHub Copilot')])
 
-    const vscodeGlyph = wrapper.find('[data-test="client-icon-vscode"]').text()
+    const vscodeGlyph = wrapper.find('[data-test="client-icon-vscode"] [data-icon]').attributes('data-icon')
     const inlineRows = wrapper.findComponent(ClientConnectList)
     for (const scope of [wrapper, inlineRows]) {
       const copilot = scope.findAll('[data-test="client-icon-copilot"]')
       expect(copilot.length).toBeGreaterThan(0)
       for (const icon of copilot) {
         expect(icon.text()).not.toContain('vscode')
-        expect(icon.text()).toBe(vscodeGlyph)
+        expect(icon.find('[data-icon]').attributes('data-icon')).toBe(vscodeGlyph)
       }
     }
   })
@@ -185,7 +185,7 @@ describe('OnboardingWizard Clients step paths/icons (Spec 109-b FR-037)', () => 
     const icons = wrapper.findAll('[data-test="client-icon-brand-new"]')
     expect(icons.length).toBeGreaterThan(0)
     for (const icon of icons) {
-      expect(icon.text()).toBe('\u{1F527}')
+      expect(icon.find('[data-icon]').attributes('data-icon')).toBe('wrench')
     }
   })
 })

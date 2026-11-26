@@ -9,7 +9,9 @@ exports[`Connect screen: choice of how the client signs in (Spec 132 PR-3) > fea
       <div data-test="client-row-claude-code" class="rounded-lg border border-base-300 hover:bg-base-200/50 transition-colors overflow-hidden">
         <div class="flex items-center justify-between p-3">
           <div class="flex items-center gap-3 min-w-0 flex-1">
-            <div class="w-8 h-8 flex items-center justify-center text-lg shrink-0" title="Claude Code" data-test="client-icon-claude-code">💻</div>
+            <div class="w-8 h-8 flex items-center justify-center text-lg shrink-0" title="Claude Code" data-test="client-icon-claude-code"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" data-test="ui-icon" data-icon="bot" class="w-5 h-5">
+                <path d="M9 3v2m6-2v2M9 19v2m6-2v2M3 9h2m-2 6h2m14-6h2m-2 6h2M7 7h10v10H7V7z"></path>
+              </svg></div>
             <div class="min-w-0 flex-1">
               <div class="font-medium text-sm truncate">Claude Code
               </div>
@@ -17,14 +19,16 @@ exports[`Connect screen: choice of how the client signs in (Spec 132 PR-3) > fea
             </div>
           </div>
           <div class="shrink-0 ml-2 flex flex-col items-end gap-1"><button data-test="connect-claude-code" class="btn btn-primary btn-xs"><span>Review &amp; connect</span></button>
-            <button data-test="connect-check-access" class="btn btn-ghost btn-2xs h-auto min-h-0 py-0.5 text-[0.7rem] opacity-60 hover:opacity-100" title="Read this client's config now to verify access (may prompt on macOS)"><span>Check access</span></button>
+            <button data-test="connect-check-access" class="btn btn-ghost btn-2xs h-auto min-h-0 py-0.5 text-xs opacity-60 hover:opacity-100" title="Read this client's config now to verify access (may prompt on macOS)"><span>Check access</span></button>
           </div>
         </div>
       </div>
       <div data-test="client-row-cursor" class="rounded-lg border border-base-300 hover:bg-base-200/50 transition-colors overflow-hidden">
         <div class="flex items-center justify-between p-3">
           <div class="flex items-center gap-3 min-w-0 flex-1">
-            <div class="w-8 h-8 flex items-center justify-center text-lg shrink-0" title="Cursor" data-test="client-icon-cursor">📝</div>
+            <div class="w-8 h-8 flex items-center justify-center text-lg shrink-0" title="Cursor" data-test="client-icon-cursor"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" data-test="ui-icon" data-icon="pencil" class="w-5 h-5">
+                <path d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path>
+              </svg></div>
             <div class="min-w-0 flex-1">
               <div class="font-medium text-sm truncate">Cursor
               </div>
@@ -32,7 +36,7 @@ exports[`Connect screen: choice of how the client signs in (Spec 132 PR-3) > fea
             </div>
           </div>
           <div class="shrink-0 ml-2 flex flex-col items-end gap-1"><button data-test="connect-cursor" class="btn btn-primary btn-xs"><span>Review &amp; connect</span></button>
-            <button data-test="connect-check-access" class="btn btn-ghost btn-2xs h-auto min-h-0 py-0.5 text-[0.7rem] opacity-60 hover:opacity-100" title="Read this client's config now to verify access (may prompt on macOS)"><span>Check access</span></button>
+            <button data-test="connect-check-access" class="btn btn-ghost btn-2xs h-auto min-h-0 py-0.5 text-xs opacity-60 hover:opacity-100" title="Read this client's config now to verify access (may prompt on macOS)"><span>Check access</span></button>
           </div>
         </div>
       </div>
@@ -54,7 +58,9 @@ exports[`Connect screen: choice of how the client signs in (Spec 132 PR-3) > fea
       <div data-test="client-row-claude-code" class="rounded-lg border border-base-300 hover:bg-base-200/50 transition-colors overflow-hidden">
         <div class="flex items-center justify-between p-3">
           <div class="flex items-center gap-3 min-w-0 flex-1">
-            <div class="w-8 h-8 flex items-center justify-center text-lg shrink-0" title="Claude Code" data-test="client-icon-claude-code">💻</div>
+            <div class="w-8 h-8 flex items-center justify-center text-lg shrink-0" title="Claude Code" data-test="client-icon-claude-code"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" data-test="ui-icon" data-icon="bot" class="w-5 h-5">
+                <path d="M9 3v2m6-2v2M9 19v2m6-2v2M3 9h2m-2 6h2m14-6h2m-2 6h2M7 7h10v10H7V7z"></path>
+              </svg></div>
             <div class="min-w-0 flex-1">
               <div class="font-medium text-sm truncate">Claude Code
               </div>
@@ -62,13 +68,13 @@ exports[`Connect screen: choice of how the client signs in (Spec 132 PR-3) > fea
             </div>
           </div>
           <div class="shrink-0 ml-2 flex flex-col items-end gap-1"><button data-test="connect-claude-code" class="btn btn-primary btn-xs"><span>Review &amp; connect</span></button>
-            <button data-test="connect-check-access" class="btn btn-ghost btn-2xs h-auto min-h-0 py-0.5 text-[0.7rem] opacity-60 hover:opacity-100" title="Read this client's config now to verify access (may prompt on macOS)"><span>Check access</span></button>
+            <button data-test="connect-check-access" class="btn btn-ghost btn-2xs h-auto min-h-0 py-0.5 text-xs opacity-60 hover:opacity-100" title="Read this client's config now to verify access (may prompt on macOS)"><span>Check access</span></button>
           </div>
         </div>
         <div data-test="client-preview-claude-code" class="border-t border-base-300 bg-base-200/40 px-3 py-3 space-y-2">
-          <p class="text-xs opacity-70 leading-relaxed"> Only this entry is added to <code class="font-mono text-[11px] break-all" title="/Users/test/.claude.json">/Users/test/.claude.json</code>. Everything else in the file stays untouched, and a timestamped backup is created first. </p>
+          <p class="text-xs opacity-70 leading-relaxed"> Only this entry is added to <code class="font-mono text-xs break-all" title="/Users/test/.claude.json">/Users/test/.claude.json</code>. Everything else in the file stays untouched, and a timestamped backup is created first. </p>
           <div>
-            <div class="text-[11px] font-semibold uppercase tracking-wider text-success/80 mb-1">+ will be added</div><pre data-test="client-preview-entry-claude-code" class="text-[11px] font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-success px-2 py-1.5 leading-relaxed">{"mcpproxy":{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"mcp_cli_••••"}}}</pre>
+            <div class="text-xs font-semibold uppercase tracking-wider text-success/80 mb-1">+ will be added</div><pre data-test="client-preview-entry-claude-code" class="text-xs font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-success px-2 py-1.5 leading-relaxed">{"mcpproxy":{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"mcp_cli_••••"}}}</pre>
           </div>
           <div class="space-y-2" data-test="client-preview-credential-claude-code">
             <p class="text-xs leading-relaxed" data-test="connect-credential-notice-claude-code"> MCPProxy writes a client credential for Claude Code. The admin API key is never written. </p>
@@ -78,7 +84,7 @@ exports[`Connect screen: choice of how the client signs in (Spec 132 PR-3) > fea
                   <option value="">All servers</option>
                 </select></div><label class="label cursor-pointer justify-start gap-2 py-0" title="Choose a profile to lock"><input type="checkbox" role="switch" class="toggle toggle-xs" disabled="" aria-label="Lock Claude Code to this profile" data-test="connect-lock-switch-claude-code"><span class="label-text text-xs">Locked</span></label>
             </div>
-            <p class="text-[11px] opacity-70" data-test="connect-binding-summary-claude-code"> Profile: All servers · Mode: switchable</p>
+            <p class="text-xs opacity-70" data-test="connect-binding-summary-claude-code"> Profile: All servers · Mode: switchable</p>
             <p class="text-xs text-warning leading-relaxed" data-test="connect-mgmt-notice-claude-code">This client can no longer add, change or restart servers; manage servers from the Web UI, the macOS app or the CLI</p>
           </div>
           <div class="flex items-center gap-2 pt-1"><button data-test="client-preview-confirm-claude-code" class="btn btn-primary btn-xs"><span>Connect</span></button><button data-test="client-preview-cancel-claude-code" class="btn btn-ghost btn-xs"> Cancel </button></div>
@@ -87,7 +93,9 @@ exports[`Connect screen: choice of how the client signs in (Spec 132 PR-3) > fea
       <div data-test="client-row-cursor" class="rounded-lg border border-base-300 hover:bg-base-200/50 transition-colors overflow-hidden">
         <div class="flex items-center justify-between p-3">
           <div class="flex items-center gap-3 min-w-0 flex-1">
-            <div class="w-8 h-8 flex items-center justify-center text-lg shrink-0" title="Cursor" data-test="client-icon-cursor">📝</div>
+            <div class="w-8 h-8 flex items-center justify-center text-lg shrink-0" title="Cursor" data-test="client-icon-cursor"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" data-test="ui-icon" data-icon="pencil" class="w-5 h-5">
+                <path d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path>
+              </svg></div>
             <div class="min-w-0 flex-1">
               <div class="font-medium text-sm truncate">Cursor
               </div>
@@ -95,7 +103,7 @@ exports[`Connect screen: choice of how the client signs in (Spec 132 PR-3) > fea
             </div>
           </div>
           <div class="shrink-0 ml-2 flex flex-col items-end gap-1"><button data-test="connect-cursor" class="btn btn-primary btn-xs"><span>Review &amp; connect</span></button>
-            <button data-test="connect-check-access" class="btn btn-ghost btn-2xs h-auto min-h-0 py-0.5 text-[0.7rem] opacity-60 hover:opacity-100" title="Read this client's config now to verify access (may prompt on macOS)"><span>Check access</span></button>
+            <button data-test="connect-check-access" class="btn btn-ghost btn-2xs h-auto min-h-0 py-0.5 text-xs opacity-60 hover:opacity-100" title="Read this client's config now to verify access (may prompt on macOS)"><span>Check access</span></button>
           </div>
         </div>
       </div>

@@ -75,23 +75,29 @@ describe('sidebar structure (Spec 109-i FR-050)', () => {
     mocks.getClients.mockReset().mockResolvedValue({ success: true, data: { clients: [] } })
   })
 
-  it('renders groups CONNECT, PROTECT, MONITOR in that order', async () => {
+  it('renders an unlabeled primary block, then PROTECT and MONITOR (Spec 134 FR-010)', async () => {
     const wrapper = await mountSidebar()
     const groups = wrapper.findAll('[data-test^="sidebar-group-"]')
     expect(groups.map((g) => g.attributes('data-test'))).toEqual([
-      'sidebar-group-connect',
+      'sidebar-group-primary',
       'sidebar-group-protect',
       'sidebar-group-monitor',
     ])
-    expect(groups.map((g) => g.text().toUpperCase())).toEqual(['CONNECT', 'PROTECT', 'MONITOR'])
+    expect(groups.map((g) => g.text().toUpperCase())).toEqual(['', 'PROTECT', 'MONITOR'])
   })
 
-  it('orders items home, clients, servers, tools, review, secrets, activity, usage then the footer', async () => {
+  it('orders items home, servers, tools, clients, review, secrets, activity, usage, settings, then the footer (Spec 134 FR-010)', async () => {
     const wrapper = await mountSidebar()
     expect(testIds(wrapper, 'sidebar-item-')).toEqual([
-      'home', 'clients', 'servers', 'tools', 'review', 'secrets', 'activity', 'usage',
+      'home', 'servers', 'tools', 'clients', 'review', 'secrets', 'activity', 'usage',
       'settings', 'docs', 'feedback', 'theme',
     ])
+  })
+
+  it('names the Protect items Review and Secrets', async () => {
+    const wrapper = await mountSidebar()
+    expect(wrapper.get('[data-test="sidebar-item-review"]').text()).toContain('Review')
+    expect(wrapper.get('[data-test="sidebar-item-review"]').text()).not.toContain('queue')
   })
 
   it('puts the version row below the footer links', async () => {
@@ -187,7 +193,7 @@ describe('sidebar structure (Spec 109-i FR-050)', () => {
 
     const withRoute = await mountSidebar([{ path: '/profiles' }])
     const ids = testIds(withRoute, 'sidebar-item-')
-    expect(ids.slice(0, 4)).toEqual(['home', 'clients', 'profiles', 'servers'])
+    expect(ids.slice(0, 5)).toEqual(['home', 'servers', 'tools', 'clients', 'profiles'])
   })
 
   it('labels every link in collapsed mode', async () => {

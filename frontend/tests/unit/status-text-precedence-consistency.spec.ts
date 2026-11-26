@@ -46,7 +46,7 @@ const disagreeingHealth = {
 }
 
 describe('status-text precedence is the SAME on every surface (summary before the status label)', () => {
-  it('AdminServers STATUS column prefers summary over the status label, like ServerCard', async () => {
+  it('AdminServers STATUS column shows the status label and keeps the summary as detail (Spec 134 FR-004)', async () => {
     const router = makeRouter()
     await router.isReady()
 
@@ -77,13 +77,15 @@ describe('status-text precedence is the SAME on every surface (summary before th
 
     const row = wrapper.findAll('tbody tr').find(r => r.text().includes('agreeing-and-disagreeing'))
     expect(row).toBeTruthy()
+    // Spec 134 FR-004 supersedes the summary-first rule for this cell: the
+    // Spec 109 label is printed by the status pill and the summary stays
+    // beside it as separate detail, so neither is lost.
     const statusCell = row!.findAll('td')[3]
-    const badge = statusCell.find('span.badge')
-    expect(badge.text()).toBe('Connected (14 tools)')
-    expect(badge.text()).not.toBe('Online')
+    expect(statusCell.get('[data-test="status-pill"]').text()).toBe('Online')
+    expect(statusCell.get('[data-test="server-status-summary"]').text()).toBe('Connected (14 tools)')
   })
 
-  it('UserServers Status column prefers summary over the status label, like ServerCard', async () => {
+  it('UserServers Status column shows the status label and keeps the summary as detail (Spec 134 FR-004)', async () => {
     const router = makeRouter()
     await router.isReady()
 
@@ -109,9 +111,11 @@ describe('status-text precedence is the SAME on every surface (summary before th
 
     const row = wrapper.findAll('tbody tr').find(r => r.text().includes('agreeing-and-disagreeing'))
     expect(row).toBeTruthy()
+    // Spec 134 FR-004 supersedes the summary-first rule for this cell: the
+    // Spec 109 label is printed by the status pill and the summary stays
+    // beside it as separate detail, so neither is lost.
     const statusCell = row!.findAll('td')[3]
-    const badge = statusCell.find('span.badge')
-    expect(badge.text()).toBe('Connected (14 tools)')
-    expect(badge.text()).not.toBe('Online')
+    expect(statusCell.get('[data-test="status-pill"]').text()).toBe('Online')
+    expect(statusCell.get('[data-test="server-status-summary"]').text()).toBe('Connected (14 tools)')
   })
 })

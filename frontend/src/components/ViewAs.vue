@@ -1,10 +1,10 @@
 <template>
-  <div v-if="visible" class="relative" data-test="viewing-filter" @keydown.esc="closePopover">
+  <div v-if="visible" class="relative flex flex-wrap items-center gap-x-3 gap-y-1" data-test="viewing-filter" @keydown.esc="closePopover">
     <div class="flex items-center gap-1">
       <button
         type="button"
-        class="btn btn-sm btn-outline gap-2 max-w-[22rem] normal-case"
-        :class="hasValue && 'btn-primary'"
+        class="btn btn-sm btn-outline gap-2 max-w-[22rem] normal-case min-h-10 md:min-h-8"
+        :class="hasValue && 'btn-active'"
         aria-haspopup="dialog"
         :aria-expanded="open ? 'true' : 'false'"
         :aria-label="ariaLabel"
@@ -13,34 +13,36 @@
         ref="button"
         @click="open = !open"
       >
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-        </svg>
-        <span class="hidden min-[1100px]:inline truncate" data-test="viewing-filter-text">
-          Viewing:
+        <UiIcon name="eye" class="w-4 h-4 shrink-0" />
+        <span class="truncate" data-test="viewing-filter-text">
+          View as:
           <template v-if="hasValue">
             <span v-if="profileValue" :class="!profileApplies && 'opacity-50'" :title="!profileApplies ? NOT_APPLIED : undefined" data-test="viewing-profile">{{ profileLabel }}</span>
             <template v-if="profileValue && clientValue"> &middot; </template>
             <span v-if="clientValue" :class="!clientApplies && 'opacity-50'" :title="!clientApplies ? NOT_APPLIED : undefined" data-test="viewing-client">{{ clientLabel }}</span>
           </template>
-          <template v-else>all</template>
+          <template v-else>everyone</template>
         </span>
       </button>
       <button
         v-if="hasValue"
         type="button"
-        class="btn btn-sm btn-ghost btn-square"
+        class="btn btn-sm btn-ghost btn-square min-h-10 min-w-10 md:min-h-8 md:min-w-8"
         aria-label="Clear view filter"
         data-test="viewing-filter-clear"
         @click="clear"
-      >&times;</button>
+      ><UiIcon name="x" class="w-4 h-4" /></button>
     </div>
+    <!-- Spec 134 FR-016: a narrowed page cannot be mistaken for the full one.
+         The removable "Viewing as <name>" chip is the page's scope chip row. -->
+    <p v-if="narrowing && visible" class="text-xs text-base-content/70" data-test="view-as-note">
+      Viewing as {{ viewingNames }}: this page shows only what it can reach. Header counts stay fleet-wide.
+    </p>
 
     <div
       v-if="open"
       role="dialog"
-      aria-label="Viewing filter"
+      aria-label="View as"
       class="absolute left-0 top-full mt-2 p-3 shadow-lg bg-base-100 rounded-box w-80 max-w-[calc(100vw-1.5rem)] border border-base-300 z-[var(--z-dropdown)] space-y-3"
       data-test="viewing-filter-popover"
     >
@@ -68,18 +70,21 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import UiIcon from '@/components/UiIcon.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useClientsStore } from '@/stores/clients'
 import { useProfilesStore } from '@/stores/profiles'
 import { useSystemStore } from '@/stores/system'
 import { isScopeParamAvailable, pageIdForRouteName, scopeParamAppliesToPage, useScopeQuery } from '@/composables/useScopeQuery'
 
-// Spec 108-i I16 / FR-044: the header's "Viewing" chip. It narrows what a PAGE
+// Spec 134 FR-016 (was Spec 108-i I16 / FR-044, the header's "Viewing" chip):
+// the "View as" control in the filter row of Servers, Tools, Activity and Usage. It narrows what a PAGE
 // shows; it never changes what any client or agent can access, and it calls no
 // binding route. It reads and writes the URL filter contract (Spec 109-k) and
 // replaces the v2 "Profile:" switcher, which looked like agent scoping.
+const props = defineProps<{ conflict?: boolean }>()
 const TOOLTIP = 'Filters what this page shows. It does not change what any client or agent can access.'
 const NOT_APPLIED = 'Not applied on this page'
 
@@ -109,8 +114,8 @@ const hasValue = computed(() => Boolean(profileValue.value || clientValue.value)
 const profileApplies = computed(() => scopeParamAppliesToPage('profile', page.value))
 const clientApplies = computed(() => scopeParamAppliesToPage('client', page.value))
 
-const profileLabel = computed(() => profiles.titleFor(profileValue.value))
-const clientLabel = computed(() => clients.clients.find(client => client.id === clientValue.value)?.display_name ?? clientValue.value)
+const profileLabel = computed(() => (profileValue.value === '-' ? 'unattributed' : profiles.titleFor(profileValue.value)))
+const clientLabel = computed(() => (clientValue.value === '-' ? 'unattributed' : clients.clients.find(client => client.id === clientValue.value)?.display_name ?? clientValue.value))
 
 // Hidden: before the server lists the filters, for a tenant, and while there is
 // nothing to filter by (no profile and no client with a credential). A value
@@ -121,10 +126,20 @@ const visible = computed(() => {
 })
 
 const ariaLabel = computed(() => {
-  if (!hasValue.value) return 'Viewing: all. Filters what this page shows'
-  const parts = [profileValue.value ? profileLabel.value : '', clientValue.value ? clientLabel.value : ''].filter(Boolean)
-  return `Viewing: ${parts.join(' · ')}. Filters what this page shows`
+  if (!hasValue.value) return 'View as: everyone. Filters what this page shows'
+  const raw = [profileValue.value ? profileLabel.value : '', clientValue.value ? clientLabel.value : ''].filter(Boolean).join(' · ')
+  return `View as: ${raw}. Filters what this page shows`
 })
+// Only the filters this page actually applies count as narrowing ("-" is the
+// unattributed marker, not a view-as subject).
+const narrowingProfile = computed(() => Boolean(profileValue.value && profileValue.value !== '-' && profileApplies.value))
+const narrowingClient = computed(() => Boolean(clientValue.value && clientValue.value !== '-' && clientApplies.value))
+// A page that cannot apply both at once (Tools: profile + client) shows its own
+// conflict state; the note must not claim a narrowing that did not happen.
+const narrowing = computed(() => !props.conflict && (narrowingProfile.value || narrowingClient.value))
+const viewingNames = computed(() =>
+  [narrowingProfile.value ? profileLabel.value : '', narrowingClient.value ? clientLabel.value : ''].filter(Boolean).join(' · '),
+)
 
 function setParam(name: 'profile' | 'client', value: string) { scope.set({ [name]: value || undefined }) }
 function clear() { scope.clear(['profile', 'client']); open.value = false }
@@ -137,13 +152,15 @@ function closePopover() {
   button.value?.focus()
 }
 
-// The header is global, so it loads the list itself (TopHeader no longer does).
+// Loads the profile list only when no one has (pages share the profiles store).
 // App only mounts the shell once the principal is known; a tenant never reads
 // the admin profile list.
 function load() {
   if (isTenant.value) return
-  if (!auth.isTeamsEdition || auth.canLoadCore) void profiles.fetchProfiles()
+  if ((!auth.isTeamsEdition || auth.canLoadCore) && !profiles.loaded && !profiles.loading) void profiles.fetchProfiles()
 }
-onMounted(load)
-watch(() => system.authEpoch, load)
+// After the host page's own mount, so a page that loads profiles itself is not
+// asked twice (the loaded/loading guard above sees its request).
+onMounted(() => { void nextTick(load) })
+watch(() => system.authEpoch, () => { if (!isTenant.value && (!auth.isTeamsEdition || auth.canLoadCore)) void profiles.fetchProfiles() })
 </script>

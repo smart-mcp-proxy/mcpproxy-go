@@ -13,7 +13,7 @@ vi.mock('@/services/api', () => ({
   default: { hasAPIKey: vi.fn(() => true) },
 }))
 
-import StatusPill from '@/components/StatusPill.vue'
+import HeaderStatus from '@/components/HeaderStatus.vue'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 
@@ -34,14 +34,14 @@ async function mountPill() {
   })
   router.push('/')
   await router.isReady()
-  const wrapper = mount(StatusPill, { global: { plugins: [router] } })
+  const wrapper = mount(HeaderStatus, { global: { plugins: [router] } })
   await flushPromises()
   return wrapper
 }
 
 const full = (w: Awaited<ReturnType<typeof mountPill>>) => w.get('[data-test="header-status-full"]').text().replace(/\s+/g, ' ')
 
-describe('StatusPill awaiting review and first load (fix-usertest-web T202)', () => {
+describe('HeaderStatus awaiting review and first load (fix-usertest-web T202)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     useServersStore().loaded = true

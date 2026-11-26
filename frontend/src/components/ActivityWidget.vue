@@ -57,7 +57,7 @@
           @click="navigateToActivity(activity.id)"
         >
           <div class="flex items-center gap-3">
-            <span class="text-lg">{{ getTypeIcon(activity.type) }}</span>
+            <UiIcon :name="getTypeIcon(activity.type)" :label="formatType(activity.type)" class="w-5 h-5" />
             <div>
               <div class="text-sm font-medium">
                 <span v-if="activity.server_name">{{ activity.server_name }}</span>
@@ -99,12 +99,14 @@
 </template>
 
 <script setup lang="ts">
+import UiIcon from '@/components/UiIcon.vue'
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/services/api'
 import type { ActivityRecord, ActivitySummaryResponse } from '@/types/api'
 import {
   formatPreflightSummary,
+  formatType,
   getTypeIcon,
   isChildCall,
   isPreflightActivity,

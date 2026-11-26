@@ -493,7 +493,7 @@ const handleSecretAdded = async () => {
 const secretsHints = computed<Hint[]>(() => {
   return [
     {
-      icon: '🔐',
+      icon: 'lock',
       title: 'Config-First Workflow',
       description: 'Add secret references to your config first, then set their values',
       sections: [
@@ -520,7 +520,7 @@ const secretsHints = computed<Hint[]>(() => {
       ]
     },
     {
-      icon: '🌍',
+      icon: 'globe',
       title: 'Environment Variables',
       description: 'Reference environment variables in your configuration',
       sections: [
@@ -541,7 +541,7 @@ const secretsHints = computed<Hint[]>(() => {
       ]
     },
     {
-      icon: '🔄',
+      icon: 'refresh',
       title: 'Migrate Existing Secrets',
       description: 'Find and migrate hardcoded secrets to secure storage',
       sections: [

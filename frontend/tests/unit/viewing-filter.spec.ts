@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
-import { createPinia, setActivePinia } from 'pinia'
 import { h } from 'vue'
+import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import TopHeader from '@/components/TopHeader.vue'
-import ViewingFilter from '@/components/ViewingFilter.vue'
+import ViewAs from '@/components/ViewAs.vue'
 import api from '@/services/api'
 import { setAvailableFeatures, useScopeQuery } from '@/composables/useScopeQuery'
 import { useAuthStore } from '@/stores/auth'
@@ -35,7 +35,7 @@ async function mountChip(url = '/activity', options: { profiles?: any[]; clients
   const router = makeRouter()
   await router.push(url)
   await router.isReady()
-  const wrapper = mount(ViewingFilter, { global: { plugins: [router] } })
+  const wrapper = mount(ViewAs, { global: { plugins: [router] } })
   useClientsStore().clients = (options.clients ?? [makeClient('cursor')]) as any
   await flushPromises()
   return { wrapper, router }
@@ -54,29 +54,16 @@ describe('Viewing chip (Spec 108-i T095, FR-044)', () => {
     const router = makeRouter()
     await router.push('/')
     await router.isReady()
-    const header = mount(TopHeader, { global: { plugins: [router], stubs: { StatusPill: true, AddMenu: true, CommandPalette: true } } })
+    const header = mount(TopHeader, { global: { plugins: [router], stubs: { HeaderStatus: true, AddMenu: true, CommandPalette: true } } })
     await flushPromises()
     expect(header.find('[data-test="profile-switcher"]').exists()).toBe(false)
     expect(header.text()).not.toContain('Profile:')
   })
 
-  it('renders inside the header viewing slot', async () => {
-    ;(api.getProfiles as any).mockResolvedValue({ profiles: [WORK_RO] })
-    const router = makeRouter()
-    await router.push('/activity')
-    await router.isReady()
-    const header = mount(TopHeader, {
-      slots: { viewing: () => h(ViewingFilter) },
-      global: { plugins: [router], stubs: { StatusPill: true, AddMenu: true, CommandPalette: true } },
-    })
-    await flushPromises()
-    expect(header.find('[data-test="header-viewing-slot"] [data-test="viewing-filter"]').exists()).toBe(true)
-  })
-
-  it('shows "Viewing: all" with a popover holding Profile and Client selects and the tooltip', async () => {
+  it('shows "View as: everyone" with a popover holding Profile and Client selects and the tooltip', async () => {
     const { wrapper } = await mountChip()
     const button = wrapper.get('[data-test="viewing-filter-button"]')
-    expect(wrapper.get('[data-test="viewing-filter-text"]').text()).toBe('Viewing: all')
+    expect(wrapper.get('[data-test="viewing-filter-text"]').text()).toBe('View as: everyone')
     expect(button.attributes('title')).toBe(TOOLTIP)
     expect(wrapper.find('[data-test="viewing-filter-clear"]').exists()).toBe(false)
     await button.trigger('click')
@@ -94,17 +81,17 @@ describe('Viewing chip (Spec 108-i T095, FR-044)', () => {
     await wrapper.get('[data-test="viewing-client-select"]').setValue('cursor')
     await flushPromises()
     expect(router.currentRoute.value.query).toEqual({ profile: 'work-ro', client: 'cursor' })
-    expect(wrapper.get('[data-test="viewing-filter-text"]').text()).toBe('Viewing: Work · Cursor')
+    expect(wrapper.get('[data-test="viewing-filter-text"]').text()).toBe('View as: Work · Cursor')
     await wrapper.get('[data-test="viewing-filter-clear"]').trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.query).toEqual({})
-    expect(wrapper.get('[data-test="viewing-filter-text"]').text()).toBe('Viewing: all')
-    expect(wrapper.get('[data-test="viewing-filter-button"]').attributes('aria-label')).toContain('Viewing: all')
+    expect(wrapper.get('[data-test="viewing-filter-text"]').text()).toBe('View as: everyone')
+    expect(wrapper.get('[data-test="viewing-filter-button"]').attributes('aria-label')).toContain('View as: everyone')
   })
 
   it('reads the URL, survives navigation through the link map, and Back restores it', async () => {
     const { wrapper, router } = await mountChip('/activity?profile=work-ro')
-    expect(wrapper.get('[data-test="viewing-filter-text"]').text()).toBe('Viewing: Work')
+    expect(wrapper.get('[data-test="viewing-filter-text"]').text()).toBe('View as: Work')
     // A page link built with linkTo carries the sticky value.
     let link: any
     const Host = { setup() { link = useScopeQuery('activity').linkTo('tools'); return () => h('div') } }
@@ -113,12 +100,12 @@ describe('Viewing chip (Spec 108-i T095, FR-044)', () => {
     await flushPromises()
     expect(router.currentRoute.value.path).toBe('/tools')
     expect(router.currentRoute.value.query.profile).toBe('work-ro')
-    expect(wrapper.get('[data-test="viewing-filter-text"]').text()).toBe('Viewing: Work')
+    expect(wrapper.get('[data-test="viewing-filter-text"]').text()).toBe('View as: Work')
     router.back()
     await flushPromises()
     expect(router.currentRoute.value.path).toBe('/activity')
     expect(router.currentRoute.value.query.profile).toBe('work-ro')
-    expect(wrapper.get('[data-test="viewing-filter-text"]').text()).toBe('Viewing: Work')
+    expect(wrapper.get('[data-test="viewing-filter-text"]').text()).toBe('View as: Work')
   })
 
   it('never calls a binding route: it only changes the URL', async () => {
@@ -158,9 +145,8 @@ describe('Viewing chip (Spec 108-i T095, FR-044)', () => {
   it('collapses to an icon below 1100px whose aria-label names the current value', async () => {
     const { wrapper } = await mountChip('/activity?profile=work-ro&client=cursor')
     // The text is hidden below the breakpoint and the button keeps its name.
-    expect(wrapper.get('[data-test="viewing-filter-text"]').classes()).toContain('hidden')
-    expect(wrapper.get('[data-test="viewing-filter-text"]').classes()).toContain('min-[1100px]:inline')
-    expect(wrapper.get('[data-test="viewing-filter-button"]').attributes('aria-label')).toBe('Viewing: Work · Cursor. Filters what this page shows')
+    expect(wrapper.get('[data-test="viewing-filter-text"]').classes()).not.toContain('hidden')
+    expect(wrapper.get('[data-test="viewing-filter-button"]').attributes('aria-label')).toBe('View as: Work · Cursor. Filters what this page shows')
     expect(wrapper.get('[data-test="viewing-filter-clear"]').attributes('aria-label')).toBe('Clear view filter')
   })
 

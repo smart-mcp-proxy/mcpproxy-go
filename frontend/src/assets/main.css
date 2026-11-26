@@ -66,13 +66,35 @@
   --tone-warning: oklch(45% 0.199 91.936);
   --tone-error: oklch(46% 0.191 22.216);
   --tone-muted: oklch(46% 0.031 278.072); /* base-content/40 2.51 -> 4.68 */
+
+  /* Spec 134 FR-001: design-system tokens (light). */
+  --radius-selector: 0.25rem;
+  --radius-field: 0.25rem;
+  --radius-box: 0.25rem;
+  --brand: oklch(55% 0.158 241.966);
+  --on-brand: oklch(100% 0 0);
+  --brand-text: oklch(42% 0.158 241.966);
+  --brand-soft: oklch(95% 0.03 241.966);
+  --ds-border: oklch(86% 0 0);
+  --status-ok: oklch(39% 0.194 149.214);
+  --status-ok-soft: oklch(95% 0.05 149.214);
+  --status-review: oklch(42% 0.14 75);
+  --status-review-soft: oklch(95% 0.07 91.936);
+  --status-error: oklch(46% 0.191 22.216);
+  --status-error-soft: oklch(95% 0.035 22.216);
+  --status-busy: oklch(41% 0.126 221.723);
+  --status-busy-soft: oklch(95% 0.03 221.723);
+  --status-off: oklch(40% 0 0);
+  --status-off-soft: oklch(92% 0 0);
+  --focus: oklch(55% 0.158 241.966);
 }
 
 /* Dark default. */
 [data-theme="dark"] {
-  --color-primary: oklch(55% 0.233 277.117); /* primary-content on primary 4.14 -> 4.71 */
+  --color-primary: oklch(55% 0.158 241.966); /* Spec 134 FR-002: the same brand blue as light */
+  --color-primary-content: oklch(100% 0 0);
   --color-secondary: oklch(53% 0.241 354.308); /* secondary-content on secondary 3.05 -> 4.69 */
-  --tone-primary: oklch(70% 0.233 277.117);
+  --tone-primary: oklch(78% 0.12 241.966);
   --tone-secondary: oklch(71% 0.241 354.308);
   --tone-accent: oklch(66% 0.152 181.912);
   --tone-info: oklch(67% 0.16 232.661);
@@ -80,6 +102,29 @@
   --tone-warning: oklch(70% 0.189 84.429);
   --tone-error: oklch(70% 0.194 13.428);
   --tone-muted: oklch(64% 0.029 256.847); /* base-content/40 3.56 -> 4.71 */
+
+  /* Spec 134 FR-001: design-system tokens (dark). Same hues as light; text
+     tones are light enough and soft backgrounds dark enough for AA on the
+     dark base. The brand blue is the same fill in both themes (FR-002). */
+  --radius-selector: 0.25rem;
+  --radius-field: 0.25rem;
+  --radius-box: 0.25rem;
+  --brand: oklch(55% 0.158 241.966);
+  --on-brand: oklch(100% 0 0);
+  --brand-text: oklch(78% 0.12 241.966);
+  --brand-soft: oklch(32% 0.05 241.966);
+  --ds-border: oklch(38% 0.02 252.42);
+  --status-ok: oklch(80% 0.17 149.214);
+  --status-ok-soft: oklch(32% 0.07 149.214);
+  --status-review: oklch(82% 0.14 85);
+  --status-review-soft: oklch(34% 0.07 85);
+  --status-error: oklch(78% 0.15 22.216);
+  --status-error-soft: oklch(33% 0.08 22.216);
+  --status-busy: oklch(80% 0.1 221.723);
+  --status-busy-soft: oklch(32% 0.05 221.723);
+  --status-off: oklch(78% 0 0);
+  --status-off-soft: oklch(34% 0 0);
+  --focus: oklch(72% 0.14 241.966);
 }
 
 /*
@@ -570,4 +615,99 @@ body {
 
 .repo-card-leave-active {
   position: absolute;
+}
+
+
+/*
+ * ---------------------------------------------------------------------------
+ * Spec 134 FR-003: the status pill and state tag, one look in both themes.
+ * Tone = colour only; the words come from HEALTH_STATUS_LABELS.
+ * ---------------------------------------------------------------------------
+ */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0 0.5rem;
+  min-height: 1.5rem;
+  border-radius: 0.25rem;
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--tone-muted);
+  background: var(--status-off-soft);
+}
+.status-pill__dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: currentColor;
+  flex: none;
+}
+.state-tag .status-pill__dot { display: none; }
+.status-pill.tone-ok { color: var(--status-ok); background: var(--status-ok-soft); }
+.status-pill.tone-review { color: var(--status-review); background: var(--status-review-soft); }
+.status-pill.tone-error { color: var(--status-error); background: var(--status-error-soft); }
+.status-pill.tone-busy { color: var(--status-busy); background: var(--status-busy-soft); }
+.status-pill.tone-off { color: var(--status-off); background: var(--status-off-soft); }
+.status-pill.tone-neutral { color: var(--tone-muted); background: var(--status-off-soft); }
+
+/* Spec 134 FR-013: a visible focus ring on every interactive element. */
+:where(a, button, summary, [role="button"], input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--focus, currentColor);
+  outline-offset: 2px;
+}
+
+/* Spec 134 FR-013: "Skip to content" appears on focus only. */
+.skip-link {
+  position: absolute;
+  left: 0.5rem;
+  top: -4rem;
+  z-index: 1000;
+  padding: 0.5rem 1rem;
+  border-radius: 0.25rem;
+  background: var(--brand);
+  color: var(--on-brand);
+  font-weight: 600;
+}
+.skip-link:focus { top: 0.5rem; }
+
+@media (prefers-reduced-motion: reduce) {
+  details > * { transition: none !important; }
+}
+
+/* Spec 134 FR-013: the theme menu is a native <details>. A closed one renders
+   nothing (so it holds no text for assistive tech or contrast checks), and its
+   headings and secondary text use the AA-checked muted tone. */
+details.dropdown:not([open]) > .dropdown-content { display: none; }
+details.dropdown > summary::-webkit-details-marker { display: none; }
+.menu .menu-title { color: var(--tone-muted); opacity: 1; }
+
+/*
+ * Spec 134 FR-001/FR-002: one secondary button look in both themes. A neutral
+ * outline button (and the filter chips built from it) has a 1 px border in the
+ * design-system border colour on base-100 with base-content text, radius 4.
+ * Coloured outline buttons keep their colour. (The token is --ds-border:
+ * daisyUI 5 reads --border as the border WIDTH, so a colour there breaks
+ * every button and badge.)
+ */
+.btn-outline:not(.btn-primary, .btn-secondary, .btn-accent, .btn-info, .btn-success, .btn-warning, .btn-error, .btn-neutral) {
+  --btn-border: var(--ds-border);
+  --btn-bg: var(--color-base-100);
+  --btn-rest-fg: var(--color-base-content);
+  color: var(--color-base-content);
+}
+.btn-outline:not(.btn-primary, .btn-secondary, .btn-accent, .btn-info, .btn-success, .btn-warning, .btn-error, .btn-neutral):is(:hover, .btn-active, [aria-pressed="true"]) {
+  --btn-bg: var(--color-base-200);
+}
+
+/* Spec 134 FR-010: the active sidebar item is brand-soft with brand-text,
+   semibold, not daisyUI's neutral block. */
+[data-test="sidebar-overlay"] .menu {
+  --menu-active-bg: var(--brand-soft);
+  --menu-active-fg: var(--brand-text);
+}
+[data-test="sidebar-overlay"] .menu :where(a.active, a.router-link-active.active) {
+  font-weight: 600;
 }

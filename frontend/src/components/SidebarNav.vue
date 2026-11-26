@@ -1,6 +1,6 @@
 <template>
-  <div class="drawer-side z-[var(--z-sidebar)]">
-    <label for="sidebar-drawer" aria-label="close sidebar" class="drawer-overlay"></label>
+  <div class="drawer-side z-[var(--z-sidebar)]" id="sidebar-panel" data-test="sidebar-overlay" :inert="sidebarInert || undefined">
+    <label for="sidebar-drawer" aria-hidden="true" class="drawer-overlay"></label>
     <aside
       class="bg-base-100 h-screen flex flex-col border-r border-base-300 fixed transition-[width] duration-200 ease-out"
       :class="collapsed ? 'w-14' : 'w-64'"
@@ -52,7 +52,7 @@
         <template v-if="authStore.isTeamsEdition">
           <ul class="menu menu-sm w-full gap-0.5 p-0">
             <li v-if="authStore.isAdmin && !collapsed" class="menu-title px-3 !py-1">
-              <span class="text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40">My Workspace</span>
+              <span class="text-xs font-semibold uppercase tracking-[0.12em] text-base-content/40">My Workspace</span>
             </li>
             <li v-for="item in teamsUserMenu" :key="item.path">
               <router-link
@@ -71,7 +71,7 @@
             <div class="divider my-2 px-2"></div>
             <ul class="menu menu-sm w-full gap-0.5 p-0">
               <li v-if="!collapsed" class="menu-title px-3 !py-1">
-                <span class="text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40">Administration</span>
+                <span class="text-xs font-semibold uppercase tracking-[0.12em] text-base-content/40">Administration</span>
               </li>
               <li v-for="item in teamsAdminMenu" :key="item.path">
                 <router-link
@@ -170,14 +170,17 @@
           </ul>
 
           <template v-for="group in visibleGroups" :key="group.id">
-            <div
-              v-if="!collapsed"
-              class="mt-5 mb-1 px-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40"
-              :data-test="`sidebar-group-${group.id}`"
-            >
-              {{ group.label }}
-            </div>
-            <div v-else class="mt-3 mb-1 mx-auto w-6 h-px bg-base-300" :data-test="`sidebar-group-${group.id}`"></div>
+            <template v-if="group.label">
+              <div
+                v-if="!collapsed"
+                class="mt-5 mb-1 px-3 text-xs font-semibold uppercase tracking-[0.12em] text-base-content/40"
+                :data-test="`sidebar-group-${group.id}`"
+              >
+                {{ group.label }}
+              </div>
+              <div v-else class="mt-3 mb-1 mx-auto w-6 h-px bg-base-300" :data-test="`sidebar-group-${group.id}`"></div>
+            </template>
+            <div v-else class="mt-1" :data-test="`sidebar-group-${group.id}`"></div>
 
             <ul class="menu menu-sm w-full gap-0.5 p-0">
               <li v-for="item in group.items" :key="item.id">
@@ -202,6 +205,23 @@
               </li>
             </ul>
           </template>
+
+          <!-- Spec 134 FR-010: Settings closes the main list. -->
+          <ul class="menu menu-sm w-full gap-0.5 p-0 mt-5">
+            <li>
+              <router-link
+                :to="SIDEBAR_SETTINGS.path"
+                :class="{ 'active': isActiveRoute(SIDEBAR_SETTINGS.path) }"
+                class="rounded-lg font-medium"
+                :title="collapsed ? SIDEBAR_SETTINGS.label : ''"
+                :aria-label="collapsed ? SIDEBAR_SETTINGS.label : undefined"
+                :data-test="`sidebar-item-${SIDEBAR_SETTINGS.id}`"
+              >
+                <component :is="icons[SIDEBAR_SETTINGS.icon]" class="w-5 h-5 shrink-0" />
+                <span v-show="!collapsed" class="flex-1">{{ SIDEBAR_SETTINGS.label }}</span>
+              </router-link>
+            </li>
+          </ul>
         </template>
       </nav>
 
@@ -219,7 +239,7 @@
               <div v-if="authStore.user?.email" class="text-xs text-base-content/50 truncate">{{ authStore.user.email }}</div>
             </div>
           </div>
-          <button @click="handleLogout" class="btn btn-ghost btn-xs" title="Sign out">
+          <button @click="handleLogout" class="btn btn-ghost btn-xs" title="Sign out" aria-label="Sign out">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
             </svg>
@@ -227,8 +247,8 @@
         </div>
       </div>
 
-      <!-- Footer: Settings · Docs · Feedback · Theme, then the version row
-           (Spec 109 FR-050). The server edition keeps only Theme here — its
+      <!-- Footer: Docs · Feedback · Theme, then the version row (Spec 109
+           FR-050; Settings moved into the main list by Spec 134 FR-010). The server edition keeps only Theme here — its
            Settings lives in the admin menu and it has no Feedback page. -->
       <div class="border-t border-base-300 py-2" :class="collapsed ? 'px-1' : 'px-2'" data-test="sidebar-footer">
         <div
@@ -266,15 +286,13 @@
             </template>
           </template>
 
-          <!-- Theme dropdown.
-               Sidebar sits at the left edge, so the theme menu must open rightward
-               (start-aligned). dropdown-end would anchor the menu's right edge to the
-               button and push a ~288px menu off the left of the viewport. -->
-          <div class="dropdown dropdown-top" :class="collapsed ? 'w-full' : ''">
-            <div
-              tabindex="0"
-              role="button"
-              class="btn btn-ghost btn-sm font-normal gap-1.5 px-2"
+          <!-- Theme menu. A native <details> so Enter/Space open it, Escape closes
+               it and returns focus to the summary, and every choice is a real
+               button (Spec 134 FR-013). It opens upward and rightward: the
+               sidebar sits at the left edge. -->
+          <details ref="themeMenu" class="dropdown dropdown-top" :class="collapsed ? 'w-full' : ''" data-test="sidebar-theme-menu" @keydown.esc="onThemeEscape">
+            <summary
+              class="btn btn-ghost btn-sm font-normal gap-1.5 px-2 list-none"
               :class="collapsed ? 'btn-square w-full' : ''"
               :title="collapsed ? THEME_LABEL : ''"
               :aria-label="collapsed ? THEME_LABEL : undefined"
@@ -282,42 +300,44 @@
             >
               <component :is="icons.theme" class="w-4 h-4 shrink-0" />
               <span v-show="!collapsed" class="text-xs">{{ THEME_LABEL }}</span>
-            </div>
-            <ul tabindex="0" class="dropdown-content z-[1] menu flex-nowrap p-2 shadow-2xl bg-base-300 rounded-box w-72 max-h-96 overflow-y-auto mb-2" aria-label="Choose theme">
+            </summary>
+            <ul class="dropdown-content z-[1] menu flex-nowrap p-2 shadow-2xl bg-base-300 rounded-box w-72 max-h-96 overflow-y-auto mb-2" aria-label="Choose theme">
               <li class="menu-title">
                 <span>Choose theme</span>
               </li>
               <!-- Default: follow the OS light/dark setting (UX audit F29). -->
               <li>
-                <a
+                <button
+                  type="button"
                   data-test="theme-option-system"
                   :aria-current="systemStore.currentTheme === 'system' ? 'true' : undefined"
                   :class="{ 'active': systemStore.currentTheme === 'system' }"
-                  @click="systemStore.setTheme('system')"
+                  @click="chooseTheme('system')"
                 >
                   <span :data-theme="systemStore.resolvedTheme" class="bg-base-100 rounded-badge w-4 h-4 mr-2"></span>
                   System
-                  <span class="ml-auto text-xs opacity-60">
+                  <span class="ml-auto text-xs text-base-content/70">
                     {{ systemStore.resolvedTheme === 'dark' ? 'dark' : 'light' }}
                   </span>
-                </a>
+                </button>
               </li>
               <li class="menu-title pt-2">
                 <span>More themes</span>
               </li>
               <li v-for="theme in explicitThemes" :key="theme.name">
-                <a
+                <button
+                  type="button"
                   :data-test="`theme-option-${theme.name}`"
                   :aria-current="systemStore.currentTheme === theme.name ? 'true' : undefined"
                   :class="{ 'active': systemStore.currentTheme === theme.name }"
-                  @click="systemStore.setTheme(theme.name)"
+                  @click="chooseTheme(theme.name)"
                 >
                   <span :data-theme="theme.name" class="bg-base-100 rounded-badge w-4 h-4 mr-2"></span>
                   {{ theme.displayName }}
-                </a>
+                </button>
               </li>
             </ul>
-          </div>
+          </details>
         </div>
 
         <!-- Version + Check for updates (expanded sidebar only). Single-line
@@ -345,7 +365,7 @@
             type="button"
             @click="handleCheckForUpdates"
             :disabled="systemStore.checkingForUpdates"
-            class="btn btn-ghost btn-xs ml-auto gap-1 px-1.5 font-normal text-[11px] text-base-content/70 hover:text-base-content"
+            class="btn btn-ghost btn-xs ml-auto gap-1 px-1.5 font-normal text-xs text-base-content/70 hover:text-base-content"
             data-testid="sidebar-check-updates"
             :title="updateStatusTitle"
             :aria-label="updateButtonLabel"
@@ -378,11 +398,13 @@ import { useOnboardingStore } from '@/stores/onboarding'
 import { useAttentionStore } from '@/stores/attention'
 import { useClientsStore } from '@/stores/clients'
 import api from '@/services/api'
+import { useSidebarDrawer } from '@/composables/useSidebarDrawer'
 import { reviewQueueScopeText, summarizeReviewQueue } from '@/utils/reviewQueue'
 import {
   SIDEBAR_FOOTER,
   SIDEBAR_GROUPS,
   SIDEBAR_HOME,
+  SIDEBAR_SETTINGS,
   TEAMS_ADMIN_MENU,
   TEAMS_USER_MENU,
   THEME_LABEL,
@@ -397,6 +419,7 @@ const authStore = useAuthStore()
 const onboardingStore = useOnboardingStore()
 const attentionStore = useAttentionStore()
 const clientsStore = useClientsStore()
+const { sidebarInert } = useSidebarDrawer()
 
 // Spec 046 v2: badge count drives the sidebar Setup entry's pulse + count.
 // Refetched on mount; the wizard itself drives subsequent updates while open.
@@ -500,6 +523,31 @@ watch(() => systemStore.authEpoch, () => {
 })
 
 const collapsed = computed(() => systemStore.sidebarCollapsed)
+
+// Theme menu (a <details>): closes after a choice, on Escape (focus back to the
+// summary) and on a click anywhere outside it.
+const themeMenu = ref<HTMLDetailsElement | null>(null)
+function closeThemeMenu(returnFocus = false) {
+  const el = themeMenu.value
+  if (!el?.open) return
+  el.open = false
+  if (returnFocus) el.querySelector<HTMLElement>('summary')?.focus()
+}
+function onThemeEscape(event: KeyboardEvent) {
+  // Escape dismisses one layer: the open theme menu, not also the phone drawer.
+  if (!themeMenu.value?.open) return
+  event.stopPropagation()
+  closeThemeMenu(true)
+}
+function chooseTheme(name: string) {
+  systemStore.setTheme(name)
+  closeThemeMenu(true)
+}
+function onDocumentPointerDown(event: Event) {
+  if (themeMenu.value?.open && !themeMenu.value.contains(event.target as Node)) closeThemeMenu()
+}
+onMounted(() => document.addEventListener('pointerdown', onDocumentPointerDown))
+onUnmounted(() => document.removeEventListener('pointerdown', onDocumentPointerDown))
 
 // "System" is rendered on its own above the divider; the rest are the explicit
 // theme choices grouped under "More themes" (UX audit F29).

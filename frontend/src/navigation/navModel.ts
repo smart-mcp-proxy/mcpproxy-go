@@ -33,7 +33,8 @@ export interface NavItem {
 }
 
 export interface NavGroup {
-  id: 'connect' | 'protect' | 'monitor'
+  id: 'primary' | 'protect' | 'monitor'
+  /** Empty for the unlabeled primary block (Spec 134 FR-010). */
   label: string
   items: NavItem[]
 }
@@ -43,22 +44,27 @@ export const DOCS_URL = 'https://docs.mcpproxy.app'
 /** Solo top row, no group label. */
 export const SIDEBAR_HOME: NavItem = { id: 'home', label: 'Home', path: '/', icon: 'home', badge: 'attention' }
 
+/**
+ * Spec 134 FR-010, personal edition, in this order: Home, Servers, Tools,
+ * Clients, Profiles; group "Protect": Review, Secrets; group "Monitor":
+ * Activity, Usage; then Settings. Every badge stays on its item.
+ */
 export const SIDEBAR_GROUPS: NavGroup[] = [
   {
-    id: 'connect',
-    label: 'Connect',
+    id: 'primary',
+    label: '',
     items: [
-      { id: 'clients', label: 'Clients', path: '/clients', icon: 'clients', badge: 'clients' },
-      { id: 'profiles', label: 'Profiles', path: '/profiles', icon: 'profiles', requiresRoutePath: '/profiles' },
       { id: 'servers', label: 'Servers', path: '/servers', icon: 'servers', badge: 'servers' },
       { id: 'tools', label: 'Tools', path: '/tools', icon: 'tools', badge: 'tools' },
+      { id: 'clients', label: 'Clients', path: '/clients', icon: 'clients', badge: 'clients' },
+      { id: 'profiles', label: 'Profiles', path: '/profiles', icon: 'profiles', requiresRoutePath: '/profiles' },
     ],
   },
   {
     id: 'protect',
     label: 'Protect',
     items: [
-      { id: 'review', label: 'Review queue', path: '/review', icon: 'review', badge: 'review' },
+      { id: 'review', label: 'Review', path: '/review', icon: 'review', badge: 'review' },
       { id: 'secrets', label: 'Secrets', path: '/secrets', icon: 'secrets', badge: 'secrets' },
     ],
   },
@@ -72,9 +78,11 @@ export const SIDEBAR_GROUPS: NavGroup[] = [
   },
 ]
 
+/** Last item of the main list, after Monitor (Spec 134 FR-010). */
+export const SIDEBAR_SETTINGS: NavItem = { id: 'settings', label: 'Settings', path: '/settings', icon: 'settings' }
+
 /** Footer links. Theme is a dropdown, so it is a label only (no path). */
 export const SIDEBAR_FOOTER: NavItem[] = [
-  { id: 'settings', label: 'Settings', path: '/settings', icon: 'settings' },
   { id: 'docs', label: 'Docs', path: DOCS_URL, icon: 'docs', external: true },
   { id: 'feedback', label: 'Feedback', path: '/feedback', icon: 'feedback' },
 ]

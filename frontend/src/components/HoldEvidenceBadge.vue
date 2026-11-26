@@ -14,7 +14,7 @@
       :class="reasonClass"
       :title="reason.description"
     >
-      <span aria-hidden="true">{{ reasonIcon }}</span>
+      <UiIcon :name="reasonIcon" class="w-3 h-3" />
       <span>{{ reason.label }}</span>
     </span>
 
@@ -68,7 +68,9 @@
 </template>
 
 <script setup lang="ts">
+import UiIcon from '@/components/UiIcon.vue'
 import { computed } from 'vue'
+import type { UiIconName } from '@/utils/uiIcons'
 import {
   parseHoldEvidence,
   displaySignals,
@@ -118,14 +120,14 @@ const reasonClass = computed(() => {
   }
 })
 
-const reasonIcon = computed(() => {
+const reasonIcon = computed<UiIconName>(() => {
   switch (reason.value?.tone) {
     case 'threat':
-      return '⚠️'
+      return 'alert'
     case 'precaution':
-      return '🛡️'
+      return 'shield'
     default:
-      return '⏸️'
+      return 'pause'
   }
 })
 

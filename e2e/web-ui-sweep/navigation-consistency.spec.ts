@@ -162,9 +162,9 @@ const HEADER_CONTROLS = [
   'header-drawer-toggle',
   'header-search-input',
   'header-search-icon',
-  'header-viewing-slot',
   'header-status-pill',
   'header-attention-pill',
+  'header-add-server',
   'header-add-menu',
 ] as const
 
@@ -177,13 +177,8 @@ for (const width of WIDTHS) {
       const attention = await apiGet(page, '/api/v1/attention')
       const attentionCount: number = attention.count ?? attention.items?.length ?? 0
       const wide = width >= 1100
-      // Spec 108-i I16: the header's Viewing chip (the viewing slot) renders when
-      // there is a profile or a client with its own credential to filter by.
-      const profilesData = await apiGet(page, '/api/v1/profiles')
-      const clientsData = await apiGet(page, '/api/v1/clients')
-      const hasViewing =
-        (profilesData?.profiles ?? []).length > 0 ||
-        (clientsData?.clients ?? []).some((client: { credential_state?: string }) => client.credential_state === 'client')
+      // Spec 134 FR-016: the Viewing filter left the header ("View as" lives in
+      // the page filter rows), so the header never carries a viewing slot.
 
       for (const route of MATRIX_ROUTES) {
         const where = `${route} at ${width}px (${theme})`
@@ -221,10 +216,9 @@ for (const width of WIDTHS) {
 
         if (width === 390) {
           const expected = ['header-drawer-toggle', 'header-search-icon']
-          if (hasViewing) expected.push('header-viewing-slot')
           expected.push('header-status-pill')
           if (attentionCount > 0) expected.push('header-attention-pill')
-          expected.push('header-add-menu')
+          expected.push('header-add-server', 'header-add-menu')
           expect(visible, `the phone header holds exactly these controls on ${where}`).toEqual(expected)
         }
       }
@@ -233,20 +227,20 @@ for (const width of WIDTHS) {
 }
 
 // FR-050 / N1 / N7: one sidebar structure at desktop width.
-test('the sidebar has Home, Connect, Protect, Monitor and the footer (Spec 109 FR-050)', async ({ page }) => {
+test('the sidebar has Home, the primary block, Protect, Monitor, Settings and the footer (Spec 134 FR-010)', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await goto(page, '/', 'aside [data-test="sidebar-item-home"]')
 
   const groups = await page.locator('aside [data-test^="sidebar-group-"]').evaluateAll((els) =>
     els.map((el) => el.getAttribute('data-test')),
   )
-  expect(groups).toEqual(['sidebar-group-connect', 'sidebar-group-protect', 'sidebar-group-monitor'])
+  expect(groups).toEqual(['sidebar-group-primary', 'sidebar-group-protect', 'sidebar-group-monitor'])
 
   const items = await page.locator('aside [data-test^="sidebar-item-"]').evaluateAll((els) =>
     els.map((el) => el.getAttribute('data-test')!.replace('sidebar-item-', '')),
   )
   expect(items).toEqual([
-    'home', 'clients', 'profiles', 'servers', 'tools', 'review', 'secrets', 'activity', 'usage',
+    'home', 'servers', 'tools', 'clients', 'profiles', 'review', 'secrets', 'activity', 'usage',
     'settings', 'docs', 'feedback', 'theme',
   ])
 

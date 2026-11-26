@@ -32,7 +32,7 @@
           @click="selectTab(tab.id)"
         >
           <span
-            class="inline-flex items-center justify-center w-5 h-5 rounded-full text-[11px] font-semibold"
+            class="inline-flex items-center justify-center w-5 h-5 rounded-full text-xs font-semibold"
             :class="tab.complete ? 'bg-success text-success-content' : 'bg-base-300 text-base-content/60'"
           >
             <span v-if="tab.complete">✓</span>
@@ -69,7 +69,7 @@
           <template v-else>
             <!-- Detected clients -->
             <div v-if="detectedClients.length > 0" class="space-y-2 mb-4">
-              <div class="text-[11px] font-semibold uppercase tracking-wider opacity-50">Detected on this machine</div>
+              <div class="text-xs font-semibold uppercase tracking-wider opacity-50">Detected on this machine</div>
               <ClientRow
                 v-for="c in detectedClients"
                 :key="c.id"
@@ -95,7 +95,7 @@
 
             <!-- Pinned trio (only the ones not already in detected) -->
             <div v-if="pinnedClients.length > 0" class="space-y-2 mb-4">
-              <div class="text-[11px] font-semibold uppercase tracking-wider opacity-50">Most popular</div>
+              <div class="text-xs font-semibold uppercase tracking-wider opacity-50">Most popular</div>
               <ClientRow
                 v-for="c in pinnedClients"
                 :key="c.id"
@@ -171,7 +171,7 @@
                 <div class="flex-1 min-w-0">
                   <div class="font-medium">Bind interface</div>
                   <div class="text-xs opacity-60 mt-0.5">
-                    mcpproxy is listening on <code class="font-mono text-[11px]">{{ listenAddr || 'localhost' }}</code>.
+                    mcpproxy is listening on <code class="font-mono text-xs">{{ listenAddr || 'localhost' }}</code>.
                     To expose it on the LAN, edit <span class="opacity-80">listen</span> in
                     <router-link to="/settings" class="link link-primary">Settings → Configuration</router-link>.
                   </div>
@@ -204,7 +204,7 @@
         <section v-else-if="activeTab === 'servers'" data-test="panel-servers">
           <p class="text-sm opacity-70 mb-4">
             Pick which servers from your existing AI clients to import. Same name in multiple sources? We auto-rename collisions like
-            <code class="font-mono text-[11px] bg-base-200 px-1 rounded">mcpproxy_claude_code</code> so each entry stays distinct.
+            <code class="font-mono text-xs bg-base-200 px-1 rounded">mcpproxy_claude_code</code> so each entry stays distinct.
           </p>
 
           <!-- The done card below is the one completion state; suppress the
@@ -266,7 +266,7 @@
             class="border border-base-300 rounded-lg p-6 text-center mb-5"
             data-test="servers-nothing-to-import"
           >
-            <div class="text-3xl opacity-40 mb-2">📦</div>
+            <div class="opacity-40 mb-2 flex justify-center"><UiIcon name="package" class="w-8 h-8" /></div>
             <div class="font-semibold">Nothing to import</div>
             <p class="text-sm opacity-70 mt-1 max-w-md mx-auto">
               We found no MCP servers in your AI clients' configs on this machine —
@@ -321,9 +321,9 @@
                 <div class="min-w-0 flex-1">
                   <div class="font-medium text-sm flex items-center gap-2">
                     <span>{{ src.name }}</span>
-                    <span class="text-[11px] opacity-50">— {{ src.serverCount }} server{{ src.serverCount === 1 ? '' : 's' }}</span>
+                    <span class="text-xs opacity-50">— {{ src.serverCount }} server{{ src.serverCount === 1 ? '' : 's' }}</span>
                   </div>
-                  <div class="text-[11px] opacity-50 truncate font-mono" :title="src.path">{{ src.path }}</div>
+                  <div class="text-xs opacity-50 truncate font-mono" :title="src.path">{{ src.path }}</div>
                 </div>
               </label>
               <!-- Server rows (indented + with vertical guide so the visual
@@ -350,7 +350,7 @@
                            url+auth-type) and its tags. -->
                       <span
                         v-if="importedRow(src, name)"
-                        class="text-[11px] opacity-50 font-mono truncate block"
+                        class="text-xs opacity-50 font-mono truncate block"
                         :data-test="`import-summary-${src.format}-${name}`"
                       >
                         {{ importedRow(src, name)!.summary }}
@@ -372,7 +372,7 @@
                     :title="`This name conflicts across sources — will be imported as ${conflictTarget(src, name)}`"
                   >
                     →
-                    <code class="font-mono text-[11px]">{{ conflictTarget(src, name) }}</code>
+                    <code class="font-mono text-xs">{{ conflictTarget(src, name) }}</code>
                   </span>
                 </li>
               </ul>
@@ -445,7 +445,7 @@
                tool actually running, which is first_real_tool_call_ever. -->
           <template v-if="onboarding.firstMCPClientEver">
             <div class="flex flex-col items-center gap-2 pt-6 pb-4 text-center" data-test="verify-client-connected" data-state="satisfied">
-              <div class="text-4xl">✅</div>
+              <div class="text-success flex justify-center"><UiIcon name="checkCircle" class="w-10 h-10" /></div>
               <div class="font-semibold text-lg">AI client connected</div>
               <div class="text-sm opacity-70 max-w-md">
                 Your AI client completed an MCP handshake with mcpproxy, so the wiring is right.<span v-if="upstreamCallState === 'pending'"> It does not yet mean a tool has run.</span>
@@ -466,13 +466,13 @@
               :data-state="upstreamCallState"
             >
               <template v-if="upstreamCallState === 'satisfied'">
-                <span>✅</span>
+                <span class="text-success"><UiIcon name="checkCircle" class="w-4 h-4" /></span>
                 <span>
                   <span class="font-semibold">First upstream tool call</span> — a tool on one of your MCP servers ran through mcpproxy and returned a result.
                 </span>
               </template>
               <template v-else>
-                <span class="opacity-50">📡</span>
+                <span class="opacity-50"><UiIcon name="signal" class="w-4 h-4" /></span>
                 <span class="opacity-70">
                   <span class="font-semibold">No upstream tool call recorded yet</span> — try the first prompt below, which calls a tool on one of your servers; the rest search and inspect mcpproxy itself.
                 </span>
@@ -481,7 +481,7 @@
           </template>
           <template v-else>
             <div class="flex flex-col items-center gap-3 py-6 text-center">
-              <div class="text-4xl opacity-50">📡</div>
+              <div class="opacity-50 flex justify-center"><UiIcon name="signal" class="w-10 h-10" /></div>
               <div class="font-semibold text-lg">Waiting for your first request</div>
               <div class="text-sm opacity-70 max-w-md">
                 Open your AI agent and ask it to call <code class="font-mono text-[12px]">retrieve_tools</code> through mcpproxy. We'll detect the round-trip live.
@@ -497,7 +497,7 @@
                clients only read their MCP config at startup, so a connect
                that succeeded doesn't mean the client is using it yet. -->
           <div v-if="connectedClientsWithHints.length > 0" class="mt-4 border-t border-base-300 pt-4" data-test="verify-reload-hints">
-            <div class="text-[11px] font-semibold uppercase tracking-wider opacity-50 mb-2">Reload your client to pick it up</div>
+            <div class="text-xs font-semibold uppercase tracking-wider opacity-50 mb-2">Reload your client to pick it up</div>
             <ul class="space-y-1">
               <li
                 v-for="c in connectedClientsWithHints"
@@ -516,7 +516,7 @@
                only generated from usable servers — with none, there is
                nothing an agent could actually call yet. -->
           <div class="mt-4 border-t border-base-300 pt-4">
-            <div class="text-[11px] font-semibold uppercase tracking-wider opacity-50 mb-2">Try one of these prompts</div>
+            <div class="text-xs font-semibold uppercase tracking-wider opacity-50 mb-2">Try one of these prompts</div>
             <div
               v-if="suggestedPrompts.length === 0"
               class="bg-base-200 rounded-lg p-3 text-sm opacity-70 text-center"
@@ -532,7 +532,7 @@
                 class="bg-base-200 rounded-lg p-2.5 text-sm font-mono"
               >
                 "{{ p.text }}"
-                <span class="text-[11px] opacity-50 ml-2 not-italic font-sans">→ {{ p.hint }}</span>
+                <span class="text-xs opacity-50 ml-2 not-italic font-sans">→ {{ p.hint }}</span>
               </li>
             </ul>
           </div>
@@ -541,8 +541,8 @@
                and on the Activity Log page (Spec 046 v2) -->
           <div class="mt-4 border-t border-base-300 pt-4" data-test="verify-activity-section">
             <div class="flex items-center justify-between mb-2">
-              <div class="text-[11px] font-semibold uppercase tracking-wider opacity-50">Recent activity</div>
-              <router-link to="/activity" class="text-[11px] link link-primary opacity-80 hover:opacity-100" data-test="link-activity-log">
+              <div class="text-xs font-semibold uppercase tracking-wider opacity-50">Recent activity</div>
+              <router-link to="/activity" class="text-xs link link-primary opacity-80 hover:opacity-100" data-test="link-activity-log">
                 View all in Activity Log →
               </router-link>
             </div>
@@ -640,8 +640,9 @@
               data-test="bulk-import-primary"
             >
               <span v-if="bulkImportBusy" class="loading loading-spinner loading-xs"></span>
-              <span v-else-if="quarantineOnImport">🛡</span>
+              <UiIcon v-else-if="quarantineOnImport" name="shield" class="w-4 h-4" />
               Import {{ selectedCount }} server{{ selectedCount === 1 ? '' : 's' }}
+              <span v-if="quarantineOnImport" class="sr-only">into quarantine</span>
             </button>
           </div>
         </div>
@@ -687,6 +688,8 @@ import api from '@/services/api'
 import { useOnboardingStore } from '@/stores/onboarding'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
+import UiIcon from '@/components/UiIcon.vue'
+import type { UiIconName } from '@/utils/uiIcons'
 import ManualServerForm from '@/components/ManualServerForm.vue'
 import ImportServers from '@/components/ImportServers.vue'
 import ClientConnectList from '@/components/ClientConnectList.vue'
@@ -1821,24 +1824,24 @@ async function recordDismissalEngagement() {
 // duplicated rather than imported so this file stays self-contained — falls
 // back to the glyph of the server-supplied ClientStatus.icon id, then a generic
 // wrench.
-function clientRowIcon(client: ClientStatus): string {
-  const iconMap: Record<string, string> = {
-    'claude-desktop': '✨',
-    'claude-code': '\u{1F4BB}',
-    'cursor': '\u{1F4DD}',
-    'vscode': '\u{1F4D0}',
-    'windsurf': '\u{1F3C4}',
-    'opencode': '⚡',
-    'gemini': '♊',
-    'codex': '⌘',
-    'zed': '⚡',
-    'cline': '\u{1F916}',
-    'continue': '➡️',
-    'zcode': '\u{1F9BE}',
+function clientRowIcon(client: ClientStatus): UiIconName {
+  const iconMap: Record<string, UiIconName> = {
+    'claude-desktop': 'sparkles',
+    'claude-code': 'bot',
+    'cursor': 'pencil',
+    'vscode': 'puzzle',
+    'windsurf': 'signal',
+    'opencode': 'bolt',
+    'gemini': 'sparkles',
+    'codex': 'cog',
+    'zed': 'bolt',
+    'cline': 'bot',
+    'continue': 'arrowRight',
+    'zcode': 'plug',
   }
   // client.icon is the id of the glyph to reuse (Copilot reuses VS Code's), never
   // a glyph itself: resolve it through the table rather than printing it.
-  return iconMap[client.id] || (client.icon && iconMap[client.icon]) || '\u{1F527}'
+  return iconMap[client.id] || (client.icon && iconMap[client.icon]) || 'wrench'
 }
 
 // --- ClientRow component ------------------------------------------------
@@ -1874,7 +1877,7 @@ const ClientRow: FunctionalComponent<
     [
       h('div', { class: 'min-w-0 flex-1' }, [
         h('div', { class: 'font-medium text-sm truncate flex items-center gap-1.5' }, [
-          h('span', { 'aria-hidden': 'true', 'data-test': `client-icon-${c.id}` }, clientRowIcon(c)),
+          h('span', { 'aria-hidden': 'true', 'data-test': `client-icon-${c.id}` }, [h(UiIcon, { name: clientRowIcon(c), class: 'w-4 h-4' })]),
           c.name,
         ]),
         // Spec 109-b FR-037: show the home-shortened path; the full path is
@@ -1924,7 +1927,7 @@ const ClientRow: FunctionalComponent<
       ? h(
           'p',
           {
-            class: 'mt-1 text-[11px] opacity-60 leading-relaxed',
+            class: 'mt-1 text-xs opacity-60 leading-relaxed',
             'data-test': `client-tcc-note-${c.id}`,
           },
           [
@@ -1958,7 +1961,7 @@ const ClientRow: FunctionalComponent<
       ? h(
           'div',
           {
-            class: 'mt-1 flex items-start justify-between gap-2 text-[11px] opacity-70',
+            class: 'mt-1 flex items-start justify-between gap-2 text-xs opacity-70',
             'data-test': `client-backup-${c.id}`,
           },
           props.backupPath
@@ -2010,12 +2013,12 @@ const ClientRow: FunctionalComponent<
             props.backupPath
               ? [
                   'Undo restores ',
-                  h('code', { class: 'font-mono text-[11px] break-all' }, up?.config_path ?? c.config_path),
+                  h('code', { class: 'font-mono text-xs break-all' }, up?.config_path ?? c.config_path),
                   ' to its exact pre-connect state from the backup (a safety copy of the current file is saved first).',
                 ]
               : [
                   'Undo removes ',
-                  h('code', { class: 'font-mono text-[11px] break-all' }, up?.config_path ?? c.config_path),
+                  h('code', { class: 'font-mono text-xs break-all' }, up?.config_path ?? c.config_path),
                   ' — it did not exist before mcpproxy connected (a safety copy is saved first).',
                 ]
           ),
@@ -2023,13 +2026,13 @@ const ClientRow: FunctionalComponent<
             ? h('div', {}, [
                 h(
                   'div',
-                  { class: 'text-[11px] font-semibold uppercase tracking-wider text-error/80 mb-1' },
+                  { class: 'text-xs font-semibold uppercase tracking-wider text-error/80 mb-1' },
                   '− will be reverted'
                 ),
                 h(
                   'pre',
                   {
-                    class: 'text-[11px] font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-error px-2 py-1.5 leading-relaxed',
+                    class: 'text-xs font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-error px-2 py-1.5 leading-relaxed',
                     'data-test': `client-undo-entry-${c.id}`,
                   },
                   up.entry_text
@@ -2076,7 +2079,7 @@ const ClientRow: FunctionalComponent<
         [
           h('p', { class: 'text-xs opacity-70 leading-relaxed' }, [
             'Only this entry is added to ',
-            h('code', { class: 'font-mono text-[11px] break-all', title: p.config_path }, p.config_path),
+            h('code', { class: 'font-mono text-xs break-all', title: p.config_path }, p.config_path),
             '. Everything else in the file stays untouched, and a timestamped backup is created first.',
           ]),
           p.entry_exists
@@ -2099,11 +2102,11 @@ const ClientRow: FunctionalComponent<
                   )
                 : null,
           h('div', {}, [
-            h('div', { class: 'text-[11px] font-semibold uppercase tracking-wider text-success/80 mb-1' }, '+ will be added'),
+            h('div', { class: 'text-xs font-semibold uppercase tracking-wider text-success/80 mb-1' }, '+ will be added'),
             h(
               'pre',
               {
-                class: 'text-[11px] font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-success px-2 py-1.5 leading-relaxed',
+                class: 'text-xs font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-success px-2 py-1.5 leading-relaxed',
                 'data-test': `client-preview-entry-${c.id}`,
               },
               p.entry_text
@@ -2112,7 +2115,7 @@ const ClientRow: FunctionalComponent<
           p.contains_api_key
             ? h(
                 'p',
-                { class: 'text-[11px] opacity-60 leading-relaxed', 'data-test': `client-preview-apikey-${c.id}` },
+                { class: 'text-xs opacity-60 leading-relaxed', 'data-test': `client-preview-apikey-${c.id}` },
                 'This entry includes your API key (shown masked). The real key is written into the config so the client can authenticate.'
               )
             : null,

@@ -36,7 +36,7 @@
           <div class="flex items-center justify-between p-3">
             <div class="flex items-center gap-3 min-w-0 flex-1">
               <div class="w-8 h-8 flex items-center justify-center text-lg shrink-0" :title="client.name" :data-test="`client-icon-${client.id}`">
-                {{ clientIcon(client) }}
+                <UiIcon :name="clientIcon(client)" class="w-5 h-5" />
               </div>
               <div class="min-w-0 flex-1">
                 <div class="font-medium text-sm truncate">{{ client.name }} <span v-if="client.connected" class="badge badge-success badge-xs align-middle">Connected</span></div>
@@ -121,7 +121,7 @@
               </button>
               <span
                 v-if="client.connected && client.endpoint_match === 'other'"
-                class="text-[0.7rem] text-warning"
+                class="text-xs text-warning"
                 :data-test="`connect-other-instance-${client.id}`"
               >Connected to another instance</span>
               <!-- Spec 075 US1: explicit, no-eager-read access check. The stat-only
@@ -135,7 +135,7 @@
                 v-if="client.exists && accessState(client) === 'unknown' && !client.endpoint_match"
                 data-test="connect-check-access"
                 @click="checkAccess(client.id)"
-                class="btn btn-ghost btn-2xs h-auto min-h-0 py-0.5 text-[0.7rem] opacity-60 hover:opacity-100"
+                class="btn btn-ghost btn-2xs h-auto min-h-0 py-0.5 text-xs opacity-60 hover:opacity-100"
                 :disabled="checking[client.id]"
                 :title="client.connected
                   ? `Read this client's config now to see which MCPProxy endpoint it points at (may prompt on macOS)`
@@ -181,7 +181,7 @@
           >
             <p class="text-xs opacity-70 leading-relaxed">
               Only this entry is added to
-              <code class="font-mono text-[11px] break-all" :title="previews[client.id]!.config_path">{{ previews[client.id]!.config_path }}</code>.
+              <code class="font-mono text-xs break-all" :title="previews[client.id]!.config_path">{{ previews[client.id]!.config_path }}</code>.
               Everything else in the file stays untouched, and a timestamped backup is created first.
             </p>
             <!-- Overwrite warning (FR-003): an entry with this name already exists. -->
@@ -210,10 +210,10 @@
               This file will be created; there is no prior file to back up.
             </p>
             <div>
-              <div class="text-[11px] font-semibold uppercase tracking-wider text-success/80 mb-1">+ will be added</div>
+              <div class="text-xs font-semibold uppercase tracking-wider text-success/80 mb-1">+ will be added</div>
               <pre
                 :data-test="`client-preview-entry-${client.id}`"
-                class="text-[11px] font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-success px-2 py-1.5 leading-relaxed"
+                class="text-xs font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-success px-2 py-1.5 leading-relaxed"
               >{{ previews[client.id]!.entry_text }}</pre>
             </div>
             <!-- Spec 132: how the client signs in. Offered only while browser
@@ -290,7 +290,7 @@
                   <span class="label-text text-xs">Locked</span>
                 </label>
               </div>
-              <p class="text-[11px] opacity-70" :data-test="`connect-binding-summary-${client.id}`">
+              <p class="text-xs opacity-70" :data-test="`connect-binding-summary-${client.id}`">
                 Profile: {{ formFor(client.id).profile ? profilesStore.titleFor(formFor(client.id).profile) : 'All servers' }} &middot; Mode: {{ previews[client.id]!.mode || (formFor(client.id).profile && formFor(client.id).locked ? 'locked' : 'switchable') }}
               </p>
               <p
@@ -373,7 +373,7 @@
         >
           <span class="text-xs leading-relaxed min-w-0">
             A backup of your previous config was saved to
-            <code class="font-mono text-[11px] break-all" :title="resultBackupPath">{{ resultBackupPath }}</code>
+            <code class="font-mono text-xs break-all" :title="resultBackupPath">{{ resultBackupPath }}</code>
           </span>
           <button
             data-test="connect-copy-backup"
@@ -418,20 +418,20 @@
           <p class="text-xs opacity-70 leading-relaxed">
             <template v-if="lastConnect.backupPath">
               Undo restores
-              <code class="font-mono text-[11px] break-all">{{ lastConnect.configPath }}</code>
+              <code class="font-mono text-xs break-all">{{ lastConnect.configPath }}</code>
               to its exact pre-connect state from the backup (a safety copy of the current file is saved first).
             </template>
             <template v-else>
               Undo removes
-              <code class="font-mono text-[11px] break-all">{{ lastConnect.configPath }}</code>
+              <code class="font-mono text-xs break-all">{{ lastConnect.configPath }}</code>
               — it did not exist before mcpproxy connected (a safety copy is saved first).
             </template>
           </p>
           <div v-if="lastConnect.preview">
-            <div class="text-[11px] font-semibold uppercase tracking-wider text-error/80 mb-1">− will be reverted</div>
+            <div class="text-xs font-semibold uppercase tracking-wider text-error/80 mb-1">− will be reverted</div>
             <pre
               data-test="connect-undo-entry"
-              class="text-[11px] font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-error px-2 py-1.5 leading-relaxed"
+              class="text-xs font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-error px-2 py-1.5 leading-relaxed"
             >{{ lastConnect.preview.entry_text }}</pre>
           </div>
           <div class="flex items-center gap-2 pt-0.5">
@@ -477,7 +477,7 @@
               <span class="font-medium">{{ b.name }}:</span>
               <template v-if="b.backupPath">
                 a backup of your previous config was saved to
-                <code class="font-mono text-[11px] break-all" :title="b.backupPath">{{ b.backupPath }}</code>
+                <code class="font-mono text-xs break-all" :title="b.backupPath">{{ b.backupPath }}</code>
               </template>
               <template v-else>
                 No prior config file existed, so no backup was needed.
@@ -601,6 +601,8 @@
 </template>
 
 <script setup lang="ts">
+import UiIcon from '@/components/UiIcon.vue'
+import type { UiIconName } from '@/utils/uiIcons'
 import { ref, reactive, computed, nextTick, watch } from 'vue'
 import api from '@/services/api'
 import { useSystemStore } from '@/stores/system'
@@ -783,25 +785,25 @@ async function confirmDisconnect() {
   disconnectTarget.value = null
 }
 
-function clientIcon(client: ClientStatus): string {
+function clientIcon(client: ClientStatus): UiIconName {
   // Map client icons based on id/name
-  const iconMap: Record<string, string> = {
-    'claude-desktop': '\u2728',
-    'claude-code': '\u{1F4BB}',
-    'cursor': '\u{1F4DD}',
-    'vscode': '\u{1F4D0}',
-    'windsurf': '\u{1F3C4}',
-    'opencode': '\u26A1',
-    'gemini': '\u264A',
-    'codex': '\u2318',
-    'zed': '\u26A1',
-    'cline': '\u{1F916}',
-    'continue': '\u27A1\uFE0F',
-    'zcode': '\u{1F9BE}',
+  const iconMap: Record<string, UiIconName> = {
+    'claude-desktop': 'sparkles',
+    'claude-code': 'bot',
+    'cursor': 'pencil',
+    'vscode': 'puzzle',
+    'windsurf': 'signal',
+    'opencode': 'bolt',
+    'gemini': 'sparkles',
+    'codex': 'cog',
+    'zed': 'bolt',
+    'cline': 'bot',
+    'continue': 'arrowRight',
+    'zcode': 'plug',
   }
   // client.icon is the id of the glyph to reuse (Copilot reuses VS Code's), never
   // a glyph itself: resolve it through the table rather than printing it.
-  return iconMap[client.id] || (client.icon && iconMap[client.icon]) || '\u{1F527}'
+  return iconMap[client.id] || (client.icon && iconMap[client.icon]) || 'wrench'
 }
 
 async function fetchClients() {
