@@ -14,6 +14,27 @@ All facts about mcp-go v1.4.0 come from its `client/transport/oauth.go` at tag `
 - **Risk**: v1.2.0 also changed refresh handling (shared refresh #1013, rediscovery after failure #1014, tokens without a type treated as bearer #1015). mcpproxy has many refresh tests (refresh_manager_*, refresh_coordinator_*, persistent_token_store_refresh_*), and they are the regression net. Any behaviour change is either adopted or neutralised, and recorded here when PR-1 lands (FR-019).
 - **Alternatives**: patch v1.0.0 behaviour inside `internal/oauth` (rejected by the issue and by us: it duplicates upstream code that the next bump would delete); vendor a fork (rejected: maintenance cost).
 
+### R1a. Recorded when PR-1 landed (v1.0.0 → v1.6.0, 2026-11-26)
+
+Every upstream behaviour change that reaches mcpproxy, and what PR-1 does with it. "Adopted" means mcpproxy now behaves as mcp-go does; "neutralised" means mcpproxy keeps its v1.0 behaviour on purpose until a later PR replaces it.
+
+| mcp-go change | Effect on mcpproxy | PR-1 |
+|---|---|---|
+| v1.3 #1089: a refresh needs issuer provenance (`Token.Issuer`, or `OAuthConfig.CredentialsIssuer` for an unknown refresh token); v1.6 `RefreshToken` reads the token store to find it | mcpproxy's rows carry no issuer, so **every** library refresh was refused (`ErrOAuthAuthorizationRequired`), and the store read would have re-entered mcpproxy's own refresh flight | **Neutralised.** `oauthRefreshOnce` passes `oauth.WithRefreshProvenance(ctx, refreshToken, metadata.Issuer)`; under that mark both token stores answer the read from ctx (no store read, no reactive refresh). The issuer is the one of the metadata the handler uses, which is exactly what v1.0 trusted. PR-2 replaces it with the row's stored binding (D4). Test: `TestRefreshProvenance_*`. |
+| v1.3 #1089: `boundCredentials` binds `CredentialsIssuer` on first use (TOFU) | In-process only; no persisted state | Adopted (no visible change). |
+| v1.2 #1004 / v1.3: metadata without `issuer` is refused for exchange, refresh and registration | A provider whose metadata omits `issuer` can no longer sign in. FR-006 makes a missing issuer terminal anyway | Adopted, ahead of PR-2. |
+| v1.2 #1004: RFC 8414 issuer equality on documents mcp-go discovers itself | Skipped when mcpproxy passes an explicit metadata URL (most servers). Partial FR-006 | Adopted; PR-2 owns discovery (D0). |
+| v1.2 #1005: token endpoint auth method follows `token_endpoint_auth_methods_supported` | Confidential clients may switch between `client_secret_post` and `client_secret_basic` | Adopted. Existing refresh/exchange tests green. |
+| v1.2 #1013 shared refresh, #1014 rediscovery after failure, #1015 untyped token = bearer | mcpproxy refreshes through its own coordinator (`bindOAuthRefresher`), so mcp-go's own refresh path is not used for bound stores | Adopted. |
+| v1.4 #1003: `application_type` at registration, `native` only for `127.0.0.1`, `::1`, `localhost` | Other `127/8` addresses got `web` | **Corrected** by a registration-body rewrite in the transport wrapper (D5, FR-016). Tests: `TestDCR_ApplicationType`, `TestDCR_RejectApplicationType_NoRetry`. |
+| v1.4 #1006: `ProcessAuthorizationCallback` with the RFC 9207 check; callbacks bound to their transaction | mcpproxy still calls `ProcessAuthorizationResponse`, which does not check `iss` | Unchanged; PR-2 (D2). |
+| v1.4 #1098: fallback endpoints derived from the server origin | Only reached when no metadata and no override exist | Adopted; PR-2 classifies it as source `fallback` (FR-004a). |
+| v1.5: case variants of `localhost` accepted in redirect hosts | — | Adopted. |
+| v1.6 #1151: empty PKCE challenge or verifier refused | mcpproxy always sends both | Adopted. |
+| v1.6: cross-origin redirects refused in mcp-go's default HTTP clients (GO-2026-6911) | mcpproxy passes its own clients | No effect; FR-010 is PR-2. |
+| v1.6: empty tool annotations omitted (`WithoutDefaultAnnotations`) | `NewTool` defaults are unchanged, so built-in tool hashes are unchanged | Adopted. |
+| v1.2: server rejects a missing client `capabilities` object and an unsupported `MCP-Protocol-Version` header | Strictness on mcpproxy's own `/mcp` endpoint for non-conforming clients | Adopted (protocol conformance). Watch client reports. |
+
 ## R2. Does `ProcessAuthorizationCallback` fit mcpproxy's flows?
 
 - **Fact**: it needs the `AuthorizationTransaction` that the handler records when it builds the authorization URL. It checks state, then `iss` against the transaction's metadata snapshot, then `error`, then `code`. It skips the `iss` check when mcp-go itself guessed the metadata. With no transaction it fails with `no authorization transaction found; restore it with SetAuthorizationTransaction`.
@@ -31,7 +52,7 @@ All facts about mcp-go v1.4.0 come from its `client/transport/oauth.go` at tag `
 ## R4. `application_type` mapping
 
 - **Fact**: OpenID Connect Dynamic Client Registration 1.0 §2 defines `application_type` as `web` (the default) or `native`. Web clients that use the implicit grant MUST use `https` redirect URIs and MUST NOT use `localhost`. The code grant has no such hard rule, but providers commonly apply native-versus-web redirect policy on this field. Native clients use custom schemes or loopback `http`. RFC 7591 does not define the field, and plain RFC 7591 servers ignore unknown metadata (§2).
-- **Decision**: send `native` for loopback or `localhost` redirect hosts and `web` otherwise. PR-1 asserts mcp-go's `applicationType(redirectURI)` (its body is not in `oauth.go`; it lives in another file of the package) against this table. If it disagrees, mcpproxy rewrites the field in the registration body. That needs a new interception for the DCR request: today the wrapper intercepts only authorization queries and token forms (`internal/oauth/transport_wrapper.go:171-209`, `:403-455`). The assertion and the rewrite ship in the same PR. Loopback is decided by `config.IsLoopbackHost`, which covers all of `127/8`, `::1` and `localhost`.
+- **Decision**: send `native` for an `http` redirect URI on a loopback or `localhost` host and `web` otherwise; an `https` URI on a loopback host is `web` (OIDC DCR §2: native clients use loopback `http` or custom schemes; mcp-go decides the same). Corrected in PR-1 (the first wording ignored the scheme). PR-1 asserts mcp-go's `applicationType(redirectURI)` (its body is not in `oauth.go`; it lives in another file of the package) against this table. If it disagrees, mcpproxy rewrites the field in the registration body. That needs a new interception for the DCR request: today the wrapper intercepts only authorization queries and token forms (`internal/oauth/transport_wrapper.go:171-209`, `:403-455`). The assertion and the rewrite ship in the same PR. Loopback is decided by `config.IsLoopbackHost`, which covers all of `127/8`, `::1` and `localhost`.
 - **Issue reply**: the issue's "`web`" proposal would tell strict OIDC providers to refuse the loopback redirect. The gap is real; the value is `native`.
 
 ## R5. Legacy rows: trust on first use or forced re-login

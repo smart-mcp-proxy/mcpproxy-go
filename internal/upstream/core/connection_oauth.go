@@ -1345,15 +1345,15 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 			zap.String("note", fmt.Sprintf("User completed authorization in %.1f seconds", waitDuration.Seconds())))
 
 		// Verify state parameter
-		if params["state"] != state {
-			return fmt.Errorf("state mismatch: expected %s, got %s", state, params["state"])
+		if params.Get("state") != state {
+			return fmt.Errorf("state mismatch: expected %s, got %s", state, params.Get("state"))
 		}
 
 		// Get authorization code
-		code := params["code"]
+		code := params.Get("code")
 		if code == "" {
-			if params["error"] != "" {
-				return fmt.Errorf("OAuth authorization failed: %s - %s", params["error"], params["error_description"])
+			if params.Get("error") != "" {
+				return fmt.Errorf("OAuth authorization failed: %s - %s", params.Get("error"), params.Get("error_description"))
 			}
 			return fmt.Errorf("no authorization code received")
 		}
@@ -1618,15 +1618,15 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 			zap.String("correlation_id", result.CorrelationID))
 
 		// Verify state parameter
-		if params["state"] != state {
-			return result, fmt.Errorf("state mismatch: expected %s, got %s", state, params["state"])
+		if params.Get("state") != state {
+			return result, fmt.Errorf("state mismatch: expected %s, got %s", state, params.Get("state"))
 		}
 
 		// Get authorization code
-		code := params["code"]
+		code := params.Get("code")
 		if code == "" {
-			if params["error"] != "" {
-				return result, fmt.Errorf("OAuth authorization failed: %s - %s", params["error"], params["error_description"])
+			if params.Get("error") != "" {
+				return result, fmt.Errorf("OAuth authorization failed: %s - %s", params.Get("error"), params.Get("error_description"))
 			}
 			return result, fmt.Errorf("no authorization code received")
 		}
@@ -2040,7 +2040,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 	}
 
 	// Get authorization URL - this is the key synchronous operation
-	authURL, oauthHandler, codeVerifier, state, err := c.getAuthorizationURLQuick(ctx, oauthConfig, extraParams, result.CorrelationID)
+	authURL, oauthHandler, codeVerifier, state, callbackCh, err := c.getAuthorizationURLQuick(ctx, oauthConfig, extraParams, result.CorrelationID)
 	if err != nil {
 		c.logger.Error("❌ Failed to get authorization URL",
 			zap.String("server", c.config.Name),
@@ -2072,7 +2072,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 		waiterOwnsRelease = true
 		go func() {
 			defer releaseManualFlow()
-			c.waitForOAuthCallbackAsync(ctx, oauthHandler, codeVerifier, state, result.CorrelationID)
+			c.waitForOAuthCallbackAsync(ctx, oauthHandler, codeVerifier, state, callbackCh, result.CorrelationID)
 		}()
 
 		return result, nil
@@ -2096,7 +2096,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 	waiterOwnsRelease = true
 	go func() {
 		defer releaseManualFlow()
-		c.waitForOAuthCallbackAsync(ctx, oauthHandler, codeVerifier, state, result.CorrelationID)
+		c.waitForOAuthCallbackAsync(ctx, oauthHandler, codeVerifier, state, callbackCh, result.CorrelationID)
 	}()
 
 	return result, nil
@@ -2130,14 +2130,19 @@ func (c *Client) forcedAuthorizationRequired() error {
 
 // getAuthorizationURLQuick gets the authorization URL without starting the full OAuth flow.
 // Returns the URL, OAuth handler, code verifier, and state for later use.
-func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *client.OAuthConfig, extraParams map[string]string, correlationID string) (string, *uptransport.OAuthHandler, string, string, error) {
+//
+// The returned channel is the waiter registered for the state (nil when no
+// callback server exists): the caller hands it to waitForOAuthCallbackAsync,
+// so a callback that arrives before that goroutine runs is not lost (Spec 135
+// plan D1, one waiter per flow).
+func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *client.OAuthConfig, extraParams map[string]string, correlationID string) (string, *uptransport.OAuthHandler, string, string, <-chan oauth.CallbackResult, error) {
 	// Create transport config with OAuth
 	httpConfig := c.httpTransportConfig(c.config, oauthConfig)
 
 	// Create OAuth-enabled HTTP client
 	httpClient, err := transport.CreateHTTPClient(httpConfig)
 	if err != nil {
-		return "", nil, "", "", fmt.Errorf("failed to create OAuth HTTP client: %w", err)
+		return "", nil, "", "", nil, fmt.Errorf("failed to create OAuth HTTP client: %w", err)
 	}
 
 	// Store the client
@@ -2146,7 +2151,7 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 
 	// Start the client
 	if err := c.client.Start(ctx); err != nil {
-		return "", nil, "", "", fmt.Errorf("failed to start OAuth client: %w", err)
+		return "", nil, "", "", nil, fmt.Errorf("failed to start OAuth client: %w", err)
 	}
 
 	// Try to initialize - this will trigger OAuth authorization requirement
@@ -2159,32 +2164,32 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 	if err == nil {
 		// No OAuth needed - server connected without auth. Name the remedy for
 		// the one case this conclusion is wrong about (GH #1271).
-		return "", nil, "", "", fmt.Errorf("server connected without OAuth - no authentication required " +
+		return "", nil, "", "", nil, fmt.Errorf("server connected without OAuth - no authentication required " +
 			"(if this upstream accepts initialize anonymously but rejects tools/call, declare OAuth with an \"oauth\" block in its server config)")
 	}
 
 	// Check if this is an OAuth authorization error
 	if !client.IsOAuthAuthorizationRequiredError(err) && !c.isOAuthError(err) {
-		return "", nil, "", "", fmt.Errorf("initialization failed with non-OAuth error: %w", err)
+		return "", nil, "", "", nil, fmt.Errorf("initialization failed with non-OAuth error: %w", err)
 	}
 
 	// Get the OAuth handler from the error
 	oauthHandler := client.GetOAuthHandler(err)
 	if oauthHandler == nil {
-		return "", nil, "", "", fmt.Errorf("failed to get OAuth handler from error")
+		return "", nil, "", "", nil, fmt.Errorf("failed to get OAuth handler from error")
 	}
 
 	// Generate PKCE code verifier and challenge
 	codeVerifier, err := client.GenerateCodeVerifier()
 	if err != nil {
-		return "", nil, "", "", fmt.Errorf("failed to generate code verifier: %w", err)
+		return "", nil, "", "", nil, fmt.Errorf("failed to generate code verifier: %w", err)
 	}
 	codeChallenge := client.GenerateCodeChallenge(codeVerifier)
 
 	// Generate state parameter
 	state, err := client.GenerateState()
 	if err != nil {
-		return "", nil, "", "", fmt.Errorf("failed to generate state: %w", err)
+		return "", nil, "", "", nil, fmt.Errorf("failed to generate state: %w", err)
 	}
 
 	// Check for existing credentials or attempt DCR
@@ -2223,7 +2228,7 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 			clientID := oauthHandler.GetClientID()
 			clientSecret := oauthHandler.GetClientSecret()
 			if _, saveErr := c.persistDCRRegistration(clientID, clientSecret); errors.Is(saveErr, errDCRRegistrationSuperseded) {
-				return "", nil, "", "", c.supersededDCRFlowError(correlationID)
+				return "", nil, "", "", nil, c.supersededDCRFlowError(correlationID)
 			} else if saveErr != nil {
 				c.logger.Warn("Failed to persist DCR credentials",
 					zap.String("server", c.config.Name),
@@ -2245,7 +2250,7 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 	}()
 
 	if authURLErr != nil {
-		return "", nil, "", "", scrubbedFlowError(&contracts.OAuthFlowError{
+		return "", nil, "", "", nil, scrubbedFlowError(&contracts.OAuthFlowError{
 			Success:    false,
 			ErrorType:  contracts.OAuthErrorFlowFailed,
 			ErrorCode:  contracts.OAuthCodeFlowFailed,
@@ -2261,7 +2266,7 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 	// Issue #975: never hand back an authorization URL without a client_id —
 	// the provider is guaranteed to reject it (GitHub 404s on client_id=).
 	if flowErr := c.emptyClientIDFlowError(authURL, correlationID, dcrErr); flowErr != nil {
-		return "", nil, "", "", flowErr
+		return "", nil, "", "", nil, flowErr
 	}
 
 	// A persisted DCR client the authorization server has since deleted is
@@ -2270,7 +2275,7 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 	if !hasStaticCredentials && hasPersistedCredentials {
 		recoveredURL, staleErr := c.recoverStaleDCRClient(ctx, oauthHandler, oauthConfig.ClientID, authURL, state, codeChallenge, extraParams, correlationID)
 		if staleErr != nil {
-			return "", nil, "", "", staleErr
+			return "", nil, "", "", nil, staleErr
 		}
 		authURL = recoveredURL
 	}
@@ -2281,11 +2286,12 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 	// scheduled (issue #975). RegisterState is idempotent, so that goroutine
 	// obtains this same channel. Registering only on the success path keeps a
 	// failed flow from leaving a dangling waiter behind.
+	var callbackCh <-chan oauth.CallbackResult
 	if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
-		callbackServer.RegisterState(state)
+		callbackCh = callbackServer.RegisterState(state)
 	}
 
-	return authURL, oauthHandler, codeVerifier, state, nil
+	return authURL, oauthHandler, codeVerifier, state, callbackCh, nil
 }
 
 // emptyClientIDFlowError returns a structured oauth_client_id_required error
@@ -2366,7 +2372,10 @@ func (c *Client) clientIDRequiredSuggestion() string {
 }
 
 // waitForOAuthCallbackAsync waits for OAuth callback and handles token exchange in background.
-func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *uptransport.OAuthHandler, codeVerifier, state, correlationID string) {
+//
+// callbackCh is the waiter registered when the authorization URL was built;
+// nil registers one here (tests, and a flow built without a callback server).
+func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *uptransport.OAuthHandler, codeVerifier, state string, callbackCh <-chan oauth.CallbackResult, correlationID string) {
 	c.markOAuthInProgress()
 	defer func() {
 		c.oauthMu.Lock()
@@ -2394,9 +2403,13 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 		return
 	}
 
-	// The state was registered when the authorization URL was built; this
-	// returns that same channel (issue #975).
-	callbackCh := callbackServer.RegisterState(state)
+	// The state was registered when the authorization URL was built and its
+	// channel handed in (issue #975, Spec 135 plan D1). Registering it again
+	// here would lose a callback that was already delivered: delivery removes
+	// the waiter, so a second RegisterState would park on a fresh channel.
+	if callbackCh == nil {
+		callbackCh = callbackServer.RegisterState(state)
+	}
 	defer callbackServer.UnregisterState(state)
 
 	select {
@@ -2406,25 +2419,25 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 			zap.String("correlation_id", correlationID))
 
 		// Defensive: dispatch is by state, so this cannot normally fire.
-		if params["state"] != state {
+		if params.Get("state") != state {
 			c.logger.Error("❌ State mismatch in OAuth callback",
 				zap.String("server", c.config.Name),
 				zap.String("expected", state),
-				zap.String("got", params["state"]))
+				zap.String("got", params.Get("state")))
 			c.reportOAuthFailure(fmt.Errorf("OAuth callback state mismatch for %s - the sign-in was not completed, please try again", c.config.Name))
 			return
 		}
 
 		// Get authorization code
-		code := params["code"]
+		code := params.Get("code")
 		if code == "" {
-			if params["error"] != "" {
+			if params.Get("error") != "" {
 				c.logger.Error("❌ OAuth authorization failed",
 					zap.String("server", c.config.Name),
-					zap.String("error", params["error"]),
-					zap.String("description", params["error_description"]))
+					zap.String("error", params.Get("error")),
+					zap.String("description", params.Get("error_description")))
 				c.reportOAuthFailure(fmt.Errorf("OAuth authorization failed for %s: %s - %s",
-					c.config.Name, params["error"], params["error_description"]))
+					c.config.Name, params.Get("error"), params.Get("error_description")))
 				return
 			}
 			c.reportOAuthFailure(fmt.Errorf("OAuth callback for %s carried no authorization code", c.config.Name))

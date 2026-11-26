@@ -163,7 +163,7 @@ type CallbackServer struct {
 	logger *zap.Logger
 
 	waitersMu         sync.Mutex
-	waiters           map[string]chan map[string]string
+	waiters           map[string]chan CallbackResult
 	remoteCallbackURL string // protected by waitersMu
 	// invalidated maps a state whose flow gave up (its instance was retired
 	// while it waited, GH #1722) to the reason, so the callback that arrives
@@ -1773,7 +1773,7 @@ func (m *CallbackServerManager) StartCallbackServerOnHost(serverName string, bin
 		BindHost:    bindHost,
 		Path:        path,
 		logger:      logger.With(zap.String("server", serverName), zap.String("bind_host", bindHost), zap.Int("port", port), zap.String("path", path)),
-		waiters:     make(map[string]chan map[string]string),
+		waiters:     make(map[string]chan CallbackResult),
 	}
 
 	// The handler is a plain http.HandlerFunc, deliberately NOT registered
@@ -1830,7 +1830,7 @@ func (m *CallbackServerManager) StartCallbackServerOnHost(serverName string, bin
 // Registering the same state twice returns the same channel, which lets the
 // flow that mints the state register early and the goroutine that waits for it
 // obtain the same channel later without a second buffer.
-func (c *CallbackServer) RegisterState(state string) <-chan map[string]string {
+func (c *CallbackServer) RegisterState(state string) <-chan CallbackResult {
 	c.waitersMu.Lock()
 	defer c.waitersMu.Unlock()
 
@@ -1838,7 +1838,7 @@ func (c *CallbackServer) RegisterState(state string) <-chan map[string]string {
 		return ch
 	}
 
-	ch := make(chan map[string]string, 1)
+	ch := make(chan CallbackResult, 1)
 	c.waiters[state] = ch
 	c.logger.Debug("Registered OAuth callback waiter", zap.String("state", StateFingerprint(state)))
 	return ch
@@ -1910,10 +1910,10 @@ func (c *CallbackServer) HasState(state string) bool {
 	return exists
 }
 
-// deliver hands the callback params to the flow that registered this state.
-// The waiter is single-use: it is removed on delivery so a replayed callback
-// cannot be delivered twice. Returns false when no flow is waiting.
-func (c *CallbackServer) deliver(state string, params map[string]string) bool {
+// deliver hands the strictly parsed callback to the flow that registered this
+// state. The waiter is single-use: it is removed on delivery so a replayed
+// callback cannot be delivered twice. Returns false when no flow is waiting.
+func (c *CallbackServer) deliver(state string, result CallbackResult) bool {
 	c.waitersMu.Lock()
 	ch, exists := c.waiters[state]
 	if exists {
@@ -1930,7 +1930,7 @@ func (c *CallbackServer) deliver(state string, params map[string]string) bool {
 	}
 
 	select {
-	case ch <- params:
+	case ch <- result:
 		return true
 	default:
 		// Cannot happen: the channel is buffered and single-use.
@@ -1948,7 +1948,7 @@ func (c *CallbackServer) dropAllWaiters() int {
 	defer c.waitersMu.Unlock()
 
 	dropped := len(c.waiters)
-	c.waiters = make(map[string]chan map[string]string)
+	c.waiters = make(map[string]chan CallbackResult)
 	return dropped
 }
 
@@ -2010,13 +2010,28 @@ func (c *CallbackServer) handleCallbackWithFailureNotification(w http.ResponseWr
 		zap.String("remote_addr", r.RemoteAddr),
 		zap.String("user_agent", r.UserAgent()))
 
-	// Extract query parameters
-	params := make(map[string]string)
-	for key, values := range r.URL.Query() {
-		if len(values) > 0 {
-			params[key] = values[0]
+	// Spec 135 FR-001: one strict parse before any waiter is taken, any
+	// provider error is reported or any page is chosen.
+	query, err := ParseCallbackQuery(r.URL.RawQuery)
+	if err != nil {
+		c.logger.Warn("❌ OAuth callback rejected before delivery", zap.Error(err))
+		if notifyFailure {
+			GetTokenStoreManager().RecordOAuthFailure(c.ServerName,
+				fmt.Errorf("OAuth callback for server %q was rejected: %w", c.ServerName, err))
 		}
+		c.writePage(w, http.StatusBadRequest, callbackPage(callbackTitleFailed,
+			fmt.Sprintf("The sign-in response was malformed (%s). Nothing was signed in. Start the login again from mcpproxy for '%s'.",
+				err.Error(), c.ServerName)))
+		return
 	}
+	c.handleParsedCallback(w, query, notifyFailure)
+}
+
+// handleParsedCallback routes a query ParseCallbackQuery accepted to the flow
+// that minted its state and writes the browser page.
+func (c *CallbackServer) handleParsedCallback(w http.ResponseWriter, query url.Values, notifyFailure bool) {
+	params := query
+	_, issPresent := query["iss"]
 
 	// Log specific OAuth parameters
 	// Issue #1158 (review round 2, finding B1): the authorization CODE is a
@@ -2026,27 +2041,25 @@ func (c *CallbackServer) handleCallbackWithFailureNotification(w http.ResponseWr
 	// keeps the one thing an operator debugging a callback needs from the code:
 	// whether the provider sent one at all.
 	c.logger.Info("🔍 OAuth callback parameters extracted",
-		zap.Bool("code_present", params["code"] != ""),
-		zap.String("code", callbackParamField("code", params["code"])),
-		zap.String("state", StateFingerprint(params["state"])),
-		zap.String("error", ScrubUpstreamText(params["error"])),
-		zap.String("error_description", ScrubUpstreamText(params["error_description"])),
+		zap.Bool("code_present", params.Get("code") != ""),
+		zap.String("code", callbackParamField("code", params.Get("code"))),
+		zap.String("state", StateFingerprint(params.Get("state"))),
+		zap.String("error", ScrubUpstreamText(params.Get("error"))),
+		zap.String("error_description", ScrubUpstreamText(params.Get("error_description"))),
+		zap.Bool("iss_present", issPresent),
 		zap.Int("total_params", len(params)))
 
-	state := params["state"]
+	state := params.Get("state")
 
 	// Route the params to the flow that minted this state. A callback nobody is
 	// waiting for is NOT delivered to some other flow and NOT reported to the
 	// user as a success (issue #975).
-	if !c.deliver(state, params) {
+	if !c.deliver(state, CallbackResult{Query: query}) {
 		reason := fmt.Errorf("OAuth callback for server %q could not be delivered: state %s is unknown or expired "+
 			"(the sign-in may have timed out, or it was started by a different mcpproxy session)", c.ServerName, StateFingerprint(state))
-		if state == "" {
-			reason = fmt.Errorf("OAuth callback for server %q carried no state parameter and was rejected", c.ServerName)
-		}
 		c.logger.Error("❌ OAuth callback dropped - no flow is waiting for this state",
 			zap.String("state", StateFingerprint(state)),
-			zap.String("error", ScrubUpstreamText(params["error"])))
+			zap.String("error", ScrubUpstreamText(params.Get("error"))))
 
 		// Surface it to the operator instead of burying it in the log (issue #975).
 		if notifyFailure {
@@ -2068,9 +2081,9 @@ func (c *CallbackServer) handleCallbackWithFailureNotification(w http.ResponseWr
 
 	// The provider itself reported a failure: the flow was told, but the user
 	// must not see a success page.
-	if providerErr := params["error"]; providerErr != "" {
+	if providerErr := params.Get("error"); providerErr != "" {
 		message := providerErr
-		if desc := params["error_description"]; desc != "" {
+		if desc := params.Get("error_description"); desc != "" {
 			message = providerErr + ": " + desc
 		}
 		c.writePage(w, http.StatusBadRequest, callbackPage(

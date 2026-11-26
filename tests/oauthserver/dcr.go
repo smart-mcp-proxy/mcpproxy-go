@@ -40,6 +40,14 @@ func (s *OAuthTestServer) handleRegistration(w http.ResponseWriter, r *http.Requ
 		s.dcrError(w, http.StatusBadRequest, "invalid_client_metadata", "Failed to parse request body")
 		return
 	}
+	s.mu.Lock()
+	s.registrationRequests = append(s.registrationRequests, req)
+	s.mu.Unlock()
+
+	if s.options.RejectApplicationType && req.ApplicationType != "" {
+		s.dcrError(w, http.StatusBadRequest, "invalid_client_metadata", "application_type is not accepted")
+		return
+	}
 
 	// Validate redirect URIs
 	if len(req.RedirectURIs) == 0 {

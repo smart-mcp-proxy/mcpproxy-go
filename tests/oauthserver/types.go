@@ -109,6 +109,8 @@ type DiscoveryMetadata struct {
 	GrantTypesSupported               []string `json:"grant_types_supported"`
 	CodeChallengeMethodsSupported     []string `json:"code_challenge_methods_supported"`
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported"`
+	// RFC 9207 §3 (Options.AdvertiseIss only).
+	AuthorizationResponseIssParameterSupported bool `json:"authorization_response_iss_parameter_supported,omitempty"`
 
 	// OpenID Provider Metadata additions (Options.OIDC only).
 	UserinfoEndpoint                 string   `json:"userinfo_endpoint,omitempty"`
@@ -135,6 +137,7 @@ type ClientRegistrationRequest struct {
 	ClientName              string   `json:"client_name,omitempty"`
 	Scope                   string   `json:"scope,omitempty"`
 	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method,omitempty"`
+	ApplicationType         string   `json:"application_type,omitempty"`
 }
 
 // ClientRegistrationResponse represents a successful DCR response.

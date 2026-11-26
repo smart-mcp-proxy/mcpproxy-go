@@ -175,6 +175,10 @@ func (w *OAuthTransportWrapper) RoundTrip(req *http.Request) (*http.Response, er
 		}
 	}
 
+	// Spec 135 FR-016: the registration request carries the right
+	// application_type for its redirect URI.
+	req = w.rewriteRegistrationApplicationType(req)
+
 	tokenReq := w.matchesToken(req)
 
 	if len(w.extraParams) > 0 {

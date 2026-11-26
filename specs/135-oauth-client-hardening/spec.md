@@ -269,7 +269,7 @@ A brokered upstream (`ConnectorConfig`, static endpoints, no discovery) can now 
 
 **DCR**
 
-- **FR-016**: DCR MUST send `application_type: "native"` when the registered redirect URI's host is a loopback address or `localhost`, and `"web"` otherwise. It MUST NOT retry without the field.
+- **FR-016**: DCR MUST send `application_type: "native"` when the registered redirect URI is an `http` URI whose host is a loopback address or `localhost`, and `"web"` otherwise, including an `https` URI on a loopback host (OpenID Connect DCR 1.0 §2 allows a native client only loopback `http` or custom-scheme redirect URIs). It MUST NOT retry without the field.
 
 **Surfaces**
 

@@ -38,7 +38,7 @@ func TestRemoteCallbackStateRouting(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Equal(t, "no-store", w.Header().Get("Cache-Control"))
 	require.Equal(t, "no-referrer", w.Header().Get("Referrer-Policy"))
-	require.Equal(t, "real-code", (<-ch)["code"])
+	require.Equal(t, "real-code", (<-ch).Get("code"))
 	replay := httptest.NewRecorder()
 	m.RemoteCallbackHandler(replay, httptest.NewRequest(http.MethodGet, "/oauth/callback/linear?code=real-code&state=waiting-state", nil))
 	require.Equal(t, http.StatusBadRequest, replay.Code)
@@ -72,7 +72,7 @@ func TestRemoteCallbackCancellationAndExpiry(t *testing.T) {
 	w := httptest.NewRecorder()
 	m.RemoteCallbackHandler(w, httptest.NewRequest(http.MethodGet, "/oauth/callback/linear?error=access_denied&state=cancel-state", nil))
 	require.Equal(t, http.StatusBadRequest, w.Code)
-	require.Equal(t, "access_denied", (<-ch)["error"])
+	require.Equal(t, "access_denied", (<-ch).Get("error"))
 	c.RegisterState("expired")
 	c.UnregisterState("expired")
 	w = httptest.NewRecorder()
@@ -100,7 +100,7 @@ func TestRemoteCallbackPKCEExchangeThroughHTTPS(t *testing.T) {
 	require.Equal(t, http.StatusOK, response.StatusCode)
 	select {
 	case params := <-ch:
-		token := exchangeCode(t, provider, "remote-client", redirect, params["code"], verifier)
+		token := exchangeCode(t, provider, "remote-client", redirect, params.Get("code"), verifier)
 		require.NotEmpty(t, token["access_token"])
 	case <-time.After(5 * time.Second):
 		t.Fatal("HTTPS callback was not delivered")

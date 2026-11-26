@@ -304,7 +304,15 @@ func (h *CredentialHandlers) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	q := r.URL.Query()
+	// Spec 135 FR-001: one strict parse before any exchange or provider
+	// error report. A rejected request does not touch the pending flow, so
+	// the provider's real callback for the same state can still complete it.
+	q, err := oauth.ParseCallbackQuery(r.URL.RawQuery)
+	if err != nil {
+		h.logger.Warnw("brokered credential connect callback rejected", "server", srv.Name, "error", err)
+		http.Redirect(w, r, credentialConnectRedirect(srv.Name, "connect_failed"), http.StatusFound)
+		return
+	}
 	state := q.Get("state")
 
 	// Authorization-server-side error (e.g. user denied consent).

@@ -99,12 +99,16 @@ func (c *Client) oauthRefreshOnce(handler *transport.OAuthHandler) oauth.Refresh
 			// that a refresh that could not even find where to send its
 			// request is not recorded as a failed token request (Spec 124
 			// D5).
-			if metadata, metaErr := handler.GetServerMetadata(ctx); metaErr != nil {
+			metadata, metaErr := handler.GetServerMetadata(ctx)
+			if metaErr != nil {
 				return nil, oauth.MarkRefreshNotSent(fmt.Errorf("failed to get server metadata for %s: %w", c.config.Name, metaErr))
 			} else if metadata == nil || metadata.TokenEndpoint == "" {
 				return nil, oauth.MarkRefreshNotSent(fmt.Errorf("token endpoint not found in server metadata for %s", c.config.Name))
 			}
-			tok, err := handler.RefreshToken(ctx, rec.RefreshToken)
+			// mcp-go >= v1.3 refreshes only with issuer provenance, which
+			// the stored row does not carry yet (Spec 135 PR-2): hand it
+			// the issuer of the metadata it is using, as v1.0 trusted.
+			tok, err := handler.RefreshToken(oauth.WithRefreshProvenance(ctx, rec.RefreshToken, metadata.Issuer), rec.RefreshToken)
 			// mcp-go embeds the provider's error_description or raw body
 			// in the error text; scrub it before it reaches logs/events.
 			return tok, oauth.ScrubRefreshError(err, rec.RefreshToken, rec.ClientSecret, handler.GetClientSecret(),
