@@ -183,9 +183,8 @@ func (w *OAuthTransportWrapper) RoundTrip(req *http.Request) (*http.Response, er
 	if tokenReq {
 		// GH #1827: every token request leaves one line after it returns:
 		// grant type, the refresh flight that sent it, status and duration.
-		var grantType string
-		req, grantType = peekTokenGrantType(req)
-		if v, ok := w.extraParams["grant_type"]; ok && !w.matchesAuthorization(req) {
+		grantType, parsed := peekTokenGrantType(req)
+		if v, ok := w.extraParams["grant_type"]; ok && parsed && !w.matchesAuthorization(req) {
 			grantType = tokenRequestGrantType(v) // what injectFormParams sends
 		}
 		start := time.Now()
@@ -398,45 +397,30 @@ func isAllDigits(s string) bool {
 	return true
 }
 
-// peekTokenGrantType returns a copy of req whose body can still be read,
-// and the request's grant_type as one of a closed set of names. The caller's
-// request is not modified.
-func peekTokenGrantType(req *http.Request) (*http.Request, string) {
-	if req.Body == nil || req.Body == http.NoBody {
-		return req, tokenRequestGrantType("")
+// peekTokenGrantType returns the request's grant_type as one of a closed set
+// of names, read from a copy of the body obtained through GetBody. The
+// request and its body are not touched, so how it is sent (retries, Expect:
+// 100-continue, streaming) does not change; a body without GetBody, or one
+// that is not a form, is "unknown". parsed reports that the form was read.
+func peekTokenGrantType(req *http.Request) (grant string, parsed bool) {
+	if req.GetBody == nil || req.Body == nil || req.Body == http.NoBody {
+		return tokenRequestGrantType(""), false
 	}
-	bodyBytes, err := io.ReadAll(io.LimitReader(req.Body, maxTokenRequestPeek+1))
+	body, err := req.GetBody()
+	if err != nil {
+		return tokenRequestGrantType(""), false
+	}
+	defer body.Close()
+	bodyBytes, err := io.ReadAll(io.LimitReader(body, maxTokenRequestPeek+1))
 	if err != nil || len(bodyBytes) > maxTokenRequestPeek {
-		// Not peeked: the outgoing body yields the bytes read so far, then
-		// the rest of the original (or its read error again), and closing
-		// it closes the original.
-		rest := io.Reader(req.Body)
-		if err != nil {
-			rest = errReader{err}
-		}
-		clone := req.Clone(req.Context())
-		clone.Body = readCloser{Reader: io.MultiReader(bytes.NewReader(bodyBytes), rest), Closer: req.Body}
-		return clone, tokenRequestGrantType("")
+		return tokenRequestGrantType(""), false
 	}
-	_ = req.Body.Close()
-	clone := req.Clone(req.Context())
-	clone.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	clone.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(bodyBytes)), nil }
-	values, perr := url.ParseQuery(string(bodyBytes))
-	if perr != nil {
-		return clone, tokenRequestGrantType("")
+	values, err := url.ParseQuery(string(bodyBytes))
+	if err != nil {
+		return tokenRequestGrantType(""), false
 	}
-	return clone, tokenRequestGrantType(values.Get("grant_type"))
+	return tokenRequestGrantType(values.Get("grant_type")), true
 }
-
-type readCloser struct {
-	io.Reader
-	io.Closer
-}
-
-type errReader struct{ err error }
-
-func (e errReader) Read([]byte) (int, error) { return 0, e.err }
 
 // maxTokenRequestPeek bounds how much of a token request body is read to
 // learn its grant type; token requests are a few hundred bytes.

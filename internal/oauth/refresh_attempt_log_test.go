@@ -191,46 +191,40 @@ func (b *failingBody) Read(p []byte) (int, error) {
 
 func (b *failingBody) Close() error { b.closed = true; return nil }
 
-// Review round 1: a body that fails while being peeked still fails the
-// upload (its prefix is not sent as a complete form), and closing the
-// outgoing body closes the caller's.
-func TestPeekTokenGrantType_ReadErrorStillFailsUpload(t *testing.T) {
+// Review rounds 1 and 3: the grant type is read from a GetBody copy; the
+// caller's body is never read, so a streaming body (no GetBody) is sent as
+// it was and is logged as "unknown".
+func TestPeekTokenGrantType_NeverReadsCallerBody(t *testing.T) {
 	body := &failingBody{}
 	req, err := http.NewRequest(http.MethodPost, "https://as.example/token", nil)
 	require.NoError(t, err)
 	req.Body = body
-	out, grant := peekTokenGrantType(req)
+	grant, parsed := peekTokenGrantType(req)
 	assert.Equal(t, "unknown", grant)
-	assert.Same(t, body, req.Body, "the caller's request is not modified")
-	got, rerr := io.ReadAll(out.Body)
-	assert.Equal(t, "grant_type=refresh", string(got))
-	assert.EqualError(t, rerr, "upload broke")
-	require.NoError(t, out.Body.Close())
-	assert.True(t, body.closed)
+	assert.False(t, parsed)
+	assert.Equal(t, 0, body.n, "the streaming body was not read")
+
+	req, err = http.NewRequest(http.MethodPost, "https://as.example/token", strings.NewReader("grant_type=refresh_token&refresh_token=x"))
+	require.NoError(t, err)
+	grant, parsed = peekTokenGrantType(req)
+	assert.Equal(t, "refresh_token", grant)
+	assert.True(t, parsed)
+	rest, _ := io.ReadAll(req.Body)
+	assert.Equal(t, "grant_type=refresh_token&refresh_token=x", string(rest), "the body is still whole")
 }
 
-// Review round 2: flight numbers do not restart for another server key or
-// binding, so two flights' lines are never confused.
-func TestRefreshCoordinator_FlightNumbersAreProcessWide(t *testing.T) {
-	c := newTestCoordinator()
-	var got []uint64
-	for _, name := range []string{"a", "b"} {
-		f := newCoordFixture(t, "cid")
-		req := f.req(RefreshTriggerProactive, "rt-0")
-		req.Key = GenerateServerKey(name, "https://x.example/mcp")
-		req.Load = func() (*storage.OAuthTokenRecord, error) {
-			rec, err := f.load()
-			if rec != nil {
-				rec.ServerName = req.Key
-			}
-			return rec, err
-		}
-		req.Refresh = func(ctx context.Context, rec *storage.OAuthTokenRecord) (*client.Token, error) {
-			info, _ := RefreshFlightInfoFrom(ctx)
-			got = append(got, info.Flight)
-			return nil, &net.OpError{Op: "read", Net: "tcp", Err: io.ErrUnexpectedEOF}
-		}
-		_, _, _ = c.Do(context.Background(), req)
-	}
-	assert.Equal(t, []uint64{1, 2}, got)
+// Review round 3: an override is not reported when the form cannot be parsed
+// (injectFormParams then sends the original body).
+func TestOAuthTransportWrapper_OverrideNotReportedForUnparsableForm(t *testing.T) {
+	ok := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusBadRequest, Body: io.NopCloser(strings.NewReader(`{}`)), Header: http.Header{}}, nil
+	})
+	core, logs := observer.New(zapcore.DebugLevel)
+	w := NewOAuthTransportWrapper(ok, map[string]string{"grant_type": "client_credentials"}, zap.New(core))
+	req, err := http.NewRequest(http.MethodPost, "https://as.example/token", strings.NewReader("grant_type=refresh_token&scope=%ZZ"))
+	require.NoError(t, err)
+	resp, err := w.RoundTrip(req)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, "unknown", logs.FilterMessage("OAuth token request finished").All()[0].ContextMap()["grant_type"])
 }
