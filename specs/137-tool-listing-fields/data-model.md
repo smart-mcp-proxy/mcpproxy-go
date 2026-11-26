@@ -5,7 +5,7 @@
 | Field | JSON | Type | Rule |
 |---|---|---|---|
 | Title | `title` | string | trimmed; empty or equal to the raw name → absent (FR-002) |
-| ListingDigest | (on `ToolMetadata`, `listing_digest`) | string | SHA-256 of canonical JSON of every extra except titles, including drop diagnostics; index change detection only, never identity |
+| ListingDigest | (on `ToolMetadata`, `listing_digest`) | string | SHA-256 of canonical JSON of every extra except titles and title diagnostics, including icon/`_meta` drop diagnostics; index change detection only, never identity |
 | TitleInvalid / AnnotationsTitleInvalid | `title_invalid`, `annotations_title_invalid` | {reason, preview} | reason `too_long`, `control_char`, `bidi_control`; preview ≤ 64 chars with controls escaped; the raw value is not kept |
 | Icons | `icons` | []Icon | ≤ 8, validated (FR-003) |
 | IconsDropped | `icons_dropped` | {count, items[≤8]{index, reason}} | reasons: `scheme`, `too_long`, `bad_data_uri`, `mime`, `mime_mismatch`, `sizes`, `theme`, `count`, `tool_budget`, `server_budget` |

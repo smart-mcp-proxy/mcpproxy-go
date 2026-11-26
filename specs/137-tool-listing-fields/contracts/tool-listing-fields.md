@@ -1,9 +1,9 @@
 # Contract: Where each field is emitted
 
-| Field | Direct surface (full + deferred) | `retrieve_tools` full | `retrieve_tools` compact | `describe_tool` | Code execution | REST admin | REST agent token | Scanner export | Web UI |
+| Field | Direct surface (full + deferred) | `retrieve_tools` full | `retrieve_tools` compact | `describe_tool` | Code execution | REST admin | REST agent token | Scanner input (report shows emitted) | Web UI |
 |---|---|---|---|---|---|---|---|---|---|
-| top-level `title` | emitted value | `title` (emitted, else emitted annotations title) | — | `title` (same) | as full | emitted + `pending_title` + `title_invalid` | emitted | emitted | display name |
-| `annotations.title` | emitted value | inside `annotations` (emitted) | — | inside `annotations` (emitted) | as full | emitted + `pending_annotations_title` + `annotations_title_invalid` | emitted | emitted | badge |
+| top-level `title` | emitted value | `title` (emitted, else emitted annotations title) | — | `title` (same) | as full | emitted + `pending_title` + `title_invalid` | emitted | — (none) | display name |
+| `annotations.title` | emitted value | inside `annotations` (emitted) | — | inside `annotations` (emitted) | as full | emitted + `pending_annotations_title` + `annotations_title_invalid` | emitted | — (none) | badge |
 | `icons` | validated set | — | — | — | — | `icons`, `icons_dropped` | `icons` | — | `ToolIcon` (data: inline img; https on request) |
 | `_meta` | stored object minus owned keys, plus the size hook key when enabled | — | — | — | — | `meta`, `meta_dropped` | — | — | collapsed JSON (admin) |
 | `defer_loading` | when true | — | — | `defer_loading: true` | — | `defer_loading` | `defer_loading` | — | "loaded on demand" badge |
