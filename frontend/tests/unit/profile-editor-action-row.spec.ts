@@ -116,4 +116,19 @@ describe('Profile editor action row (FR-052)', () => {
     expect(document.activeElement).not.toBe(b.get('[data-test="profile-response-limit-value"]').element)
     b.unmount()
   })
+
+  it('a save refusal that arrives after unmount does not read the focus of the page now showing', async () => {
+    let reject: (e: unknown) => void = () => {}
+    ;(api.updateProfile as any).mockImplementation(() => new Promise((_r, rej) => { reject = rej }))
+    const w = await mountEditor()
+    await w.get('[data-test="profile-title"]').setValue('Renamed')
+    await w.get('[data-test="profile-form"]').trigger('submit')
+    await flushPromises()
+    w.unmount()
+    const read = vi.spyOn(document, 'activeElement', 'get')
+    reject(Object.assign(new Error('refused'), { status: 400, message: 'refused' }))
+    await flushPromises()
+    expect(read).not.toHaveBeenCalled()
+    read.mockRestore()
+  })
 })

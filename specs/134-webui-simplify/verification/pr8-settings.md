@@ -64,3 +64,13 @@ Merged `origin/main` first (one new commit, #2052; conflicts in the hints panel,
 3. `ProfileEditor.vue` `save` catch: `focusStayed()` reads `document.activeElement` of the current page after unmount; the move itself is already blocked by the `revealRefusal` guard, so this is a read with no effect.
 
 Assessment: real in principle, no data or URL effect, focus-only and only under a same-flush remount; cheap to guard with `unmounted` if the maintainer wants it.
+
+## Round 23 follow-up: three focus guards, no re-review
+
+Round 23 (Sol) was not clean. The maintainer chose "Guard and stop": the three findings were fixed and NOT re-reviewed (no round 24, no Sol or Astra run).
+
+1. `Settings.vue` section-change focus callback: returns when the component is unmounted.
+2. `Settings.vue` `onSectionKeydown` deferred focus: returns when unmounted, or when the section changed again before it ran.
+3. `ProfileEditor.vue` `focusStayed()`: returns false after unmount, so a late save refusal reads no focus from the page now showing.
+
+Tests (failing first): `settings-late-after-unmount.spec.ts` (3 new; the arrow-key and section-change unmount cases were red before the fix; the "section changed again" case passed before the fix too, so it is a regression guard, not proof of the guard) and `profile-editor-action-row.spec.ts` (1 new, red before). Unit 3325 passed, type check clean, `make build` ok, full sweep on an isolated instance 185 passed, 4 skipped, 0 failed on the second run (the first run had one failure in `shell-pr1.spec.ts` "Tab through the header", a file this change does not touch; it passed on re-run).

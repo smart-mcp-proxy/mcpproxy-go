@@ -525,6 +525,8 @@ async function save() {
 // Focus is "where it was" if it is still there or has only fallen to <body> (a
 // disabled Save button drops it there); anything else is a move by the user.
 function focusStayed(at: Element | null): boolean {
+  // A check that resumes after the editor was left has no focus of its own to judge.
+  if (unmounted) return false
   const now = document.activeElement
   return !now || now === document.body || now === at
 }

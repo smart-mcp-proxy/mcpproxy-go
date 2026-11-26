@@ -410,6 +410,7 @@ const tabs = computed(() => {
 // `?tab=teams`) must not strand keyboard focus on a button that just lost its Tab stop.
 watch(activeTab, () => {
   void nextTick(() => {
+    if (unmounted) return
     const cur = document.activeElement as HTMLElement | null
     if (cur?.getAttribute('role') === 'tab' && cur.hasAttribute('data-tab-id') && cur.getAttribute('aria-selected') !== 'true') {
       ;(document.querySelector(`[data-test="settings-tab-${activeTab.value}"]`) as HTMLElement | null)?.focus()
@@ -709,7 +710,12 @@ function onSectionKeydown(event: KeyboardEvent) {
   if (next < 0) return
   event.preventDefault()
   pickTab(ids[next])
-  void nextTick(() => (document.querySelector(`[data-test="settings-tab-${ids[next]}"]`) as HTMLElement | null)?.focus())
+  const target = ids[next]
+  void nextTick(() => {
+    // Not after the page is left, nor when another section was picked meanwhile.
+    if (unmounted || activeTab.value !== target) return
+    ;(document.querySelector(`[data-test="settings-tab-${target}"]`) as HTMLElement | null)?.focus()
+  })
 }
 function applyTabParamIfValid(): boolean {
   const tabParam = route.query.tab
