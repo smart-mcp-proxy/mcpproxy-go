@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy-tray/internal/state"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shutdown"
 )
 
 // Windows-specific ProcessMonitor implementation without POSIX process groups.
@@ -198,9 +199,8 @@ func (pm *ProcessMonitor) Stop() error {
 
 	pm.logger.Infow("Stopping process", "pid", pid)
 
-	// Force kill after 45 seconds to allow core time to clean up Docker containers
-	// (typically 10-30s for 7 containers).
-	grace := 45 * time.Second
+	// Force kill only a wedged core: it ends by itself after 60 seconds at the latest.
+	grace := shutdown.Tray
 	if err := requestGracefulStop(pid); err != nil {
 		pm.logger.Warnw("Could not ask process to stop gracefully, force killing", "pid", pid, "error", err)
 		grace = 0
