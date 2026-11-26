@@ -69,3 +69,14 @@ func TestOAuthLogger_DropsServerFileWritesAfterRetire(t *testing.T) {
 	assert.Equal(t, 1, fileLogs.Len())
 	assert.Equal(t, 0, fileLogs.FilterMessage("after").Len())
 }
+
+func TestRetiredDropCore_WriteAfterRetireIsDropped(t *testing.T) {
+	fileCore, fileLogs := observer.New(zapcore.InfoLevel)
+	retired := false
+	core := retiredDropCore{Core: fileCore, retired: func() bool { return retired }}
+	ce := core.Check(zapcore.Entry{Level: zapcore.InfoLevel, Message: "late"}, nil)
+	require.NotNil(t, ce)
+	retired = true
+	ce.Write()
+	assert.Equal(t, 0, fileLogs.Len(), "retired between Check and Write")
+}

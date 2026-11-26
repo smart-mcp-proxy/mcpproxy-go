@@ -1230,10 +1230,19 @@ func (r retiredDropCore) With(fields []zapcore.Field) zapcore.Core {
 }
 
 func (r retiredDropCore) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
-	if r.retired() {
+	if r.retired() || !r.Enabled(e.Level) {
 		return ce
 	}
-	return r.Core.Check(e, ce)
+	return ce.AddCore(e, r)
+}
+
+// Write checks again: the instance may have been retired between Check and
+// Write.
+func (r retiredDropCore) Write(e zapcore.Entry, fields []zapcore.Field) error {
+	if r.retired() {
+		return nil
+	}
+	return r.Core.Write(e, fields)
 }
 
 // cappedScrub renders an upstream-authored response body for an error message:

@@ -228,3 +228,11 @@ func TestOAuthTransportWrapper_OverrideNotReportedForUnparsableForm(t *testing.T
 	_ = resp.Body.Close()
 	assert.Equal(t, "unknown", logs.FilterMessage("OAuth token request finished").All()[0].ContextMap()["grant_type"])
 }
+
+func TestPeekTokenGrantType_EmptyBodyIsAnEmptyForm(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://as.example/token", http.NoBody)
+	require.NoError(t, err)
+	grant, parsed := peekTokenGrantType(req)
+	assert.Equal(t, "unknown", grant)
+	assert.True(t, parsed, "injectFormParams sends the extra params into an empty form")
+}

@@ -403,7 +403,14 @@ func isAllDigits(s string) bool {
 // 100-continue, streaming) does not change; a body without GetBody, or one
 // that is not a form, is "unknown". parsed reports that the form was read.
 func peekTokenGrantType(req *http.Request) (grant string, parsed bool) {
-	if req.GetBody == nil || req.Body == nil || req.Body == http.NoBody {
+	if req.Body == nil || req.Body == http.NoBody {
+		// An empty form: injectFormParams still sends the extra params.
+		return tokenRequestGrantType(""), true
+	}
+	// GetBody is set by http.NewRequest for in-memory bodies (what mcp-go and
+	// the stored-client refresh send), so reading the copy does not wait on
+	// I/O. A body without it is not peeked.
+	if req.GetBody == nil {
 		return tokenRequestGrantType(""), false
 	}
 	body, err := req.GetBody()
