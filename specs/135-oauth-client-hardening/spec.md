@@ -163,7 +163,7 @@ An upstream's PRM names authorization server `https://auth.example.com`, but the
 
 ### User Story 5: DCR declares the right application type (Priority: P2)
 
-When mcpproxy registers itself, the request sends `"application_type": "native"` for a loopback redirect URI and `"web"` for a non-loopback one.
+When mcpproxy registers itself, the request sends `"application_type": "native"` for an `http` loopback redirect URI and `"web"` for any other (non-loopback, or `https` on a loopback host).
 
 **Why this priority**: it fixes registrations that strict providers reject. It is not an attack defence.
 
@@ -307,7 +307,7 @@ These are decisions made on the maintainer's behalf (zero-interruption policy). 
 1. **Strict by default**, with a per-server opt-out only (FR-014).
 2. **Trust on first use for legacy rows** (FR-011). Forcing every server to sign in again would close only the window described under "Protection model", at the cost of one sign-in per server for every user. mcp-go makes the same choice. The protection claims (SC-002) are stated for bound rows only.
 3. **mcpproxy owns the `iss` decision** in its callback handler. mcp-go cannot tell a synthetic document from a discovered one, and the broker does not use mcp-go. Where the two agree, mcp-go's `ProcessAuthorizationCallback` also runs, as a second check.
-4. **`application_type` follows OIDC DCR**: `native` for loopback, `web` otherwise.
+4. **`application_type` follows OIDC DCR**: `native` for an `http` loopback redirect, `web` otherwise (`https` on a loopback host included).
 5. **No new activity-log type and no telemetry change.** Failures go through the existing OAuth failure record, health, the Spec 124 `upstream_event` rows, and logs.
 6. **Trailing slash** is tolerated once for metadata equality and never for `iss`.
 7. **Broker**: the `issuer` field is optional, and an absent `iss` is accepted there (US7).

@@ -30,7 +30,7 @@ Every upstream behaviour change that reaches mcpproxy, and what PR-1 does with i
 | v1.4 #1006: `ProcessAuthorizationCallback` with the RFC 9207 check; callbacks bound to their transaction | mcpproxy still calls `ProcessAuthorizationResponse`, which does not check `iss` | Unchanged; PR-2 (D2). |
 | v1.4 #1098: fallback endpoints derived from the server origin | Only reached when no metadata and no override exist | Adopted; PR-2 classifies it as source `fallback` (FR-004a). |
 | v1.5: case variants of `localhost` accepted in redirect hosts | — | Adopted. |
-| v1.6: a numeric `expires_at` in a token response is accepted | No effect: the transport wrapper already drops a non-RFC 3339 `expires_at` and derives `expires_in` (`normalizeTokenResponseBody`) before mcp-go decodes | Unchanged. |
+| v1.6: a numeric `expires_at` in a token response is accepted | No effect for responses the wrapper normalises: it drops a non-RFC 3339 `expires_at` and derives `expires_in` (`normalizeTokenResponseBody`) before mcp-go decodes. A token response reached through a same-origin redirect to another path is not normalised; there v1.0 failed to decode a numeric `expires_at` and v1.6 accepts it | Adopted for that redirected case (FR-010 in PR-2 stops following redirects on credential POSTs). |
 | v1.6 #1151: empty PKCE challenge or verifier refused | mcpproxy always sends both | Adopted. |
 | v1.6: cross-origin redirects refused in mcp-go's default HTTP clients (GO-2026-6911) | mcpproxy passes its own clients | No effect; FR-010 is PR-2. |
 | v1.6: empty tool annotations omitted (`WithoutDefaultAnnotations`) | `NewTool` defaults are unchanged, so built-in tool hashes are unchanged | Adopted. |
