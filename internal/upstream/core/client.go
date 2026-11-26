@@ -650,15 +650,6 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 	}
 	request.Params.Arguments = args
 
-	// GH #1967: a call whose MCP client asked for progress carries a token
-	// minted for this call alone, never the client's own; the upstream's
-	// notifications/progress under it are forwarded until the call returns.
-	progressToken, endProgress := c.progress.Begin(ctx)
-	defer endProgress()
-	if progressToken != nil {
-		request.Params.Meta = &mcp.Meta{ProgressToken: progressToken}
-	}
-
 	// Log to server-specific log
 	if c.upstreamLogger != nil {
 		c.upstreamLogger.Info("Starting CallTool operation",
@@ -706,6 +697,15 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 			forwardAllow = policy.Allow
 			outbound = headerfwd.Outbound(snap, policy)
 		}
+	}
+	// GH #1967: a call whose MCP client asked for progress carries a token
+	// minted for this call alone, never the client's own; the upstream's
+	// notifications/progress under it are forwarded until the call returns or its
+	// deadline passes.
+	progressToken, endProgress := c.progress.Begin(callCtx)
+	defer endProgress()
+	if progressToken != nil {
+		request.Params.Meta = &mcp.Meta{ProgressToken: progressToken}
 	}
 	callCtx = headerfwd.WithOutbound(callCtx, outbound)
 	headerfwd.RecordOutbound(ctx, outbound)

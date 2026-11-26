@@ -100,6 +100,15 @@ func TestDispatch_AfterEndOrClearDropped(t *testing.T) {
 	assert.Equal(t, 0, n)
 }
 
+func TestDispatch_AfterCallContextDoneDropped(t *testing.T) {
+	r, _ := newRegistry()
+	ctx, cancel := context.WithCancel(WithSink(context.Background(), func(Update) bool { t.Error("forwarded after the deadline"); return true }))
+	tok, end := r.Begin(ctx)
+	defer end()
+	cancel()
+	assert.False(t, r.Dispatch(progressNote(tok, 1, nil, "")))
+}
+
 func TestDispatch_RateLimitedAndMonotonic(t *testing.T) {
 	r, clk := newRegistry()
 	var got []float64

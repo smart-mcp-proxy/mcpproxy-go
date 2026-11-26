@@ -137,6 +137,7 @@ type Registry struct {
 type call struct {
 	mu       sync.Mutex
 	sink     Sink
+	done     <-chan struct{} // the call's context: closed past its deadline
 	closed   bool
 	sent     bool
 	doneSent bool // the completion bypass was used
@@ -151,7 +152,8 @@ func (r *Registry) clock() time.Time {
 	return time.Now()
 }
 
-// Begin registers the call whose context is ctx. With no sink in ctx it
+// Begin registers the call whose context is ctx; once ctx is done nothing
+// more is forwarded for it, even before end runs. With no sink in ctx it
 // returns a nil token and registers nothing. Otherwise the token goes into
 // the upstream request's _meta.progressToken, and end must be called when
 // the call returns; after end returns the sink is never called again.
@@ -161,7 +163,7 @@ func (r *Registry) Begin(ctx context.Context) (token mcp.ProgressToken, end func
 		return nil, func() {}
 	}
 	tok := newToken(r.seq.Add(1))
-	c := &call{sink: sink}
+	c := &call{sink: sink, done: ctx.Done()}
 	r.mu.Lock()
 	if r.calls == nil {
 		r.calls = make(map[string]*call)
@@ -250,6 +252,11 @@ func (r *Registry) Dispatch(n mcp.JSONRPCNotification) bool {
 	defer c.mu.Unlock()
 	if c.closed {
 		return false
+	}
+	select {
+	case <-c.done:
+		return false // timed out or cancelled; end() has not run yet
+	default:
 	}
 	if c.sent && progress <= c.last {
 		return false
