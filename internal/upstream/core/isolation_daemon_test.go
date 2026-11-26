@@ -36,9 +36,12 @@ func TestDockerIsolation_SigProxyOffOnlyOnOurOwnDaemon(t *testing.T) {
 		{name: "nothing set", login: map[string]string{}},
 		{name: "set for mcpproxy itself", own: "tcp://a", env: []string{host + "=tcp://a"}, login: map[string]string{}},
 		{name: "only in docker run's env", env: []string{host + "=tcp://a"}, login: map[string]string{}, other: true},
-		{name: "in the server's env", env: []string{host + "=tcp://a"}, serverEnv: true, login: map[string]string{}},
-		{name: "relative DOCKER_CONFIG without working_dir", env: []string{"DOCKER_CONFIG=cfg"}, serverEnv: true, login: map[string]string{}},
-		{name: "relative DOCKER_CONFIG with working_dir", env: []string{"DOCKER_CONFIG=cfg"}, serverEnv: true, workDir: "/srv", login: map[string]string{}, other: true},
+		// With DOCKER_HOST in mcpproxy's own env, docker runs directly, without the login profile.
+		{name: "in the server's env, docker run directly", own: "tcp://a", env: []string{host + "=tcp://b"}, serverEnv: true, login: map[string]string{}},
+		// The profile may change or unset it (`unset DOCKER_HOST`), and login cannot show that.
+		{name: "in the server's env, docker run through the login shell", env: []string{host + "=tcp://a"}, serverEnv: true, login: map[string]string{}, other: unix},
+		{name: "relative DOCKER_CONFIG without working_dir", own: "tcp://a", env: []string{"DOCKER_CONFIG=cfg"}, serverEnv: true, login: map[string]string{}},
+		{name: "relative DOCKER_CONFIG with working_dir", own: "tcp://a", env: []string{"DOCKER_CONFIG=cfg"}, serverEnv: true, workDir: "/srv", login: map[string]string{}, other: true},
 		{name: "only in the login profile", login: map[string]string{host: "tcp://a"}, other: unix},
 		{name: "context in the login profile", login: map[string]string{"DOCKER_CONTEXT": "podman"}, other: unix},
 		{name: "login profile unknown", login: nil, other: unix},
