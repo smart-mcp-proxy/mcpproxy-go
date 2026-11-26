@@ -1612,6 +1612,9 @@ func (s *Server) Shutdown() error {
 	}
 	s.shutdown = true
 	httpServer := s.httpServer
+	// The run whose browser-login watcher is joined after the HTTP shutdown,
+	// read with httpServer: StartServer resets it under s.mu.
+	oauthRun := s.oauthRunGen()
 	startTime := s.startTime
 	reason := s.shutdownReason
 	signal := s.shutdownSignal
@@ -1660,8 +1663,6 @@ func (s *Server) Shutdown() error {
 	}
 
 	s.logger.Info("Shutting down MCP proxy server...")
-
-	oauthRun := s.oauthRunGen() // the run whose browser-login watcher is joined below
 
 	// Gracefully shutdown HTTP server first to stop accepting new connections
 	if httpServer != nil {
@@ -2888,6 +2889,9 @@ func (s *Server) stopServer(run *serverRun) error {
 	// installs a new context, which the tail below must not cancel or unmark.
 	httpServer := s.httpServer
 	stoppingCtx, stoppingCancel := s.serverCtx, s.serverCancel
+	// The run whose browser-login watcher is joined after the HTTP shutdown,
+	// read with httpServer: StartServer resets it under s.mu.
+	oauthRun := s.oauthRunGen()
 	s.mu.Unlock()
 
 	// Notify about server stopping
@@ -2895,8 +2899,6 @@ func (s *Server) stopServer(run *serverRun) error {
 	_ = s.logger.Sync()
 
 	s.updateStatus(runtime.PhaseStopping, "Server is stopping...")
-
-	oauthRun := s.oauthRunGen() // the run whose browser-login watcher is joined below
 
 	// STEP 1: Gracefully shutdown HTTP server FIRST to stop accepting new connections
 	// This must happen before we disconnect upstream servers to prevent new requests
