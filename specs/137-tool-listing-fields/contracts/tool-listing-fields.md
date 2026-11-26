@@ -2,8 +2,8 @@
 
 | Field | Direct surface (full + deferred) | `retrieve_tools` full | `retrieve_tools` compact | `describe_tool` | Code execution | REST admin | REST agent token | Scanner input (report shows emitted) | Web UI |
 |---|---|---|---|---|---|---|---|---|---|
-| top-level `title` | emitted value | `title` (emitted, else emitted annotations title) | — | `title` (same) | as full | emitted + `pending_title` + `title_invalid` | emitted | — (none) | display name |
-| `annotations.title` | emitted value | inside `annotations` (emitted) | — | inside `annotations` (emitted) | as full | emitted + `pending_annotations_title` + `annotations_title_invalid` | emitted | — (none) | badge |
+| top-level `title` | emitted value | `title` (emitted, else emitted annotations title) | — | `title` (same) | as full | emitted + `approved_title` + `pending_title` + `title_invalid` | emitted | — (none) | display name |
+| `annotations.title` | emitted value | inside `annotations` (emitted) | — | inside `annotations` (emitted) | as full | emitted + `approved_annotations_title` + `pending_annotations_title` + `annotations_title_invalid` | emitted | — (none) | badge |
 | `icons` | validated set | — | — | — | — | `icons`, `icons_dropped` | `icons` | — | `ToolIcon` (data: inline img; https on request) |
 | `_meta` | stored object minus owned keys, plus the size hook key when enabled | — | — | — | — | `meta`, `meta_dropped` | — | — | collapsed JSON (admin) |
 | `defer_loading` | when true | — | — | `defer_loading: true` | — | `defer_loading` | `defer_loading` | — | "loaded on demand" badge |
@@ -15,11 +15,11 @@
 
 ```json
 {
-  "title": "Create issue",
   "icons": [{"src": "https://example.com/i.png", "mime_type": "image/png", "sizes": ["48x48"], "theme": "light"}],
   "defer_loading": true,
   "task_support": "optional",
   "meta": {"vendor/x": 1},
+  "approved_title": "Create issue",
   "pending_title": "Create issue (v2)",
   "pending_annotations_title": "",
   "title_invalid": null,
@@ -29,7 +29,7 @@
 }
 ```
 
-The last seven keys are present only for a positively authenticated administrator. `GET /api/v1/servers/{id}/review` for a scoped caller and MCP `quarantine_security` `inspect_quarantined`/`inspect_tools` for every caller use the agent-safe projection: emitted titles plus `title_pending: true|false`, no pending or invalid text anywhere (values, diffs, evidence).
+(`title` is absent because the top-level title is pending.) `meta` and the keys from `approved_title` on are present only for a positively authenticated administrator. `GET /api/v1/servers/{id}/review` for a scoped caller and MCP `quarantine_security` `inspect_quarantined`/`inspect_tools` for every caller use the agent-safe projection: emitted titles plus `title_pending: true|false`, no pending or invalid text anywhere (values, diffs, evidence).
 
 ## Review door
 
