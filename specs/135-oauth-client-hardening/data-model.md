@@ -89,7 +89,7 @@ any ──(row undecryptable, Spec 123)──► undecryptable   [checked first]
 - **One entry per effective client-authentication credential.** These are the FR-010b class 4 keys: `client_secret`, `client_assertion`, `assertion` and their normalised aliases, plus names the sensitive matcher classifies as credential-bearing, taken from `oauth.*` or `oauth.extra_params` after precedence. `client_assertion_type` and client ids get no entry.
 - **Created or compared** atomically under the current Spec 116 binding, before the first send of that credential, and in the same transaction as a legacy row's binding (FR-011).
 - **Survives** logout, grant clears (a scopes edit, for example), client-id-only edits (by the operator or by DCR), and URL edits that keep the incarnation.
-- **Removed** when that credential's effective value changes (only its own entry) and when the server is deleted or replaced (all entries).
+- **Removed** when a credential's effective value changes and no other effective class-4 field still has the old value (entries are per fingerprint) and when the server is deleted or replaced (all entries).
 - **Sealed** under Spec 123 when a key is set.
 
 ## Extras classes (FR-010b)
