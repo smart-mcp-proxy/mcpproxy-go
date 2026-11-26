@@ -96,4 +96,24 @@ describe('Profile editor action row (FR-052)', () => {
     expect(w.get('[data-test="profile-response-limit-value"]').attributes('aria-invalid')).toBeUndefined()
     delete (Element.prototype as any).scrollIntoView
   })
+
+  it('a save that fails after its editor was left never moves focus into another editor', async () => {
+    const a = await mountEditor()
+    let rejectA: (e: unknown) => void = () => {}
+    ;(api.updateProfile as any).mockImplementationOnce(() => new Promise((_r, rej) => { rejectA = rej }))
+    await a.get('[data-test="profile-title"]').setValue('Edited A')
+    await a.get('[data-test="profile-form"]').trigger('submit')
+    // The user leaves editor A and opens editor B, which shows its own field error.
+    const b = await mountEditor()
+    await b.get('[data-test="profile-response-limit-custom"]').setValue(true)
+    await b.get('[data-test="profile-response-limit-value"]').setValue('')
+    await b.get('[data-test="profile-form"]').trigger('submit')
+    await flushPromises()
+    ;(document.activeElement as HTMLElement | null)?.blur()
+    a.unmount()
+    rejectA(Object.assign(new Error('nope'), { field: 'title', status: 400 }))
+    await flushPromises()
+    expect(document.activeElement).not.toBe(b.get('[data-test="profile-response-limit-value"]').element)
+    b.unmount()
+  })
 })

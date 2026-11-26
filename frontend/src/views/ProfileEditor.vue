@@ -1,5 +1,5 @@
 <template>
-  <div class="space-y-4" data-test="profile-editor">
+  <div ref="rootEl" class="space-y-4" data-test="profile-editor">
     <router-link class="link text-sm" :to="{ name: 'profiles' }" data-test="profile-editor-back">&larr; All profiles</router-link>
 
     <div v-if="loading && !saved" class="space-y-3" aria-busy="true" data-test="profile-editor-skeleton">
@@ -355,6 +355,9 @@ const assignOpen = ref(false)
 const assignError = ref('')
 const announcement = ref('')
 const refusalEl = ref<HTMLElement | null>(null)
+const rootEl = ref<HTMLElement | null>(null)
+// Set when this editor is left: a save that settles afterwards must not touch the page.
+let unmounted = false
 // True from the moment a rename is sent until the route carries the new name. The
 // events the rename emits must not reload the OLD name (a 404 per event).
 const renaming = ref(false)
@@ -528,10 +531,11 @@ function focusStayed(at: Element | null): boolean {
 
 async function revealRefusal(mayMoveFocusToField = true) {
   await nextTick()
+  if (unmounted) return
   // A refusal block, else the first field message: the action row now sits
   // after the tool rules, far from the field the message belongs to.
   const target = refusalEl.value?.querySelector<HTMLElement>('[data-test="guard-refusal"], [data-test="profile-save-error"]')
-    ?? document.querySelector<HTMLElement>('[data-test="profile-form"] .text-error')
+    ?? rootEl.value?.querySelector<HTMLElement>('[data-test="profile-form"] .text-error')
   if (!target) return
   // A field message: focus the field it belongs to, so the next Tab stays on it.
   const input = target.matches('.text-error') && !refusalEl.value?.contains(target)
@@ -613,6 +617,7 @@ onMounted(() => {
   window.addEventListener(CREDENTIALS_CHANGED_EVENT, onChangedElsewhere)
 })
 onBeforeUnmount(() => {
+  unmounted = true
   window.removeEventListener(PROFILES_CHANGED_EVENT, onChangedElsewhere)
   window.removeEventListener(CLIENT_BINDING_CHANGED_EVENT, onChangedElsewhere)
   window.removeEventListener(CREDENTIALS_CHANGED_EVENT, onChangedElsewhere)

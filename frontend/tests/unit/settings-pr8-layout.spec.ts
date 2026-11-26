@@ -259,6 +259,14 @@ describe('Review fixes', () => {
     expect(router.currentRoute.value.query.tab).toBeUndefined()
   })
 
+  it('a focus link with a stale ?tab=teams rewrites the URL to the section it showed', async () => {
+    const { wrapper, router } = await mountSettings('/settings?tab=teams&focus=routing_mode')
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.get('[data-test="settings-tab-general"]').classes()).toContain('tab-active')
+    expect(router.currentRoute.value.query.tab).toBe('general')
+  })
+
   it('section list arrows wrap', async () => {
     const { wrapper } = await mountSettings()
     await wrapper.get('[data-test="settings-tab-general"]').trigger('keydown', { key: 'ArrowUp' })

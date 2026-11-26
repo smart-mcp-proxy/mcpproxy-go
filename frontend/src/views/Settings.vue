@@ -609,7 +609,7 @@ async function focusField(key: string) {
   }
   // Name the section in the URL (General, the default, is otherwise never
   // written), so following the same bare focus link again is a real navigation.
-  if (route.query.tab === undefined && isKnownFieldKey(key) && tabs.value.some((t) => t.id === activeTab.value)) await router.replace({ query: { ...route.query, tab: activeTab.value } })
+  if (route.query.tab !== activeTab.value && isKnownFieldKey(key) && tabs.value.some((t) => t.id === activeTab.value)) await router.replace({ query: { ...route.query, tab: activeTab.value } })
   await nextTick()
 
   // Advanced settings live inside collapsed <details>; open the one holding it.
