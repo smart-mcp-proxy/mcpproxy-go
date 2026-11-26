@@ -47,7 +47,7 @@ type Attempt struct {
 // left zero — the per-kind rules are enforced by the line builders, and the
 // schema's identity `allOf` blocks are the binding source of truth.
 type Caller struct {
-	Kind        string // api_key|socket|stdio|anonymous|agent_token|session_user|session_admin|internal
+	Kind        string // api_key|socket|stdio|anonymous|agent_token|session_user|session_admin|internal; admin_action adds none|cli_offline
 	UserID      string
 	UserEmail   string
 	EmailHash   string // auth_event only, verified email, no user record yet
@@ -56,6 +56,12 @@ type Caller struct {
 	TokenName   string
 	TokenPrefix string
 	ProfilePin  string
+
+	// TokenNameWithheld and Ref are admin_action only (Spec 133 §Target,
+	// derived labels): a caller whose token name is derived from text that
+	// may be private is named by its opaque ref instead.
+	TokenNameWithheld bool
+	Ref               string
 }
 
 // Client is the audit line's optional `client` object: caller-asserted

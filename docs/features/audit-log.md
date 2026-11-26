@@ -3,7 +3,7 @@ id: audit-log
 title: Audit Log
 sidebar_label: Audit Log
 sidebar_position: 7.5
-description: Attributable, redacted JSONL audit lines for every tool-call authorization decision, tool call and login attempt.
+description: Attributable, redacted JSONL audit lines for every tool-call authorization decision, tool call, login attempt and administrative change.
 keywords: [audit, audit-log, jsonl, compliance, siem, server edition]
 ---
 
@@ -15,7 +15,8 @@ the (droppable, 256-slot) activity event bus. It is a separate, narrower record 
 the [Activity Log](activity-log.md): where the activity log is a rich, queryable
 history read back through REST/CLI, the audit log exists only to answer "who called
 what, and what happened" from an external file or stream, with a stable schema a
-security reviewer signs off once.
+security reviewer signs off once. Since Spec 133 it also answers "who changed the
+rules": every committed administrative change writes an `admin_action` line.
 
 There is **no** REST, SSE, MCP, CLI or Web UI surface that reads or lists audit
 lines. The file or stdout stream is the only reader's surface — point a log shipper
@@ -23,13 +24,14 @@ at it.
 
 ## What gets audited
 
-Three event kinds, one schema:
+Four event kinds, one schema:
 
 | Event | Written | Count |
 |---|---|---|
 | `authz` | Once per pre-dispatch authorization decision (`decision: allow` after the last gate passes and before the upstream call, or `decision: deny` at the refusing gate) | one per decision |
 | `tool_call` | Once per completed dispatch whose `authz` line said `allow` — success, upstream error, a post-dispatch output-sanitisation/schema block, or a limiter shed | one per `authz allow` |
 | `auth_event` | Once per terminal login attempt and once per logout (server edition only) | one per attempt |
+| `admin_action` | Once per **committed** administrative effect — a token minted, rotated, revoked or deleted, and (as later slices land) approvals and config changes. See [Administrative changes](#administrative-changes-admin_action) | one per committed effect |
 
 Audited surfaces: `call_tool_read`/`call_tool_write`/`call_tool_destructive`,
 direct-name dispatch, nested `code_execution` sub-calls, and the REST
@@ -39,7 +41,8 @@ pair. **Not audited in v1**: invocations of built-in tools as such —
 `upstream_servers`, `quarantine_security`, `list_registries`, `search_servers`,
 `doctor`, and the `code_execution` wrapper call itself. Those have no canonical
 `(server, tool)` pair and keep their existing [activity log](activity-log.md) rows
-unchanged.
+unchanged. (The administrative **effects** a built-in such as `credentials` commits
+are recorded as `admin_action` lines; the invocation itself writes no `authz` line.)
 
 A limiter shed is **not** a second authorization decision: admission runs after
 every gate, so the `authz allow` line already exists; the shed is recorded on the
@@ -115,6 +118,14 @@ call it would have recorded: it increments the `mcpproxy_audit_write_failures_to
 counter (when metrics are enabled), is surfaced as a `mcpproxy doctor` finding,
 and is logged at most once per minute. There is no `audit_log.strict` mode.
 
+After a short write the sink resumes at a record boundary: before the next record
+it writes a lone newline, so a torn tail is never glued onto the next line; while
+that repair fails it appends nothing. On open it checks that the file ends in a
+newline and repairs it the same way. A line the builder rejects is not written;
+rejections are counted apart from write failures and reported by `mcpproxy
+doctor`. Counters count attempts, not records: verify records by reading the file,
+and have the shipper skip a malformed line independently (below).
+
 ### Crash window
 
 The `authz` line is written **before** the upstream call, so a process killed
@@ -139,8 +150,8 @@ entry for this page — see `verification.md`.)
 |---|---|---|
 | `schema_version` | ✔ | Always `1` |
 | `ts` | ✔ | RFC 3339, UTC (`Z`), fixed nine fractional digits: `2006-01-02T15:04:05.000000000Z` — not `RFC3339Nano`, which trims trailing zeros |
-| `event` | ✔ | `authz` \| `tool_call` \| `auth_event` |
-| `request_id` | ✔ | Activity request id — the join key to `mcpproxy activity show <id>` / `activity list --request-id <id>` |
+| `event` | ✔ | `authz` \| `tool_call` \| `auth_event` \| `admin_action` |
+| `request_id` | ✔ (optional on `admin_action`) | Activity request id — the join key to `mcpproxy activity show <id>` / `activity list --request-id <id>`. On `admin_action` it is present iff a request caused the effect |
 | `transport_request_id` | optional | REST only; equals `request_id` on REST-originated direct dispatch |
 | `parent_id` | optional | Nested `code_execution` children only — the wrapper's activity request id (a correlation key; the wrapper writes no line of its own) |
 | `session_id`, `work_session_id` | optional | Activity resolver values |
@@ -223,6 +234,74 @@ never returns) writes no line.
 `userinfo_subject_mismatch` · `user_disabled` · `state_invalid` ·
 `provider_error` · `discovery_failed` · `internal_error`
 
+## Administrative changes (`admin_action`)
+
+One line per **committed** administrative effect, written synchronously where the
+effect persisted, from what the storage transaction reported — not from the request
+or the response. A request that commits nothing (a refusal, a no-op such as revoking
+an already-revoked token) writes nothing; a request that fails after part of it
+committed writes the lines for what persisted. Lines never go through the event
+bus, so their count is unaffected when the bus is saturated. A failed write never
+refuses or undoes the change (the [sink failure policy](#sink-failure-policy)
+applies). The binding contract is
+[`specs/133-admin-action-audit/contracts/admin-action-line.md`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/specs/133-admin-action-audit/contracts/admin-action-line.md).
+
+**Recorded today** (Spec 133 PR-1a — agent tokens, the reporter's first priority):
+
+| `action` | Doors | `changes` |
+|---|---|---|
+| `token.create` | `POST /api/v1/tokens`, `mcpproxy token create`, MCP `credentials create_token` | `/token_prefix` (after), `/expires_at` (after, when it expires) |
+| `token.rotate` | `POST /api/v1/tokens/{name}/regenerate`, `mcpproxy token regenerate` | `/token_prefix` before and after, from the rotating transaction |
+| `token.revoke` | `DELETE /api/v1/tokens/{name}`, `mcpproxy token revoke`, MCP `credentials revoke` with `token` | `/token_prefix` (before) — only when the token was not already revoked |
+| `token.delete` | `DELETE /api/v1/tokens/{name}/permanent`, `mcpproxy token delete` | `/token_prefix` (before) |
+
+Client credentials, browser logins, keyring secrets and Connect (the rest of the
+priority-1 list), approvals (priority 2) and config changes (priority 3) follow
+in later slices; the full action list is already part of the schema's closed
+`action` enum. `DELETE /api/v1/tokens/client-<id>` (a client credential record)
+writes no line yet.
+
+Example (the CLI over the tray socket rotating a token):
+
+```json
+{"schema_version":1,"ts":"2026-11-24T10:15:02.123456789Z","event":"admin_action","origin":"socket","source":"api","request_id":"01JD5QX7","caller":{"kind":"socket"},"client":{"name":"cli/0.77.0","surface":"cli"},"action":"token.rotate","target":{"kind":"agent_token","name":"ci-bot","ref":"tok_7Q2M9X4K"},"outcome":"success","changes":[{"field":"/token_prefix","before":"mcp_agt_a1b2","after":"mcp_agt_9f8e"}]}
+```
+
+| Key | Required | Notes |
+|---|---|---|
+| `action` | ✔ | One value of a closed `<area>.<verb>` vocabulary |
+| `target` | ✔ | What changed. An agent token is `{kind: agent_token, name, ref}` (`owner_user_id` for a tenant token); `ref` is an opaque identifier stored on the token at create and kept across rotation, so two names that look alike once capped stay distinguishable. A name carrying a private-key block is never written: `name_withheld: true` beside the `ref` |
+| `outcome` | ✔ | `success` — the effect committed |
+| `changes` | optional | `[{field, before?, after?}]` or `[{field, withheld: "secret"\|"value"}]`. `field` is a JSON Pointer. A value appears only for typed, non-free-text fields (booleans, closed enums, bounded integers, timestamps, display prefixes, counts, name lists); every other value is withheld, with **no** value and **no** hash. Capped at 128 entries (`changes_truncated`, `changes_count`) |
+| `request_id_masked` | optional | `true` when a credential-shaped `request_id` was masked (that line's join is lost) |
+| `trigger`, `policy` | iff the proxy decided or observed | `trigger` iff `caller.kind` is `none` or `internal` (`config_file`, `admission`, `policy`, `startup`, `schedule`); `policy` iff `trigger: policy` |
+| `client.surface` | optional | `web`\|`macos`\|`cli`\|`mcp`\|`api` — the caller-asserted surface (`X-MCPProxy-Surface` / `X-MCPProxy-Client`), classified at the ingress; untrusted, like `client.name` |
+
+An `admin_action` line never carries `surface`, `operation`, `decision`, `disclosed`,
+`reason`, `server`, `tool`, `args_sha256`, `args_bytes`, `error_class`, `duration_ms`,
+`request_bytes`, `response_bytes`, `flags`, `parent_id` or `transport_request_id`.
+A line is at most 16 KiB.
+
+`caller` is derived exactly as for `authz` lines (the AuthContext, then the
+connection source): `api_key` over TCP, `socket` for the CLI or tray over the
+socket, `stdio` for native stdio administration, `agent_token`, `session_admin` /
+`session_user` in the server edition. Two kinds are new and legal only here:
+`none` (the proxy observed a change it did not make, e.g. a config file edit) and
+`cli_offline` (an offline CLI command with the core stopped). Neither carries
+`request_id`.
+
+**Residual exposure.** Values never enter a line — they have no path in. Labels
+(names an administrator chose, a caller's `X-Request-Id`, `client.name`) are
+recorded as chosen, through the per-field credential mask. The mask matches fixed
+shapes only — the proxy's own `mcp_agt_` / `mcp_cli_` / `mcp_oat_` / `mcp_ort_`
+tokens, GitHub `ghp_…` and `github_pat_…`, `sk-…`, `AKIA…`, JWTs, `Bearer …` — so a
+secret with no recognisable shape (a 64-hex API key pasted into a token name or an
+`X-Request-Id`) reaches the audit file, as it already reaches the activity log and
+`authz` lines. Per-field mask hits are counted and surfaced by `mcpproxy doctor`.
+
+**File order is not commit order.** `ts` is the commit time of the effect; order
+by `ts`, not by position in the file.
+
 ## Caller identity
 
 `caller.kind` is derived from `auth.AuthContextFromContext(ctx)` +
@@ -239,7 +318,9 @@ cannot be dropped under load.
 | `agent_token` | `mcp_agt_…` | `token_name`, `token_prefix`; when owned, all of `user_id`/`user_email`/`role`/`provider` together | `email_hash`; an ownerless token also carries none of `user_id`/`user_email`/`role`/`provider` |
 | `session_user` | Tenant browser/API session | `user_id`, `role: user` — **`auth_event` only**, unreachable for dispatch (FR-002/FR-003) | `email_hash`, `token_name`, `token_prefix` |
 | `session_admin` | Administrator browser/API session | `user_id`, `role: admin` | `email_hash`, `token_name`, `token_prefix` |
-| `internal` | Proxy-originated | — | same as `api_key` |
+| `internal` | Proxy-originated (on `admin_action`: the proxy decided, with a `trigger`) | — | same as `api_key` |
+| `none` | `admin_action` only: a change the proxy observed and did not make | — | every identity key; never `request_id` |
+| `cli_offline` | `admin_action` only: an offline CLI command, core stopped | — | every identity key; never `request_id` |
 
 ## Argument hashing and redaction
 
@@ -286,34 +367,55 @@ published for old consumers.
 **Adding a key or an enum value is a minor change**: it ships as an updated copy
 of the *same* schema file (`$id` unchanged, `docs/schemas/audit-line-v1.schema.json`)
 with a change-log entry on this page. The published schema is
-consumer-tolerant (`additionalProperties: true`), so a strict consumer holding
-the v1 document keeps validating after a minor additive change under the same
-`$id`.
+consumer-tolerant (`additionalProperties: true`), so a consumer holding an older
+copy keeps validating after a minor change **that adds keys**. A new enum value is
+different, case by case:
+
+- an old shipped line validates under the new schema unchanged — including an old
+  line that carries a shipper-added extension key with the same name as a key
+  Spec 133 introduced (`target`, `changes`, `client.surface`, …): every
+  constraint on those keys lives inside the `admin_action` block;
+- a shipper filtering on `schema_version == 1` receives `admin_action` lines with
+  no change on its side;
+- a consumer should **route or filter on `event` before validating**, and ignore
+  values it does not know;
+- a consumer that validates against a **cached copy** of the v1 schema must refresh
+  it: `event` and `caller.kind` are closed enums, so the old copy rejects
+  `admin_action` lines (and `caller.kind: none` / `cli_offline`).
+
+The extended credential mask (the proxy's own token shapes and `github_pat_`) also
+applies to `authz` and `tool_call` lines. A line that matched none of the new
+patterns is byte-identical; a legacy `request_id` or `transport_request_id` that
+does match is now masked on the audit line while its activity row keeps the
+original, so that one join is lost (legacy kinds get no `request_id_masked`
+marker).
 
 ### Change log
 
 | Version | Change |
 |---|---|
 | 1 | Initial schema (Spec 107 PR-D) |
+| 1 (additive, Spec 133) | New event kind `admin_action` with its own block (`action`, `target`, `changes`, `changes_truncated`, `changes_count`, `request_id_masked`, `trigger`, `policy`, `client.surface`, `caller.token_name_withheld`, `caller.ref`); `event` gains `admin_action`, `caller.kind` gains `none` and `cli_offline`; the agent-token `token_name` and owned-token all-or-none rules are scoped to `authz`/`tool_call`/`auth_event`; credential mask gains `mcp_agt_`/`mcp_cli_`/`mcp_oat_`/`mcp_ort_` and `github_pat_` |
 
 ## Log-shipper example
 
 The audit sink has no built-in connector — point any file/stdout log shipper at
-it and filter on `schema_version`. A minimal, vendor-neutral tail-and-forward
+it, skip any malformed line on its own (`jq -R 'fromjson? // empty'`), and filter
+on `schema_version`, then route on `event`. A minimal, vendor-neutral tail-and-forward
 example (works with Filebeat, Promtail, Vector, Fluent Bit, or a shell pipe
 alike — substitute your shipper's own input stage):
 
 ```bash
 # File sink: forward every well-formed audit line as it's appended
 tail -F -n0 /var/log/mcpproxy/audit.jsonl \
-  | jq -c --unbuffered 'select(.schema_version == 1)' \
+  | jq -R -c --unbuffered 'fromjson? // empty | select(.schema_version == 1)' \
   | your-log-forwarder --input -
 
 # stdout sink (e.g. inside Docker/Kubernetes): the container runtime already
 # captures stdout — point your log collector's normal container-log input at
 # it, or pipe a local run the same way:
 docker logs -f my-mcpproxy \
-  | jq -c 'select(.schema_version == 1)' \
+  | jq -R -c 'fromjson? // empty | select(.schema_version == 1)' \
   | your-log-forwarder --input -
 ```
 

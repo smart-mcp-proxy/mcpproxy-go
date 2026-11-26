@@ -30,6 +30,10 @@ func TagRequestMeta(mount reqcontext.Mount, trusted config.TrustedProxiesProvide
 				ClientIP: config.ForwardedHeaders(r, list).ClientIP,
 				Mount:    mount,
 			}
+			if mount == reqcontext.MountAPI {
+				meta.Surface = string(surfaceFromRequest(r))
+				meta.ClientName = r.Header.Get(XMCPProxyClientHeader)
+			}
 			next.ServeHTTP(w, r.WithContext(reqcontext.WithRequestMeta(r.Context(), meta)))
 		})
 	}

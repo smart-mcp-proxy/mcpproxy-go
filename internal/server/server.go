@@ -459,6 +459,23 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 			obsManager.Metrics().RegisterAuditSink(server.auditSink)
 			obsManager.Metrics().RegisterAuditSanitizer(server.auditSink)
 		}
+		// Spec 133 FR-017: builder rejections and per-field mask hits are
+		// counted apart from write failures and sanitizer hits.
+		mgmtService.AddRuntimeWarningSource(func() []string {
+			if n := audit.BuildFailures(); n > 0 {
+				return []string{fmt.Sprintf("audit_log: %d lines rejected by the builder since start (not written; see the log)", n)}
+			}
+			return nil
+		})
+		mgmtService.AddRuntimeWarningSource(func() []string {
+			if n := audit.FieldMaskHits(); n > 0 {
+				return []string{fmt.Sprintf("audit_log: %d credential-shaped labels masked on audit lines since start (a name or request id looked like a secret)", n)}
+			}
+			return nil
+		})
+		// Spec 133: committed administrative effects reach the audit stream
+		// as admin_action lines through this writer.
+		rt.SetAdminAuditor(newSinkAdminAuditor(server.auditSink, logger))
 	}
 
 	// Record the servers this process started with: they are the baseline

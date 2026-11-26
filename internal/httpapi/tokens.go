@@ -408,7 +408,20 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.tokenStore.DeleteAgentToken(name); err != nil {
+	// Spec 133: through the credentials service, which writes the
+	// token.delete audit line from the deleted record. A token store that
+	// cannot report the deleted record (unit-test fakes) keeps the direct
+	// delete, with no audit sink to report to anyway.
+	_, err := s.credentials().DeleteToken(r.Context(), actorFromRequest(r), name)
+	if errors.Is(err, internalRuntime.ErrCredentialsUnavailable) {
+		err = s.tokenStore.DeleteAgentToken(name)
+	}
+	var ce *internalRuntime.CredentialError
+	if errors.As(err, &ce) && ce.ErrCode == profile.CredentialErrorCodeIdentityNotFound {
+		s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
+		return
+	}
+	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
 			return

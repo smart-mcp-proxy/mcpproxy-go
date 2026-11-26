@@ -23,6 +23,15 @@ const (
 type RequestMeta struct {
 	ClientIP string
 	Mount    Mount
+	// Surface is the caller-asserted #1842 surface of a REST request (web,
+	// macos, cli or api, from X-MCPProxy-Surface / X-MCPProxy-Client),
+	// classified once at the ingress so a built-in dispatched from REST keeps
+	// it (Spec 133 client.surface). Untrusted, attribution only. Empty on
+	// the MCP mount, whose surface is always mcp.
+	Surface string
+	// ClientName is the caller-asserted X-MCPProxy-Client value of a REST
+	// request (Spec 133 client.name). Untrusted.
+	ClientName string
 }
 
 // WithRequestMeta stores meta on the context.

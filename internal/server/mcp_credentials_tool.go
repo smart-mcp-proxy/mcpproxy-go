@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"sort"
 	"strings"
 	"time"
@@ -171,7 +172,14 @@ func (p *MCPProxyServer) handleCredentials(ctx context.Context, request mcp.Call
 
 	start := time.Now()
 	sessionID := sessionIDFromContext(ctx)
-	requestID := mintCorrelationID(credentialsToolName)
+	// Spec 133 rule 3: reuse the request id already on the context, mint one
+	// only at an ingress that has none, and install it so the mutation — and
+	// its admin_action line — carries the wrapper row's id.
+	requestID := reqcontext.GetRequestID(ctx)
+	if requestID == "" {
+		requestID = mintCorrelationID(credentialsToolName)
+		ctx = reqcontext.WithRequestID(ctx, requestID)
+	}
 	args := request.GetArguments()
 	if args == nil {
 		args = map[string]any{}

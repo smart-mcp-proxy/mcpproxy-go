@@ -75,6 +75,8 @@ type TestEnvironmentOptions struct {
 	Mutate func(cfg *config.Config, tempDir string)
 	// Logger replaces the default development logger; it runs after Mutate.
 	Logger func(cfg *config.Config) (*zap.Logger, error)
+	// ServerOptions are passed to NewServer (e.g. WithAuditSink).
+	ServerOptions []ServerOption
 }
 
 // NewTestEnvironmentWithOptions is NewTestEnvironment with config and logger
@@ -134,7 +136,7 @@ func NewTestEnvironmentWithOptions(t *testing.T, opts TestEnvironmentOptions) *T
 	require.NoError(t, err)
 	env.logger = logger
 
-	env.proxyServer, err = NewServer(cfg, logger)
+	env.proxyServer, err = NewServer(cfg, logger, opts.ServerOptions...)
 	require.NoError(t, err)
 
 	// Start proxy server in background
