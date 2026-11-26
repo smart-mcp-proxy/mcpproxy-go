@@ -51,3 +51,21 @@ func TestOAuthRefreshRequest_CarriesServerLogger(t *testing.T) {
 	req := c.oauthRefreshRequest("k", nil)
 	assert.NotNil(t, req.Logger)
 }
+
+// Review round 5 on #2063: a refresh flight can finish after its instance was
+// retired and its log file closed. Writing to the server file then would
+// reopen it with nobody left to close it, so the server-file half of the
+// OAuth logger drops writes once the instance is retired; the main log keeps
+// them.
+func TestOAuthLogger_DropsServerFileWritesAfterRetire(t *testing.T) {
+	mainCore, mainLogs := observer.New(zapcore.InfoLevel)
+	fileCore, fileLogs := observer.New(zapcore.InfoLevel)
+	c := &Client{config: &config.ServerConfig{Name: "s"}, logger: zap.New(mainCore), upstreamLogger: zap.New(fileCore)}
+	l := c.oauthLogger()
+	l.Info("before")
+	c.Retire()
+	l.Info("after")
+	assert.Equal(t, 2, mainLogs.Len())
+	assert.Equal(t, 1, fileLogs.Len())
+	assert.Equal(t, 0, fileLogs.FilterMessage("after").Len())
+}

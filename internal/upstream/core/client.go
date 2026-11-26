@@ -1210,10 +1210,30 @@ func (c *Client) oauthLogger() *zap.Logger {
 	case c.upstreamLogger == nil:
 		return c.logger
 	case c.logger == nil:
-		return c.upstreamLogger
+		return zap.New(retiredDropCore{Core: c.upstreamLogger.Core(), retired: c.retiredNow})
 	default:
-		return zap.New(zapcore.NewTee(c.logger.Core(), c.upstreamLogger.Core()))
+		return zap.New(zapcore.NewTee(c.logger.Core(), retiredDropCore{Core: c.upstreamLogger.Core(), retired: c.retiredNow}))
 	}
+}
+
+// retiredDropCore drops writes to this instance's server log file once the
+// instance is retired (GH #1827 review): a refresh flight or token request
+// that finishes after Disconnect closed the file would otherwise reopen it
+// (lumberjack reopens on write) with nobody left to close it.
+type retiredDropCore struct {
+	zapcore.Core
+	retired func() bool
+}
+
+func (r retiredDropCore) With(fields []zapcore.Field) zapcore.Core {
+	return retiredDropCore{Core: r.Core.With(fields), retired: r.retired}
+}
+
+func (r retiredDropCore) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+	if r.retired() {
+		return ce
+	}
+	return r.Core.Check(e, ce)
 }
 
 // cappedScrub renders an upstream-authored response body for an error message:
@@ -1291,3 +1311,6 @@ func (c *Client) logCallInterrupted(parent, callCtx context.Context, toolName st
 		zap.String("resulting_state", state),
 	)
 }
+
+// retiredNow reports whether the instance's gate is retired, read at call time.
+func (c *Client) retiredNow() bool { return c.Gate().Retired() }
