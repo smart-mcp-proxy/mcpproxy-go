@@ -102,7 +102,7 @@ func (e *adminE2E) activityRequestIDs(requestID string) int {
 	return len(rows)
 }
 
-func TestAdminActionE2E_RESTTokenDoors(t *testing.T) {
+func TestAdminActionDoors_RESTTokenDoors(t *testing.T) {
 	e := newAdminE2E(t)
 	seen := 0
 
@@ -195,7 +195,7 @@ func TestAdminActionE2E_RESTTokenDoors(t *testing.T) {
 	require.Zero(t, e.sink.SanitizerHits())
 }
 
-func TestAdminActionE2E_MCPCredentialsTool(t *testing.T) {
+func TestAdminActionDoors_MCPCredentialsTool(t *testing.T) {
 	e := newAdminE2E(t)
 	seen := 0
 	tr, err := transport.NewStreamableHTTP(e.base+"/mcp", transport.WithHTTPHeaders(map[string]string{"X-API-Key": adminE2EAPIKey}))
@@ -237,11 +237,11 @@ func TestAdminActionE2E_MCPCredentialsTool(t *testing.T) {
 	require.Empty(t, e.adminLines(&seen))
 }
 
-// TestAdminActionE2E_SaturatedBus pins SC-003 at the token-revocation scale
+// TestAdminActionDoors_SaturatedBus pins SC-003 at the token-revocation scale
 // this slice owns: with the event bus saturated (nobody draining it), every
 // committed revocation still writes its line — the line never goes through
 // the bus.
-func TestAdminActionE2E_SaturatedBus(t *testing.T) {
+func TestAdminActionDoors_SaturatedBus(t *testing.T) {
 	if testing.Short() {
 		t.Skip("bus saturation is slow")
 	}
