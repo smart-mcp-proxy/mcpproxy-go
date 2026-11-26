@@ -256,6 +256,8 @@ type Server struct {
 	// auditSink is the Spec 107 audit line writer (WithAuditSink); nil in the
 	// personal-edition default and whenever audit_log is off.
 	auditSink audit.Sink
+	// adminAuditor writes Spec 133 admin_action lines (nil = audit off).
+	adminAuditor *sinkAdminAuditor
 }
 
 // ServerOption customises a Server at construction time (Spec 107 T103).
@@ -475,7 +477,8 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		})
 		// Spec 133: committed administrative effects reach the audit stream
 		// as admin_action lines through this writer.
-		rt.SetAdminAuditor(newSinkAdminAuditor(server.auditSink, logger))
+		server.adminAuditor = newSinkAdminAuditor(server.auditSink, logger)
+		rt.SetAdminAuditor(server.adminAuditor)
 	}
 
 	// Record the servers this process started with: they are the baseline
@@ -524,6 +527,17 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// Spec 107 T103: the audit sink reaches the dispatch funnels through the
 	// proxy; nil keeps them no-ops.
 	mcpProxy.auditSink = server.auditSink
+	if server.adminAuditor != nil {
+		// MCP admin lines carry the session's clientInfo, as authz lines do.
+		server.adminAuditor.clientInfo = func(ctx context.Context) (string, string) {
+			if sid := sessionIDFromContext(ctx); sid != "" {
+				if sess := mcpProxy.sessionStore.GetSession(sid); sess != nil {
+					return sess.ClientName, sess.ClientVersion
+				}
+			}
+			return "", ""
+		}
+	}
 
 	server.mcpProxy = mcpProxy
 	// FR-008a: the one evaluator behind every guarded write (config routes,

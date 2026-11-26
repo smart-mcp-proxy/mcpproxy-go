@@ -145,6 +145,10 @@ type AgentToken struct {
 	// stamped inside the rotating transaction, so the token.rotate audit line
 	// carries the commit time (Spec 133 FR-016b). Additive and omitempty.
 	RotatedAt *time.Time `json:"rotated_at,omitempty"`
+	// CommittedAt is the time stamped inside the storage transaction that
+	// returned this record (a create or delete report), for the audit line's
+	// commit time (Spec 133 FR-016b). Never stored.
+	CommittedAt time.Time `json:"-"`
 
 	// MatchedPrefix is the display prefix of the secret that authenticated
 	// this request. It is set by validation, never stored. It differs from

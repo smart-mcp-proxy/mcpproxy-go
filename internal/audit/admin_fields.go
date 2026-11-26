@@ -80,6 +80,18 @@ var nestedRoots = map[string]bool{"env": true, "headers": true, "oauth": true, "
 // oauth. A deeper path collapses to that depth.
 var maxDepth = map[string]int{"env": 2, "headers": 2, "oauth": 2}
 
+// fixedChildren are the only child names a fixed sub-schema root may have;
+// any other child collapses the path to the root (FR-015b: paths come from a
+// fixed schema, never from a value). Mirrors config.OAuthConfig.
+var fixedChildren = map[string]map[string]bool{
+	"oauth": {
+		"client_id": true, "client_secret": true, "redirect_uri": true, "callback_base_url": true,
+		"scopes": true, "pkce_enabled": true, "refresh_replay_enabled": true, "extra_params": true,
+		"authorization_endpoint": true, "token_endpoint": true, "registration_endpoint": true,
+		"auth_server_metadata_url": true,
+	},
+}
+
 // render returns the escaped pointer and whether it was shortened, masked or
 // collapsed to a parent (field_masked). Order per segment (contract §Size):
 // private-key check on the original, mask, then the 64-character cap, then
@@ -88,12 +100,19 @@ var maxDepth = map[string]int{"env": 2, "headers": 2, "oauth": 2}
 func (f FieldPath) render() (string, bool) {
 	segs := f.segs
 	masked := false
+	if len(segs) == 0 {
+		return "", false
+	}
 	if len(segs) > 1 && (opaqueRoots[segs[0]] || !nestedRoots[segs[0]]) {
 		segs = segs[:1]
 		masked = true
 	}
 	if d, ok := maxDepth[segs[0]]; ok && len(segs) > d {
 		segs = segs[:d]
+		masked = true
+	}
+	if allowed, ok := fixedChildren[segs[0]]; ok && len(segs) > 1 && !allowed[segs[1]] {
+		segs = segs[:1]
 		masked = true
 	}
 	var b strings.Builder
@@ -312,6 +331,9 @@ func Withheld(field FieldPath, kind WithheldKind) Change {
 func (c Change) entry() (map[string]interface{}, error) {
 	if !c.set {
 		return nil, fmt.Errorf("audit: zero Change")
+	}
+	if len(c.path.segs) == 0 {
+		return nil, fmt.Errorf("audit: change with an empty field path")
 	}
 	field, masked := c.path.render()
 	e := map[string]interface{}{"field": field}

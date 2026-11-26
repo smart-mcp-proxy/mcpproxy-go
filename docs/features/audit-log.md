@@ -251,7 +251,9 @@ refuses or undoes the change (the [sink failure policy](#sink-failure-policy)
 applies). The binding contract is
 [`specs/133-admin-action-audit/contracts/admin-action-line.md`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/specs/133-admin-action-audit/contracts/admin-action-line.md).
 
-**Recorded today** (Spec 133 PR-1a — agent tokens, the reporter's first priority):
+**Recorded today** (Spec 133 PR-1a — the operator's agent tokens, the reporter's
+first priority). Tenant-owned tokens of the server edition (`/api/v1/user/tokens…`)
+are not recorded yet; they follow with the server-edition slice:
 
 | `action` | Doors | `changes` |
 |---|---|---|

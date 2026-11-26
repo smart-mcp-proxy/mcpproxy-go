@@ -32,7 +32,12 @@ func TestAdminDoorRegistry_CoversEveryCLICommand(t *testing.T) {
 			walk(s)
 		}
 	}
-	walk(newRootCmd())
+	root := newRootCmd()
+	// newRootCmd attaches package-level commands to this root: detach them
+	// afterwards so a later test that executes one does not dispatch through
+	// this test's root.
+	t.Cleanup(func() { root.RemoveCommand(root.Commands()...) })
+	walk(root)
 	if len(doors) < 100 {
 		t.Fatalf("found only %d runnable commands: the tree changed shape", len(doors))
 	}

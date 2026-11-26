@@ -388,16 +388,9 @@ func fitAdminBudget(f map[string]interface{}, fullChanges int) error {
 		if entries, ok := f["changes"].([]interface{}); ok && len(entries) > 0 {
 			f["changes_truncated"] = true
 			f["changes_count"] = fullChanges
-			// Drop enough entries at once that the loop stays short.
-			over := len(raw) - MaxAdminLineBytes
-			drop := 1
-			if per := len(raw) / (len(entries) + 1); per > 0 {
-				drop = over/per + 1
-			}
-			if drop > len(entries) {
-				drop = len(entries)
-			}
-			f["changes"] = entries[:len(entries)-drop]
+			// One entry at a time from the end, so no more is dropped than
+			// the budget requires (at most 128 re-serializations).
+			f["changes"] = entries[:len(entries)-1]
 			continue
 		}
 		if tgt, ok := f["target"].(map[string]interface{}); ok {
@@ -552,11 +545,11 @@ func checkRequiredPrefixes(action string, changes []Change) error {
 		if c.path.sortKey() != FieldTokenPrefix.sortKey() || c.withheld != "" {
 			continue
 		}
-		if (!want.before || c.before != nil) && (!want.after || c.after != nil) {
+		if want.before == (c.before != nil) && want.after == (c.after != nil) {
 			return nil
 		}
 	}
-	return fmt.Errorf("audit.NewAdminAction: %s requires its /token_prefix display-prefix entry", action)
+	return fmt.Errorf("audit.NewAdminAction: %s requires its /token_prefix entry with exactly the sides the contract names", action)
 }
 
 // checkRenderedPrefixes re-checks the required /token_prefix entry on the
@@ -574,7 +567,7 @@ func checkRenderedPrefixes(action string, f map[string]interface{}) error {
 		}
 		_, hasBefore := m["before"]
 		_, hasAfter := m["after"]
-		if (!want.before || hasBefore) && (!want.after || hasAfter) {
+		if want.before == hasBefore && want.after == hasAfter {
 			return nil
 		}
 	}

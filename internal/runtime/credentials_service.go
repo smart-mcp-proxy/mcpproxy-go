@@ -84,6 +84,13 @@ type tokenRegenerateReporter interface {
 	RegenerateAgentTokenReport(userID, name string, newRawToken string, hmacKey []byte, narrowScope func([]string) []string) (before, after *auth.AgentToken, err error)
 }
 
+// tokenCreateReporter is the optional store method that reports the record
+// as the minting transaction stored it, with the commit time stamped inside
+// that transaction (*storage.Manager).
+type tokenCreateReporter interface {
+	CreateAgentTokenReport(token auth.AgentToken, rawToken string, hmacKey []byte) (*auth.AgentToken, error)
+}
+
 // tokenDeleteReporter is the store method behind DeleteToken: it permanently
 // deletes the ownerless token called name and returns the deleted record.
 type tokenDeleteReporter interface {
@@ -780,15 +787,23 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 		s.logger.Error("failed to get HMAC key", zap.Error(err))
 		return nil, credErr("", "", "Failed to initialize token security", 500)
 	}
-	// Spec 133 FR-016b: ts is the commit time. The persisted created_at is
-	// stamped immediately before the minting transaction (the store keeps a
-	// non-zero CreatedAt as given) and the line uses that same value, as
-	// revoke uses RevokedAt and rotate RotatedAt from inside theirs.
-	candidate.CreatedAt = s.now().UTC()
-	if err := s.tokens.CreateAgentToken(candidate, raw, key); err != nil {
+	// Spec 133 FR-016b: ts is the commit time, stamped inside the minting
+	// transaction when the store can report it (as revoke uses RevokedAt and
+	// rotate RotatedAt from inside theirs).
+	committedAt := now
+	if rep, ok := s.tokens.(tokenCreateReporter); ok {
+		// created_at is stamped by the transaction too, so it equals the
+		// line's ts.
+		candidate.CreatedAt = time.Time{}
+		stored, err := rep.CreateAgentTokenReport(candidate, raw, key)
+		if err != nil {
+			return nil, s.classifyCreateError(req.Name, mcp, err, now)
+		}
+		committedAt = stored.CommittedAt
+		candidate.CreatedAt = stored.CreatedAt
+	} else if err := s.tokens.CreateAgentToken(candidate, raw, key); err != nil {
 		return nil, s.classifyCreateError(req.Name, mcp, err, now)
 	}
-	committedAt := candidate.CreatedAt
 
 	// Post-commit: project from the committed record; nothing below can fail.
 	committed := candidate
@@ -1240,10 +1255,6 @@ func (s *CredentialsService) DeleteToken(ctx context.Context, a Actor, name stri
 	defer out.flush(ctx, s.adminAudit)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Deletion leaves no record to stamp: ts is taken immediately before the
-	// deleting transaction, under the same lock, so no other effect of this
-	// service can commit in between.
-	deletedAt := s.now()
 	deleted, err := del.DeleteAgentTokenReport("", name)
 	if err != nil {
 		if errors.Is(err, storage.ErrAgentTokenNotFound) {
@@ -1257,7 +1268,8 @@ func (s *CredentialsService) DeleteToken(ctx context.Context, a Actor, name stri
 		if deleted.TokenPrefix != "" {
 			changes = []audit.Change{audit.Literal(audit.FieldTokenPrefix, audit.TokenPrefix(deleted.TokenPrefix), nil)}
 		}
-		s.recordTokenEffect(&out, audit.ActionTokenDelete, deleted, changes, deletedAt)
+		// CommittedAt is stamped inside the deleting transaction.
+		s.recordTokenEffect(&out, audit.ActionTokenDelete, deleted, changes, deleted.CommittedAt)
 	}
 	return deleted, nil
 }

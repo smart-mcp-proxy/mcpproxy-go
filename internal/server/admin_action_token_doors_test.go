@@ -251,6 +251,7 @@ func TestAdminActionDoors_MCPCredentialsTool(t *testing.T) {
 	require.Equal(t, "token.create", l["action"])
 	require.Equal(t, "mcp", l["source"])
 	require.Equal(t, "mcp", l["client"].(map[string]interface{})["surface"])
+	require.NotEmpty(t, l["client"].(map[string]interface{})["name"], "the MCP session's clientInfo name, as on authz lines")
 	rid, _ := l["request_id"].(string)
 	require.NotEmpty(t, rid, "an MCP admin line carries the wrapper's request id")
 	// The wrapper row and the profile_change row both carry the same id.
@@ -262,6 +263,7 @@ func TestAdminActionDoors_MCPCredentialsTool(t *testing.T) {
 		return err == nil && len(rows) >= 2
 	}, 10*time.Second, 50*time.Millisecond, "wrapper row and profile_change row share the line's request id")
 
+	require.Equal(t, "worker", l["target"].(map[string]interface{})["name"])
 	createRef := l["target"].(map[string]interface{})["ref"]
 	require.Equal(t, map[string]interface{}{"kind": "api_key"}, l["caller"])
 
@@ -275,6 +277,7 @@ func TestAdminActionDoors_MCPCredentialsTool(t *testing.T) {
 	require.Equal(t, map[string]interface{}{"kind": "api_key"}, r["caller"])
 	require.Equal(t, "mcp", r["source"])
 	require.Equal(t, createRef, r["target"].(map[string]interface{})["ref"], "same token, same ref")
+	require.Equal(t, "worker", r["target"].(map[string]interface{})["name"])
 	revokeID, _ := r["request_id"].(string)
 	require.NotEmpty(t, revokeID)
 	require.NotEqual(t, rid, revokeID, "each MCP call has its own request id")

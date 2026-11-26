@@ -43,6 +43,18 @@ func (c *countingStore) CreateAgentToken(t auth.AgentToken, raw string, key []by
 	return nil
 }
 
+func (c *countingStore) CreateAgentTokenReport(t auth.AgentToken, raw string, key []byte) (*auth.AgentToken, error) {
+	c.creates.Add(1)
+	if c.failMint {
+		return nil, errors.New("disk full")
+	}
+	rec, err := c.Manager.CreateAgentTokenReport(t, raw, key)
+	if err == nil {
+		c.failListAfter.Store(true)
+	}
+	return rec, err
+}
+
 func (c *countingStore) MintClientCredentialWith(id, raw string, key []byte, opts storage.ClientMintOptions) (*auth.AgentToken, error) {
 	c.mints.Add(1)
 	if c.failMint {

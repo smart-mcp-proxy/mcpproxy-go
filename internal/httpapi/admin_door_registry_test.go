@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 )
 
 // Spec 133 FR-022: every route and method of the production personal REST
@@ -38,4 +39,22 @@ func TestAdminDoorRegistry_CoversEveryRESTRoute(t *testing.T) {
 	missing, stale := audit.DiffDoors("REST ", doors)
 	require.Empty(t, missing, "REST doors with no registry row (internal/audit/admindoors.go): map them to an action or exempt them with a reason")
 	require.Empty(t, stale, "registry rows whose REST door no longer exists")
+}
+
+// The contract exempts POST /diagnostics/fix per registered fixer, by name: a
+// newly registered fixer must get its own row (and a mapped funnel if it
+// changes a rule).
+func TestAdminDoorRegistry_ListsEveryDiagnosticsFixer(t *testing.T) {
+	rows := map[string]bool{}
+	for _, d := range audit.AdminDoors {
+		if d.Door == "REST POST /api/v1/diagnostics/fix" {
+			rows[d.Branch] = true
+		}
+	}
+	keys := diagnostics.FixerKeys()
+	require.NotEmpty(t, keys)
+	for _, k := range keys {
+		require.True(t, rows["fixer "+k], "diagnostics fixer %q has no registry row", k)
+	}
+	require.Len(t, rows, len(keys), "a fixer row names a fixer that is no longer registered")
 }

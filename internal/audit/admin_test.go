@@ -418,3 +418,36 @@ func TestChange_OAuthPathStopsAtTheFixedField(t *testing.T) {
 		t.Fatalf("got %v", f)
 	}
 }
+
+func TestChange_OAuthUnknownChildCollapses(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
+	in.Changes = []audit.Change{audit.Withheld(audit.Path("oauth", "private-customer-hostname"), audit.WithheldSecret)}
+	line, obj := mustAdmin(t, in)
+	assertSentinelAbsent(t, line, "private-customer-hostname")
+	if f := obj["changes"].([]interface{})[0].(map[string]interface{})["field"]; f != "/oauth" {
+		t.Fatalf("got %v", f)
+	}
+}
+
+func TestChange_EmptyPathIsARejectionNotAPanic(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
+	in.Changes = []audit.Change{audit.Withheld(audit.ParsePointer(""), audit.WithheldValue)}
+	if _, err := audit.NewAdminAction(in); err == nil {
+		t.Fatal("an empty field path must be rejected")
+	}
+}
+
+func TestNewAdminAction_PrefixSidesAreExact(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenCreate
+	in.Changes = []audit.Change{audit.Literal(audit.FieldTokenPrefix, audit.TokenPrefix("mcp_agt_a1b2"), audit.TokenPrefix("mcp_agt_9f8e"))}
+	if _, err := audit.NewAdminAction(in); err == nil {
+		t.Fatal("token.create has no before prefix")
+	}
+	in.Action = audit.ActionTokenRevoke
+	if _, err := audit.NewAdminAction(in); err == nil {
+		t.Fatal("token.revoke has no after prefix")
+	}
+}

@@ -230,6 +230,22 @@ func TestAdminAudit_RotationTimestampFromTheTransaction(t *testing.T) {
 	require.True(t, recs[len(recs)-1].At.Equal(*stored.RotatedAt))
 }
 
+func TestAdminAudit_CreateAndDeleteTimestampsFromTheTransaction(t *testing.T) {
+	ctx := context.Background()
+	h, cap := newAuditedCredHarness(t)
+	a := Actor{Kind: "api_key", Surface: profile.SurfaceCLI}
+	_, err := h.cs.IssueToken(ctx, a, restTokenReq("cd"))
+	require.NoError(t, err)
+	recs := cap.take()
+	stored, _ := h.sm.GetAgentTokenByName("cd")
+	require.True(t, recs[0].At.Equal(stored.CreatedAt), "create ts is the created_at the transaction stamped")
+	deleted, err := h.cs.DeleteToken(ctx, a, "cd")
+	require.NoError(t, err)
+	recs = cap.take()
+	require.False(t, deleted.CommittedAt.IsZero())
+	require.True(t, recs[0].At.Equal(deleted.CommittedAt))
+}
+
 func TestAdminAudit_NoAuditorIsANoOp(t *testing.T) {
 	h := newCredHarness(t)
 	_, err := h.cs.IssueToken(context.Background(), mcpActor(), mcpTokenReq("quiet", "ro", "1h"))

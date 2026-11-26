@@ -195,8 +195,17 @@ func (m *Manager) countAgentTokensForOwnerLocked(tx *bbolt.Tx, userID string) (i
 // Returns ErrAgentTokenNameExists if the same owner already has that name, or
 // ErrAgentTokenLimitReached if the deployment-wide cap is reached.
 func (m *Manager) CreateAgentToken(token auth.AgentToken, rawToken string, hmacKey []byte) error {
+	_, err := m.CreateAgentTokenReport(token, rawToken, hmacKey)
+	return err
+}
+
+// CreateAgentTokenReport is CreateAgentToken that also returns the record as
+// the transaction stored it. A zero CreatedAt is stamped inside the
+// transaction, and CommittedAt carries that time (Spec 133: the token.create
+// line's ts is the commit time).
+func (m *Manager) CreateAgentTokenReport(token auth.AgentToken, rawToken string, hmacKey []byte) (*auth.AgentToken, error) {
 	if token.Name == "" {
-		return fmt.Errorf("agent token name cannot be empty")
+		return nil, fmt.Errorf("agent token name cannot be empty")
 	}
 	// FR-021: the "client-" name prefix is reserved for kind=client
 	// credentials, minted only through MintClientCredential. A regular
@@ -204,23 +213,24 @@ func (m *Manager) CreateAgentToken(token auth.AgentToken, rawToken string, hmacK
 	// pre-108 token that already holds such a name is untouched (this guard
 	// only refuses NEW creates).
 	if token.Kind != auth.KindClient && strings.HasPrefix(token.Name, "client-") {
-		return fmt.Errorf("token names starting with \"client-\" are reserved for client credentials")
+		return nil, fmt.Errorf("token names starting with \"client-\" are reserved for client credentials")
 	}
 
 	hash := auth.HashToken(rawToken, hmacKey)
 	token.TokenHash = hash
 	token.TokenPrefix = auth.TokenPrefix(rawToken)
 
-	if token.CreatedAt.IsZero() {
-		token.CreatedAt = time.Now().UTC()
-	}
 	// Spec 133: the stable audit ref is assigned at create.
 	auth.EnsureAuditRef(&token)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return m.db.db.Update(func(tx *bbolt.Tx) error {
+	err := m.db.db.Update(func(tx *bbolt.Tx) error {
+		token.CommittedAt = time.Now().UTC()
+		if token.CreatedAt.IsZero() {
+			token.CreatedAt = token.CommittedAt
+		}
 		tokenBucket, err := tx.CreateBucketIfNotExists([]byte(AgentTokensBucket))
 		if err != nil {
 			return fmt.Errorf("failed to create agent_tokens bucket: %w", err)
@@ -295,6 +305,10 @@ func (m *Manager) CreateAgentToken(token auth.AgentToken, rawToken string, hmacK
 
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return &token, nil
 }
 
 // claimAgentTokenNameSlot reports whether the legacy owner-blind name index may
@@ -649,6 +663,7 @@ func (m *Manager) DeleteAgentTokenReport(userID, name string) (*auth.AgentToken,
 		}
 
 		auth.EnsureAuditRef(token)
+		token.CommittedAt = time.Now().UTC()
 		deleted = token
 		return nil
 	})
