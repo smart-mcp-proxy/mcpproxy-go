@@ -101,11 +101,11 @@ func TestOAuthStreams_ShutdownJoinsWatcher(t *testing.T) {
 	require.NotNil(t, reg)
 
 	stopped := make(chan struct{})
-	go func() { srv.stopOAuthStreams(); close(stopped) }()
+	go func() { srv.stopOAuthStreamsOfRun(srv.oauthRunGen()); close(stopped) }()
 	select {
 	case <-stopped:
 	case <-time.After(5 * time.Second):
-		t.Fatal("stopOAuthStreams did not return: the watcher was not joined")
+		t.Fatal("stopOAuthStreamsOfRun did not return: the watcher was not joined")
 	}
 	select {
 	case <-interrupted:
@@ -123,7 +123,7 @@ func TestOAuthStreams_ShutdownJoinsWatcher(t *testing.T) {
 	assert.False(t, reg.running)
 	assert.Len(t, reg.entries, 1, "only the request tracked before the stop (released by its owner)")
 	reg.mu.Unlock()
-	srv.stopOAuthStreams() // idempotent
+	srv.stopOAuthStreamsOfRun(srv.oauthRunGen()) // idempotent
 }
 
 // --- real daemon: what ends an open stream ------------------------------------
@@ -329,7 +329,7 @@ func TestOAuthStreams_ClientRevokeForgetAndReplayEndStreams(t *testing.T) {
 func TestOAuthStreams_StopWithoutRegistryRefusesLateTracking(t *testing.T) {
 	srv := newOAuthLoginTestServer(t, func(c *config.Config) { c.MCPOAuthEnabled = true })
 	require.Nil(t, srv.oauthStreams.Load(), "nothing is allocated before the first OAuth request")
-	srv.stopOAuthStreams()
+	srv.stopOAuthStreamsOfRun(srv.oauthRunGen())
 	require.Nil(t, srv.oauthStreams.Load(), "stopping allocates nothing")
 
 	_, ok := srv.trackOAuthRequest("g", time.Now().Add(time.Hour), 0, srv.oauthRunGen(), func() {})
@@ -439,7 +439,7 @@ func TestOAuthStreams_LateRequestOfPreviousRunIsRefused(t *testing.T) {
 		status <- resp.StatusCode
 	}()
 	<-paused
-	srv.stopOAuthStreams()
+	srv.stopOAuthStreamsOfRun(srv.oauthRunGen())
 	srv.resetOAuthStreams() // the next run starts while the old request is paused
 	close(resume)
 	select {
@@ -468,7 +468,7 @@ func TestOAuthStreams_LateRequestOfPreviousRunIsRefused(t *testing.T) {
 func TestOAuthStreams_GenerationIsComparedAtRegistration(t *testing.T) {
 	srv := newOAuthLoginTestServer(t, func(c *config.Config) { c.MCPOAuthEnabled = true })
 	old := srv.oauthRunGen()
-	srv.stopOAuthStreams()
+	srv.stopOAuthStreamsOfRun(srv.oauthRunGen())
 	srv.resetOAuthStreams()
 	_, ok := srv.trackOAuthRequest("g", time.Now().Add(time.Hour), 0, old, func() {})
 	assert.False(t, ok)
@@ -529,4 +529,27 @@ func TestOAuthStreams_StopLetsRunningCallsFinish(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the server did not stop")
 	}
+}
+
+// A stop joins the watcher only after the HTTP shutdown, and Serve returns as
+// soon as that shutdown begins, so a next run can start while the stop still
+// drains. The late join must leave that next run's tracking alone.
+func TestOAuthStreams_LateStopLeavesTheNextRunAlone(t *testing.T) {
+	srv := newOAuthLoginTestServer(t, func(c *config.Config) { c.MCPOAuthEnabled = true })
+	stopping := srv.oauthRunGen() // captured when the stop begins
+	oldRelease, ok := srv.trackOAuthRequest("g", time.Now().Add(time.Hour), 0, stopping, func() {})
+	require.True(t, ok)
+
+	srv.resetOAuthStreams() // the next run starts during the drain
+	next := srv.oauthRunGen()
+	srv.stopOAuthStreamsOfRun(stopping)
+
+	release, ok := srv.trackOAuthRequest("g", time.Now().Add(time.Hour), 0, next, func() {})
+	assert.True(t, ok, "the next run still serves browser-login requests")
+	release()
+	oldRelease()
+
+	srv.stopOAuthStreamsOfRun(next)
+	_, ok = srv.trackOAuthRequest("g", time.Now().Add(time.Hour), 0, next, func() {})
+	assert.False(t, ok, "a stop of the current run still refuses late tracking")
 }

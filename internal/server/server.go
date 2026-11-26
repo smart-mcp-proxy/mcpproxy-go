@@ -136,7 +136,7 @@ type Server struct {
 	oauthStreams         atomic.Pointer[oauthStreamRegistry]
 	oauthStreamsMu       sync.Mutex // guards oauthStreamsStopping and the registry's creation
 	oauthStreamsRun      uint64     // server-run generation, bumped by resetOAuthStreams
-	oauthStreamsStopping bool       // set by stopOAuthStreams, cleared by a new run
+	oauthStreamsStopping bool       // set by stopOAuthStreamsOfRun, cleared by a new run
 	// testHookAfterEpochCapture pauses oauthResourceAuth between the switch-off
 	// epoch capture and the authentication (tests only; nil in production).
 	testHookAfterEpochCapture func()
@@ -1661,6 +1661,8 @@ func (s *Server) Shutdown() error {
 
 	s.logger.Info("Shutting down MCP proxy server...")
 
+	oauthRun := s.oauthRunGen() // the run whose browser-login watcher is joined below
+
 	// Gracefully shutdown HTTP server first to stop accepting new connections
 	if httpServer != nil {
 		s.logger.Info("Gracefully shutting down HTTP server...")
@@ -1678,7 +1680,7 @@ func (s *Server) Shutdown() error {
 
 	// Spec 132: join the browser-login watcher. Only now: the HTTP shutdown
 	// above lets their calls finish and ends their streams like any other.
-	s.stopOAuthStreams()
+	s.stopOAuthStreamsOfRun(oauthRun)
 
 	// Spec 101 US3 (B17): unsubscribe the activation observer and join any
 	// running re-protection sweep BEFORE the runtime closes, so no sweep
@@ -2894,6 +2896,8 @@ func (s *Server) stopServer(run *serverRun) error {
 
 	s.updateStatus(runtime.PhaseStopping, "Server is stopping...")
 
+	oauthRun := s.oauthRunGen() // the run whose browser-login watcher is joined below
+
 	// STEP 1: Gracefully shutdown HTTP server FIRST to stop accepting new connections
 	// This must happen before we disconnect upstream servers to prevent new requests
 	if httpServer != nil {
@@ -2917,7 +2921,7 @@ func (s *Server) stopServer(run *serverRun) error {
 
 	// Spec 132: join the browser-login watcher. Only now: the HTTP shutdown
 	// above lets their calls finish and ends their streams like any other.
-	s.stopOAuthStreams()
+	s.stopOAuthStreamsOfRun(oauthRun)
 
 	// STEP 2: Disconnect upstream servers AFTER HTTP server is shut down
 	// This ensures no new requests can come in while we're disconnecting
