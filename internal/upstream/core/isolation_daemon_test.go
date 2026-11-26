@@ -14,6 +14,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secureenv"
 )
 
 // A container our own docker commands may not find must still get the docker client's SIGTERM.
@@ -26,11 +27,17 @@ func TestDockerIsolation_SigProxyOffOnlyOnOurOwnDaemon(t *testing.T) {
 		own   string
 		env   []string
 		login map[string]string
-		other bool
+		// serverEnv: env is the server's own, which our docker commands get too.
+		serverEnv bool
+		workDir   string
+		other     bool
 	}{
 		{name: "nothing set", login: map[string]string{}},
 		{name: "set for mcpproxy itself", own: "tcp://a", env: []string{host + "=tcp://a"}, login: map[string]string{}},
-		{name: "only in the server's env", env: []string{host + "=tcp://a"}, login: map[string]string{}, other: true},
+		{name: "only in docker run's env", env: []string{host + "=tcp://a"}, login: map[string]string{}, other: true},
+		{name: "in the server's env", env: []string{host + "=tcp://a"}, serverEnv: true, login: map[string]string{}},
+		{name: "relative DOCKER_CONFIG without working_dir", env: []string{"DOCKER_CONFIG=cfg"}, serverEnv: true, login: map[string]string{}},
+		{name: "relative DOCKER_CONFIG with working_dir", env: []string{"DOCKER_CONFIG=cfg"}, serverEnv: true, workDir: "/srv", login: map[string]string{}, other: true},
 		{name: "only in the login profile", login: map[string]string{host: "tcp://a"}, other: unix},
 		{name: "context in the login profile", login: map[string]string{"DOCKER_CONTEXT": "podman"}, other: unix},
 		{name: "login profile unknown", login: nil, other: unix},
@@ -47,6 +54,15 @@ func TestDockerIsolation_SigProxyOffOnlyOnOurOwnDaemon(t *testing.T) {
 			loginShellEnv = func(*zap.Logger) map[string]string { return tt.login }
 
 			c := newIsolatedTestClient()
+			c.config.WorkingDir = tt.workDir
+			if tt.serverEnv {
+				vars := map[string]string{}
+				for _, kv := range tt.env {
+					k, v, _ := strings.Cut(kv, "=")
+					vars[k] = v
+				}
+				c.envManager = secureenv.NewManager(&secureenv.EnvConfig{CustomVars: vars})
+			}
 			c.dockerOtherDaemon = c.dockerRunMayUseOtherDaemon(tt.env)
 			require.Equal(t, tt.other, c.dockerOtherDaemon)
 

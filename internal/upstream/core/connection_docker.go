@@ -119,8 +119,8 @@ func (c *Client) probeDockerSpawn(ctx context.Context, env []string) {
 }
 
 // dockerRunMayUseOtherDaemon reports whether `docker run` can reach another daemon than the docker
-// commands that look up and stop its container. Those run with mcpproxy's own environment, while
-// the server's env and the login profile can point `docker run` elsewhere.
+// commands that look up and stop its container. Those get the server's env too (newDockerCmd), but
+// not the login profile, nor the working_dir that `docker run` starts in.
 func (c *Client) dockerRunMayUseOtherDaemon(env []string) bool {
 	login := map[string]string{}
 	viaLoginShell := runtime.GOOS != osWindows && !dockerDaemonEnvGuaranteed()
@@ -129,12 +129,21 @@ func (c *Client) dockerRunMayUseOtherDaemon(env []string) bool {
 			return true // cannot tell
 		}
 	}
+	ours := os.Environ() // what newDockerCmd gives our own docker commands
+	if c.envManager != nil {
+		ours = c.envManager.BuildSecureEnvironment()
+	}
 	for _, key := range []string{"DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG"} {
-		own := os.Getenv(key)
-		if v, ok := lastEnvValue(env, key); ok && v != own {
+		own, _ := lastEnvValue(ours, key)
+		run, _ := lastEnvValue(env, key)
+		if viaLoginShell && login[key] != os.Getenv(key) {
+			run = login[key] // the profile sets its own
+		}
+		if run != own {
 			return true
 		}
-		if viaLoginShell && login[key] != own {
+		// A relative DOCKER_CONFIG names another directory from working_dir.
+		if key == "DOCKER_CONFIG" && run != "" && !filepath.IsAbs(run) && c.config.WorkingDir != "" {
 			return true
 		}
 	}
@@ -155,12 +164,23 @@ func lastEnvValue(env []string, key string) (value string, ok bool) {
 // remembered answer can be about another daemon, for example after `docker context use`.
 func (c *Client) forgetDockerInit() {
 	if c.dockerInit {
-		dockerInitKnown.Clear()
+		clearDockerInitKnown()
 	}
 }
 
 // dockerInitKnown remembers dockerHasInit's answers, so that a daemon is asked once per process.
-var dockerInitKnown sync.Map // probe command and DOCKER_* environment -> bool
+var (
+	dockerInitMu    sync.Mutex
+	dockerInitKnown = map[string]bool{} // probe command and DOCKER_* environment -> answer
+)
+
+// clearDockerInitKnown swaps in a new map, so that a probe still running stores its answer in the
+// old one, which nobody reads any more.
+func clearDockerInitKnown() {
+	dockerInitMu.Lock()
+	defer dockerInitMu.Unlock()
+	dockerInitKnown = map[string]bool{}
+}
 
 // dockerHasInit reports whether the Docker daemon can run containers with --init. The daemon lists
 // the docker-init component only when it found and ran that binary. Podman lists none, and may
@@ -178,8 +198,12 @@ func (c *Client) dockerHasInit(ctx context.Context, env []string) bool {
 			key += "\x00" + kv
 		}
 	}
-	if known, ok := dockerInitKnown.Load(key); ok {
-		return known.(bool)
+	dockerInitMu.Lock()
+	known := dockerInitKnown
+	has, ok := known[key]
+	dockerInitMu.Unlock()
+	if ok {
+		return has
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -192,8 +216,10 @@ func (c *Client) dockerHasInit(ctx context.Context, env []string) bool {
 	if err != nil {
 		return false // not remembered: the daemon may be starting
 	}
-	has := slices.Contains(strings.Fields(string(out)), "docker-init")
-	dockerInitKnown.Store(key, has)
+	has = slices.Contains(strings.Fields(string(out)), "docker-init")
+	dockerInitMu.Lock()
+	known[key] = has
+	dockerInitMu.Unlock()
 	return has
 }
 

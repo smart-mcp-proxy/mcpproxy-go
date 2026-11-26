@@ -37,8 +37,8 @@ func installDockerReporting(t *testing.T, components ...string) (log string) {
 	t.Setenv("DOCKER_HOST", "")
 	forceDockerDaemonEnvGOOS(t, osDarwin) // direct exec where the platform allows it
 	useRealDockerResolver(t)
-	dockerInitKnown.Clear()
-	t.Cleanup(dockerInitKnown.Clear)
+	clearDockerInitKnown()
+	t.Cleanup(clearDockerInitKnown)
 	return log
 }
 
@@ -76,7 +76,7 @@ func TestDockerIsolation_InitProbeFollowsTheSpawnEnvironment(t *testing.T) {
 
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	dockerInitKnown.Clear()
+	clearDockerInitKnown()
 	require.False(t, c.dockerHasInit(cancelled, local), "a cancelled connect does not probe")
 	require.True(t, c.dockerHasInit(context.Background(), local), "and a failed probe is not remembered")
 }

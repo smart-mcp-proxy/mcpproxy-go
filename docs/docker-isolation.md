@@ -142,7 +142,7 @@ mcpproxy starts every isolated container with these defaults:
 |------|------|-----|
 | `--init` | The Docker daemon reports a working `docker-init`. Never on Podman. | Runs a small init as PID 1, so the MCP server does not have to be one |
 | `--stop-timeout 3` | Always | Seconds `docker stop` waits before it kills the container: the same as for a server that does not run in a container. Docker's own default is 10 |
-| `--sig-proxy=false` | Unless `DOCKER_HOST`, `DOCKER_CONTEXT` or `DOCKER_CONFIG` in the server's `env` or in your login profile differ from mcpproxy's own environment | Keeps the docker client from passing its own `SIGTERM` on, so the server gets one and not two |
+| `--sig-proxy=false` | Unless your login profile changes `DOCKER_HOST`, `DOCKER_CONTEXT` or `DOCKER_CONFIG`, or the server has a relative `DOCKER_CONFIG` and a `working_dir`. Our own `docker stop` could then reach another daemon. | Keeps the docker client from passing its own `SIGTERM` on, so the server gets one and not two |
 
 An MCP server is arbitrary third-party software, and few programs are written to run as PID 1. Without an init:
 
