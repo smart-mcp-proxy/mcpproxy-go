@@ -54,7 +54,7 @@ The persisted value is `protected`, not a raw string match.
 | `MixUpProtected` | `mix_up_protected,omitempty` | the callback decision's `protected` for the login that wrote the row. Cleared by any write that replaces the grant. |
 
 - All four fields sit inside the record body. Under Spec 123 they are sealed with the rest, and the additional data (kid ‖ bucket ‖ bucket key) is unchanged. A record without them marshals to the same bytes as today.
-- A row with all binding fields empty is *unbound*: a legacy row, or one last rewritten by an older binary through an ordinary save. Spec 123 envelope-only rewrites keep the fields.
+- A row with all binding fields empty is *unbound*: a legacy row, or one last rewritten by an older binary through an ordinary save. Spec 123 envelope-only rewrites keep the fields. A row with some but not all of `Issuer`, `DiscoveryTarget` and `IssuerSource` set is refused as corrupt (`MCPX_OAUTH_REAUTH_REQUIRED`), never treated as unbound.
 
 ### Row transitions
 
