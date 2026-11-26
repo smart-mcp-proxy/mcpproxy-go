@@ -18,6 +18,12 @@
       <ViewAs />
       <ScopeChips v-if="tab === 'clients'" page="clients" :scope-query="scopeQuery" :disabled="scopeNotApplied" :unavailable="scopeUnavailable" />
     </div>
+    <!-- Spec 134 FR-016: View as and its chips in the filter row of the Clients
+         and Tokens tabs (the Endpoint tab applies no scope). -->
+    <div v-if="tab !== 'endpoint'" class="flex flex-wrap items-center gap-2 empty:hidden" data-test="clients-view-as">
+      <ViewAs />
+      <ScopeChips v-if="tab === 'clients'" page="clients" :scope-query="scopeQuery" :disabled="scopeNotApplied" :unavailable="scopeUnavailable" />
+    </div>
     <section v-if="tab === 'clients'" class="space-y-3">
       <ClientsWarningsBanner :warnings="store.warnings" @upgrade="upgradeOpen = true" @move="moveClient" />
       <div v-if="store.loading" class="py-12 text-center"><span class="loading loading-spinner loading-lg" /></div>

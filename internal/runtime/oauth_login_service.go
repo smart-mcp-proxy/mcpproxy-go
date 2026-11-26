@@ -89,6 +89,9 @@ type OAuthLoginService struct {
 
 	notifier BindingNotifier
 
+	// presence: see OAuthLoginDeps.Presence.
+	presence func() map[string]time.Time
+
 	// reqs is built on first use, because building it needs the token key and
 	// creating that key writes a file: a default-off install must not.
 	reqMu sync.Mutex
@@ -163,13 +166,17 @@ type OAuthLoginDeps struct {
 	// ConfigCommitLock fences the token exchange against config publication
 	// (see exchangeFenced). Nil is allowed.
 	ConfigCommitLock sync.Locker
+	// Presence returns when each MCP clientInfo.name was last seen by this
+	// installation (onboarding state); nil is allowed. It only breaks a tie
+	// between clients that one reported name matches.
+	Presence func() map[string]time.Time
 }
 
 // NewOAuthLoginService builds the service.
 func NewOAuthLoginService(d OAuthLoginDeps) *OAuthLoginService {
 	s := &OAuthLoginService{
 		store: d.Store, hmacKey: d.HMACKey, cfg: d.Config, guard: d.Guard, activity: d.Activity,
-		publish: d.Publish, now: d.Now, mu: d.Mu, logger: d.Logger, reqs: d.Requests, commitLock: d.ConfigCommitLock,
+		publish: d.Publish, now: d.Now, mu: d.Mu, logger: d.Logger, reqs: d.Requests, commitLock: d.ConfigCommitLock, presence: d.Presence,
 		lastTouch: map[string]time.Time{},
 	}
 	if s.now == nil {

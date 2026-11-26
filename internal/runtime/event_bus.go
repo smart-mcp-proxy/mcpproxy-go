@@ -954,10 +954,13 @@ func (r *Runtime) emitConfigChange(ctx context.Context, action, affectedEntity, 
 // detectionCount is the number of sensitive data detections found.
 // maxSeverity is the highest severity level among detections (e.g., "high", "medium", "low").
 // detectionTypes is a list of detection type names (e.g., "credit_card", "api_key").
-func (r *Runtime) EmitSensitiveDataDetected(activityID string, detectionCount int, maxSeverity string, detectionTypes []string, serverName string) {
+// activityType is the type of that row: the SSE layer withholds the event from
+// callers who may not read rows of that type (storage.IsAdminOnlyActivityType).
+func (r *Runtime) EmitSensitiveDataDetected(activityID string, activityType storage.ActivityType, detectionCount int, maxSeverity string, detectionTypes []string, serverName string) {
 	payload := map[string]any{
 		"server_name":     serverName,
 		"activity_id":     activityID,
+		"activity_type":   string(activityType),
 		"detection_count": detectionCount,
 		"max_severity":    maxSeverity,
 		"detection_types": detectionTypes,

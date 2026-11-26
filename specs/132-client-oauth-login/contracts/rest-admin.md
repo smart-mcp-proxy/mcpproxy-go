@@ -24,9 +24,9 @@ Pending requests, newest first: `[{id, client_label, created_at, expires_at}]`. 
     "has_api_key": true, "logins": 1,
     "binding": { "profile": "dev-readonly", "mode": "locked", "revision": "b1f3…" }
   },
-  "existing_clients": [ /* address_kind = generic: {id, display_name, binding} */ ],
+  "existing_clients": [ /* address_kind = generic: {id, display_name, binding, builtin}; builtin=true marks a supported connect-registry client with no records yet, choosable; its record is created when the login is exchanged, not at approval */ ],
   "suggested_new_client": { "id": "acme-agent", "display_name": "Acme Agent" },
-  "suggested_client": { "id": "cursor", "matched": "display_name" }, // generic only; present when the reported name equals exactly one entry of existing_clients (matched: id | display_name | known_name); absent otherwise
+  "suggested_client": { "id": "cursor", "matched": "display_name" }, // generic only; present when the first tier with a match (entries with records, then built-ins) has exactly one matching entry, or a known-name tie there is broken as described below (matched: id | display_name | known_name); absent otherwise. On a fresh install "Visual Studio Code" yields `copilot`
   "profiles": [ { "name": "dev-readonly" } ],
   "profile_required": true,               // profiles exist and the client has no binding
   "previous_login": { "grant_id": "…", "client_id": "cursor", "approved_at": "…" }, // same registration signed in before: its newest live login
@@ -37,7 +37,7 @@ Pending requests, newest first: `[{id, client_label, created_at, expires_at}]`. 
 
 `404` for an unknown, expired, decided or cancelled id (one uniform answer).
 
-`suggested_client` is advice for the page only. It is computed on read from the sanitised reported name (trimmed, compared without regard to case) against each entry of `existing_clients`: its id, its display name and, for a connect-registry client, its known client names. The whole name is tried and, when it ends with a parenthesised suffix, also the part before it. Matches are collected over all fields and counted by distinct client id; exactly one distinct client → present, none or several → absent. `matched` names the first field that matched in the order `id`, `display_name`, `known_name`. The reported name and a new client's display name are stored without Unicode format characters (category Cf: bidi controls, zero-width characters), and so is the name observed at `initialize`; the page shows every such name in an isolated element. Preview and approve take the client from their own body and never fall back to the suggestion: on the generic address, preview without a client answers `200 {"complete": false}` with no `access` and no `guard`, and approve without a client answers `422 client_required`.
+`suggested_client` is advice for the page only. It is computed on read from the sanitised reported name (trimmed, compared without regard to case) against each entry of `existing_clients`: its id, its display name and, for a connect-registry client, its known client names. The whole name is tried and, when it ends with a parenthesised suffix, also the part before it. Matches are collected over all fields and counted by distinct client id; Entries with records are tried first and built-in entries (`builtin: true`) only when none of those matched; within a tier, exactly one distinct client → present, several → absent (and the built-in tier is then not consulted), none → next tier. A tier with several matches that all matched by a known client name (VS Code's `Visual Studio Code` fits `vscode` and `copilot`; `ClientDef.OAuthRegistrationNames` is matched beside `ClientInfoNames`) is broken by the clientInfo name last seen in the past 30 days, then by the registry's preferred client (`copilot`); any other several-match tier stays absent. `matched` names the first field that matched in the order `id`, `display_name`, `known_name`. The reported name and a new client's display name are stored without Unicode format characters (category Cf: bidi controls, zero-width characters), and so is the name observed at `initialize`; the page shows every such name in an isolated element. Preview and approve take the client from their own body and never fall back to the suggestion: on the generic address, preview without a client answers `200 {"complete": false}` with no `access` and no `guard`, and approve without a client answers `422 client_required`.
 
 ### `POST /oauth/authorizations/{id}/preview`
 
@@ -57,7 +57,7 @@ Records the decision and issues the code. The login itself is stored when the cl
 
 ```jsonc
 {
-  "client": { "id": "cursor" },                    // generic address: existing id, or
+  "client": { "id": "cursor" },                    // generic address: an existing id or a built-in (builtin: true) without records, or
   // "client": { "new": { "id": "acme-agent", "display_name": "Acme Agent" } },
   "profile": "dev-readonly",                       // "" = All servers; ignored when the client has a binding
   "mode": "locked",

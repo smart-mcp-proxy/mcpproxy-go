@@ -3239,7 +3239,7 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 // needs to see the real value — useful when the API redacts sensitive
 // header values on the GET path. The body is:
 //
-//	{"scope": "header" | "env", "key": "Authorization", "secret_name": "synapbus-auth"}
+//	{"scope": "header" | "env", "key": "Authorization", "secret_name": "my-server-auth"}
 //
 // On success the server config is updated with the reference string
 // `${keyring:<secret_name>}` and the response carries the same reference

@@ -1626,7 +1626,8 @@ export interface OAuthAuthorizationClient {
   binding?: OAuthBindingView
 }
 
-export interface OAuthExistingClient { id: string; display_name: string; binding?: OAuthBindingView }
+/** `builtin`: a supported built-in client with no API key or login yet; its record is created when the login is exchanged. */
+export interface OAuthExistingClient { id: string; display_name: string; binding?: OAuthBindingView; builtin?: boolean }
 
 export interface OAuthGuardVerdict { code: string; bindings: BindingRef[]; fixes: GuardFix[] }
 
@@ -1641,7 +1642,7 @@ export interface OAuthAuthorization {
   client?: OAuthAuthorizationClient
   existing_clients?: OAuthExistingClient[]
   suggested_new_client?: { id: string; display_name: string }
-  /** Advice only; present on the generic address when the reported name equals exactly one existing client. */
+  /** Advice only; present on the generic address when the reported name matches one client (a tie between known client names is broken by recent presence, then the registry's preferred client). */
   suggested_client?: { id: string; matched: 'id' | 'display_name' | 'known_name' }
   profiles: Array<{ name: string }>
   profile_required: boolean
