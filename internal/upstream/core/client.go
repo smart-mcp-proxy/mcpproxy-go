@@ -1021,11 +1021,13 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 	// GH #1827: this request does not pass the OAuth transport wrapper, so
 	// it logs its own token-request line, once the body has been read (a slow
 	// log write must not eat the request's timeout).
-	status, took := 0, time.Since(sentAt)
+	status, logErr := 0, err
 	if resp != nil {
 		status = resp.StatusCode
 	}
-	defer oauth.LogTokenRequest(ctx, c.oauthLogger(), "refresh_token", status, err, took)
+	defer func() {
+		oauth.LogTokenRequest(ctx, c.oauthLogger(), "refresh_token", status, logErr, time.Since(sentAt))
+	}()
 	if err != nil {
 		return nil, fmt.Errorf("failed to send refresh request: %w", err)
 	}
@@ -1033,6 +1035,7 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		logErr = err // the answer was cut short: say so in the request line
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			// The status arrived even though the body did not. Keep it, so a
 			// truncated rejection is classified as the answer it is and not

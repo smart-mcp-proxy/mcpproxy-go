@@ -38,7 +38,7 @@ func TestRefreshCoordinator_LogsNumberedFlightsToRequestLogger(t *testing.T) {
 	inner := req.Refresh
 	req.Refresh = func(ctx context.Context, rec *storage.OAuthTokenRecord) (*client.Token, error) {
 		info, ok := RefreshFlightInfoFrom(ctx)
-		require.True(t, ok, "the token request context names its flight")
+		assert.True(t, ok, "the token request context names its flight") // not require: this runs on the flight goroutine
 		seen = append(seen, info)
 		return inner(ctx, rec)
 	}
