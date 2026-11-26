@@ -180,7 +180,7 @@ func (w *OAuthTransportWrapper) RoundTrip(req *http.Request) (*http.Response, er
 
 	tokenReq := w.matchesToken(req)
 
-	if tokenReq {
+	if tokenReq && !isJSONBody(req) {
 		// GH #1827: every token request leaves one line after it returns:
 		// grant type, the refresh flight that sent it, status and duration.
 		authz := len(w.extraParams) > 0 && w.matchesAuthorization(req) // one answer for injection and log
@@ -446,6 +446,14 @@ func peekTokenGrantType(req *http.Request) (grant string, parsed bool) {
 		return tokenRequestGrantType(""), false
 	}
 	return tokenRequestGrantType(values.Get("grant_type")), true
+}
+
+// isJSONBody reports a JSON request body: a token request is form-encoded
+// (RFC 6749 §4.1.3, §6), while a client registration that matched the token
+// path pattern sends JSON and is not a token request.
+func isJSONBody(req *http.Request) bool {
+	ct := strings.ToLower(req.Header.Get("Content-Type"))
+	return strings.HasPrefix(ct, "application/json") || strings.Contains(ct, "+json")
 }
 
 // maxTokenRequestPeek bounds how much of a token request body is read to

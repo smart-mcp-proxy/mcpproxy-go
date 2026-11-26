@@ -259,3 +259,20 @@ func TestOAuthTransportWrapper_CutShortSuccessBodyIsLogged(t *testing.T) {
 type errReader struct{ err error }
 
 func (e errReader) Read([]byte) (int, error) { return 0, e.err }
+
+// Review round 18: a JSON POST that matched the token path (a client
+// registration) is not logged as a token request.
+func TestOAuthTransportWrapper_JSONPostIsNotATokenRequest(t *testing.T) {
+	ok := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusBadRequest, Body: io.NopCloser(strings.NewReader(`{}`)), Header: http.Header{}}, nil
+	})
+	core, logs := observer.New(zapcore.DebugLevel)
+	w := NewOAuthTransportWrapper(ok, nil, zap.New(core))
+	req, err := http.NewRequest(http.MethodPost, "https://as.example/oauth/token", strings.NewReader(`{"redirect_uris":[]}`))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := w.RoundTrip(req)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, 0, logs.FilterMessage("OAuth token request finished").Len())
+}
