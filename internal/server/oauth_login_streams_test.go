@@ -200,6 +200,12 @@ func (d *streamDaemon) refresh(regID, refresh string) (access, newRefresh string
 // openStream opens a session on the client's OAuth address and an SSE GET
 // stream on it; the channel closes when the stream ends.
 func (d *streamDaemon) openStream(client, access string) chan struct{} {
+	_, done := d.openSession(client, access)
+	return done
+}
+
+// openSession is openStream that also returns the session id.
+func (d *streamDaemon) openSession(client, access string) (session string, done chan struct{}) {
 	t := d.t
 	do := func(method, body, session string) *http.Response {
 		req, _ := http.NewRequest(method, d.base+"/mcp/oauth/"+client, bytes.NewBufferString(body))
@@ -217,19 +223,19 @@ func (d *streamDaemon) openStream(client, access string) chan struct{} {
 	}
 	resp := do(http.MethodPost, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`, "")
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	session := resp.Header.Get("Mcp-Session-Id")
+	session = resp.Header.Get("Mcp-Session-Id")
 	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	do(http.MethodPost, `{"jsonrpc":"2.0","method":"notifications/initialized"}`, session).Body.Close()
 	stream := do(http.MethodGet, "", session)
 	require.Equal(t, http.StatusOK, stream.StatusCode)
-	done := make(chan struct{})
+	done = make(chan struct{})
 	go func() {
 		_, _ = io.Copy(io.Discard, stream.Body)
 		stream.Body.Close()
 		close(done)
 	}()
-	return done
+	return session, done
 }
 
 func streamOpen(done chan struct{}, d time.Duration) bool {
@@ -470,4 +476,57 @@ func TestOAuthStreams_GenerationIsComparedAtRegistration(t *testing.T) {
 	release, ok := srv.trackOAuthRequest("g", time.Now().Add(time.Hour), 0, srv.oauthRunGen(), func() {})
 	assert.True(t, ok)
 	release()
+}
+
+// A server stop lets a browser-login call that is still running finish, like
+// any other call, and ends the open stream once it has.
+func TestOAuthStreams_StopLetsRunningCallsFinish(t *testing.T) {
+	d := newStreamDaemon(t)
+	access, _, _ := d.login("cursor")
+	session, stream := d.openSession("cursor", access)
+	require.True(t, streamOpen(stream, 300*time.Millisecond))
+
+	// A call whose body is still being sent when the stop begins.
+	body, upload := io.Pipe()
+	req, err := http.NewRequest(http.MethodPost, d.base+"/mcp/oauth/cursor", body)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+access)
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Mcp-Session-Id", session)
+	status := make(chan int, 1)
+	go func() {
+		resp, err := d.httpc.Do(req)
+		if err != nil {
+			status <- 0
+			return
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		status <- resp.StatusCode
+	}()
+	_, err = io.WriteString(upload, `{"jsonrpc":"2.0",`)
+	require.NoError(t, err)
+	time.Sleep(200 * time.Millisecond) // the call reaches the server
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- d.env.proxyServer.StopServer() }()
+	require.True(t, streamOpen(stream, 500*time.Millisecond), "the stream stays open while a call runs")
+
+	_, err = io.WriteString(upload, `"id":2,"method":"ping"}`)
+	require.NoError(t, err)
+	require.NoError(t, upload.Close())
+	select {
+	case code := <-status:
+		require.Equal(t, http.StatusOK, code, "the call finishes")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the call did not finish")
+	}
+	d.requireEnds(stream, "the last call finished")
+	select {
+	case err := <-stopped:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the server did not stop")
+	}
 }
