@@ -309,7 +309,12 @@ for (const theme of THEMES) {
   test(`contrast AA: / with a live MCP client (${theme})`, async ({ page }) => {
     const session = await openMcpSession(KEY, [], 'e2e-home-client', true)
     try {
+      // The live clients sit in the topology section, collapsed by default
+      // (spec 134 FR-040); open it the way a user does and keep its state.
       await goto(page, '/', theme)
+      await page.evaluate(() => localStorage.setItem('mcpproxy.home.topology', 'open'))
+      await page.reload()
+      await page.locator('main').first().waitFor({ state: 'visible' })
       const age = page.locator('[data-test="dashboard-live-client-age"]').first()
       await expect(age).toBeVisible()
       const failures = await contrastFailures(page)
@@ -387,7 +392,7 @@ test('contrast AA: buttons and links on a coloured alert, hovered', async ({ pag
   const measured: Record<string, number> = {}
   for (const theme of THEMES) {
     measured[theme] = 0
-    for (const route of ['/', '/servers'] as const) {
+    for (const route of ['/', '/servers', '/clients', '/tools', '/activity', '/settings', '/review'] as const) {
       await goto(page, route, theme)
       const targets = page.locator(
         ':is(.alert-info, .alert-success, .alert-warning, .alert-error) :is(.btn-ghost, a.link, .btn-link)',
@@ -434,6 +439,14 @@ test('contrast AA: buttons and links on a coloured alert, hovered', async ({ pag
         ).toBeGreaterThanOrEqual(4.5 - 0.005)
       }
     }
+  }
+  // Spec 134 PR 4: Home's notices are no longer daisyUI coloured alerts, so on
+  // a clean instance no swept route may show one. Say so instead of failing;
+  // when one is on screen (update notice from another page, a refusal) it is
+  // still measured above, and must then be measured in both themes.
+  if (THEMES.every((t) => measured[t] === 0)) {
+    test.info().annotations.push({ type: 'skip-part', description: 'no hovered .btn-ghost inside a coloured alert on the swept routes' })
+    return
   }
   // Per theme, and specifically a ghost button — the variant daisyUI repaints
   // on hover. An ordinary link passing in one theme is not coverage.

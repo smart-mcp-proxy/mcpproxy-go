@@ -74,6 +74,8 @@ function makeRouter() {
     routes: [
       { path: '/', name: 'home', component: Home },
       { path: '/add-server', name: 'add-server', component: { template: '<div />' } },
+      { path: '/activity', name: 'activity', component: { template: '<div />' } },
+      { path: '/usage', name: 'usage', component: { template: '<div />' } },
       { path: '/:pathMatch(.*)*', name: 'other', component: { template: '<div />' } },
     ],
   })
@@ -89,8 +91,9 @@ async function mountHomeAsAdmin() {
     wrapper: shallowMount(Home, {
       global: {
         plugins: [router],
+        // Real links: the shortcuts are router-links now (spec 134 FR-040).
         stubs: {
-          RouterLink: { template: '<a><slot /></a>' },
+          RouterLink: false,
           UsageSummaryStrip: false,
         },
       },
@@ -145,8 +148,7 @@ describe('Home tenant gating (Spec 107 FR-041, cross-review round 2 P1)', () => 
     const wrapper = await mountHomeAsTenant()
     await flushPromises()
 
-    expect(wrapper.find('[data-test="home-usage-strip-top"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="home-usage-strip-bottom"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="home-usage-strip"]').exists()).toBe(false)
     expect(getActivitySummarySpy).not.toHaveBeenCalled()
   })
 
@@ -162,22 +164,23 @@ describe('Home tenant gating (Spec 107 FR-041, cross-review round 2 P1)', () => 
     const wrapper = await mountHomeAsTenant()
     await flushPromises()
 
-    expect(wrapper.find('[data-test="dashboard-admin-left-actions"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="dashboard-recent-sessions-link"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="dashboard-right-add-server"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="home-shortcuts"]').exists()).toBe(true)
+    for (const id of ['connect', 'import', 'sessions', 'add-server']) {
+      expect(wrapper.find(`[data-test="home-shortcut-${id}"]`).exists()).toBe(false)
+    }
   })
 
   it('routes Add Server and client-config import to their catalog-first tabs', async () => {
     const { wrapper, router } = await mountHomeAsAdmin()
     await flushPromises()
 
-    await wrapper.find('[data-test="dashboard-right-add-server"]').trigger('click')
+    await wrapper.find('[data-test="home-shortcut-add-server"]').trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.fullPath).toBe('/add-server')
 
     await router.push('/')
     await flushPromises()
-    await wrapper.find('[data-test="dashboard-import-configs"]').trigger('click')
+    await wrapper.find('[data-test="home-shortcut-import"]').trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.fullPath).toBe('/add-server?tab=import')
   })

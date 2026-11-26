@@ -114,6 +114,8 @@ async function collapsedTitle(wrapper: Awaited<ReturnType<typeof mountSidebar>>)
 }
 
 async function mountHome() {
+  // The topology is collapsed by default (spec 134 FR-040); these tests read it.
+  localStorage.setItem('mcpproxy.home.topology', 'open')
   const router = makeRouter()
   router.push('/')
   await router.isReady()

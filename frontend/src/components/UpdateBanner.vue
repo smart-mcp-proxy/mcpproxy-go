@@ -4,11 +4,11 @@
        re-nags but a newer release shows the banner again. When update
        checking is disabled (update_check.enabled=false) the /api/v1/info
        response carries no update object, so the banner is naturally absent. -->
-  <div v-if="visible" class="alert alert-info" data-test="update-banner">
-    <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+  <div v-if="visible" class="flex items-start gap-3 rounded border px-4 py-3 text-sm" style="background: var(--status-busy-soft); color: var(--status-busy); border-color: var(--status-busy)" data-test="update-banner">
+    <svg class="w-5 h-5 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12m0 0l-4-4m4 4l4-4" />
     </svg>
-    <div class="flex-1">
+    <div class="flex-1 min-w-0 break-words">
       <span>
         Update available: <span class="font-semibold">{{ latestVersion }}</span>
         <template v-if="currentVersion"> — you are running {{ currentVersion }}</template
@@ -25,7 +25,7 @@
         :href="releaseUrl"
         target="_blank"
         rel="noopener noreferrer"
-        class="link link-hover underline"
+        class="link link-hover underline inline-block max-sm:py-3"
         data-test="update-banner-release-link"
       >Release notes</a>
       <!-- Spec 079 US2 (FR-009): the exact one-line command for the detected
@@ -37,11 +37,12 @@
            name. -->
       <div v-if="updateCommand" class="mt-2 flex items-center gap-2">
         <code
-          class="rounded bg-base-200 px-2 py-1 font-mono text-sm text-base-content"
+          class="rounded bg-base-100 border px-2 py-1 font-mono text-xs text-base-content break-all min-w-0"
+          style="border-color: var(--ds-border)"
           data-test="update-banner-command"
         >{{ updateCommand }}</code>
         <button
-          class="btn btn-xs btn-ghost"
+          class="btn btn-sm btn-ghost btn-square shrink-0 max-sm:h-11 max-sm:w-11"
           :aria-label="copied ? 'Copied' : 'Copy update command'"
           data-test="update-banner-copy"
           @click="copyCommand"
@@ -49,7 +50,7 @@
           <svg v-if="!copied" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
           </svg>
-          <span v-else class="text-success">Copied</span>
+          <span v-else class="text-xs">Copied</span>
         </button>
       </div>
       <!-- Guidance fallback for channels that intentionally have no safe
@@ -64,7 +65,7 @@
       >{{ guidance }}</div>
     </div>
     <button
-      class="btn btn-sm btn-ghost btn-square"
+      class="btn btn-sm btn-ghost btn-square shrink-0 max-sm:h-11 max-sm:w-11"
       aria-label="Dismiss"
       data-test="update-banner-dismiss"
       @click="dismiss"
