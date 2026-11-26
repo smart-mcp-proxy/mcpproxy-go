@@ -2040,7 +2040,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 	}
 
 	// Get authorization URL - this is the key synchronous operation
-	authURL, oauthHandler, codeVerifier, state, callbackCh, err := c.getAuthorizationURLQuick(ctx, oauthConfig, extraParams, result.CorrelationID)
+	authURL, oauthHandler, codeVerifier, state, waiter, err := c.getAuthorizationURLQuick(ctx, oauthConfig, extraParams, result.CorrelationID)
 	if err != nil {
 		c.logger.Error("❌ Failed to get authorization URL",
 			zap.String("server", c.config.Name),
@@ -2072,7 +2072,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 		waiterOwnsRelease = true
 		go func() {
 			defer releaseManualFlow()
-			c.waitForOAuthCallbackAsync(ctx, oauthHandler, codeVerifier, state, callbackCh, result.CorrelationID)
+			c.waitForOAuthCallbackAsync(ctx, oauthHandler, codeVerifier, state, waiter, result.CorrelationID)
 		}()
 
 		return result, nil
@@ -2096,7 +2096,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 	waiterOwnsRelease = true
 	go func() {
 		defer releaseManualFlow()
-		c.waitForOAuthCallbackAsync(ctx, oauthHandler, codeVerifier, state, callbackCh, result.CorrelationID)
+		c.waitForOAuthCallbackAsync(ctx, oauthHandler, codeVerifier, state, waiter, result.CorrelationID)
 	}()
 
 	return result, nil
@@ -2131,11 +2131,12 @@ func (c *Client) forcedAuthorizationRequired() error {
 // getAuthorizationURLQuick gets the authorization URL without starting the full OAuth flow.
 // Returns the URL, OAuth handler, code verifier, and state for later use.
 //
-// The returned channel is the waiter registered for the state (nil when no
-// callback server exists): the caller hands it to waitForOAuthCallbackAsync,
-// so a callback that arrives before that goroutine runs is not lost (Spec 135
-// plan D1, one waiter per flow).
-func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *client.OAuthConfig, extraParams map[string]string, correlationID string) (string, *uptransport.OAuthHandler, string, string, <-chan oauth.CallbackResult, error) {
+// The returned waiter is the callback listener and channel registered for
+// the state (nil when no callback server exists): the caller hands it to
+// waitForOAuthCallbackAsync, so a callback that arrives before that goroutine
+// runs is not lost and is exchanged with the listener it was registered on
+// (Spec 135 plan D1, one waiter per flow).
+func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *client.OAuthConfig, extraParams map[string]string, correlationID string) (string, *uptransport.OAuthHandler, string, string, *callbackWaiter, error) {
 	// Create transport config with OAuth
 	httpConfig := c.httpTransportConfig(c.config, oauthConfig)
 
@@ -2286,12 +2287,12 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 	// scheduled (issue #975). RegisterState is idempotent, so that goroutine
 	// obtains this same channel. Registering only on the success path keeps a
 	// failed flow from leaving a dangling waiter behind.
-	var callbackCh <-chan oauth.CallbackResult
+	var waiter *callbackWaiter
 	if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
-		callbackCh = callbackServer.RegisterState(state)
+		waiter = &callbackWaiter{server: callbackServer, ch: callbackServer.RegisterState(state)}
 	}
 
-	return authURL, oauthHandler, codeVerifier, state, callbackCh, nil
+	return authURL, oauthHandler, codeVerifier, state, waiter, nil
 }
 
 // emptyClientIDFlowError returns a structured oauth_client_id_required error
@@ -2371,11 +2372,19 @@ func (c *Client) clientIDRequiredSuggestion() string {
 	return registerApp
 }
 
+// callbackWaiter is the callback listener a flow registered its state on and
+// the channel that state's callback is delivered to.
+type callbackWaiter struct {
+	server *oauth.CallbackServer
+	ch     <-chan oauth.CallbackResult
+}
+
 // waitForOAuthCallbackAsync waits for OAuth callback and handles token exchange in background.
 //
-// callbackCh is the waiter registered when the authorization URL was built;
-// nil registers one here (tests, and a flow built without a callback server).
-func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *uptransport.OAuthHandler, codeVerifier, state string, callbackCh <-chan oauth.CallbackResult, correlationID string) {
+// waiter is the listener and channel registered when the authorization URL
+// was built; nil looks the listener up and registers here (tests, and a flow
+// built without a callback server).
+func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *uptransport.OAuthHandler, codeVerifier, state string, waiter *callbackWaiter, correlationID string) {
 	c.markOAuthInProgress()
 	defer func() {
 		c.oauthMu.Lock()
@@ -2396,20 +2405,21 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 		zap.String("correlation_id", correlationID),
 		zap.Time("deadline", waitDeadline))
 
-	// Get or create callback server
-	callbackServer, exists := oauth.GetCallbackServer(c.config.Name)
-	if !exists {
-		c.reportOAuthFailure(fmt.Errorf("OAuth callback server not found for %s - the authorization code cannot be received", c.config.Name))
-		return
+	// The state was registered when the authorization URL was built and the
+	// listener and channel handed in (issue #975, Spec 135 plan D1).
+	// Registering it again here would lose a callback that was already
+	// delivered (delivery removes the waiter, so a second RegisterState would
+	// park on a fresh channel), and looking the listener up by name again
+	// could find a replacement that never saw this state.
+	if waiter == nil {
+		callbackServer, exists := oauth.GetCallbackServer(c.config.Name)
+		if !exists {
+			c.reportOAuthFailure(fmt.Errorf("OAuth callback server not found for %s - the authorization code cannot be received", c.config.Name))
+			return
+		}
+		waiter = &callbackWaiter{server: callbackServer, ch: callbackServer.RegisterState(state)}
 	}
-
-	// The state was registered when the authorization URL was built and its
-	// channel handed in (issue #975, Spec 135 plan D1). Registering it again
-	// here would lose a callback that was already delivered: delivery removes
-	// the waiter, so a second RegisterState would park on a fresh channel.
-	if callbackCh == nil {
-		callbackCh = callbackServer.RegisterState(state)
-	}
+	callbackServer, callbackCh := waiter.server, waiter.ch
 	defer callbackServer.UnregisterState(state)
 
 	select {

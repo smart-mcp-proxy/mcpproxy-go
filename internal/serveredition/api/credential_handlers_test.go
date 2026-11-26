@@ -504,6 +504,8 @@ func TestCredentialsCallback_StrictParse_RepeatedCodeRejectedFlowKept(t *testing
 		"code=a&error=access_denied&state=" + url.QueryEscape(state),
 		"error=access_denied&error=x&state=" + url.QueryEscape(state),
 		"code=a&state=" + url.QueryEscape(state) + "&iss=x&iss=y",
+		"code=&state=" + url.QueryEscape(state),
+		"state=" + url.QueryEscape(state),
 	} {
 		cbReq := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials/connect-srv/callback?"+bad, http.NoBody)
 		cbReq.Host = "gw.example.com"

@@ -2003,10 +2003,11 @@ func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 }
 
 func (c *CallbackServer) handleCallbackWithFailureNotification(w http.ResponseWriter, r *http.Request, notifyFailure bool) {
+	// handleRequest already logged the raw query (scrubbed per value); this
+	// line marks the callback path only.
 	c.logger.Info("🎯 OAuth callback received",
 		zap.String("method", r.Method),
 		zap.String("path", LogSafeRequestPath(r.URL.Path)),
-		zap.String("query", LogSafeCallbackQuery(r.URL.RawQuery)),
 		zap.String("remote_addr", r.RemoteAddr),
 		zap.String("user_agent", r.UserAgent()))
 

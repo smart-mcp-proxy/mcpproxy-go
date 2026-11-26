@@ -27,18 +27,21 @@ func remoteCallbackFixture(t *testing.T, name string) (*CallbackServerManager, *
 func TestRemoteCallbackStateRouting(t *testing.T) {
 	m, c := remoteCallbackFixture(t, "linear")
 	ch := c.RegisterState("waiting-state")
-	for _, query := range []string{"code=x", "code=x&state=unknown", "code=x&state=waiting-state&state=other", "state=waiting-state", "code=x&error=denied&state=waiting-state", "code=x&code=y&state=waiting-state"} {
+	for _, query := range []string{"code=x", "code=x&state=unknown", "code=x&state=waiting-state&state=other", "state=waiting-state", "code=x&error=denied&state=waiting-state", "code=x&code=y&state=waiting-state", "code=&state=waiting-state", "code=x&state=waiting-state&iss=a&iss=b", "error=a&error=b&state=waiting-state", "code=%zz&state=waiting-state"} {
 		w := httptest.NewRecorder()
 		m.RemoteCallbackHandler(w, httptest.NewRequest(http.MethodGet, "/oauth/callback/linear?"+query, nil))
 		require.Equal(t, http.StatusBadRequest, w.Code)
 		require.True(t, c.HasState("waiting-state"))
 	}
 	w := httptest.NewRecorder()
-	m.RemoteCallbackHandler(w, httptest.NewRequest(http.MethodGet, "/oauth/callback/linear?code=real-code&state=waiting-state", nil))
+	m.RemoteCallbackHandler(w, httptest.NewRequest(http.MethodGet, "/oauth/callback/linear?code=real-code&state=waiting-state&iss=https%3A%2F%2Fas.example&ext=1&ext=2", nil))
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Equal(t, "no-store", w.Header().Get("Cache-Control"))
 	require.Equal(t, "no-referrer", w.Header().Get("Referrer-Policy"))
-	require.Equal(t, "real-code", (<-ch).Get("code"))
+	got := <-ch
+	require.Equal(t, "real-code", got.Get("code"))
+	require.Equal(t, []string{"https://as.example"}, got.Query["iss"], "iss reaches the flow")
+	require.Equal(t, []string{"1", "2"}, got.Query["ext"], "the multi-valued query is not flattened")
 	replay := httptest.NewRecorder()
 	m.RemoteCallbackHandler(replay, httptest.NewRequest(http.MethodGet, "/oauth/callback/linear?code=real-code&state=waiting-state", nil))
 	require.Equal(t, http.StatusBadRequest, replay.Code)
