@@ -276,3 +276,11 @@ func TestOAuthTransportWrapper_JSONPostIsNotATokenRequest(t *testing.T) {
 	_ = resp.Body.Close()
 	assert.Equal(t, 0, logs.FilterMessage("OAuth token request finished").Len())
 }
+
+func TestIsJSONBody_MediaTypeOnly(t *testing.T) {
+	r, _ := http.NewRequest(http.MethodPost, "https://as.example/token", nil)
+	r.Header.Set("Content-Type", `application/x-www-form-urlencoded; profile="oauth+json"`)
+	assert.False(t, isJSONBody(r))
+	r.Header.Set("Content-Type", "application/vnd.reg+json; charset=utf-8")
+	assert.True(t, isJSONBody(r))
+}

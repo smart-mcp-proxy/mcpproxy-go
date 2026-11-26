@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -452,8 +453,11 @@ func peekTokenGrantType(req *http.Request) (grant string, parsed bool) {
 // (RFC 6749 §4.1.3, §6), while a client registration that matched the token
 // path pattern sends JSON and is not a token request.
 func isJSONBody(req *http.Request) bool {
-	ct := strings.ToLower(req.Header.Get("Content-Type"))
-	return strings.HasPrefix(ct, "application/json") || strings.Contains(ct, "+json")
+	mt, _, err := mime.ParseMediaType(req.Header.Get("Content-Type"))
+	if err != nil {
+		return false
+	}
+	return mt == "application/json" || strings.HasSuffix(mt, "+json")
 }
 
 // maxTokenRequestPeek bounds how much of a token request body is read to
