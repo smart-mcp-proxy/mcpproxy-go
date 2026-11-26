@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -268,7 +269,8 @@ func number(v any) (float64, bool) {
 	return x, true
 }
 
-// capMessage cuts m to at most MaxMessageBytes on a rune boundary.
+// capMessage cuts m to at most MaxMessageBytes on a rune boundary. The cut
+// is a copy, so a queued update does not keep the upstream's whole message.
 func capMessage(m string) string {
 	if len(m) <= MaxMessageBytes {
 		return m
@@ -277,5 +279,5 @@ func capMessage(m string) string {
 	for len(m) > 0 && !utf8.ValidString(m) {
 		m = m[:len(m)-1]
 	}
-	return m
+	return strings.Clone(m)
 }
