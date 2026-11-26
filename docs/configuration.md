@@ -754,8 +754,11 @@ file, so a rejection seen by the provider can be matched to one client attempt:
   the `flight` and `trigger` that sent it (`0` and `none` for a request outside
   a refresh, such as a sign-in), `http_status`, `outcome` (`http_response` when
   an answer arrived, `retired` when the server instance was replaced under it,
-  else the failure class such as `network`) and `duration`. A redirect the
-  request follows is part of that one line.
+  else the failure class such as `network`) and `duration`. When the token
+  endpoint redirects to itself, each hop gets its own line (the `3xx`, then the
+  final answer) under the same `flight`. For a client registered on the fly
+  (dynamic client registration), a followed redirect shares one line, and a
+  redirect that cannot be followed shows as a `network` failure.
 - `OAuth refresh flight finished`: the same `flight` with its `outcome` class.
 
 With `refresh_replay_enabled` a flight can send two token requests; both carry
