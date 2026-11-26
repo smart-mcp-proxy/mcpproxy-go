@@ -32,10 +32,6 @@ func TestLegacySchemaJSON_MatchesMCPGoV100(t *testing.T) {
 			`{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","definitions":{"X":{"type":"string"}},"properties":{"x":{"$ref":"#/definitions/X"}}}`,
 			`{"$defs":{"X":{"type":"string"}},"properties":{"x":{"$ref":"#/$defs/X"}},"required":[],"type":"object"}`,
 		},
-		{ // number spelling and a ref nested in a keyword value
-			`{"type":"object","definitions":{"X":{"const":1.0}},"properties":{"x":{"default":{"$ref":"#/definitions/X"}}}}`,
-			`{"$defs":{"X":{"const":1}},"properties":{"x":{"default":{"$ref":"#/$defs/X"}}},"required":[],"type":"object"}`,
-		},
 	}
 	for _, tc := range cases {
 		var s mcp.ToolInputSchema
@@ -49,4 +45,27 @@ func TestLegacySchemaJSON_MatchesMCPGoV100(t *testing.T) {
 			hash.ComputeToolHashWithOutputSchema("srv", "t", "d", legacySchema(mcp.ToolArgumentsSchema(s)), ""),
 			"the Spec 032 hash is the one v1.0.0 produced")
 	}
+}
+
+// Documented residual: a ref nested in a keyword value after the decoder
+// moved "definitions" itself keeps its draft-07 spelling in the stored bytes,
+// but the Spec 032 hash equals v1.0.0's.
+func TestLegacySchemaJSON_NestedRefResidual_HashUnchanged(t *testing.T) {
+	in := `{"type":"object","definitions":{"X":{"const":1.0}},"properties":{"x":{"default":{"$ref":"#/definitions/X"}}}}`
+	v100 := `{"$defs":{"X":{"const":1}},"properties":{"x":{"default":{"$ref":"#/$defs/X"}}},"required":[],"type":"object"}`
+	var s mcp.ToolInputSchema
+	require.NoError(t, json.Unmarshal([]byte(in), &s))
+	assert.Equal(t,
+		hash.ComputeToolHashWithOutputSchema("srv", "t", "d", json.RawMessage(v100), ""),
+		hash.ComputeToolHashWithOutputSchema("srv", "t", "d", legacySchema(mcp.ToolArgumentsSchema(s)), ""))
+}
+
+// A schema v1.0.0 could not decode has no earlier bytes: it is kept whole.
+func TestLegacySchemaJSON_ArrayTypeKeptWhole(t *testing.T) {
+	in := `{"type":["object"],"patternProperties":{"^m_":{"type":"number"}},"additionalProperties":false}`
+	var s mcp.ToolOutputSchema
+	require.NoError(t, json.Unmarshal([]byte(in), &s))
+	got, err := json.Marshal(legacySchema(mcp.ToolArgumentsSchema(s)))
+	require.NoError(t, err)
+	assert.Contains(t, string(got), `"patternProperties"`)
 }

@@ -60,7 +60,8 @@ func (w *OAuthTransportWrapper) rewriteRegistrationApplicationType(req *http.Req
 	// query and a trailing slash, and a provider may tell its token and
 	// registration endpoints apart by either.
 	if tokenURL != nil && urlEndpointMatch(tokenURL, req.URL) &&
-		tokenURL.EscapedPath() == req.URL.EscapedPath() && tokenURL.RawQuery == req.URL.RawQuery {
+		tokenURL.EscapedPath() == req.URL.EscapedPath() && tokenURL.RawQuery == req.URL.RawQuery &&
+		tokenURL.ForceQuery == req.URL.ForceQuery {
 		return req
 	}
 	orig := req.Body

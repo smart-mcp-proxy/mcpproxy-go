@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -72,6 +73,23 @@ func clientFacingEraGuard(next http.Handler) http.Handler {
 	})
 }
 
+// simpleFoldKey maps every rune of name to the smallest rune of its Unicode
+// simple-folding orbit, so two names get the same key exactly when they are
+// equal under simple case folding.
+func simpleFoldKey(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		least := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < least {
+				least = f
+			}
+		}
+		b.WriteRune(least)
+	}
+	return b.String()
+}
+
 // jsonString decodes a JSON string value ("" for anything else), so escaped
 // spellings such as "server\u002fdiscover" compare by their value.
 func jsonString(raw json.RawMessage) string {
@@ -119,9 +137,8 @@ func exactTopLevelMembers(raw []byte) (map[string]json.RawMessage, bool) {
 			return nil, false
 		}
 		// encoding/json matches struct fields with Unicode simple case
-		// folding ("ſ" matches "s"); upper- then lower-casing folds the same
-		// pairs for every member name a JSON-RPC message defines.
-		key := strings.ToLower(strings.ToUpper(name))
+		// folding ("ſ" matches "s", dotless "ı" matches nothing ASCII).
+		key := simpleFoldKey(name)
 		if folded[key] {
 			return nil, false
 		}

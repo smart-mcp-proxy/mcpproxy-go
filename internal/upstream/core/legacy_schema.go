@@ -23,9 +23,13 @@ import (
 // as changed on upgrade and hand the scanner text it never reviewed. Adopting
 // the richer schema is a separate change that needs a hash-formula migration.
 //
-// A schema v1.0.0 could not decode (an array-valued "type") keeps the array.
-// Duplicate or case-variant members that the current decoder already merged
-// cannot be told apart any more; such a schema is malformed JSON Schema.
+// A schema v1.0.0 could not decode (an array-valued "type") is stored in full.
+// Residuals, none of which moves the Spec 032 hash (hash.NormalizeJSON
+// canonicalises refs and numbers): when the current decoder already moved
+// "definitions" to "$defs" (no dialect declared), refs nested in keyword
+// values such as "default" stay "#/definitions/..." where v1.0.0 rewrote
+// them. Duplicate or case-variant members the decoder already merged cannot
+// be told apart; such a schema is malformed JSON Schema.
 type legacySchema mcp.ToolArgumentsSchema
 
 func (s legacySchema) MarshalJSON() ([]byte, error) {
@@ -46,25 +50,19 @@ func (s legacySchema) MarshalJSON() ([]byte, error) {
 	}
 	if v10.Defs == nil && v10.Definitions != nil {
 		v10.Defs = v10.Definitions
-	}
-	// v1.0.0 rewrote refs when it moved "definitions" to "$defs". The current
-	// decoder may already have moved them without rewriting refs nested in
-	// keyword values, so after decoding the two cases look alike: rewrite
-	// whenever "$defs" is present. Only a schema that already used "$defs"
-	// AND kept dangling "#/definitions/" refs differs from v1.0.0.
-	if v10.Defs != nil {
 		rewriteDraft07LocalRefsV100(v10.Defs)
 		rewriteDraft07LocalRefsV100(v10.Properties)
 		rewriteDraft07LocalRefsV100(v10.AdditionalProperties)
 	}
 
-	m := make(map[string]any, 5)
 	var typeString string
-	if len(v10.Type) == 0 || string(v10.Type) == "null" || json.Unmarshal(v10.Type, &typeString) == nil {
-		m["type"] = typeString
-	} else {
-		m["type"] = v10.Type // not decodable by v1.0.0: keep what was sent
+	if len(v10.Type) != 0 && string(v10.Type) != "null" && json.Unmarshal(v10.Type, &typeString) != nil {
+		// v1.0.0 could not decode this schema (an array-valued "type"), so
+		// there are no earlier bytes to keep: store the full schema.
+		return full, nil
 	}
+	m := make(map[string]any, 5)
+	m["type"] = typeString
 	if v10.Defs != nil {
 		m["$defs"] = v10.Defs
 	}

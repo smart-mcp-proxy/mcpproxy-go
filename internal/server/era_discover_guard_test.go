@@ -42,6 +42,9 @@ func TestClientFacingEraGuard(t *testing.T) {
 	w = send(modern, `{"jsonrpc":"2\u002e0","id":2,"method":"server\u002fdiscover"}`)
 	assert.Contains(t, w.Body.String(), `-32601`, "escaped spellings are the same probe")
 
+	w = send(modern, "{\"jsonrpc\":\"2.0\",\"id\":3,\"\u0131d\":4,\"method\":\"server/discover\"}")
+	assert.Contains(t, w.Body.String(), `-32601`, "dotless i does not fold with i, so this is not ambiguous")
+
 	w = send(modern, discover)
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.JSONEq(t, `{"jsonrpc":"2.0","id":7,"error":{"code":-32601,"message":"Method not found: server/discover"}}`, w.Body.String())
