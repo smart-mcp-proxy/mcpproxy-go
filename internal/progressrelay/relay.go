@@ -269,7 +269,9 @@ func (r *Registry) Dispatch(n mcp.JSONRPCNotification) bool {
 	if !c.sink(u) {
 		return false
 	}
-	c.sent, c.last, c.lastSent = true, progress, now
+	// The interval runs from the send, not from the arrival: cleaning the
+	// message takes time too.
+	c.sent, c.last, c.lastSent = true, progress, r.clock()
 	c.doneSent = c.doneSent || done
 	return true
 }
