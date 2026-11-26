@@ -172,6 +172,11 @@ func (p *MCPProxyServer) handleCredentials(ctx context.Context, request mcp.Call
 
 	start := time.Now()
 	sessionID := sessionIDFromContext(ctx)
+	// Spec 133: the profile this call was admitted under, captured now, so
+	// the admin_action line names it whatever the session selects later.
+	if name, _ := p.resolveActiveProfile(ctx); name != "" {
+		ctx = withAdminProfile(ctx, name)
+	}
 	// Spec 133 rule 3: reuse the request id already on the context, mint one
 	// only at an ingress that has none, and install it so the mutation — and
 	// its admin_action line — carries the wrapper row's id.

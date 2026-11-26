@@ -566,3 +566,34 @@ func TestAllServersGrantedAmong_ShowsTheWildcardAndCountsTheRest(t *testing.T) {
 		t.Fatalf("got %v", ch)
 	}
 }
+
+func TestNewAdminAction_PEMRequestIDIsRejected(t *testing.T) {
+	in := tokenRotateInput()
+	in.RequestID = "-----BEGIN PRIVATE KEY-----MIIEbody"
+	if _, err := audit.NewAdminAction(in); err == nil {
+		t.Fatal("a private-key request id is a rejected record")
+	}
+}
+
+func TestNewAdminAction_OnePrefixEntryOnly(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenCreate
+	in.Changes = []audit.Change{
+		audit.Literal(audit.FieldTokenPrefix, nil, audit.TokenPrefix("mcp_agt_9f8e")),
+		audit.Literal(audit.FieldTokenPrefix, audit.TokenPrefix("mcp_agt_a1b2"), nil),
+	}
+	if _, err := audit.NewAdminAction(in); err == nil {
+		t.Fatal("conflicting /token_prefix entries must be rejected")
+	}
+}
+
+func TestMaskAllSpans_BoundedOnRepeatedPrefixes(t *testing.T) {
+	s := strings.Repeat("mcp_agt_", 20000)
+	start := time.Now()
+	in := tokenRotateInput()
+	in.ClientName = s
+	_, _ = audit.NewAdminAction(in)
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("masking a label of repeated prefixes must stay bounded")
+	}
+}

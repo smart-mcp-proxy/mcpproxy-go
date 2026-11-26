@@ -323,6 +323,11 @@ func NewAdminAction(in AdminActionInput) (Line, error) {
 		"outcome":        "success",
 	}
 	if in.RequestID != "" {
+		if containsPrivateKey(in.RequestID) {
+			// No position can carry a private-key block: the record is
+			// rejected (and counted), never serialized.
+			return Line{}, fmt.Errorf("audit.NewAdminAction: request_id carries a private-key block")
+		}
 		masked, hit := maskAllSpans(in.RequestID)
 		if hit {
 			noteFieldMask()
@@ -546,6 +551,15 @@ var requiredPrefixSides = map[string]struct{ before, after bool }{
 }
 
 func checkRequiredPrefixes(action string, changes []Change) error {
+	n := 0
+	for _, c := range changes {
+		if c.path.sortKey() == FieldTokenPrefix.sortKey() {
+			n++
+		}
+	}
+	if n > 1 {
+		return fmt.Errorf("audit.NewAdminAction: at most one /token_prefix entry")
+	}
 	want, ok := requiredPrefixSides[action]
 	if !ok {
 		return nil

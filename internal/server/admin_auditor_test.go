@@ -86,3 +86,14 @@ func TestSinkAdminAuditor_NoCallerIsCountedNotWritten(t *testing.T) {
 	require.Equal(t, before+1, audit.BuildFailures())
 	require.Nil(t, newSinkAdminAuditor(nil, nil), "no sink, no auditor")
 }
+
+func TestAdminProfile_CapturedAtIngress(t *testing.T) {
+	ctx := withAdminProfile(auth.WithAuthContext(context.Background(), auth.AdminContext()), "admin-ops")
+	ctx = transport.TagConnectionContext(ctx, transport.ConnectionSourceStdio)
+	ctx = reqcontext.WithRequestID(ctx, "rid")
+	sink := &recordingAuditSink{}
+	newSinkAdminAuditor(sink, nil).AdminAction(ctx, tokenRecord())
+	lines := sink.snapshot()
+	require.Len(t, lines, 1)
+	require.Contains(t, string(lines[0]), `"profile":"admin-ops"`)
+}

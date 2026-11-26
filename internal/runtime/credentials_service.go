@@ -791,19 +791,25 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 	// after the minting transaction commits, under its write lock (the same
 	// for rotate, revoke and delete).
 	committedAt := now
+	var stored *auth.AgentToken
 	if rep, ok := s.tokens.(tokenCreateReporter); ok {
-		stored, err := rep.CreateAgentTokenReport(candidate, raw, key)
+		var err error
+		stored, err = rep.CreateAgentTokenReport(candidate, raw, key)
 		if err != nil {
 			return nil, s.classifyCreateError(req.Name, mcp, err, now)
 		}
 		committedAt = stored.CommittedAt
-		candidate.CreatedAt = stored.CreatedAt
 	} else if err := s.tokens.CreateAgentToken(candidate, raw, key); err != nil {
 		return nil, s.classifyCreateError(req.Name, mcp, err, now)
 	}
 
 	// Post-commit: project from the committed record; nothing below can fail.
+	// With a reporting store that is the record the transaction persisted
+	// (FR-016c: the line describes what persisted, not the request).
 	committed := candidate
+	if stored != nil {
+		committed = *stored
+	}
 	committed.TokenPrefix = auth.TokenPrefix(raw)
 	view := ViewOf(&committed, cfg, now)
 	s.writeLifecycle(ctx, a, profile.ChangeIssue, view, nil)
@@ -1173,7 +1179,7 @@ func (s *CredentialsService) Revoke(ctx context.Context, a Actor, ref Credential
 	if before.Revoked {
 		return &RevokeResult{View: ViewOf(before, cfg, s.now())}, nil
 	}
-	after, err := s.revokeTokenStore(ref.Token)
+	prior, after, err := s.revokeTokenStore(ref.Token)
 	if err != nil {
 		if errors.Is(err, storage.ErrAgentTokenNotFound) {
 			return nil, s.notFound("token", ref.Token)
@@ -1186,13 +1192,17 @@ func (s *CredentialsService) Revoke(ctx context.Context, a Actor, ref Credential
 	}
 	view := ViewOf(after, cfg, s.now())
 	s.writeLifecycle(ctx, a, profile.ChangeRevoke, view, map[string]interface{}{"changed": true})
-	// The storage transaction flipped Revoked false → true (a no-op revoke
-	// returned above). The revoked key's display prefix is `before`.
-	s.recordTokenEffect(&out, audit.ActionTokenRevoke, after,
-		[]audit.Change{
-			audit.Literal(audit.FieldTokenPrefix, audit.TokenPrefix(after.TokenPrefix), nil),
-			audit.Literal(audit.Path("revoked"), audit.Bool(false), audit.Bool(true)),
-		}, revokedAt)
+	// The line follows the transaction's own before-image: if another
+	// writer revoked the token between the read above and this transaction,
+	// nothing changed here and no line is written. The revoked key's display
+	// prefix is `before`.
+	if prior != nil && !prior.Revoked {
+		s.recordTokenEffect(&out, audit.ActionTokenRevoke, after,
+			[]audit.Change{
+				audit.Literal(audit.FieldTokenPrefix, audit.TokenPrefix(after.TokenPrefix), nil),
+				audit.Literal(audit.Path("revoked"), audit.Bool(false), audit.Bool(true)),
+			}, revokedAt)
+	}
 	s.announce(view, profile.ChangeRevoke)
 	if s.clients != nil && s.clients.notifier != nil {
 		s.clients.notifier.NotifyBindingChanged(after.Name)
@@ -1331,19 +1341,22 @@ func (s *CredentialsService) recordTokenEffect(out *adminOutbox, action string, 
 	})
 }
 
-func (s *CredentialsService) revokeTokenStore(name string) (*auth.AgentToken, error) {
+// revokeTokenStore revokes the ownerless token called name and returns the
+// record as the revoking transaction read it (nil from a store that cannot
+// report it) and as it wrote it.
+func (s *CredentialsService) revokeTokenStore(name string) (prior, after *auth.AgentToken, err error) {
 	if rep, ok := s.tokens.(tokenRevokeReporter); ok {
-		_, after, err := rep.RevokeAgentTokenReport("", name)
-		return after, err
+		return rep.RevokeAgentTokenReport("", name)
 	}
 	if err := s.tokens.RevokeAgentToken(name); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	after, err := s.tokens.GetAgentTokenByName(name)
+	after, err = s.tokens.GetAgentTokenByName(name)
 	if err != nil || after == nil {
-		return nil, storage.ErrAgentTokenNotFound
+		return nil, nil, storage.ErrAgentTokenNotFound
 	}
-	return after, nil
+	// No transactional before-image: the pre-read (not revoked) stands in.
+	return &auth.AgentToken{}, after, nil
 }
 
 func (s *CredentialsService) notFound(kind, name string) error {

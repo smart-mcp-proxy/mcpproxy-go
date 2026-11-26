@@ -332,7 +332,10 @@ func TestNewFileSink_LostNewlineAndErroredWriteAtRotation(t *testing.T) {
 				t.Fatal(err)
 			}
 			ws := s.(*writerSink)
-			pad := strings.Repeat("x", 1024*1024-40)
+			// Sized so the damaged record lands just below 1 MiB and the next
+			// record crosses it: pad line 1 MiB-17, seq:1 (≤10), repair (≤1),
+			// seq:2 (10) > 1 MiB.
+			pad := strings.Repeat("x", 1024*1024-28)
 			if err := s.Write([]byte(`{"pad":"` + pad + `"}`)); err != nil {
 				t.Fatal(err)
 			}
@@ -345,6 +348,9 @@ func TestNewFileSink_LostNewlineAndErroredWriteAtRotation(t *testing.T) {
 			}
 			_ = s.Close()
 			entries, _ := os.ReadDir(dir)
+			if len(entries) < 2 {
+				t.Fatalf("the fixture must cross the rotation threshold, got %d file(s)", len(entries))
+			}
 			found := 0
 			for _, e := range entries {
 				raw, _ := os.ReadFile(filepath.Join(dir, e.Name()))

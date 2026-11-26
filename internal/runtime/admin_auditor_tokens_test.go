@@ -15,6 +15,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 type capturingAuditor struct {
@@ -244,6 +245,39 @@ func TestAdminAudit_CreateAndDeleteTimestampsFromTheTransaction(t *testing.T) {
 	recs = cap.take()
 	require.False(t, deleted.CommittedAt.IsZero())
 	require.True(t, recs[0].At.Equal(deleted.CommittedAt))
+}
+
+// racingRevokeStore revokes the token on behalf of "another writer" right
+// before the service's own revoking transaction runs.
+type racingRevokeStore struct{ *storage.Manager }
+
+func (r racingRevokeStore) RevokeAgentTokenReport(userID, name string) (before, after *auth.AgentToken, err error) {
+	if _, _, err := r.Manager.RevokeAgentTokenReport(userID, name); err != nil {
+		return nil, nil, err
+	}
+	return r.Manager.RevokeAgentTokenReport(userID, name)
+}
+
+// FR-013/FR-016c: the line follows the transaction's before-image. A token
+// another writer revoked between the service's read and its transaction is
+// not "revoked by this request".
+func TestAdminAudit_RevokeRaceWritesNoLine(t *testing.T) {
+	ctx := context.Background()
+	h := newCredHarness(t)
+	cap := &capturingAuditor{}
+	cs := NewCredentialsService(CredentialsServiceDeps{
+		Tokens: racingRevokeStore{h.sm}, HMACKey: h.svc.hmacKey, Config: h.svc.cfg, Now: h.svc.now,
+		AdminAuditor: cap,
+	})
+	a := Actor{Kind: "api_key", Surface: profile.SurfaceCLI}
+	_, err := cs.IssueToken(ctx, a, restTokenReq("race"))
+	require.NoError(t, err)
+	cap.take()
+	_, err = cs.Revoke(ctx, a, CredentialRef{Token: "race"}, true)
+	require.NoError(t, err)
+	for _, r := range cap.take() {
+		require.NotEqual(t, audit.ActionTokenRevoke, r.Action, "the transaction saw the token already revoked")
+	}
 }
 
 func TestAdminAudit_NoAuditorIsANoOp(t *testing.T) {

@@ -38,9 +38,23 @@ type sinkAdminAuditor struct {
 	// (name, version), as authz lines carry it. Nil until the MCP proxy is
 	// built; REST lines take client.name from the ingress tag instead.
 	clientInfo func(ctx context.Context) (name, version string)
-	// activeProfile resolves the caller's active profile on an MCP request,
-	// as authz lines carry it. Nil until the MCP proxy is built.
-	activeProfile func(ctx context.Context) string
+}
+
+// adminProfileKey carries the active profile an admin tool call was admitted
+// under, captured at the ingress before the mutation (a later set_profile on
+// the same session must not re-attribute it).
+type adminProfileKey struct{}
+
+func withAdminProfile(ctx context.Context, name string) context.Context {
+	if name == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, adminProfileKey{}, name)
+}
+
+func adminProfileFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(adminProfileKey{}).(string)
+	return s
 }
 
 // newSinkAdminAuditor returns nil when there is no sink (audit off).
@@ -116,8 +130,8 @@ func (a *sinkAdminAuditor) AdminAction(ctx context.Context, rec runtime.AdminRec
 	if ok && in.Source == "mcp" && in.ClientName == "" && a.clientInfo != nil {
 		in.ClientName, in.ClientVersion = a.clientInfo(ctx)
 	}
-	if ok && in.Source == "mcp" && rec.Decider == nil && a.activeProfile != nil {
-		in.Profile = a.activeProfile(ctx)
+	if ok && rec.Decider == nil {
+		in.Profile = adminProfileFromContext(ctx)
 	}
 	if !ok {
 		audit.NoteBuildFailure()

@@ -117,6 +117,9 @@ func applyLegacyMasking(s string) (masked string, hit bool) {
 // the merged spans. admin_action labels always use it (a new event kind has
 // no legacy bytes to keep); legacy kinds use it when a Spec 133 shape is
 // present (applyMasking).
+// maxOverlapRescans bounds the overlapping-match rescans per pattern.
+const maxOverlapRescans = 32
+
 func maskAllSpans(s string) (masked string, hit bool) {
 	// Every pattern is matched against the ORIGINAL string, at
 	// every start position (FindAll returns only non-overlapping matches, so
@@ -125,13 +128,24 @@ func maskAllSpans(s string) (masked string, hit bool) {
 	// pattern by pattern lets one mask consume the prefix another needs.
 	var spans [][2]int
 	for _, re := range credentialPatterns {
+		// Restarting one byte after each match start finds overlapping
+		// matches; it is bounded (maxOverlapRescans per pattern) so a string
+		// packed with token prefixes cannot make masking quadratic. Past the
+		// bound the scan continues from each match's end, which still finds
+		// every non-overlapping match.
+		rescans := 0
 		for off := 0; off < len(s); {
 			m := re.FindStringIndex(s[off:])
 			if m == nil {
 				break
 			}
 			spans = append(spans, [2]int{off + m[0], off + m[1]})
-			off += m[0] + 1
+			if rescans < maxOverlapRescans {
+				rescans++
+				off += m[0] + 1
+			} else {
+				off += m[1]
+			}
 		}
 	}
 	if len(spans) == 0 {

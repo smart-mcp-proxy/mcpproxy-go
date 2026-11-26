@@ -93,7 +93,7 @@ In the distroless server image, `mcpproxy version`/`doctor` need `--entrypoint`
 
 ```bash
 # Tail the audit stream out of a running container
-docker logs -f my-mcpproxy | jq -R -c 'fromjson? // empty | select(.schema_version == 1)'
+docker logs -f my-mcpproxy | jq -R -c 'fromjson? // empty | objects | select(.schema_version == 1)'
 ```
 
 ### Native stdio transport exception
@@ -426,7 +426,7 @@ marker).
 ## Log-shipper example
 
 The audit sink has no built-in connector — point any file/stdout log shipper at
-it, skip any malformed line on its own (`jq -R 'fromjson? // empty'`), and filter
+it, skip any malformed or non-object line on its own (`jq -R 'fromjson? // empty | objects'`), and filter
 on `schema_version`, then route on `event`. A minimal, vendor-neutral tail-and-forward
 example (works with Filebeat, Promtail, Vector, Fluent Bit, or a shell pipe
 alike — substitute your shipper's own input stage):
@@ -434,14 +434,14 @@ alike — substitute your shipper's own input stage):
 ```bash
 # File sink: forward every well-formed audit line as it's appended
 tail -F -n0 /var/log/mcpproxy/audit.jsonl \
-  | jq -R -c --unbuffered 'fromjson? // empty | select(.schema_version == 1)' \
+  | jq -R -c --unbuffered 'fromjson? // empty | objects | select(.schema_version == 1)' \
   | your-log-forwarder --input -
 
 # stdout sink (e.g. inside Docker/Kubernetes): the container runtime already
 # captures stdout — point your log collector's normal container-log input at
 # it, or pipe a local run the same way:
 docker logs -f my-mcpproxy \
-  | jq -R -c 'fromjson? // empty | select(.schema_version == 1)' \
+  | jq -R -c 'fromjson? // empty | objects | select(.schema_version == 1)' \
   | your-log-forwarder --input -
 ```
 

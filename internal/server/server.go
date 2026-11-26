@@ -537,10 +537,6 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 			}
 			return "", ""
 		}
-		server.adminAuditor.activeProfile = func(ctx context.Context) string {
-			name, _ := mcpProxy.resolveActiveProfile(ctx)
-			return name
-		}
 	}
 
 	server.mcpProxy = mcpProxy
