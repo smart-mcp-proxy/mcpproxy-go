@@ -596,7 +596,12 @@ function isKnownFieldKey(key: string): boolean {
   return key === 'anonymous_profile' || allFields.value.some((f) => f.key === key) || serverEditionFields.some((f) => f.key === key)
 }
 
+// Set when this instance is left: a continuation that resumes after an await
+// (config load, router write) must not act on the page the user is on now.
+let unmounted = false
+
 async function focusField(key: string) {
+  if (unmounted) return
   // Clear any active search so the tabbed layout (not search results) renders.
   search.value = ''
   // A field of a section this edition does not show (or an unknown key) must not
@@ -611,6 +616,7 @@ async function focusField(key: string) {
   // written), so following the same bare focus link again is a real navigation.
   if (route.query.tab !== activeTab.value && isKnownFieldKey(key) && tabs.value.some((t) => t.id === activeTab.value)) await router.replace({ query: { ...route.query, tab: activeTab.value } })
   await nextTick()
+  if (unmounted) return
 
   // Advanced settings live inside collapsed <details>; open the one holding it.
   const acc = advancedAccordions.value.find((a) => a.fields.some((f) => f.key === key))
@@ -619,6 +625,7 @@ async function focusField(key: string) {
     const det = summary?.closest('details') as HTMLDetailsElement | null
     if (det) det.open = true
     await nextTick()
+    if (unmounted) return
   }
 
   const row = document.querySelector(`[data-test="setting-row-${key}"]`) as HTMLElement | null
@@ -775,13 +782,16 @@ onMounted(async () => {
   loadStatusExtras()
   window.addEventListener('mcpproxy:config-saved', handleConfigSaved)
   await loadConfig()
+  if (unmounted) return
   const focus = route.query.focus
   if (typeof focus === 'string' && focus) {
     await nextTick()
+    if (unmounted) return
     await focusField(focus)
   }
 })
 onUnmounted(() => {
+  unmounted = true
   window.removeEventListener('mcpproxy:config-saved', handleConfigSaved)
 })
 </script>

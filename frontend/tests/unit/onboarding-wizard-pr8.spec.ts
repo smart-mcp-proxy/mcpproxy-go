@@ -261,6 +261,7 @@ describe('Wizard tabs and hints are keyboard-operable (FR-053)', () => {
   it('focus follows the hints toggle into its other state', async () => {
     const hints: any = [{ icon: 'lightbulb', title: 'Settings', sections: [{ text: 'x' }] }]
     const w = mount(CollapsibleHintsPanel, { props: { hints }, attachTo: document.body })
+    ;(w.get('[data-test="hints-toggle"]').element as HTMLElement).focus()
     await w.get('[data-test="hints-toggle"]').trigger('click')
     await flushPromises()
     expect(document.activeElement?.getAttribute('aria-expanded')).toBe('true')
