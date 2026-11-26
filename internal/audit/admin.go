@@ -282,7 +282,8 @@ func NewAdminAction(in AdminActionInput) (Line, error) {
 	if !backgroundKinds[kind] && in.RequestID == "" {
 		return Line{}, fmt.Errorf("audit.NewAdminAction: caller.kind %s requires request_id", kind)
 	}
-	if strings.HasPrefix(in.Action, "token.") && in.Target.kind != "agent_token" && !(in.Action == ActionTokenDelete && in.Target.kind == "client") {
+	clientRecordDelete := in.Action == ActionTokenDelete && in.Target.kind == "client"
+	if strings.HasPrefix(in.Action, "token.") && in.Target.kind != "agent_token" && !clientRecordDelete {
 		return Line{}, fmt.Errorf("audit.NewAdminAction: %s requires an agent_token target", in.Action)
 	}
 	if err := checkRequiredPrefixes(in.Action, in.Changes); err != nil {
