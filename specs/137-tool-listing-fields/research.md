@@ -14,7 +14,7 @@
 ## R2. Rug-pull hash and fingerprint
 
 - **Decision**: keep the v5 approval hash; bump the review fingerprint to `rv3` with the live titles.
-- **Rationale**: no stored hash changes, so no tool can change status on upgrade (SC-002). The fingerprint is derived, never stored; a version bump only makes an open review page reload.
+- **Rationale**: the feature adds no hash change, so it adds no status change on upgrade; the existing v4→v5 formula migration runs exactly as before (SC-002). The fingerprint is derived, never stored; a version bump only makes an open review page reload.
 - **Alternatives**: a separate title fingerprint and a separate approval door: more surface for the same guarantee; rejected. Letting unbound approvals approve titles: the agent-reachable `quarantine_security` approve operations are unbound, so an agent could approve text it then reads; rejected.
 
 ## R3. `annotations.title` at upgrade
