@@ -50,8 +50,8 @@ func clientFacingEraGuard(next http.Handler) http.Handler {
 			return
 		}
 		members, ok := exactTopLevelMembers(raw)
-		if !ok || string(members["jsonrpc"]) != `"`+mcp.JSONRPC_VERSION+`"` ||
-			string(members["method"]) != `"`+string(mcp.MethodServerDiscover)+`"` || !validRequestID(members["id"]) {
+		if !ok || jsonString(members["jsonrpc"]) != mcp.JSONRPC_VERSION ||
+			jsonString(members["method"]) != string(mcp.MethodServerDiscover) || !validRequestID(members["id"]) {
 			// Anything that is not unambiguously a probe (duplicate or
 			// case-variant members included) is mcp-go's to judge.
 			next.ServeHTTP(w, r)
@@ -70,6 +70,16 @@ func clientFacingEraGuard(next http.Handler) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(body)
 	})
+}
+
+// jsonString decodes a JSON string value ("" for anything else), so escaped
+// spellings such as "server\u002fdiscover" compare by their value.
+func jsonString(raw json.RawMessage) string {
+	var v string
+	if len(raw) == 0 || json.Unmarshal(raw, &v) != nil {
+		return ""
+	}
+	return v
 }
 
 // validRequestID reports whether raw is a JSON-RPC request id: a string or a
@@ -108,7 +118,10 @@ func exactTopLevelMembers(raw []byte) (map[string]json.RawMessage, bool) {
 		if !ok {
 			return nil, false
 		}
-		key := strings.ToLower(name)
+		// encoding/json matches struct fields with Unicode simple case
+		// folding ("ſ" matches "s"); upper- then lower-casing folds the same
+		// pairs for every member name a JSON-RPC message defines.
+		key := strings.ToLower(strings.ToUpper(name))
 		if folded[key] {
 			return nil, false
 		}

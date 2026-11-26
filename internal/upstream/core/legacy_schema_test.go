@@ -28,6 +28,14 @@ func TestLegacySchemaJSON_MatchesMCPGoV100(t *testing.T) {
 			`{"type":"object","properties":{"a":{"$ref":"#/definitions/X"}},"definitions":{"X":{"type":"string"}},"additionalProperties":false,"oneOf":[{"required":["a"]}]}`,
 			`{"$defs":{"X":{"type":"string"}},"additionalProperties":false,"properties":{"a":{"$ref":"#/$defs/X"}},"required":[],"type":"object"}`,
 		},
+		{ // draft-07 definitions with a declared dialect (v1.6 keeps them apart)
+			`{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","definitions":{"X":{"type":"string"}},"properties":{"x":{"$ref":"#/definitions/X"}}}`,
+			`{"$defs":{"X":{"type":"string"}},"properties":{"x":{"$ref":"#/$defs/X"}},"required":[],"type":"object"}`,
+		},
+		{ // number spelling and a ref nested in a keyword value
+			`{"type":"object","definitions":{"X":{"const":1.0}},"properties":{"x":{"default":{"$ref":"#/definitions/X"}}}}`,
+			`{"$defs":{"X":{"const":1}},"properties":{"x":{"default":{"$ref":"#/$defs/X"}}},"required":[],"type":"object"}`,
+		},
 	}
 	for _, tc := range cases {
 		var s mcp.ToolInputSchema

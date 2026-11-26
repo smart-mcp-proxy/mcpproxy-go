@@ -39,6 +39,9 @@ func TestClientFacingEraGuard(t *testing.T) {
 	assert.Contains(t, w.Body.String(), `"id":1e400`, "a large numeric id is still an id, echoed as sent")
 	assert.Contains(t, w.Body.String(), `-32601`)
 
+	w = send(modern, `{"jsonrpc":"2\u002e0","id":2,"method":"server\u002fdiscover"}`)
+	assert.Contains(t, w.Body.String(), `-32601`, "escaped spellings are the same probe")
+
 	w = send(modern, discover)
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.JSONEq(t, `{"jsonrpc":"2.0","id":7,"error":{"code":-32601,"message":"Method not found: server/discover"}}`, w.Body.String())
@@ -51,11 +54,12 @@ func TestClientFacingEraGuard(t *testing.T) {
 		{modern, `{"jsonrpc":"2.0","method":"server/discover"}`},               // a notification
 		{modern, `[{"jsonrpc":"2.0","id":9,"method":"server/discover"}]`},      // a batch
 		{modern, `not json`},
-		{modern, `{"id":10,"method":"server/discover"}`},                                      // no jsonrpc member
-		{modern, `{"jsonrpc":"2.0","id":{"x":1},"method":"server/discover"}`},                 // object id
-		{modern, `{"jsonrpc":"2.0","id":1,"method":"tools/list","method":"server/discover"}`}, // repeated member
-		{modern, `{"jsonrpc":"2.0","id":1,"Method":"tools/list","method":"server/discover"}`}, // case variant
-		{modern, `{"jsonrpc":"2.0","id":1,"method":"server/discover"} {}`},                    // trailing data // garbage
+		{modern, `{"id":10,"method":"server/discover"}`},                                                   // no jsonrpc member
+		{modern, `{"jsonrpc":"2.0","id":{"x":1},"method":"server/discover"}`},                              // object id
+		{modern, `{"jsonrpc":"2.0","id":1,"method":"tools/list","method":"server/discover"}`},              // repeated member
+		{modern, `{"jsonrpc":"2.0","id":1,"Method":"tools/list","method":"server/discover"}`},              // case variant
+		{modern, `{"jsonrpc":"2.0","id":1,"method":"server/discover"} {}`},                                 // trailing data
+		{modern, "{\"j\u017fonrpc\":\"1.0\",\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\"}"}, // folds like encoding/json // garbage
 	} {
 		reached = nil
 		w := send(tc.version, tc.body)

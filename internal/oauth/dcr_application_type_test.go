@@ -148,3 +148,27 @@ func TestDCR_RejectApplicationType_EmptyValueStillPresent(t *testing.T) {
 	_ = resp.Body.Close()
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "the member's presence is refused, whatever its value")
 }
+
+// The token-endpoint exclusion is exact: an endpoint that differs only by
+// its query or a trailing slash is still corrected.
+func TestDCRRewrite_TokenExclusionIsExact(t *testing.T) {
+	var seen []string
+	inner := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		b, _ := io.ReadAll(r.Body)
+		seen = append(seen, string(b))
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("{}")), Header: http.Header{}}, nil
+	})
+	w := NewOAuthTransportWrapper(inner, nil, zap.NewNop())
+	w.learnEndpoints("", "https://as.example/oauth?op=token")
+	reg := `{"client_name":"mcpproxy-go","grant_types":["authorization_code"],"redirect_uris":["http://127.0.0.2:1/cb"],"application_type":"web"}`
+	for _, u := range []string{"https://as.example/oauth?op=register", "https://as.example/oauth/?op=token", "https://as.example/oauth?op=token"} {
+		req, _ := http.NewRequest(http.MethodPost, u, strings.NewReader(reg))
+		req.Header.Set("Content-Type", "application/json")
+		_, err := w.RoundTrip(req)
+		require.NoError(t, err)
+	}
+	require.Len(t, seen, 3)
+	assert.Contains(t, seen[0], `"native"`)
+	assert.Contains(t, seen[1], `"native"`)
+	assert.Equal(t, reg, seen[2], "only the exact token URL is left alone")
+}

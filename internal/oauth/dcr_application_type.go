@@ -56,9 +56,11 @@ func (w *OAuthTransportWrapper) rewriteRegistrationApplicationType(req *http.Req
 	w.mu.RLock()
 	tokenURL := w.tokenURL
 	w.mu.RUnlock()
-	// Exact match (query included): urlEndpointMatch ignores the query, and a
-	// provider may tell its token and registration endpoints apart by it.
-	if tokenURL != nil && urlEndpointMatch(tokenURL, req.URL) && tokenURL.RawQuery == req.URL.RawQuery {
+	// Exact match (path and query as sent): urlEndpointMatch ignores the
+	// query and a trailing slash, and a provider may tell its token and
+	// registration endpoints apart by either.
+	if tokenURL != nil && urlEndpointMatch(tokenURL, req.URL) &&
+		tokenURL.EscapedPath() == req.URL.EscapedPath() && tokenURL.RawQuery == req.URL.RawQuery {
 		return req
 	}
 	orig := req.Body

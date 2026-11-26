@@ -18,7 +18,7 @@ func captureOutputSchemaJSON(tool *mcp.Tool) string {
 		return hash.NormalizeJSON(string(tool.RawOutputSchema))
 	}
 
-	if tool.OutputSchema.Type == "" {
+	if tool.OutputSchema.Type == "" && len(tool.OutputSchema.Types) == 0 {
 		return ""
 	}
 
