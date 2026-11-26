@@ -12432,7 +12432,8 @@ paths:
         name: preview
         schema:
           type: boolean
-      - description: Force format (claude-desktop, claude-code, cursor, codex, gemini, mcpproxy)
+      - description: Force format (claude-desktop, claude-code, cursor, codex, gemini,
+          mcpproxy)
         in: query
         name: format
         schema:
