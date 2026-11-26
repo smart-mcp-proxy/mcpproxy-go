@@ -46,8 +46,10 @@ func (c *Client) Retire() {
 	c.Gate().Retire()
 	// GH #1827 review: an OAuth line written after a Disconnect that came
 	// before this Retire may have reopened the server log; close it again.
-	// From here on retiredDropCore drops those writes.
-	c.closeUpstreamLog()
+	// From here on retiredDropCore drops those writes. It runs on its own
+	// goroutine: Retire is called under the manager's locks, and the close
+	// waits for a log write in progress.
+	go c.closeUpstreamLog()
 }
 
 // Retired reports whether the instance's gate is retired.

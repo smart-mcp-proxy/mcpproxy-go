@@ -107,5 +107,9 @@ func TestRetire_ClosesServerLogSink(t *testing.T) {
 	<-done
 	assert.Equal(t, 0, fileLogs.Len(), "the waiting write saw the retirement")
 	c.Retire()
-	assert.Equal(t, 1, closer.n)
+	assert.Eventually(t, func() bool {
+		c.upstreamLogSinkMu.RLock()
+		defer c.upstreamLogSinkMu.RUnlock()
+		return closer.n == 1
+	}, 2*time.Second, 10*time.Millisecond)
 }

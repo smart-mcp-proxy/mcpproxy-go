@@ -1019,12 +1019,13 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 	sentAt := time.Now()
 	resp, err := httpClient.Do(req)
 	// GH #1827: this request does not pass the OAuth transport wrapper, so
-	// it logs its own token-request line.
-	status := 0
+	// it logs its own token-request line, once the body has been read (a slow
+	// log write must not eat the request's timeout).
+	status, took := 0, time.Since(sentAt)
 	if resp != nil {
 		status = resp.StatusCode
 	}
-	oauth.LogTokenRequest(ctx, c.oauthLogger(), "refresh_token", status, err, time.Since(sentAt))
+	defer oauth.LogTokenRequest(ctx, c.oauthLogger(), "refresh_token", status, err, took)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send refresh request: %w", err)
 	}
