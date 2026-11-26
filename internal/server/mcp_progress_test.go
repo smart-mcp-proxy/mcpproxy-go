@@ -46,6 +46,11 @@ func TestWithProgressRelay_NoTokenOrNoSession(t *testing.T) {
 // The upstream-written message passes the output policy like tool output:
 // redacted under redact, dropped (numbers kept) under block.
 func TestWithProgressRelay_MessageThroughOutputPolicy(t *testing.T) {
+	t.Run("a message that reads like the withheld marker is kept", func(t *testing.T) {
+		p := &MCPProxyServer{config: &config.Config{}}
+		assert.Equal(t, skillWordWithheld, p.progressMessageCleaner()(skillWordWithheld))
+	})
+
 	// A secret that straddles the forwarding cap is still seen whole.
 	t.Run("redact before the cap", func(t *testing.T) {
 		cfg := config.DefaultOutputSanitisationConfig()

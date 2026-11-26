@@ -50,8 +50,8 @@ func TestBegin_NoSinkRegistersNothing(t *testing.T) {
 func TestDispatch_RoutesByProxyTokenOnly(t *testing.T) {
 	r, clk := newRegistry()
 	var a, b []Update
-	tokA, endA := r.Begin(WithSink(context.Background(), func(u Update) { a = append(a, u) }))
-	tokB, endB := r.Begin(WithSink(context.Background(), func(u Update) { b = append(b, u) }))
+	tokA, endA := r.Begin(WithSink(context.Background(), func(u Update) bool { a = append(a, u); return true }))
+	tokB, endB := r.Begin(WithSink(context.Background(), func(u Update) bool { b = append(b, u); return true }))
 	defer endA()
 	defer endB()
 	require.NotEqual(t, tokA, tokB)
@@ -75,7 +75,7 @@ func TestDispatch_RoutesByProxyTokenOnly(t *testing.T) {
 func TestDispatch_TokensDifferAcrossRegistries(t *testing.T) {
 	r1, _ := newRegistry()
 	r2, _ := newRegistry()
-	ctx := WithSink(context.Background(), func(Update) {})
+	ctx := WithSink(context.Background(), func(Update) bool { return true })
 	t1, e1 := r1.Begin(ctx)
 	t2, e2 := r2.Begin(ctx)
 	defer e1()
@@ -87,7 +87,7 @@ func TestDispatch_TokensDifferAcrossRegistries(t *testing.T) {
 func TestDispatch_AfterEndOrClearDropped(t *testing.T) {
 	r, _ := newRegistry()
 	n := 0
-	ctx := WithSink(context.Background(), func(Update) { n++ })
+	ctx := WithSink(context.Background(), func(Update) bool { n++; return true })
 	tok, end := r.Begin(ctx)
 	end()
 	assert.False(t, r.Dispatch(progressNote(tok, 1, nil, "")))
@@ -103,7 +103,7 @@ func TestDispatch_AfterEndOrClearDropped(t *testing.T) {
 func TestDispatch_RateLimitedAndMonotonic(t *testing.T) {
 	r, clk := newRegistry()
 	var got []float64
-	tok, end := r.Begin(WithSink(context.Background(), func(u Update) { got = append(got, u.Progress) }))
+	tok, end := r.Begin(WithSink(context.Background(), func(u Update) bool { got = append(got, u.Progress); return true }))
 	defer end()
 
 	assert.True(t, r.Dispatch(progressNote(tok, 1, 10.0, "")))
@@ -126,10 +126,29 @@ func TestDispatch_RateLimitedAndMonotonic(t *testing.T) {
 	assert.Equal(t, []float64{1, 3, 4, 10}, got)
 }
 
+// An update the client could not take does not use up the interval or the
+// completion bypass.
+func TestDispatch_UnsentUpdateKeepsState(t *testing.T) {
+	r, _ := newRegistry()
+	accept := false
+	var got []float64
+	tok, end := r.Begin(WithSink(context.Background(), func(u Update) bool {
+		if accept {
+			got = append(got, u.Progress)
+		}
+		return accept
+	}))
+	defer end()
+	assert.False(t, r.Dispatch(progressNote(tok, 10, 10.0, "")))
+	accept = true
+	assert.True(t, r.Dispatch(progressNote(tok, 10, 10.0, "")), "same progress again: nothing was sent before")
+	assert.Equal(t, []float64{10}, got)
+}
+
 func TestDispatch_Malformed(t *testing.T) {
 	r, _ := newRegistry()
 	n := 0
-	tok, end := r.Begin(WithSink(context.Background(), func(Update) { n++ }))
+	tok, end := r.Begin(WithSink(context.Background(), func(Update) bool { n++; return true }))
 	defer end()
 	bad := progressNote(tok, 1, nil, "")
 	delete(bad.Params.AdditionalFields, "progress")
@@ -146,7 +165,7 @@ func TestDispatch_Malformed(t *testing.T) {
 func TestDispatch_OverlongMessageLeftOut(t *testing.T) {
 	r, _ := newRegistry()
 	var got []Update
-	tok, end := r.Begin(WithSink(context.Background(), func(u Update) { got = append(got, u) }))
+	tok, end := r.Begin(WithSink(context.Background(), func(u Update) bool { got = append(got, u); return true }))
 	defer end()
 	require.True(t, r.Dispatch(progressNote(tok, 1, nil, strings.Repeat("x", MaxRawMessageBytes))))
 	r.now = func() time.Time { return time.Unix(2000, 0) }
@@ -168,7 +187,7 @@ func TestCapMessage_RuneBoundary(t *testing.T) {
 // Two tokens of one registry share nothing an upstream could extend.
 func TestBegin_TokensUnguessable(t *testing.T) {
 	r, _ := newRegistry()
-	ctx := WithSink(context.Background(), func(Update) {})
+	ctx := WithSink(context.Background(), func(Update) bool { return true })
 	t1, e1 := r.Begin(ctx)
 	t2, e2 := r.Begin(ctx)
 	defer e1()

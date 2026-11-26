@@ -36,10 +36,13 @@ func (p *MCPProxyServer) withProgressRelay(ctx context.Context, request mcp.Call
 // messages); a message the policy withholds becomes "".
 func (p *MCPProxyServer) progressMessageCleaner() func(string) string {
 	return func(s string) string {
-		out := p.skillWordCleaner(p.skillPolicy())(s)
-		if out == skillWordWithheld {
-			return ""
+		pol := p.skillPolicy()
+		if pol.mutates && pol.cfg.IsBlock() {
+			if criticalAnywhere(pol.detector, s) {
+				return ""
+			}
+			return s
 		}
-		return out
+		return p.skillWordCleaner(pol)(s)
 	}
 }

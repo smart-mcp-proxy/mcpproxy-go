@@ -47,8 +47,10 @@ type Update struct {
 	Message  string
 }
 
-// Sink receives the forwarded updates of one call. It must not block.
-type Sink func(Update)
+// Sink receives the forwarded updates of one call. It must not block, and
+// reports whether the update was sent; one it could not send leaves the
+// call's rate and completion state as it was.
+type Sink func(Update) bool
 
 type sinkKey struct{}
 
@@ -82,7 +84,7 @@ func SessionSink(ctx context.Context, clientToken mcp.ProgressToken, clean func(
 	if session == nil || !session.Initialized() {
 		return nil
 	}
-	return func(u Update) {
+	return func(u Update) bool {
 		params := map[string]any{
 			"progressToken": clientToken,
 			"progress":      u.Progress,
@@ -110,7 +112,9 @@ func SessionSink(ctx context.Context, clientToken mcp.ProgressToken, clean func(
 		}
 		select {
 		case session.NotificationChannel() <- n:
+			return true
 		default:
+			return false
 		}
 	}
 }
@@ -251,9 +255,11 @@ func (r *Registry) Dispatch(n mcp.JSONRPCNotification) bool {
 	if c.sent && !done && now.Sub(c.lastSent) < MinInterval {
 		return false
 	}
+	if !c.sink(u) {
+		return false
+	}
 	c.sent, c.last, c.lastSent = true, progress, now
 	c.doneSent = c.doneSent || done
-	c.sink(u)
 	return true
 }
 

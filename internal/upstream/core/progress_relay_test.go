@@ -110,7 +110,7 @@ func TestProgressRelay_StreamableHTTPUpstream(t *testing.T) {
 // A disconnect forgets every call in flight.
 func TestProgressRelay_DisconnectClears(t *testing.T) {
 	var c Client
-	tok, end := c.progress.Begin(progressrelay.WithSink(context.Background(), func(progressrelay.Update) { t.Error("forwarded after disconnect") }))
+	tok, end := c.progress.Begin(progressrelay.WithSink(context.Background(), func(progressrelay.Update) bool { t.Error("forwarded after disconnect"); return true }))
 	defer end()
 	require.NotNil(t, tok)
 	c.clearProgressCalls()
