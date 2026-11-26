@@ -295,4 +295,26 @@ describe('Clients table and Manage panel (Spec 134 FR-060)', () => {
     expect(wrapper.find('[data-test="client-manage-root"]').exists()).toBe(false)
     wrapper.unmount()
   })
+
+  it('keeps the panel of a client whose rotation is in flight, then opens the queued one', async () => {
+    const dev = makeClient('dev-laptop', { kind: 'custom', state: 'connected_seen', credential_state: 'client', token_name: 'client-dev-laptop', profile: 'work-ro', profile_mode: 'locked', profile_source: 'pin' })
+    let finish!: (value: unknown) => void
+    ;(api.rotateClient as any).mockReturnValue(new Promise(resolve => { finish = resolve }))
+    const { wrapper } = await mountClients([dev, cursor])
+    await wrapper.get('[data-test="client-manage-dev-laptop"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="client-rotate-dev-laptop"]').trigger('click')
+    await wrapper.get('[data-test="rotate-confirm"]').trigger('click')
+    await flushPromises()
+    // Another client is asked for while the rotation is pending: the panel stays.
+    await wrapper.get('[data-test="client-manage-cursor"]').trigger('click').catch(() => {})
+    await flushPromises()
+    expect(wrapper.find('[data-test="client-manage-panel-dev-laptop"]').exists()).toBe(true)
+    // Cancel cannot close the dialog mid-flight, so the secret has somewhere to arrive.
+    expect(wrapper.get('[data-test="rotate-confirm"]').attributes('disabled')).toBeDefined()
+    finish({ client: dev, credential: 'mcp_cli_0123456789abcdef0123456789abcdef', snippet: null, rotation: { state: 'pending' } })
+    await flushPromises()
+    expect(wrapper.find('[data-test="credential-once-dialog"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
 })

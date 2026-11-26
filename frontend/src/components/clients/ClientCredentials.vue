@@ -84,10 +84,12 @@ type Pending = { kind: 'api_key'; prefix: string } | { kind: 'browser_login'; cr
 // (group "How it connects"), `revoke` shows only the revoke actions (group
 // "Disconnect or remove"); `all` is the whole section as before.
 const props = withDefaults(defineProps<{ client: Pick<ClientPresence, 'id' | 'display_name' | 'credentials' | 'browser_login_disabled'>; section?: 'all' | 'status' | 'revoke' }>(), { section: 'all' })
-const emit = defineEmits<{ (e: 'changed'): void }>()
+const emit = defineEmits<{ (e: 'changed'): void; (e: 'busy', busy: boolean): void }>()
 
 const pending = ref<Pending | null>(null)
 const busy = ref(false)
+// A revoke in flight keeps the panel mounted until it settles, so its refusal has somewhere to show.
+watch(busy, value => emit('busy', value))
 const error = ref('')
 
 const visible = computed(() => props.client.credentials !== undefined || props.client.browser_login_disabled !== undefined)

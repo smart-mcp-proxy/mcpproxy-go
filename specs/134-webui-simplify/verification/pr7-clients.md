@@ -4,13 +4,21 @@ Checked on the PR head, 2026-11-26, macOS arm64. Stacked on #2049 (PR 1).
 
 | Check | Command | Result |
 |---|---|---|
-| Frontend unit tests | `cd frontend && npx vitest run` | 3229 passed |
+| Frontend unit tests | `cd frontend && npx vitest run` | 3233 passed (after merging main) |
 | Type check | `cd frontend && npx vue-tsc --noEmit` | clean |
 | Build | `cd frontend && npm run build`; `go build ./cmd/mcpproxy`; `go build -tags server ./cmd/mcpproxy` | ok |
 | Playwright sweeps with fixture upstream, own HOME, port 19294 | `./scripts/run-web-smoke.sh` | 173 passed, 3 failed, 4 did not run (the 3 are on Activity, below) |
 | PR 7 spec alone, after the last header fix | `clients-tokens-usage-pr7.spec.ts` | 6 passed |
 
 The 3 failures are `profiles-scope.spec.ts` "layout at 1024px" (activity table overflows its card by 30 px) and `visual-a11y-sweep.spec.ts` "contrast AA: /activity" in both themes ("· over 1m" caption at 3.45:1). `Activity.vue` is not in this PR's diff (`git diff ad6a819ac HEAD -- frontend/src/views/Activity.vue` is empty); they belong to PR 5. "4 did not run" are the rest of the serial group after the first failure.
+
+## After merging main (PR 1 landed), 2026-11-26
+
+Red CI before the merge, all from PR 1's lists and fixed by main: Server Edition (`TestProfilesV3ParityMatrixResolves`, `TestSpec109Traceability_AcceptanceIndex`), Unit Tests and the Windows amd64 build (`TestWebUISweepSpecListIsComplete`: `shell-pr1.spec.ts` undocumented). All pass locally after the merge, also with `-tags server`. The macOS and Linux build jobs ran 2 h 36 min and failed with no test output (queue backlog), not from this change.
+
+Full sweeps on the merged head: 171-173 passed with 3-5 failing, then a targeted run of the five specs this PR touches (oauth consent, PR 7, profiles-clients, profiles-unhide, shell-pr1): 63 passed. Failing and not from this PR: `profiles-scope` "layout at 1024px" (activity table overflows by 30 px) and `/activity` contrast ("· over 1m" at 3.45:1): `Activity.vue` is identical to `origin/main`, so they stay until PR 5. `shell-pr1` "Tab through the header ... Ctrl+K" failed in 2 of 7 full runs and passed in the rest and in the targeted run: a flake, not touched.
+
+Sol rounds used on this PR: 4 (round 3 and 4 found only races in rapid history navigation; fixed: confirmations bound to the named credential, rotate previews numbered per opening, the panel kept and a queued open applied while a rotation or revoke is in flight). Not fixable in the UI: `revoke API key` takes the client id only, so a key replaced between the last page read and the click is caught by a key-prefix check at click time but not atomically. A key-bound revoke would need a backend change (recorded here, not made).
 
 ## SC-006, tokens part (1280 px)
 

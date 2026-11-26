@@ -75,7 +75,7 @@
         <section class="space-y-3" :data-test="`client-manage-key-${client.id}`" :aria-labelledby="`${titleId}-key`">
           <h3 :id="`${titleId}-key`" class="text-base font-semibold">Key</h3>
           <CredentialLifecycle v-if="client.kind === 'custom' || client.issuer" :id="client.id" kind="client" :profile="client.profile" :mode="client.profile_mode" :issuer="client.issuer" :lease="client.lease" :expires-at="client.expires_at" :revoked="client.credential_state === 'revoked'" :revoked-at="client.revoked_at" :credential-state="client.credential_state" :purpose="client.purpose" :profile-state="client.profile_state" :show-state="true" />
-          <ClientBindingControls :client="client" section="key" @changed="emit('changed')" @credential="emit('credential', $event)" @busy="emit('busy', $event)" />
+          <ClientBindingControls :client="client" section="key" @changed="emit('changed')" @credential="emit('credential', $event)" @busy="setBusy('key', $event)" />
         </section>
 
         <!-- 4. Disconnect or remove (closed by default) -->
@@ -86,7 +86,7 @@
               <button type="button" class="btn btn-sm btn-outline btn-error max-sm:min-h-11" :data-test="`client-disconnect-${client.id}`" @click="emit('connect', client.id)">Disconnect&hellip;</button>
               <p class="text-sm text-base-content/70">Opens the connect list on this client, where Disconnect asks for a confirmation that names the file; the client's credential is revoked too.</p>
             </div>
-            <ClientCredentials :client="client" section="revoke" @changed="emit('changed')" />
+            <ClientCredentials :client="client" section="revoke" @changed="emit('changed')" @busy="setBusy('revoke', $event)" />
             <ClientBindingControls :client="client" section="remove" @changed="emit('changed')" @forget="emit('forget', $event)" />
             <p v-if="!removable" class="text-sm text-base-content/70">Nothing to disconnect or revoke for this client.</p>
           </div>
@@ -133,6 +133,12 @@ const panelEl = ref<HTMLElement | null>(null)
 const titleEl = ref<HTMLElement | null>(null)
 const titleId = `client-manage-${Math.random().toString(36).slice(2, 8)}`
 const pathCopied = ref(false)
+// Rotate and revoke report separately; the page hears one flag.
+const inFlight = { key: false, revoke: false }
+function setBusy(source: 'key' | 'revoke', busy: boolean) {
+  inFlight[source] = busy
+  emit('busy', inFlight.key || inFlight.revoke)
+}
 
 const rowError = computed(() => props.client ? bindings.rowErrors[props.client.id] : undefined)
 const configPath = computed(() => props.client?.display_path || props.client?.config_path || '')

@@ -163,9 +163,12 @@ function selectTab(id: string) { tab.value = id }
 // A credential rotation in flight keeps the panel until its one-time secret has reached the page.
 let panelBusy = false
 let closeWhenIdle = false
+let queuedOpen = ''
 function onPanelBusy(busy: boolean) {
   panelBusy = busy
-  if (!busy && closeWhenIdle) { closeWhenIdle = false; panelId.value = '' }
+  if (busy) return
+  if (closeWhenIdle) { closeWhenIdle = false; queuedOpen = ''; panelId.value = '' }
+  else if (queuedOpen) { const id = queuedOpen; queuedOpen = ''; void openPanel(id) }
 }
 function dropPanel() { if (panelBusy) closeWhenIdle = true; else panelId.value = '' }
 watch(tab, (value) => { if (value !== 'clients') { handledFocus = ''; if (panelId.value) dropPanel() } })
@@ -194,6 +197,8 @@ function isFolded(client: ClientPresence) { return isUndetectedSupported(client)
 const shownClients = computed(() => store.clients.filter(client => !isFolded(client)))
 const undetectedClients = computed(() => store.clients.filter(isFolded))
 async function openPanel(id: string) {
+  // The panel of a client with a rotation or revoke in flight is not swapped out under it.
+  if (panelBusy && panelId.value && panelId.value !== id) { queuedOpen = id; return }
   panelId.value = id
   await store.loadDetail(id)
 }
