@@ -5,8 +5,8 @@
 | Field | JSON | Type | Rule |
 |---|---|---|---|
 | Title | `title` | string | trimmed; empty or equal to the raw name → absent (FR-002) |
-| TitleInvalid | `title_invalid` | {reason, preview} | reason `too_long`, `control_char`, `bidi_control`; preview ≤ 64 chars with controls escaped; the raw value is not kept |
-| AnnotationsTitleInvalid | `annotations_title_invalid` | string | same for `annotations.title` |
+| ListingDigest | (on `ToolMetadata`, `listing_digest`) | string | SHA-256 of canonical extras JSON; change detection only, never identity |
+| TitleInvalid / AnnotationsTitleInvalid | `title_invalid`, `annotations_title_invalid` | {reason, preview} | reason `too_long`, `control_char`, `bidi_control`; preview ≤ 64 chars with controls escaped; the raw value is not kept |
 | Icons | `icons` | []Icon | ≤ 8, validated (FR-003) |
 | IconsDropped | `icons_dropped` | {count, items[≤8]{index, reason}} | reasons: `scheme`, `too_long`, `bad_data_uri`, `mime`, `mime_mismatch`, `sizes`, `theme`, `count`, `tool_budget`, `server_budget` |
 | Meta | `meta` | raw JSON object | ≤ 16 KiB canonical, `progressToken` removed |
