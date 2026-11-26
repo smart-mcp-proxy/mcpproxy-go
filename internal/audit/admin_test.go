@@ -555,3 +555,14 @@ func TestLiteral_FlattenedSegmentIsNotLiteral(t *testing.T) {
 		t.Fatalf("a segment containing '/' is never literal: %v", ch)
 	}
 }
+
+func TestAllServersGrantedAmong_ShowsTheWildcardAndCountsTheRest(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
+	in.Changes = []audit.Change{audit.AllServersGrantedAmong(audit.Path("allowed_servers"), 2)}
+	_, obj := mustAdmin(t, in)
+	ch := obj["changes"].([]interface{})[0].(map[string]interface{})
+	if a := ch["added"].([]interface{}); len(a) != 1 || a[0] != "*" || ch["added_count"] != float64(2) || ch["truncated"] != true {
+		t.Fatalf("got %v", ch)
+	}
+}

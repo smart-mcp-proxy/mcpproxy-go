@@ -390,7 +390,14 @@ func TestAdminActionDoors_CLIOverTraySocket(t *testing.T) {
 	if goruntime.GOOS == "windows" {
 		t.Skip("named-pipe transport; the socket path is the Unix tray transport")
 	}
-	e := newAdminE2E(t, func(cfg *config.Config) { cfg.EnableSocket = true })
+	// A Unix socket path is limited to ~104 bytes; a long TMPDIR (macOS)
+	// would make the bind fail and the daemon fall back to TCP. Use a short
+	// data directory under /tmp.
+	shortDir, err := os.MkdirTemp("/tmp", "mx")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(shortDir) })
+	require.NoError(t, os.Chmod(shortDir, 0o700))
+	e := newAdminE2E(t, func(cfg *config.Config) { cfg.EnableSocket = true; cfg.DataDir = shortDir })
 	endpoint := socket.GetDefaultSocketPath(e.env.proxyServer.runtime.Config().DataDir)
 	socketPath := strings.TrimPrefix(endpoint, "unix://")
 	require.Eventually(t, func() bool { _, err := os.Stat(socketPath); return err == nil }, 10*time.Second, 50*time.Millisecond, "tray socket")

@@ -823,6 +823,10 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 		// exists (Spec 133 PR-1b).
 		if allWildcard(committed.AllowedServers) {
 			changes = append(changes, audit.AllServersGranted(audit.Path("allowed_servers")))
+		} else if containsWildcard(committed.AllowedServers) {
+			// "*" grants every server whatever else is listed: show it, and
+			// count the other entries without naming them.
+			changes = append(changes, audit.AllServersGrantedAmong(audit.Path("allowed_servers"), len(committed.AllowedServers)))
 		} else {
 			changes = append(changes, audit.Withheld(audit.Path("allowed_servers"), audit.WithheldValue))
 		}
@@ -1514,4 +1518,13 @@ func allWildcard(list []string) bool {
 		}
 	}
 	return true
+}
+
+func containsWildcard(list []string) bool {
+	for _, v := range list {
+		if v == "*" {
+			return true
+		}
+	}
+	return false
 }

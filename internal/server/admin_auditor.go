@@ -38,6 +38,9 @@ type sinkAdminAuditor struct {
 	// (name, version), as authz lines carry it. Nil until the MCP proxy is
 	// built; REST lines take client.name from the ingress tag instead.
 	clientInfo func(ctx context.Context) (name, version string)
+	// activeProfile resolves the caller's active profile on an MCP request,
+	// as authz lines carry it. Nil until the MCP proxy is built.
+	activeProfile func(ctx context.Context) string
 }
 
 // newSinkAdminAuditor returns nil when there is no sink (audit off).
@@ -112,6 +115,9 @@ func (a *sinkAdminAuditor) AdminAction(ctx context.Context, rec runtime.AdminRec
 	in, ok := adminLineInput(ctx, rec)
 	if ok && in.Source == "mcp" && in.ClientName == "" && a.clientInfo != nil {
 		in.ClientName, in.ClientVersion = a.clientInfo(ctx)
+	}
+	if ok && in.Source == "mcp" && rec.Decider == nil && a.activeProfile != nil {
+		in.Profile = a.activeProfile(ctx)
 	}
 	if !ok {
 		audit.NoteBuildFailure()

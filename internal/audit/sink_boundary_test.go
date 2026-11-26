@@ -315,3 +315,114 @@ func TestSink_FailedOpenRepairIsRetriedByPath(t *testing.T) {
 		t.Fatalf("got %q", raw)
 	}
 }
+
+// D-C at the rotation threshold: a record that lost only its newline, and a
+// full-length write that still returned an error, each leave every file
+// well-delimited and the next record readable on its own line.
+func TestNewFileSink_LostNewlineAndErroredWriteAtRotation(t *testing.T) {
+	for name, wrap := range map[string]func(io.Writer) io.Writer{
+		"lost newline":              func(w io.Writer) io.Writer { return &dropNewlineOnceWriter{w: w} },
+		"full-length errored write": func(w io.Writer) io.Writer { return &errAfterFullWriteOnceWriter{w: w} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "audit.jsonl")
+			s, err := NewFileSink(path, 1, 5, 1, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ws := s.(*writerSink)
+			pad := strings.Repeat("x", 1024*1024-40)
+			if err := s.Write([]byte(`{"pad":"` + pad + `"}`)); err != nil {
+				t.Fatal(err)
+			}
+			ws.mu.Lock()
+			ws.w = wrap(ws.w)
+			ws.mu.Unlock()
+			_ = s.Write([]byte(`{"seq":1}`)) // near the threshold, damaged
+			if err := s.Write([]byte(`{"seq":2}`)); err != nil {
+				t.Fatal(err)
+			}
+			_ = s.Close()
+			entries, _ := os.ReadDir(dir)
+			found := 0
+			for _, e := range entries {
+				raw, _ := os.ReadFile(filepath.Join(dir, e.Name()))
+				if len(raw) > 0 && raw[len(raw)-1] != '\n' {
+					t.Fatalf("%s ends mid-record", e.Name())
+				}
+				for _, l := range assertWellDelimited(t, raw) {
+					if l == `{"seq":2}` {
+						found++
+					}
+				}
+			}
+			if found != 1 {
+				t.Fatalf("the next record must be readable once, found %d", found)
+			}
+		})
+	}
+}
+
+// Reopen at the size limit of a file whose last record lost its newline.
+func TestNewFileSink_ReopenLostNewlineAtSizeLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	rec := `{"pad":"` + strings.Repeat("x", 1024*1024-10) + `"}`
+	if err := os.WriteFile(path, []byte(rec), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewFileSink(path, 1, 5, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Write([]byte(`{"seq":2}`)); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+	entries, _ := os.ReadDir(dir)
+	parsed := 0
+	for _, e := range entries {
+		raw, _ := os.ReadFile(filepath.Join(dir, e.Name()))
+		if len(raw) > 0 && raw[len(raw)-1] != '\n' {
+			t.Fatalf("%s ends mid-record", e.Name())
+		}
+		parsed += len(assertWellDelimited(t, raw))
+	}
+	if parsed != 2 {
+		t.Fatalf("the complete old record and the new one must both parse, got %d", parsed)
+	}
+}
+
+type dropNewlineOnceWriter struct {
+	w    io.Writer
+	done bool
+}
+
+func (d *dropNewlineOnceWriter) Write(p []byte) (int, error) {
+	if !d.done && len(p) > 1 && p[len(p)-1] == '\n' {
+		d.done = true
+		n, err := d.w.Write(p[:len(p)-1])
+		if err == nil {
+			err = errors.New("newline lost")
+		}
+		return n, err
+	}
+	return d.w.Write(p)
+}
+
+type errAfterFullWriteOnceWriter struct {
+	w    io.Writer
+	done bool
+}
+
+func (e *errAfterFullWriteOnceWriter) Write(p []byte) (int, error) {
+	n, err := e.w.Write(p)
+	if !e.done {
+		e.done = true
+		if err == nil {
+			err = errors.New("fsync failed")
+		}
+	}
+	return n, err
+}

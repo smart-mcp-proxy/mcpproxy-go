@@ -207,7 +207,7 @@ func validRef(r string) bool {
 		}
 	}
 	// A ref the whole-line sanitizer would rewrite is not stable.
-	_, hit := applyMasking(r)
+	_, hit := maskAllSpans(r)
 	return !hit
 }
 
@@ -323,7 +323,7 @@ func NewAdminAction(in AdminActionInput) (Line, error) {
 		"outcome":        "success",
 	}
 	if in.RequestID != "" {
-		masked, hit := applyMasking(in.RequestID)
+		masked, hit := maskAllSpans(in.RequestID)
 		if hit {
 			noteFieldMask()
 			f["request_id_masked"] = true
@@ -429,7 +429,7 @@ func renderLabel(s string) (string, bool) {
 	if s == "" || containsPrivateKey(s) {
 		return "", false
 	}
-	masked, hit := applyMasking(s)
+	masked, hit := maskAllSpans(s)
 	if hit {
 		noteFieldMask()
 	}

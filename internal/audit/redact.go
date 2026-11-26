@@ -40,18 +40,9 @@ func truncateField(s string) string {
 // credentialPatterns are all matched against the original string and their
 // spans merged (applyMasking), so their order no longer decides what is
 // masked.
-var credentialPatterns = []*regexp.Regexp{
-	// Spec 133 FR-016: the proxy's own token shapes (agent token, client
-	// credential, browser-login access and refresh tokens) first, so a
-	// broader pattern that stops at '-' cannot consume their prefix and
-	// leave the secret tail; sixteen or more characters after the kind
-	// prefix, so a display token_prefix (8–16 characters) never matches.
-	// GitHub fine-grained PATs (github_pat_) follow the classic gh*_ shape.
-	// A JWT first: its segments are dot-separated, so a pattern that stops
-	// at '.' (the proxy-token one) could otherwise consume its first segment
-	// and leave the payload and signature unmasked.
-	regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`),
-	regexp.MustCompile(`mcp_(agt|cli|oat|ort)_[A-Za-z0-9_-]{16,}`),
+// legacyPatterns are the Spec 107 fixed-prefix patterns, in their original
+// order (most specific prefix first, e.g. sk-ant- before sk-).
+var legacyPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`sk-ant-[A-Za-z0-9-]{10,}`),
 	// OpenAI keys: legacy sk-{48}, and current sk-proj-/sk-svcacct-/sk-admin-
 	// forms, which insert a hyphen-delimited segment before the random
@@ -59,10 +50,23 @@ var credentialPatterns = []*regexp.Regexp{
 	// matched the legacy form).
 	regexp.MustCompile(`sk-[A-Za-z0-9_-]{16,}`),
 	regexp.MustCompile(`gh[poushr]_[A-Za-z0-9]{16,}`),
-	regexp.MustCompile(`github_pat_[A-Za-z0-9_]{22,}`),
 	regexp.MustCompile(`AKIA[0-9A-Za-z]{8,}`),
+	regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`),
 	regexp.MustCompile(`Bearer\s+[A-Za-z0-9\-_.~+/]+=*`),
 }
+
+// spec133Patterns are the shapes Spec 133 FR-016 added: the proxy's own
+// tokens (agent token, client credential, browser-login access and refresh
+// tokens; sixteen or more characters after the kind prefix, so a display
+// token_prefix of 8–16 characters never matches) and GitHub fine-grained
+// PATs.
+var spec133Patterns = []*regexp.Regexp{
+	regexp.MustCompile(`mcp_(agt|cli|oat|ort)_[A-Za-z0-9_-]{16,}`),
+	regexp.MustCompile(`github_pat_[A-Za-z0-9_]{22,}`),
+}
+
+// credentialPatterns is every pattern, legacy first.
+var credentialPatterns = append(append([]*regexp.Regexp(nil), legacyPatterns...), spec133Patterns...)
 
 func maskMatch(s string) string {
 	if len(s) <= 8 {
@@ -80,10 +84,54 @@ func maskMatch(s string) string {
 // pattern needed (a classic gh*_ token running into github_pat_, a proxy
 // token running into a JWT), leaving the second secret's tail in the line.
 func applyMasking(s string) (masked string, hit bool) {
+	// FR-004: a string that matches none of the Spec 133 patterns is masked
+	// exactly as before (pattern by pattern, legacy order), so a legacy line
+	// stays byte-identical.
+	newShape := false
+	for _, re := range spec133Patterns {
+		if re.MatchString(s) {
+			newShape = true
+			break
+		}
+	}
+	if !newShape {
+		return applyLegacyMasking(s)
+	}
+	return maskAllSpans(s)
+}
+
+// applyLegacyMasking is the Spec 107 pass: pattern by pattern, legacy order.
+func applyLegacyMasking(s string) (masked string, hit bool) {
+	{
+		for _, re := range legacyPatterns {
+			if re.MatchString(s) {
+				hit = true
+				s = re.ReplaceAllStringFunc(s, maskMatch)
+			}
+		}
+		return s, hit
+	}
+}
+
+// maskAllSpans matches every pattern against the ORIGINAL string and masks
+// the merged spans. admin_action labels always use it (a new event kind has
+// no legacy bytes to keep); legacy kinds use it when a Spec 133 shape is
+// present (applyMasking).
+func maskAllSpans(s string) (masked string, hit bool) {
+	// Every pattern is matched against the ORIGINAL string, at
+	// every start position (FindAll returns only non-overlapping matches, so
+	// two back-to-back tokens of one shape would hide the second), and the
+	// overlapping spans are merged before anything is replaced: replacing
+	// pattern by pattern lets one mask consume the prefix another needs.
 	var spans [][2]int
 	for _, re := range credentialPatterns {
-		for _, m := range re.FindAllStringIndex(s, -1) {
-			spans = append(spans, [2]int{m[0], m[1]})
+		for off := 0; off < len(s); {
+			m := re.FindStringIndex(s[off:])
+			if m == nil {
+				break
+			}
+			spans = append(spans, [2]int{off + m[0], off + m[1]})
+			off += m[0] + 1
 		}
 	}
 	if len(spans) == 0 {

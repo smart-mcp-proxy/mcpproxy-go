@@ -143,7 +143,7 @@ func (f FieldPath) render() (string, bool) {
 			break
 		}
 		seg := s
-		if m, hit := applyMasking(seg); hit {
+		if m, hit := maskAllSpans(seg); hit {
 			noteFieldMask()
 			seg = m
 			masked = true
@@ -268,13 +268,22 @@ func (v RateLimitValue) render() (interface{}, bool) {
 // documented `*` sentinel added (contract §Changes, name lists). Lists that
 // name servers are reported once PR-1b's server-name provenance exists;
 // until then they are withheld.
-func AllServersGranted(field FieldPath) Change {
+func AllServersGranted(field FieldPath) Change { return AllServersGrantedAmong(field, 1) }
+
+// AllServersGrantedAmong is AllServersGranted for a list of total entries
+// that contains the sentinel: only "*" is rendered, added_count reports the
+// full list and truncated marks the entries left out (server names, until
+// PR-1b's provenance).
+func AllServersGrantedAmong(field FieldPath, total int) Change {
 	if field.sortKey() != Path("allowed_servers").sortKey() {
 		// Only a server allow-list can carry the sentinel: anything else is
 		// classified like any other path (never rendered).
 		return Withheld(field, WithheldKind(ClassifyField(field)))
 	}
-	return Change{path: field, set: true, list: true, added: []interface{}{"*"}, addedCount: 1}
+	if total < 1 {
+		total = 1
+	}
+	return Change{path: field, set: true, list: true, added: []interface{}{"*"}, addedCount: total, truncated: total > 1}
 }
 
 // LiteralValue is the sealed set of value types a literal change may carry.
@@ -349,6 +358,7 @@ type Change struct {
 	after  interface{}
 	// list, added, addedCount, removedCount: a name-list diff entry.
 	list         bool
+	truncated    bool
 	added        []interface{}
 	addedCount   int
 	removedCount int
@@ -423,6 +433,9 @@ func (c Change) entry() (map[string]interface{}, error) {
 		}
 		e["added_count"] = c.addedCount
 		e["removed_count"] = c.removedCount
+		if c.truncated {
+			e["truncated"] = true
+		}
 		return e, nil
 	}
 	if c.before == nil && c.after == nil {
