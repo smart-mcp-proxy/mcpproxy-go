@@ -171,8 +171,8 @@ When mcpproxy registers itself, the request sends `"application_type": "native"`
 
 **Acceptance Scenarios**:
 
-1. **Given** a redirect whose host is `127.0.0.1`, `[::1]` or `localhost`, **When** DCR runs, **Then** the body has `application_type: "native"`.
-2. **Given** a non-loopback redirect host, **When** DCR runs, **Then** the body has `application_type: "web"`.
+1. **Given** an `http` redirect whose host is `127.0.0.1`, another `127/8` address, `[::1]` or `localhost`, **When** DCR runs, **Then** the body has `application_type: "native"`.
+2. **Given** a non-loopback redirect host, or an `https` redirect on a loopback host, **When** DCR runs, **Then** the body has `application_type: "web"`.
 3. **Given** a provider that rejects the field, **Then** mcpproxy does not retry without it. The existing DCR error surfaces, and the docs name the supported remedy: a pre-registered client, configured as a static `oauth.client_id`.
 
 ---

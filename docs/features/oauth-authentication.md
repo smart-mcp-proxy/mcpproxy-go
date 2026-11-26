@@ -94,13 +94,16 @@ before it exchanges a code or shows a result page, when:
 - `state` is missing or empty;
 - the query cannot be parsed (a bad `%` escape, `;` used as a separator).
 
-The browser then shows **Authorization Failed** ("The sign-in response was
-malformed …") and nothing is signed in. A refused response does not cancel the
-sign-in: if the provider then sends a correct response for the same sign-in, it
-still completes. The same rules apply to the callback behind a remote Web UI
-(`oauth.callback_base_url`) and, in the server edition, to the brokered
-credential connect callback, which redirects to the Web UI with
-`connect_failed`.
+Nothing is signed in, and a refused response does not cancel the sign-in: if
+the provider then sends a correct response for the same sign-in, it still
+completes. What the browser shows depends on the callback:
+
+- the local callback shows **Authorization Failed** ("The sign-in response was
+  malformed (…)", naming the rule);
+- the callback behind a remote Web UI (`oauth.callback_base_url`) answers a
+  plain HTTP 400 `invalid OAuth callback`;
+- in the server edition, the brokered credential connect callback redirects
+  to the Web UI with `connect_failed`.
 
 An `iss` parameter (RFC 9207) is passed on to the sign-in unchanged. Checking
 it against the authorization server the sign-in started with is planned
@@ -378,8 +381,9 @@ callback takes precedence for provider registration and token exchange.
 
 ### The browser says the sign-in response was malformed
 
-The callback page reports **Authorization Failed** with "The sign-in response
-was malformed (…)" when the provider's redirect broke one of the rules in
+The local callback page reports **Authorization Failed** with "The sign-in
+response was malformed (…)" (a remote callback answers HTTP 400
+`invalid OAuth callback`) when the provider's redirect broke one of the rules in
 [What the callback accepts](#what-the-callback-accepts); the text in
 parentheses names the rule, for example `repeated iss parameter`. MCPProxy did
 not exchange anything. Start the login again; if the provider keeps sending

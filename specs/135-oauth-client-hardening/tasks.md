@@ -95,4 +95,4 @@ Format: `- [ ] T### [P?] [US?] description (file)`. `[P]` = can run in parallel 
 
 ## Implementation strategy
 
-PR-1 changes behaviour only for FR-001 and FR-016. PR-2 is the first PR that can refuse a provider that works today, so it ships with the opt-out (US6). PR-3 adds the surfaces, broker and e2e.
+PR-1 changes behaviour for FR-001, FR-016 and the upstream changes adopted in research.md R1a (metadata without `issuer` is refused). PR-2 is the first PR whose own checks can refuse a provider that works today, so it ships with the opt-out (US6). PR-3 adds the surfaces, broker and e2e.

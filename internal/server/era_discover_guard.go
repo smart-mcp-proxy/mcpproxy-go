@@ -51,7 +51,7 @@ func clientFacingEraGuard(next http.Handler) http.Handler {
 			return
 		}
 		members, ok := exactTopLevelMembers(raw)
-		if !ok || jsonString(members["jsonrpc"]) != mcp.JSONRPC_VERSION ||
+		if !ok || hasAmbiguousMembers(raw) || jsonString(members["jsonrpc"]) != mcp.JSONRPC_VERSION ||
 			jsonString(members["method"]) != string(mcp.MethodServerDiscover) || !validRequestID(members["id"]) {
 			// Anything that is not unambiguously a probe (duplicate or
 			// case-variant members included) is mcp-go's to judge.
@@ -88,6 +88,62 @@ func simpleFoldKey(name string) string {
 		b.WriteRune(least)
 	}
 	return b.String()
+}
+
+// hasAmbiguousMembers reports whether any object anywhere in raw repeats a
+// member name (under simple case folding), which mcp-go refuses: such a
+// request is mcp-go's to answer, never the guard's.
+func hasAmbiguousMembers(raw []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber() // any JSON number is a value, whatever its range
+	type frame struct {
+		object  bool
+		seen    map[string]bool
+		wantKey bool
+	}
+	var stack []*frame
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return false
+		}
+		if err != nil {
+			return true
+		}
+		var top *frame
+		if len(stack) > 0 {
+			top = stack[len(stack)-1]
+		}
+		if d, isDelim := tok.(json.Delim); isDelim {
+			switch d {
+			case '{':
+				if top != nil && top.object {
+					top.wantKey = true
+				}
+				stack = append(stack, &frame{object: true, seen: map[string]bool{}, wantKey: true})
+			case '[':
+				if top != nil && top.object {
+					top.wantKey = true
+				}
+				stack = append(stack, &frame{})
+			case '}', ']':
+				stack = stack[:len(stack)-1]
+			}
+			continue
+		}
+		if top != nil && top.object {
+			if top.wantKey {
+				key := simpleFoldKey(tok.(string))
+				if top.seen[key] {
+					return true
+				}
+				top.seen[key] = true
+				top.wantKey = false
+			} else {
+				top.wantKey = true
+			}
+		}
+	}
 }
 
 // jsonString decodes a JSON string value ("" for anything else), so escaped

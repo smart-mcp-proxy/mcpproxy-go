@@ -47,17 +47,26 @@ func TestLegacySchemaJSON_MatchesMCPGoV100(t *testing.T) {
 	}
 }
 
-// A ref nested in a keyword value is rewritten as v1.0.0 did, even when the
-// current decoder moved "definitions" itself: input validation compiles the
-// stored bytes, so they must match, not only the hash.
-func TestLegacySchemaJSON_NestedRefRewrittenAsV100(t *testing.T) {
-	in := `{"type":"object","definitions":{"X":{"const":1.0}},"properties":{"x":{"const":{"$ref":"#/definitions/X"}}}}`
-	v100 := `{"$defs":{"X":{"const":1}},"properties":{"x":{"const":{"$ref":"#/$defs/X"}}},"required":[],"type":"object"}`
+// Recorded residual: a "$ref" inside a literal value of a draft-07 schema
+// without a dialect keeps its spelling (v1.0.0 rewrote that data), while a
+// schema that used "$defs" all along keeps every literal unchanged, exactly
+// as v1.0.0 did. The Spec 032 hash equals v1.0.0's either way.
+func TestLegacySchemaJSON_LiteralRefs(t *testing.T) {
+	keep := `{"type":"object","$defs":{"X":{"type":"string"}},"properties":{"x":{"const":{"$ref":"#/definitions/X"}}}}`
 	var s mcp.ToolInputSchema
-	require.NoError(t, json.Unmarshal([]byte(in), &s))
+	require.NoError(t, json.Unmarshal([]byte(keep), &s))
 	got, err := json.Marshal(legacySchema(mcp.ToolArgumentsSchema(s)))
 	require.NoError(t, err)
-	assert.Equal(t, v100, string(got))
+	assert.Equal(t, `{"$defs":{"X":{"type":"string"}},"properties":{"x":{"const":{"$ref":"#/definitions/X"}}},"required":[],"type":"object"}`, string(got),
+		"a literal v1.0.0 left alone is never rewritten")
+
+	residual := `{"type":"object","definitions":{"X":{"const":1.0}},"properties":{"x":{"const":{"$ref":"#/definitions/X"}}}}`
+	v100 := `{"$defs":{"X":{"const":1}},"properties":{"x":{"const":{"$ref":"#/$defs/X"}}},"required":[],"type":"object"}`
+	var s2 mcp.ToolInputSchema // a fresh value: Unmarshal merges into an old one
+	require.NoError(t, json.Unmarshal([]byte(residual), &s2))
+	assert.Equal(t,
+		hash.ComputeToolHashWithOutputSchema("srv", "t", "d", json.RawMessage(v100), ""),
+		hash.ComputeToolHashWithOutputSchema("srv", "t", "d", legacySchema(mcp.ToolArgumentsSchema(s2)), ""))
 }
 
 // A schema v1.0.0 could not decode has no earlier bytes: it is kept whole.

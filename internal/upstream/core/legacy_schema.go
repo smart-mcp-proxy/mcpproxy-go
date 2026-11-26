@@ -24,12 +24,13 @@ import (
 // the richer schema is a separate change that needs a hash-formula migration.
 //
 // A schema v1.0.0 could not decode (an array-valued "type", an out-of-range
-// number) is stored in full. Residuals: a schema that already used "$defs"
-// and also carries "#/definitions/" refs (dangling for v1.0.0, which left
-// them, and now rewritten; an embedded resource with its own "definitions"
-// is the one well-formed case), and duplicate or case-variant members the
-// decoder already merged (malformed JSON Schema). Neither moves the Spec 032
-// hash, which canonicalises refs (hash.NormalizeJSON).
+// number) is stored in full. Residuals (recorded in Spec 135 research R1a):
+// a draft-07 schema without a declared dialect that carries a "$ref" string
+// inside a literal value (const, default, enum, examples) keeps it as sent,
+// where v1.0.0 rewrote that data to "#/$defs/..."; and duplicate or
+// case-variant members the decoder already merged (malformed JSON Schema).
+// Neither moves the Spec 032 hash, which canonicalises refs
+// (hash.NormalizeJSON).
 type legacySchema mcp.ToolArgumentsSchema
 
 func (s legacySchema) MarshalJSON() ([]byte, error) {
@@ -50,16 +51,15 @@ func (s legacySchema) MarshalJSON() ([]byte, error) {
 		// range, say): there are no earlier bytes to keep.
 		return full, nil
 	}
+	// v1.0.0 moved "definitions" to "$defs" and rewrote every local ref.
+	// When no dialect is declared the current decoder has already done the
+	// move (rewriting refs in schema positions only), and that cannot be told
+	// apart from a schema that used "$defs" all along, where v1.0.0 rewrote
+	// nothing. So refs are rewritten only when "definitions" is still here:
+	// this never alters a literal "$ref" value v1.0.0 kept (see the type
+	// comment for the one residual).
 	if v10.Defs == nil && v10.Definitions != nil {
 		v10.Defs = v10.Definitions
-	}
-	// v1.0.0 rewrote every local "#/definitions/" ref, structural or nested
-	// in a keyword value, when it moved "definitions" to "$defs". The current
-	// decoder may already have moved them, rewriting only structural refs,
-	// and the two cases then look alike: rewrite whenever "$defs" is present.
-	// Pre-dispatch argument validation compiles these stored bytes, so this
-	// keeps v1.0.0's validation behaviour, not only its hash.
-	if v10.Defs != nil {
 		rewriteDraft07LocalRefsV100(v10.Defs)
 		rewriteDraft07LocalRefsV100(v10.Properties)
 		rewriteDraft07LocalRefsV100(v10.AdditionalProperties)

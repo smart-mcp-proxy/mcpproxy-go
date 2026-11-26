@@ -110,3 +110,15 @@ func TestClientFacingEraGuard_ReadErrorPassedOn(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), req)
 	assert.ErrorIs(t, got, io.ErrUnexpectedEOF)
 }
+
+// A repeated member anywhere (here inside params) is mcp-go's to refuse.
+func TestClientFacingEraGuard_NestedDuplicatePassedOn(t *testing.T) {
+	reached := false
+	h := clientFacingEraGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true }))
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{},"_meta":{}}}`))
+	req.Header.Set(mcp.HeaderProtocolVersion, mcp.ProtocolVersion20260728)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	assert.True(t, reached)
+	assert.False(t, hasAmbiguousMembers([]byte(`{"a":{"b":1,"c":[{"b":2},{"b":3}]},"d":[1,{"e":{}}]}`)), "same names in sibling objects are fine")
+	assert.True(t, hasAmbiguousMembers([]byte(`{"a":[{"x":1,"X":2}]}`)))
+}

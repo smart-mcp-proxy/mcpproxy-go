@@ -288,7 +288,7 @@ Two or three instances (honest H, hostile A, replacement B) cover mix-up and swa
 
 ## Delivery
 
-1. **PR-1 (bump, no new enforcement)**: FR-019, D1 (strict parse), D5 (the DCR `application_type` assertion and, if needed, the registration rewrite), and the fake AS. The only behaviour change is FR-001 and FR-016.
+1. **PR-1 (bump, no new enforcement)**: FR-019, D1 (strict parse), D5 (the DCR `application_type` assertion and, if needed, the registration rewrite), and the fake AS. Its behaviour changes are FR-001, FR-016 and the upstream changes research.md R1a records as adopted; one of them can already refuse a provider: authorization server metadata without `issuer`.
 2. **PR-2 (all enforcement, with its escape hatch)**:
    - D0: the resolver, `Snapshot`, and the last-hop guard on all three clients;
    - D3, D2, D4;
