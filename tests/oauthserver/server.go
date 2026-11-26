@@ -503,7 +503,11 @@ func (s *OAuthTestServer) TokenRequestCount() int64 { return s.tokenCount.Load()
 func (s *OAuthTestServer) RegistrationRequests() []ClientRegistrationRequest {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return append([]ClientRegistrationRequest(nil), s.registrationRequests...)
+	out := make([]ClientRegistrationRequest, len(s.registrationRequests))
+	for i, r := range s.registrationRequests {
+		out[i] = r.clone()
+	}
+	return out
 }
 
 // AuthorizeGETCount reports how many GET /authorize requests the server has

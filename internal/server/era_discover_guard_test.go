@@ -46,7 +46,9 @@ func TestClientFacingEraGuard(t *testing.T) {
 		{modern, `{"jsonrpc":"2.0","id":8,"method":"tools/list","params":{}}`}, // not the probe
 		{modern, `{"jsonrpc":"2.0","method":"server/discover"}`},               // a notification
 		{modern, `[{"jsonrpc":"2.0","id":9,"method":"server/discover"}]`},      // a batch
-		{modern, `not json`}, // garbage
+		{modern, `not json`},
+		{modern, `{"id":10,"method":"server/discover"}`},                      // no jsonrpc member
+		{modern, `{"jsonrpc":"2.0","id":{"x":1},"method":"server/discover"}`}, // object id // garbage
 	} {
 		reached = nil
 		w := send(tc.version, tc.body)
@@ -67,4 +69,30 @@ func TestClientFacingEraGuard(t *testing.T) {
 	req.Header.Set(mcp.HeaderProtocolVersion, modern)
 	h.ServeHTTP(httptest.NewRecorder(), req)
 	assert.Len(t, reached, 1, "GET is untouched")
+}
+
+type failAfter struct {
+	data []byte
+	done bool
+}
+
+func (f *failAfter) Read(p []byte) (int, error) {
+	if !f.done {
+		f.done = true
+		return copy(p, f.data), nil
+	}
+	return 0, io.ErrUnexpectedEOF
+}
+
+// A body whose read fails reaches mcp-go with the same bytes and the same
+// error, not a clean EOF.
+func TestClientFacingEraGuard_ReadErrorPassedOn(t *testing.T) {
+	var got error
+	h := clientFacingEraGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, got = io.ReadAll(r.Body)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/mcp", &failAfter{data: []byte(`{"jsonrpc":"2.0"`)})
+	req.Header.Set(mcp.HeaderProtocolVersion, mcp.ProtocolVersion20260728)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	assert.ErrorIs(t, got, io.ErrUnexpectedEOF)
 }

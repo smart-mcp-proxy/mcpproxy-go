@@ -138,6 +138,17 @@ type ClientRegistrationRequest struct {
 	Scope                   string   `json:"scope,omitempty"`
 	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method,omitempty"`
 	ApplicationType         string   `json:"application_type,omitempty"`
+	// HasApplicationType reports whether the request carried the member at
+	// all (an empty string or null included). Not part of the wire format.
+	HasApplicationType bool `json:"-"`
+}
+
+// clone returns a copy that shares no slice with r.
+func (r ClientRegistrationRequest) clone() ClientRegistrationRequest {
+	r.RedirectURIs = append([]string(nil), r.RedirectURIs...)
+	r.GrantTypes = append([]string(nil), r.GrantTypes...)
+	r.ResponseTypes = append([]string(nil), r.ResponseTypes...)
+	return r
 }
 
 // ClientRegistrationResponse represents a successful DCR response.

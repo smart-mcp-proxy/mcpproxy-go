@@ -3662,7 +3662,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// /mcp/s/<server> → one upstream's tools under their own names, with the
 	// upstream's own instructions (mcp_single_server.go). The same auth,
 	// host-validation and streaming wrappers as every other MCP route.
-	singleServerHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(clientFacingEraGuard(http.HandlerFunc(s.serveSingleServer)))))))
+	singleServerHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(http.HandlerFunc(s.serveSingleServer))))))
 	mux.Handle("/mcp/s/", singleServerHandler)
 
 	s.logger.Info("Registered routing mode MCP endpoints",
@@ -6098,5 +6098,7 @@ func (s *Server) serveSingleServer(w http.ResponseWriter, r *http.Request) {
 	if ep.native {
 		next = s.mcpProxy.nativeSkillsInterceptor(ep, next)
 	}
-	singleServerSessionGuard(name, ep.gen, next).ServeHTTP(w, r.WithContext(ctx))
+	// The era guard runs after admission and the session check, so an
+	// unknown or out-of-scope server still answers 404 (Spec 135 R1a).
+	singleServerSessionGuard(name, ep.gen, clientFacingEraGuard(next)).ServeHTTP(w, r.WithContext(ctx))
 }

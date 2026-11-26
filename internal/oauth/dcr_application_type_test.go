@@ -2,7 +2,9 @@ package oauth
 
 import (
 	"context"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/client/transport"
@@ -83,4 +85,66 @@ func TestApplicationTypeFor(t *testing.T) {
 	} {
 		assert.Equal(t, want, applicationTypeFor(redirect), redirect)
 	}
+}
+
+// Only mcp-go's registration body is touched; any other request reaches the
+// server byte for byte, read errors included.
+func TestDCRRewrite_LeavesOtherRequestsAlone(t *testing.T) {
+	var seen []string
+	inner := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			seen = append(seen, "ERR:"+err.Error())
+		} else {
+			seen = append(seen, string(b))
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("{}")), Header: http.Header{}}, nil
+	})
+	w := NewOAuthTransportWrapper(inner, nil, zap.NewNop())
+	w.learnEndpoints("", "https://as.example/token")
+	post := func(url, body string) {
+		req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		_, err := w.RoundTrip(req)
+		require.NoError(t, err)
+	}
+	reg := `{"client_name":"mcpproxy-go","grant_types":["authorization_code"],"redirect_uris":["http://127.0.0.2:1/cb"],"application_type":"web"}`
+	notReg := `{"redirect_uris":["http://127.0.0.2:1/cb"],"application_type":"web"}`
+
+	post("https://as.example/register", reg)
+	assert.Contains(t, seen[0], `"application_type":"native"`, "the registration is corrected")
+	post("https://as.example/token", reg)
+	assert.Equal(t, reg, seen[1], "never a request to the token endpoint")
+	post("https://mcp.example/mcp", notReg)
+	assert.Equal(t, notReg, seen[2], "a JSON body that is not mcp-go's registration")
+
+	req, _ := http.NewRequest(http.MethodPost, "https://as.example/register", io.NopCloser(&failingReader{data: []byte(`{"client_na`)}))
+	req.ContentLength = 200
+	req.Header.Set("Content-Type", "application/json")
+	_, err := w.RoundTrip(req)
+	require.NoError(t, err)
+	assert.Equal(t, "ERR:"+io.ErrUnexpectedEOF.Error(), seen[3], "a read error reaches the transport as it was")
+}
+
+type failingReader struct {
+	data []byte
+	done bool
+}
+
+func (f *failingReader) Read(p []byte) (int, error) {
+	if !f.done {
+		f.done = true
+		return copy(p, f.data), nil
+	}
+	return 0, io.ErrUnexpectedEOF
+}
+
+func TestDCR_RejectApplicationType_EmptyValueStillPresent(t *testing.T) {
+	provider := oauthserver.Start(t, oauthserver.Options{RejectApplicationType: true})
+	t.Cleanup(func() { _ = provider.Shutdown() })
+	resp, err := http.Post(provider.RegistrationEndpoint, "application/json",
+		strings.NewReader(`{"redirect_uris":["http://127.0.0.1:1/cb"],"application_type":""}`))
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "the member's presence is refused, whatever its value")
 }

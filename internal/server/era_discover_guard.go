@@ -12,8 +12,9 @@ import (
 )
 
 // maxDiscoverProbeBytes bounds the body clientFacingEraGuard reads to recognise
-// a server/discover probe. A probe is a few hundred bytes.
-const maxDiscoverProbeBytes = 64 << 10
+// a server/discover probe. A probe is a few hundred bytes; the bound is
+// generous so whitespace padding does not hide one.
+const maxDiscoverProbeBytes = 1 << 20
 
 // clientFacingEraGuard makes a client-facing Streamable HTTP endpoint, pinned
 // to the legacy protocol era (Spec 058 FR-028), answer a modern client's
@@ -38,8 +39,9 @@ func clientFacingEraGuard(next http.Handler) http.Handler {
 		}
 		orig := r.Body
 		raw, err := io.ReadAll(io.LimitReader(orig, maxDiscoverProbeBytes+1))
-		// Whatever is passed on reads the bytes already taken, then the rest.
-		r.Body = readCloser{Reader: io.MultiReader(bytes.NewReader(raw), orig), Closer: orig}
+		// Whatever is passed on reads the bytes already taken, then the rest,
+		// and sees a read error exactly as the original body reported it.
+		r.Body = replayBody(raw, err, orig)
 		if err != nil || len(raw) > maxDiscoverProbeBytes {
 			// Too large to be a probe, or unreadable: let mcp-go answer it
 			// from the bytes already read (an oversized body is refused there).
@@ -47,11 +49,12 @@ func clientFacingEraGuard(next http.Handler) http.Handler {
 			return
 		}
 		var msg struct {
-			ID     json.RawMessage `json:"id"`
-			Method string          `json:"method"`
+			JSONRPC string          `json:"jsonrpc"`
+			ID      json.RawMessage `json:"id"`
+			Method  string          `json:"method"`
 		}
-		if json.Unmarshal(raw, &msg) != nil || msg.Method != string(mcp.MethodServerDiscover) ||
-			len(msg.ID) == 0 || string(msg.ID) == "null" {
+		if json.Unmarshal(raw, &msg) != nil || msg.JSONRPC != mcp.JSONRPC_VERSION ||
+			msg.Method != string(mcp.MethodServerDiscover) || !validRequestID(msg.ID) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -70,7 +73,44 @@ func clientFacingEraGuard(next http.Handler) http.Handler {
 	})
 }
 
+// validRequestID reports whether raw is a JSON-RPC request id: a string or a
+// number (null, objects and arrays are not).
+func validRequestID(raw json.RawMessage) bool {
+	var v any
+	if len(raw) == 0 || json.Unmarshal(raw, &v) != nil {
+		return false
+	}
+	switch v.(type) {
+	case string, float64:
+		return true
+	}
+	return false
+}
+
 type readCloser struct {
 	io.Reader
 	io.Closer
+}
+
+// errAfterReader returns err once its prefix has been read.
+type errAfterReader struct {
+	prefix *bytes.Reader
+	err    error
+}
+
+func (e *errAfterReader) Read(p []byte) (int, error) {
+	if e.prefix.Len() > 0 {
+		return e.prefix.Read(p)
+	}
+	return 0, e.err
+}
+
+// replayBody rebuilds a request body after raw was read from orig: the same
+// bytes, then the rest of orig; when the read failed with err, the same
+// bytes, then err (not a plain EOF).
+func replayBody(raw []byte, err error, orig io.ReadCloser) io.ReadCloser {
+	if err != nil {
+		return readCloser{Reader: &errAfterReader{prefix: bytes.NewReader(raw), err: err}, Closer: orig}
+	}
+	return readCloser{Reader: io.MultiReader(bytes.NewReader(raw), orig), Closer: orig}
 }
