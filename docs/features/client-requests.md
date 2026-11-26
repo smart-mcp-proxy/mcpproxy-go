@@ -87,6 +87,6 @@ When an MCP client sends a `progressToken` in a tool call's `_meta`, the upstrea
 
 - The upstream never sees the client's token. MCPProxy gives each upstream call a token of its own and maps it back to the calling client until the call returns, times out or the server disconnects. Two clients that use the same token each get only their own progress, and progress is never sent to any other client.
 - A call without a `progressToken` carries none upstream, and nothing is forwarded.
-- The `message` is text the upstream server wrote. It is cut to 512 bytes and passes the [output sanitisation](./output-sanitisation.md) policy like a tool result: redacted or stripped as configured, and under `block` a message with a critical secret is left out (`progress` and `total` are still sent).
+- The `message` is text the upstream server wrote. A message longer than 4 KiB is left out; a shorter one passes the [output sanitisation](./output-sanitisation.md) policy like a tool result (redacted or stripped as configured; under `block` a message with a critical secret is left out) and is then cut to 512 bytes. `progress` and `total` are sent either way.
 - At most one notification per call is forwarded every 100 ms; ones that arrive sooner, or whose `progress` does not increase, are dropped. The first one that reaches `total` is not held back by the interval.
 - `code_execution` sub-calls do not forward progress.

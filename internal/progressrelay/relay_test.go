@@ -143,13 +143,23 @@ func TestDispatch_Malformed(t *testing.T) {
 	assert.Equal(t, 0, n)
 }
 
-func TestDispatch_MessageCapped(t *testing.T) {
+func TestDispatch_OverlongMessageLeftOut(t *testing.T) {
 	r, _ := newRegistry()
-	var got string
-	tok, end := r.Begin(WithSink(context.Background(), func(u Update) { got = u.Message }))
+	var got []Update
+	tok, end := r.Begin(WithSink(context.Background(), func(u Update) { got = append(got, u) }))
 	defer end()
-	long := strings.Repeat("é", MaxMessageBytes) // 2 bytes each
-	require.True(t, r.Dispatch(progressNote(tok, 1, nil, "x"+long)))
+	require.True(t, r.Dispatch(progressNote(tok, 1, nil, strings.Repeat("x", MaxRawMessageBytes))))
+	r.now = func() time.Time { return time.Unix(2000, 0) }
+	require.True(t, r.Dispatch(progressNote(tok, 2, nil, strings.Repeat("x", MaxRawMessageBytes+1))))
+	require.Len(t, got, 2)
+	assert.Len(t, got[0].Message, MaxRawMessageBytes, "read whole, cut only after cleaning")
+	assert.Empty(t, got[1].Message)
+	assert.Equal(t, 2.0, got[1].Progress, "the numbers are still forwarded")
+}
+
+func TestCapMessage_RuneBoundary(t *testing.T) {
+	long := "x" + strings.Repeat("é", MaxMessageBytes) // 2 bytes each
+	got := capMessage(long)
 	assert.LessOrEqual(t, len(got), MaxMessageBytes)
 	assert.True(t, strings.HasPrefix(got, "xé"))
 	assert.True(t, strings.HasSuffix(got, "é"), "cut on a rune boundary")

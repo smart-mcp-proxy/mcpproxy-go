@@ -352,8 +352,9 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	c.logger.Info("Disconnecting from upstream MCP server",
 		zap.Bool("was_connected", wasConnected))
 
-	// GH #1967: no progress is forwarded for a call of this connection
-	// from here on, even one whose CallTool has not returned yet.
+	// GH #1967: forget the progress tokens of the calls in flight now. A
+	// call that registers while the teardown runs is removed when its
+	// CallTool returns, like any other.
 	c.clearProgressCalls()
 
 	// GH #1910: end the standalone GET stream before the transport closes.

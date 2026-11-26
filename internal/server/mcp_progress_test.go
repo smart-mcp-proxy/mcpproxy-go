@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -45,6 +46,21 @@ func TestWithProgressRelay_NoTokenOrNoSession(t *testing.T) {
 // The upstream-written message passes the output policy like tool output:
 // redacted under redact, dropped (numbers kept) under block.
 func TestWithProgressRelay_MessageThroughOutputPolicy(t *testing.T) {
+	// A secret that straddles the forwarding cap is still seen whole.
+	t.Run("redact before the cap", func(t *testing.T) {
+		cfg := config.DefaultOutputSanitisationConfig()
+		cfg.ResponseAction = "redact"
+		p := &MCPProxyServer{config: &config.Config{OutputSanitisation: cfg}}
+		sess := &progressSession{notes: make(chan mcp.JSONRPCNotification, 4)}
+		sctx := mcpserver.NewMCPServer("t", "1").WithContext(context.Background(), sess)
+		sink := progressrelay.SinkFrom(p.withProgressRelay(sctx, progressRequest("t")))
+		msg := strings.Repeat("a", progressrelay.MaxMessageBytes-10) + " AKIA1234567890ABCDEF"
+		sink(progressrelay.Update{Progress: 1, Message: msg})
+		got, _ := (<-sess.notes).Params.AdditionalFields["message"].(string)
+		assert.NotContains(t, got, "AKIA123456")
+		assert.LessOrEqual(t, len(got), progressrelay.MaxMessageBytes)
+	})
+
 	const secretMsg = "uploading with key AKIA1234567890ABCDEF now"
 	for _, tc := range []struct {
 		action string

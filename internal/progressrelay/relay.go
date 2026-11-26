@@ -25,15 +25,22 @@ import (
 )
 
 const (
-	// MaxMessageBytes caps the upstream-written message of one notification.
+	// MaxMessageBytes caps the message forwarded with one notification. The
+	// cap is applied after the message has been cleaned, so a secret is not
+	// cut in half before the output policy can see it.
 	MaxMessageBytes = 512
+	// MaxRawMessageBytes is the longest upstream message that is read at all;
+	// a longer one is left out (the numbers are still forwarded), so the
+	// output policy always sees a message whole and its work stays bounded.
+	MaxRawMessageBytes = 4096
 	// MinInterval is the shortest gap between two notifications forwarded for
 	// one call. Notifications that arrive sooner are dropped, except the first
 	// one that reports completion (progress >= total).
 	MinInterval = 100 * time.Millisecond
 )
 
-// Update is one progress report, as the upstream sent it, message capped.
+// Update is one progress report as the upstream sent it; Message is empty
+// when the upstream's was longer than MaxRawMessageBytes.
 type Update struct {
 	Progress float64
 	Total    *float64
@@ -63,8 +70,9 @@ func SinkFrom(ctx context.Context) Sink {
 // SessionSink returns a sink that sends each update to the MCP client session
 // in ctx under the client's own token, or nil when progress cannot be
 // forwarded: the client sent no token, or ctx carries no session that can
-// receive notifications. clean, when not nil, is applied to every message; a
-// message it empties is left out and the progress numbers are still sent.
+// receive notifications. clean, when not nil, is applied to every whole
+// message before it is cut to MaxMessageBytes; a message it empties is left
+// out and the progress numbers are still sent.
 // Sending never blocks: an update the session cannot take now is dropped.
 func SessionSink(ctx context.Context, clientToken mcp.ProgressToken, clean func(string) string) Sink {
 	if clientToken == nil {
@@ -86,6 +94,7 @@ func SessionSink(ctx context.Context, clientToken mcp.ProgressToken, clean func(
 		if msg != "" && clean != nil {
 			msg = clean(msg)
 		}
+		msg = capMessage(msg)
 		if msg != "" {
 			params["message"] = msg
 		}
@@ -225,8 +234,8 @@ func (r *Registry) Dispatch(n mcp.JSONRPCNotification) bool {
 	} else if _, present := f["total"]; present {
 		return false
 	}
-	if m, ok := f["message"].(string); ok {
-		u.Message = capMessage(m)
+	if m, ok := f["message"].(string); ok && len(m) <= MaxRawMessageBytes {
+		u.Message = m
 	}
 
 	c.mu.Lock()
