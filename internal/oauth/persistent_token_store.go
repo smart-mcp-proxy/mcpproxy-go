@@ -458,6 +458,9 @@ type RefreshBinding struct {
 	Refresh RefreshFunc
 	// StaticClient is true when the client id comes from oauth.client_id.
 	StaticClient bool
+	// Logger receives the reactive flight's start and finish lines (GH
+	// #1827); nil uses the coordinator's logger.
+	Logger *zap.Logger
 }
 
 type refreshBindable interface {
@@ -557,7 +560,7 @@ func reactiveTokenOutcome(ctx context.Context, clock func() time.Time, t reactiv
 			newTok, newRev, _, err := DefaultRefreshCoordinator().DoServed(ctx, RefreshRequest{
 				Key: t.key, Binding: t.binding, ServerName: t.name, ObservedRefreshToken: rec.RefreshToken,
 				Trigger: RefreshTriggerReactive, Load: t.load, Refresh: b.Refresh,
-				StaticClient: b.StaticClient, ClearClientAt: t.clearAt,
+				StaticClient: b.StaticClient, ClearClientAt: t.clearAt, Logger: b.Logger,
 			})
 			if err != nil {
 				// The flight may have taken a while: judge "still valid" by
