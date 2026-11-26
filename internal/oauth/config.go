@@ -1544,6 +1544,12 @@ func createOAuthConfigInternal(env Env, serverConfig *config.ServerConfig, stora
 		PKCEEnabled:           true,                  // Always enable PKCE for security
 		AuthServerMetadataURL: authServerMetadataURL, // Explicit metadata URL for proper discovery
 		HTTPClient:            httpClient,            // Custom HTTP client with transport wrapper (extra params + status normalization)
+		// Spec 135 FR-019 (research R1a): mcp-go v1.0 always sent a client
+		// secret in the token request body. v1.2+ follows the registration
+		// response or the metadata, and mcpproxy does not persist the
+		// registered method, so a reconnect could switch methods mid-grant.
+		// Without a secret this still sends none.
+		TokenEndpointAuthMethod: "client_secret_post",
 	}
 
 	logger.Info("OAuth config created successfully",

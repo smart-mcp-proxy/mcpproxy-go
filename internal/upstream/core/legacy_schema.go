@@ -23,13 +23,13 @@ import (
 // as changed on upgrade and hand the scanner text it never reviewed. Adopting
 // the richer schema is a separate change that needs a hash-formula migration.
 //
-// A schema v1.0.0 could not decode (an array-valued "type") is stored in full.
-// Residuals, none of which moves the Spec 032 hash (hash.NormalizeJSON
-// canonicalises refs and numbers): when the current decoder already moved
-// "definitions" to "$defs" (no dialect declared), refs nested in keyword
-// values such as "default" stay "#/definitions/..." where v1.0.0 rewrote
-// them. Duplicate or case-variant members the decoder already merged cannot
-// be told apart; such a schema is malformed JSON Schema.
+// A schema v1.0.0 could not decode (an array-valued "type", an out-of-range
+// number) is stored in full. Residuals: a schema that already used "$defs"
+// and also carries "#/definitions/" refs (dangling for v1.0.0, which left
+// them, and now rewritten; an embedded resource with its own "definitions"
+// is the one well-formed case), and duplicate or case-variant members the
+// decoder already merged (malformed JSON Schema). Neither moves the Spec 032
+// hash, which canonicalises refs (hash.NormalizeJSON).
 type legacySchema mcp.ToolArgumentsSchema
 
 func (s legacySchema) MarshalJSON() ([]byte, error) {
@@ -52,6 +52,14 @@ func (s legacySchema) MarshalJSON() ([]byte, error) {
 	}
 	if v10.Defs == nil && v10.Definitions != nil {
 		v10.Defs = v10.Definitions
+	}
+	// v1.0.0 rewrote every local "#/definitions/" ref, structural or nested
+	// in a keyword value, when it moved "definitions" to "$defs". The current
+	// decoder may already have moved them, rewriting only structural refs,
+	// and the two cases then look alike: rewrite whenever "$defs" is present.
+	// Pre-dispatch argument validation compiles these stored bytes, so this
+	// keeps v1.0.0's validation behaviour, not only its hash.
+	if v10.Defs != nil {
 		rewriteDraft07LocalRefsV100(v10.Defs)
 		rewriteDraft07LocalRefsV100(v10.Properties)
 		rewriteDraft07LocalRefsV100(v10.AdditionalProperties)

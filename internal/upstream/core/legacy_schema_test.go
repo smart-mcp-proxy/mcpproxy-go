@@ -47,17 +47,17 @@ func TestLegacySchemaJSON_MatchesMCPGoV100(t *testing.T) {
 	}
 }
 
-// Documented residual: a ref nested in a keyword value after the decoder
-// moved "definitions" itself keeps its draft-07 spelling in the stored bytes,
-// but the Spec 032 hash equals v1.0.0's.
-func TestLegacySchemaJSON_NestedRefResidual_HashUnchanged(t *testing.T) {
-	in := `{"type":"object","definitions":{"X":{"const":1.0}},"properties":{"x":{"default":{"$ref":"#/definitions/X"}}}}`
-	v100 := `{"$defs":{"X":{"const":1}},"properties":{"x":{"default":{"$ref":"#/$defs/X"}}},"required":[],"type":"object"}`
+// A ref nested in a keyword value is rewritten as v1.0.0 did, even when the
+// current decoder moved "definitions" itself: input validation compiles the
+// stored bytes, so they must match, not only the hash.
+func TestLegacySchemaJSON_NestedRefRewrittenAsV100(t *testing.T) {
+	in := `{"type":"object","definitions":{"X":{"const":1.0}},"properties":{"x":{"const":{"$ref":"#/definitions/X"}}}}`
+	v100 := `{"$defs":{"X":{"const":1}},"properties":{"x":{"const":{"$ref":"#/$defs/X"}}},"required":[],"type":"object"}`
 	var s mcp.ToolInputSchema
 	require.NoError(t, json.Unmarshal([]byte(in), &s))
-	assert.Equal(t,
-		hash.ComputeToolHashWithOutputSchema("srv", "t", "d", json.RawMessage(v100), ""),
-		hash.ComputeToolHashWithOutputSchema("srv", "t", "d", legacySchema(mcp.ToolArgumentsSchema(s)), ""))
+	got, err := json.Marshal(legacySchema(mcp.ToolArgumentsSchema(s)))
+	require.NoError(t, err)
+	assert.Equal(t, v100, string(got))
 }
 
 // A schema v1.0.0 could not decode has no earlier bytes: it is kept whole.
