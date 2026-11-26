@@ -295,7 +295,7 @@ Two or three instances (honest H, hostile A, replacement B) cover mix-up and swa
    - D6's `skip_issuer_validation` field and resolver branch;
    - the three codes, trust on first use, and the upgrade tests.
 
-   This is the first PR that can refuse a provider that works today, so it ships together with the opt-out.
+   This is the first PR whose own issuer checks can refuse a provider that works today, so it ships together with the opt-out. (PR-1 can already refuse a callback with a repeated parameter, FR-001, and metadata without `issuer`, an adopted mcp-go change.)
 3. **PR-3 (surfaces, broker, docs)**: D6's broker `issuer`, D7's surfaces and goldens, the Web UI and macOS editor fields, the docs, the e2e script and the provider verification.
 
 Each PR is cross-reviewed (opencode `gpt-6.2-sol`, round cap per the operator rules).
