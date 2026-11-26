@@ -19,8 +19,9 @@
 
 ## R3. `annotations.title` at upgrade
 
-- **Decision**: a one-time pass before the first discovery adopts each record's **stored** `annotations.title` (the value the previous version was emitting); nothing live is grandfathered, new records get nothing, and a record that later loses its title state to an older binary fails closed.
-- **Rationale**: the stored value is what agents saw before the upgrade, so adopting them does not increase exposure. Scanning them at upgrade and withholding flagged ones would be stricter, but would make the upgrade change what agents see for a reason the operator did not act on. Tightening applies from the next change. Recorded as spec Assumption 2 so a reviewer can overturn it.
+- **Decision**: no grandfathering; every title goes through the title rule on first sight.
+- **Rationale**: no stored value proves a title was published to agents. An unbound approval writes the record before its asynchronous republish, a record can be refreshed while held, and per-tool config filters are not on the record. Withholding is fail-safe and cosmetic; under the default `scan` mode clean titles are adopted on the first discovery anyway.
+- **Alternatives**: grandfather stored values of approved records (round-2/round-4 designs): each predicate tried could still approve a title captured only while held; rejected. Read the last published listing from the index: the index may be stale or rebuilt; rejected.
 
 ## R4. Icons
 

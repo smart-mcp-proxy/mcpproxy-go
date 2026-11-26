@@ -5,7 +5,7 @@
 | Field | JSON | Type | Rule |
 |---|---|---|---|
 | Title | `title` | string | trimmed; empty or equal to the raw name → absent (FR-002) |
-| ListingDigest | (on `ToolMetadata`, `listing_digest`) | string | SHA-256 of canonical extras JSON; change detection only, never identity |
+| ListingDigest | (on `ToolMetadata`, `listing_digest`) | string | SHA-256 of canonical JSON of every extra except titles, including drop diagnostics; index change detection only, never identity |
 | TitleInvalid / AnnotationsTitleInvalid | `title_invalid`, `annotations_title_invalid` | {reason, preview} | reason `too_long`, `control_char`, `bidi_control`; preview ≤ 64 chars with controls escaped; the raw value is not kept |
 | Icons | `icons` | []Icon | ≤ 8, validated (FR-003) |
 | IconsDropped | `icons_dropped` | {count, items[≤8]{index, reason}} | reasons: `scheme`, `too_long`, `bad_data_uri`, `mime`, `mime_mismatch`, `sizes`, `theme`, `count`, `tool_budget`, `server_budget` |
@@ -24,12 +24,11 @@
 | CurrentTitle | `current_title` | live top-level title (valid, normalised) |
 | CurrentTitleInvalid / CurrentAnnotationsTitleInvalid | `current_title_invalid`, `current_annotations_title_invalid` | {reason, preview} when the live value is invalid |
 | ApprovedAnnotationsTitle | `approved_annotations_title` | last approved `annotations.title`; live is `CurrentAnnotations.Title` |
-| TitleCaptured | `title_captured` | per-record marker (FR-015/FR-016) |
 | TitleHeldEvidence | `title_held_evidence` | scan findings for a withheld title |
 
 No change to `ApprovedHash`, `CurrentHash`, `HashSchemaVersion`, `Status`.
 
-Store-wide marker: `meta` bucket key `title_review_migrated` (RFC 3339 time), set once after the FR-015 pass. Record without `TitleCaptured` + marker present = lost state → approved titles treated as none (FR-016).
+No migration marker: a record without approved titles (pre-upgrade, new, or rewritten by an older binary) goes through FR-010.
 
 ## Title state per field (derived, never stored)
 
