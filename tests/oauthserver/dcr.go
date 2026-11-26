@@ -36,7 +36,11 @@ func (s *OAuthTestServer) handleRegistration(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	rawBody, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	rawBody, err := io.ReadAll(io.LimitReader(r.Body, 1<<20+1))
+	if err == nil && len(rawBody) > 1<<20 {
+		s.dcrError(w, http.StatusRequestEntityTooLarge, "invalid_client_metadata", "Request body too large")
+		return
+	}
 	var req ClientRegistrationRequest
 	var members map[string]json.RawMessage
 	if err != nil || json.Unmarshal(rawBody, &req) != nil || json.Unmarshal(rawBody, &members) != nil {

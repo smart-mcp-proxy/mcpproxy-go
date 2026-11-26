@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -48,19 +49,17 @@ func clientFacingEraGuard(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		var msg struct {
-			JSONRPC string          `json:"jsonrpc"`
-			ID      json.RawMessage `json:"id"`
-			Method  string          `json:"method"`
-		}
-		if json.Unmarshal(raw, &msg) != nil || msg.JSONRPC != mcp.JSONRPC_VERSION ||
-			msg.Method != string(mcp.MethodServerDiscover) || !validRequestID(msg.ID) {
+		members, ok := exactTopLevelMembers(raw)
+		if !ok || string(members["jsonrpc"]) != `"`+mcp.JSONRPC_VERSION+`"` ||
+			string(members["method"]) != `"`+string(mcp.MethodServerDiscover)+`"` || !validRequestID(members["id"]) {
+			// Anything that is not unambiguously a probe (duplicate or
+			// case-variant members included) is mcp-go's to judge.
 			next.ServeHTTP(w, r)
 			return
 		}
 		body, _ := json.Marshal(map[string]any{
 			"jsonrpc": mcp.JSONRPC_VERSION,
-			"id":      msg.ID,
+			"id":      members["id"],
 			"error": map[string]any{
 				"code":    mcp.METHOD_NOT_FOUND,
 				"message": "Method not found: " + string(mcp.MethodServerDiscover),
@@ -76,15 +75,57 @@ func clientFacingEraGuard(next http.Handler) http.Handler {
 // validRequestID reports whether raw is a JSON-RPC request id: a string or a
 // number (null, objects and arrays are not).
 func validRequestID(raw json.RawMessage) bool {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
 	var v any
-	if len(raw) == 0 || json.Unmarshal(raw, &v) != nil {
+	if len(raw) == 0 || dec.Decode(&v) != nil {
 		return false
 	}
 	switch v.(type) {
-	case string, float64:
+	case string, json.Number:
 		return true
 	}
 	return false
+}
+
+// exactTopLevelMembers returns the members of a JSON object, keyed by their
+// exact names. ok is false for anything but one object, and for an object
+// with a member name repeated or differing from another only in case (which
+// encoding/json would otherwise merge into one struct field).
+func exactTopLevelMembers(raw []byte) (map[string]json.RawMessage, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, false
+	}
+	members := make(map[string]json.RawMessage)
+	folded := make(map[string]bool)
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, false
+		}
+		name, ok := tok.(string)
+		if !ok {
+			return nil, false
+		}
+		key := strings.ToLower(name)
+		if folded[key] {
+			return nil, false
+		}
+		folded[key] = true
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil, false
+		}
+		members[name] = value
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
+		return nil, false
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, false // trailing data
+	}
+	return members, true
 }
 
 type readCloser struct {
