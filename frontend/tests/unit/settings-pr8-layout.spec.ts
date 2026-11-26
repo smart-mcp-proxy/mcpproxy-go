@@ -255,6 +255,8 @@ describe('Review fixes', () => {
     await flushPromises()
     await flushPromises()
     expect(wrapper.get('[data-test="settings-tab-general"]').classes()).toContain('tab-active')
+    // A direct load of that URL leaves `tab` absent; so does the in-page fallback.
+    expect(router.currentRoute.value.query.tab).toBeUndefined()
   })
 
   it('section list arrows wrap', async () => {

@@ -286,12 +286,20 @@ const activeTab = ref<string>('general')
 // Spec 109 FR-016: read on mount from `?tab=` (onMounted below), then keep the
 // URL in sync with every tab change, preserving other query params (e.g.
 // `?focus=` from focusField).
+// Set by the route watcher while it falls back to General for a URL with no `tab`.
+let fallbackWithoutTab = false
 watch(activeTab, (tab) => {
   // Review round 2, finding 8: any tab change — a click, focusField, or the
   // late-edition retry below succeeding — means the initial `?tab=` read no
   // longer needs a retry (and, for a manual click, must not be overridden
   // later by that retry).
   tabParamPending = false
+  // The route watcher's fallback to General for a URL that carries no `tab`
+  // leaves the URL as it is, like a direct load of that URL does.
+  if (fallbackWithoutTab) {
+    fallbackWithoutTab = false
+    return
+  }
   if (route.query.tab === tab) return
   void router.replace({ query: { ...route.query, tab } })
 })
@@ -731,6 +739,7 @@ watch(
     // A bare /settings (e.g. the sidebar link while on ?tab=security) falls
     // back to General; a focus link picks its own section below.
     if (typeof tab !== 'string' && (typeof prevTab === 'string' || typeof prevFocus === 'string') && !(typeof focus === 'string' && focus && isKnownFieldKey(focus))) {
+      if (activeTab.value !== 'general') fallbackWithoutTab = true
       activeTab.value = 'general'
     }
     if (typeof focus === 'string' && focus) {
