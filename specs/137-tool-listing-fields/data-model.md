@@ -53,4 +53,4 @@ Validity is checked first: an invalid live value is `invalid` whatever the appro
 
 ## Search index (`internal/index`)
 
-`ToolDocument` gains `ListingJSON` (stored only, extras without titles). No title is stored or searchable; titles are projected from approval records at read time. `indexSchemaVersion` `"2"` → `"3"`.
+`ToolDocument` gains `ListingJSON` (stored only, extras without titles). No title is stored or searchable (`annotations_json` is written and rebuilt without `title`); titles are projected from approval records at read time. `indexSchemaVersion` `"2"` → `"3"`.
