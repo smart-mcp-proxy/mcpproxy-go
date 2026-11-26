@@ -41,7 +41,7 @@
 
       <div class="grid grid-cols-1 min-[1280px]:grid-cols-2 gap-6 items-start">
         <!-- Left: the form. -->
-        <form class="space-y-5" data-test="profile-form" @submit.prevent="save">
+        <form id="profile-edit-form" class="space-y-5" data-test="profile-form" @submit.prevent="save">
           <fieldset :disabled="!canEdit" class="space-y-5">
             <div class="form-control">
               <label class="label" for="profile-title"><span class="label-text font-medium">Title</span><span class="label-text-alt text-base-content/80">{{ draft.title.length }} / 80</span></label>
@@ -167,23 +167,11 @@
             <button v-if="canEdit" type="button" class="btn btn-sm btn-outline" data-test="profile-assign" @click="assignOpen = true">Assign to client&hellip;</button>
           </section>
 
-          <!-- scroll-mb keeps a revealed refusal clear of the sticky footer below. -->
-          <div ref="refusalEl" class="scroll-mb-28">
+          <div ref="refusalEl">
             <GuardRefusal v-if="guard" :refusal="guard" />
             <div v-else-if="saveError" role="alert" class="alert alert-error text-sm" tabindex="-1" data-test="profile-save-error">{{ saveError }}</div>
           </div>
 
-          <!-- The footer stays in view: Save and Discard are never below the fold. -->
-          <div v-if="canEdit" class="sticky bottom-0 -mx-1 px-3 py-3 bg-base-100 border-t border-base-300 flex items-center justify-between gap-2 z-10" data-test="profile-editor-footer">
-            <span class="text-sm" aria-live="polite" data-test="profile-save-status">{{ dirty ? 'Unsaved changes' : savedNote }}</span>
-            <div class="flex gap-2">
-              <button type="button" class="btn btn-ghost btn-sm" :disabled="!dirty || saving" data-test="profile-editor-discard" @click="discard">Discard</button>
-              <button type="submit" class="btn btn-primary btn-sm" :disabled="!dirty || saving" data-test="profile-editor-save">
-                <span v-if="saving" class="loading loading-spinner loading-xs" />
-                Save
-              </button>
-            </div>
-          </div>
         </form>
 
         <!-- Right: what the profile does to each tool, and Try it. -->
@@ -208,6 +196,20 @@
             @remove-classification="removeClassification"
           />
           <ProfileTryPanel v-if="canEdit" :draft="() => toConfig(draft)" :dirty="dirty" />
+        </div>
+      </div>
+
+      <!-- Spec 134 FR-052: one action row after BOTH the policy form and the tool
+           rules, in normal flow so it covers nothing. It stays a submit button of
+           the form (the `form` attribute), so Enter in a field still saves. -->
+      <div v-if="canEdit" class="border-t border-base-300 pt-4 flex flex-wrap items-center justify-between gap-2" data-test="profile-editor-footer">
+        <span class="text-sm" aria-live="polite" data-test="profile-save-status">{{ dirty ? 'Unsaved changes' : savedNote }}</span>
+        <div class="flex gap-2">
+          <button type="button" class="btn btn-ghost btn-sm" :disabled="!dirty || saving" data-test="profile-editor-discard" @click="discard">Discard</button>
+          <button type="submit" form="profile-edit-form" class="btn btn-primary btn-sm" :disabled="!dirty || saving" data-test="profile-editor-save">
+            <span v-if="saving" class="loading loading-spinner loading-xs" />
+            Save
+          </button>
         </div>
       </div>
 
@@ -478,6 +480,7 @@ async function save() {
   // means "no limit": refuse it here instead of widening the profile silently.
   if (draft.response_limit_mode === 'custom' && !validResponseLimit(draft.response_limit)) {
     fieldErrors.tool_response_limit = 'Enter a whole number of characters, 1 or more'
+    void revealRefusal()
     return
   }
   saving.value = true
@@ -504,7 +507,7 @@ async function save() {
     else if (refused.field) fieldErrors[refused.field] = refused.message
     else saveError.value = describeError(err, 'Failed to save the profile')
     // The draft stays: nothing was written. Bring the reason into view: it sits
-    // under the form, behind the sticky footer, and the footer alone only says
+    // under the form, away from the action row, and the row alone only says
     // "Unsaved changes".
     void revealRefusal()
   } finally {
@@ -514,7 +517,10 @@ async function save() {
 
 async function revealRefusal() {
   await nextTick()
+  // A refusal block, else the first field message: the action row now sits
+  // after the tool rules, far from the field the message belongs to.
   const target = refusalEl.value?.querySelector<HTMLElement>('[data-test="guard-refusal"], [data-test="profile-save-error"]')
+    ?? document.querySelector<HTMLElement>('[data-test="profile-form"] .text-error')
   if (!target) return
   target.setAttribute('tabindex', '-1')
   target.focus({ preventScroll: true })

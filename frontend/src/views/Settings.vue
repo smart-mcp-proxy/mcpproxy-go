@@ -1,8 +1,8 @@
 <template>
   <div class="space-y-6">
     <!-- Page Header -->
-    <div class="flex justify-between items-center">
-      <div>
+    <div class="flex flex-wrap justify-between items-center gap-3">
+      <div class="min-w-0">
         <h1 class="text-3xl font-bold">Settings</h1>
         <p class="text-base-content/70 mt-1">
           Edit a section, then press {{ SAVE_CHANGES_LABEL }} to apply it. A badge marks fields that need a restart.
@@ -15,11 +15,11 @@
           >Full configuration reference ↗</a>
         </p>
       </div>
-      <div class="flex items-center gap-2">
-        <label class="input input-bordered input-sm flex items-center gap-2 w-64">
+      <div class="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+        <label class="input input-bordered input-sm flex items-center gap-2 w-full sm:w-64">
           <UiIcon name="search" class="w-4 h-4 opacity-50" />
           <input v-model="search" type="text" class="grow" placeholder="Search all settings…" data-test="settings-search" />
-          <button v-if="search" class="opacity-50 hover:opacity-100" @click="search = ''" title="Clear">✕</button>
+          <button v-if="search" type="button" class="opacity-70 hover:opacity-100" aria-label="Clear search" title="Clear" @click="search = ''">✕</button>
         </label>
         <button class="btn btn-sm btn-outline" :disabled="loading" @click="loadConfig" data-test="settings-reload">
           <span v-if="loading" class="loading loading-spinner loading-xs"></span>
@@ -36,31 +36,48 @@
       </div>
     </div>
 
-    <!-- Tabs -->
-    <div v-show="!search.trim()" role="tablist" class="tabs tabs-bordered" data-test="settings-tabs">
-      <button
-        v-for="t in tabs"
-        :key="t.id"
-        role="tab"
-        class="tab gap-2"
-        :class="{ 'tab-active font-semibold': activeTab === t.id }"
-        :data-test="`settings-tab-${t.id}`"
-        @click="activeTab = t.id"
+    <div class="flex flex-col md:flex-row gap-4 md:gap-6 md:items-start">
+    <!-- Sections: a list at the side, a select at phone width (FR-050). -->
+    <div v-show="!search.trim()" class="md:w-52 md:shrink-0">
+      <select
+        class="select select-bordered w-full md:hidden min-h-11"
+        aria-label="Settings section"
+        :value="activeTab"
+        data-test="settings-tab-select"
+        @change="pickTab(($event.target as HTMLSelectElement).value)"
       >
-        <component :is="t.icon" class="w-4 h-4 shrink-0" />
-        {{ t.label }}
-      </button>
+        <option v-for="t in tabs" :key="t.id" :value="t.id">{{ t.label }}</option>
+      </select>
+      <div role="tablist" aria-orientation="vertical" class="hidden md:flex flex-col gap-1" data-test="settings-tabs">
+        <button
+          v-for="t in tabs"
+          :key="t.id"
+          type="button"
+          role="tab"
+          :aria-selected="activeTab === t.id ? 'true' : 'false'"
+          :tabindex="activeTab === t.id ? 0 : -1"
+          :data-tab-id="t.id"
+          class="flex items-center justify-start gap-2 w-full min-h-11 text-left rounded px-3 py-2 text-sm hover:bg-base-200"
+          :class="activeTab === t.id ? 'tab-active font-semibold settings-nav-active' : ''"
+          :data-test="`settings-tab-${t.id}`"
+          @click="pickTab(t.id)"
+          @keydown="onSectionKeydown"
+        >
+          <component :is="t.icon" class="w-4 h-4 shrink-0" />
+          {{ t.label }}
+        </button>
+      </div>
     </div>
-
+    <div class="min-w-0 flex-1 space-y-6">
     <div v-if="loadError" class="alert alert-error">
       <span>{{ loadError }}</span>
     </div>
 
     <template v-else-if="loaded && !search.trim()">
-      <!-- Security & Access -->
+      <!-- Access and keys (tab id `security`) -->
       <div v-show="activeTab === 'security'" class="card bg-base-100 shadow-md">
         <div class="card-body">
-          <h2 class="card-title text-lg">Security &amp; Access</h2>
+          <h2 class="card-title text-lg">Access and keys</h2>
           <p class="text-sm text-base-content/60 mb-2">The settings that most affect how exposed and protected your instance is.</p>
           <!-- connect-a-client helper -->
           <div class="alert bg-base-200 border-base-300 mb-3 flex-col sm:flex-row items-start sm:items-center gap-2">
@@ -77,7 +94,7 @@
               v-for="p in posture"
               :key="p.label"
               class="badge gap-1"
-              :class="p.good ? 'badge-success badge-outline' : 'badge-warning'"
+              :class="p.good ? 'badge-success badge-soft' : 'badge-warning badge-soft'"
               :title="p.good ? 'OK' : 'Review this'"
             >
               {{ p.label }}: {{ p.on ? 'on' : 'off' }}
@@ -125,7 +142,7 @@
         </details>
         <div class="text-xs text-base-content/50 px-1">
           Complex lists/maps (image map, custom detection patterns, environment vars, registries) and
-          <RouterLink to="/" class="link">servers</RouterLink> are managed on their own pages or the Raw JSON tab.
+          <RouterLink to="/" class="link">servers</RouterLink> are managed on their own pages or in Edit as JSON.
         </div>
       </div>
 
@@ -141,9 +158,9 @@
       <div v-show="activeTab === 'raw'" class="card bg-base-100 shadow-md">
         <div class="card-body">
           <div class="flex justify-between items-center mb-2">
-            <h2 class="card-title text-lg">{ } Raw JSON</h2>
+            <h2 class="card-title text-lg">Edit as JSON</h2>
             <div v-if="configStatus" :class="['badge', configStatus.valid ? 'badge-success' : 'badge-error']">
-              {{ configStatus.valid ? '✓ Valid' : '✗ Invalid' }}
+              {{ configStatus.valid ? 'Valid' : 'Invalid' }}
             </div>
           </div>
           <p class="text-sm text-base-content/60 mb-2">Full configuration editor. Edits here apply the entire document.</p>
@@ -176,9 +193,10 @@
       </div>
     </template>
 
-    <CollapsibleHintsPanel :hints="settingsHints" />
+    </div>
+    </div>
 
-    <!-- Connect-a-client helper (shared with Dashboard) -->
+    <CollapsibleHintsPanel :hints="settingsHints" />
   </div>
 </template>
 
@@ -264,7 +282,7 @@ function maybePrefillInstructions() {
 const loading = ref(false)
 const loaded = ref(false)
 const loadError = ref('')
-const activeTab = ref<string>('security')
+const activeTab = ref<string>('general')
 // Spec 109 FR-016: read on mount from `?tab=` (onMounted below), then keep the
 // URL in sync with every tab change, preserving other query params (e.g.
 // `?focus=` from focusField).
@@ -366,13 +384,13 @@ const IconBraces = makeTabIcon(
 
 const tabs = computed(() => {
   const base = [
-    { id: 'security', label: 'Security & Access', icon: IconLock },
     { id: 'general', label: 'General', icon: IconGear },
+    { id: 'security', label: 'Access and keys', icon: IconLock },
     { id: 'catalog', label: 'Catalog sources', icon: IconCatalog },
     { id: 'advanced', label: 'Advanced', icon: IconWrench },
   ] as Array<{ id: string; label: string; icon: FunctionalComponent }>
   if (hasServerEdition.value) base.push({ id: 'teams', label: SERVER_EDITION_TAB_LABEL, icon: IconUsers })
-  base.push({ id: 'raw', label: 'Raw JSON', icon: IconBraces })
+  base.push({ id: 'raw', label: 'Edit as JSON', icon: IconBraces })
   return base
 })
 
@@ -619,6 +637,29 @@ watch(defaultInstructions, () => {
 // hasn't since picked a different tab themselves (`tabParamPending` is
 // cleared the moment either happens).
 let tabParamPending = typeof route.query.tab === 'string'
+// A section the user picks wins over a still-pending `?tab=` deep link, even
+// when it is the section already showing (the activeTab watcher would not fire).
+function pickTab(id: string) {
+  tabParamPending = false
+  activeTab.value = id
+  // Re-picking the section already showing does not fire the activeTab watcher,
+  // but a stale `?tab=` must not outlive the choice.
+  if (route.query.tab !== id) void router.replace({ query: { ...route.query, tab: id } })
+}
+// Roving tabindex + Up/Down/Home/End on the vertical section list.
+function onSectionKeydown(event: KeyboardEvent) {
+  const ids = tabs.value.map((t) => t.id)
+  const i = ids.indexOf((event.currentTarget as HTMLElement).getAttribute('data-tab-id') ?? '')
+  let next = -1
+  if (event.key === 'ArrowDown') next = Math.min(i + 1, ids.length - 1)
+  else if (event.key === 'ArrowUp') next = Math.max(i - 1, 0)
+  else if (event.key === 'Home') next = 0
+  else if (event.key === 'End') next = ids.length - 1
+  if (next < 0) return
+  event.preventDefault()
+  pickTab(ids[next])
+  void nextTick(() => (document.querySelector(`[data-test="settings-tab-${ids[next]}"]`) as HTMLElement | null)?.focus())
+}
 function applyTabParamIfValid(): boolean {
   const tabParam = route.query.tab
   if (typeof tabParam === 'string' && tabs.value.some((t) => t.id === tabParam)) {
@@ -644,6 +685,11 @@ watch(
     if (typeof tab === 'string' && tab !== prevTab) {
       tabParamPending = false
       applyTabParamIfValid()
+    }
+    // A bare /settings (e.g. the sidebar link while on ?tab=security) falls
+    // back to General; a focus link picks its own section below.
+    if (typeof tab !== 'string' && (typeof prevTab === 'string' || typeof prevFocus === 'string') && !(typeof focus === 'string' && focus)) {
+      activeTab.value = 'general'
     }
     if (typeof focus === 'string' && focus) {
       // zcode review: comparing only `focus !== prevFocus` left a repeat

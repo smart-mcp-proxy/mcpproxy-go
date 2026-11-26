@@ -8,7 +8,7 @@
     <div class="sm:max-w-md">
       <div class="flex items-center gap-2 flex-wrap">
         <span class="font-medium">{{ field.label }}</span>
-        <span v-if="dirty" class="badge badge-warning badge-xs" title="Unsaved change">●</span>
+        <span v-if="dirty" class="badge badge-warning badge-soft badge-xs" title="Unsaved change">●</span>
         <a
           v-if="docsHref"
           :href="docsHref"
@@ -20,14 +20,30 @@
           @click.stop
         >docs ↗</a>
         <span v-if="field.badge" class="badge badge-outline badge-xs" :data-test="`setting-badge-${field.key}`">{{ field.badge }}</span>
-        <span v-if="field.restart" class="badge badge-warning badge-xs gap-1" title="Requires restart">
+        <span v-if="field.restart" class="badge badge-warning badge-soft badge-xs gap-1" title="Requires restart">
           restart
         </span>
-        <span v-if="field.danger && field.danger.tone !== 'info'" class="badge badge-error badge-xs" title="Sensitive change">
+        <span v-if="field.danger && field.danger.tone !== 'info'" class="badge badge-error badge-soft badge-xs" title="Sensitive change">
           sensitive
         </span>
       </div>
-      <p v-if="field.help" class="text-xs text-base-content/60 mt-0.5">{{ field.help }}</p>
+      <!-- Spec 134 FR-051: a short summary that may wrap; the full help is one
+           activation away, local to the page (no docs page needed). -->
+      <p v-if="field.help" class="text-xs text-base-content/70 mt-0.5" :data-test="`setting-help-${field.key}`">
+        <template v-if="!helpIsLong">{{ field.help }}</template>
+        <template v-else>
+          <span v-if="!helpOpen">{{ helpSummary }}</span>
+          <span v-else :id="helpId" :data-test="`setting-help-full-${field.key}`">{{ field.help }}</span>
+          <button
+            type="button"
+            class="link link-primary ml-1 text-xs"
+            :aria-expanded="helpOpen ? 'true' : 'false'"
+            :aria-controls="helpOpen ? helpId : undefined"
+            :data-test="`setting-help-toggle-${field.key}`"
+            @click="helpOpen = !helpOpen"
+          >{{ helpOpen ? 'Show less' : 'Show full help' }}</button>
+        </template>
+      </p>
       <!-- Spec 109 FR-044a: the effective value is forced from outside the
            config file (e.g. an environment opt-out); say why and how to unlock. -->
       <p v-if="lock" class="text-xs text-warning mt-0.5" :data-test="`setting-locked-${field.key}`">{{ lock.reason }}</p>
@@ -42,6 +58,7 @@
         class="toggle toggle-primary"
         :checked="lock ? !!lock.value : !!modelValue"
         :disabled="!!lock"
+        :aria-label="field.label"
         :data-test="`setting-toggle-${field.key}`"
         @change="emitVal(($event.target as HTMLInputElement).checked)"
       />
@@ -52,6 +69,7 @@
         class="select select-bordered select-sm min-w-[12rem]"
         :value="modelValue ?? ''"
         :disabled="!!lock"
+        :aria-label="field.label"
         :data-test="`setting-select-${field.key}`"
         @change="emitVal(($event.target as HTMLSelectElement).value)"
       >
@@ -69,6 +87,7 @@
           :max="field.max"
           :step="field.step"
           :disabled="!!lock"
+          :aria-label="field.label"
           :data-test="`setting-number-${field.key}`"
           @input="onNumber(($event.target as HTMLInputElement).value)"
         />
@@ -83,6 +102,7 @@
             class="input input-bordered input-sm join-item w-56 font-mono"
             :value="modelValue ?? ''"
             :placeholder="field.placeholder"
+            :aria-label="field.label"
             :data-test="`setting-secret-${field.key}`"
             @input="emitVal(($event.target as HTMLInputElement).value)"
           />
@@ -137,6 +157,7 @@
           :value="modelValue ?? ''"
           :placeholder="field.placeholder"
           :disabled="!!lock"
+          :aria-label="field.label"
           :data-test="`setting-text-${field.key}`"
           @input="emitText(($event.target as HTMLInputElement).value)"
         />
@@ -159,6 +180,7 @@
           rows="6"
           :value="modelValue ?? ''"
           :placeholder="field.placeholder"
+          :aria-label="field.label"
           :data-test="`setting-textarea-${field.key}`"
           @input="emitText(($event.target as HTMLTextAreaElement).value)"
         ></textarea>
@@ -198,6 +220,18 @@ const props = defineProps<{
 const emit = defineEmits<{ (e: 'update:modelValue', v: any): void }>()
 
 const showSecret = ref(false)
+const helpOpen = ref(false)
+const helpId = computed(() => `setting-help-full-${props.field.key.replace(/[^a-zA-Z0-9_-]/g, '_')}`)
+// Help up to this length is shown whole; longer help is summarised.
+const HELP_SHORT = 140
+const helpIsLong = computed(() => (props.field.help?.length ?? 0) > HELP_SHORT)
+const helpSummary = computed(() => {
+  const help = (props.field.help ?? '').trim()
+  const first = help.match(/^.*?[.!?](?=\s|$)/)?.[0]
+  if (first && first.length <= HELP_SHORT && first.length < help.length) return first
+  const cut = help.slice(0, HELP_SHORT - 20)
+  return cut.slice(0, Math.max(cut.lastIndexOf(' '), 40)).trimEnd() + '…'
+})
 const copied = ref(false)
 const regenEl = ref<HTMLDialogElement | null>(null)
 const docsHref = computed(() => docsUrl(props.field.docs))

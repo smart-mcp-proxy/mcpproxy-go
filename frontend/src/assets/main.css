@@ -711,3 +711,10 @@ details.dropdown > summary::-webkit-details-marker { display: none; }
 [data-test="sidebar-overlay"] .menu :where(a.active, a.router-link-active.active) {
   font-weight: 600;
 }
+
+/* Spec 134 FR-050: the active Settings section is brand-soft with brand-text. */
+.settings-nav-active,
+.settings-nav-active:hover {
+  background-color: var(--brand-soft);
+  color: var(--brand-text);
+}

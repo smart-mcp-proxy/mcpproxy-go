@@ -22,14 +22,20 @@
 
       <!-- Tabs -->
       <div role="tablist" class="tabs tabs-border px-6 shrink-0">
-        <a
+        <button
           v-for="tab in tabs"
           :key="tab.id"
+          type="button"
           role="tab"
+          :aria-selected="activeTab === tab.id ? 'true' : 'false'"
+          :tabindex="activeTab === tab.id ? 0 : -1"
           class="tab gap-2"
           :class="{ 'tab-active text-primary': activeTab === tab.id }"
+          :id="`wizard-tab-${tab.id}`"
+          :aria-controls="activeTab === tab.id ? `wizard-panel-${tab.id}` : undefined"
           :data-test="`tab-${tab.id}`"
           @click="selectTab(tab.id)"
+          @keydown="onTabKeydown"
         >
           <span
             class="inline-flex items-center justify-center w-5 h-5 rounded-full text-xs font-semibold"
@@ -39,7 +45,7 @@
             <span v-else>{{ tab.idx }}</span>
           </span>
           <span>{{ tab.label }}</span>
-        </a>
+        </button>
       </div>
 
       <!-- Body (scrollable) -->
@@ -47,7 +53,7 @@
         <!-- ============================ -->
         <!-- Tab: Clients -->
         <!-- ============================ -->
-        <section v-if="activeTab === 'clients'" data-test="panel-clients">
+        <section v-if="activeTab === 'clients'" id="wizard-panel-clients" role="tabpanel" aria-labelledby="wizard-tab-clients" data-test="panel-clients">
           <!-- The wizard's primary client path is the same component used by
                Clients. Keep the legacy markup below inert temporarily while
                its presentation-only helpers are retired; it must never own a
@@ -173,7 +179,7 @@
                   <div class="text-xs opacity-60 mt-0.5">
                     mcpproxy is listening on <code class="font-mono text-xs">{{ listenAddr || 'localhost' }}</code>.
                     To expose it on the LAN, edit <span class="opacity-80">listen</span> in
-                    <router-link to="/settings" class="link link-primary">Settings → Configuration</router-link>.
+                    <router-link to="/settings?tab=security" class="link link-primary">Settings → Access and keys</router-link>.
                   </div>
                 </div>
               </div>
@@ -201,7 +207,7 @@
         <!-- ============================ -->
         <!-- Tab: Servers -->
         <!-- ============================ -->
-        <section v-else-if="activeTab === 'servers'" data-test="panel-servers">
+        <section v-else-if="activeTab === 'servers'" id="wizard-panel-servers" role="tabpanel" aria-labelledby="wizard-tab-servers" data-test="panel-servers">
           <p class="text-sm opacity-70 mb-4">
             Pick which servers from your existing AI clients to import. Same name in multiple sources? We auto-rename collisions like
             <code class="font-mono text-xs bg-base-200 px-1 rounded">mcpproxy_claude_code</code> so each entry stays distinct.
@@ -394,7 +400,7 @@
             data-test="security-defaults-summary"
           >
             Docker isolation is <strong>{{ dockerIsolationDefault ? 'on' : 'off' }}</strong><span v-if="dockerIsolationDefault && dockerStatus === false" class="text-warning"> (Docker not detected)</span> and new-server quarantine is <strong>{{ quarantineEnabled ? 'on' : 'off' }}</strong> by default —
-            <a :href="hrefFor('/settings')" class="link link-primary" @click="goToSettings">change these in Settings →</a>
+            <a :href="hrefFor('/settings?tab=security')" class="link link-primary" @click="goToSettings">change these in Settings →</a>
           </p>
 
           <!-- Only an alternative when there is something to import; the
@@ -438,7 +444,7 @@
         <!-- ============================ -->
         <!-- Tab: Verify -->
         <!-- ============================ -->
-        <section v-else-if="activeTab === 'verify'" data-test="panel-verify">
+        <section v-else-if="activeTab === 'verify'" id="wizard-panel-verify" role="tabpanel" aria-labelledby="wizard-tab-verify" data-test="panel-verify">
           <!-- Two milestones, deliberately separate (UX audit F13). The MCP
                `initialize` handshake behind firstMCPClientEver proves the
                wiring only; the value the product exists for is an upstream
@@ -460,7 +466,6 @@
                  upstreamCallState; a row we cannot substantiate is worse than
                  no row. -->
             <div
-              v-if="upstreamCallState !== 'unknown'"
               class="flex items-start justify-center gap-2 pb-4 text-sm text-center max-w-md mx-auto"
               data-test="verify-first-upstream-call"
               :data-state="upstreamCallState"
@@ -471,10 +476,22 @@
                   <span class="font-semibold">First upstream tool call</span> — a tool on one of your MCP servers ran through mcpproxy and returned a result.
                 </span>
               </template>
+              <template v-else-if="upstreamCallState === 'checking'">
+                <span class="opacity-50"><span class="loading loading-dots loading-xs"></span></span>
+                <span class="opacity-70">Checking whether an upstream tool call has been recorded…</span>
+              </template>
+              <template v-else-if="upstreamCallState === 'pending'">
+                <span class="opacity-50"><UiIcon name="signal" class="w-4 h-4" /></span>
+                <span class="opacity-70">
+                  <span class="font-semibold">No upstream tool call recorded yet</span>
+                  <template v-if="suggestedPrompts.length > 0"> — try the first prompt below, which calls a tool on one of your servers; the rest search and inspect mcpproxy itself.</template>
+                  <template v-else> — approve a server first, then ask your AI client to call one of its tools.</template>
+                </span>
+              </template>
               <template v-else>
                 <span class="opacity-50"><UiIcon name="signal" class="w-4 h-4" /></span>
                 <span class="opacity-70">
-                  <span class="font-semibold">No upstream tool call recorded yet</span> — try the first prompt below, which calls a tool on one of your servers; the rest search and inspect mcpproxy itself.
+                  <span class="font-semibold">Upstream tool calls are not tracked here</span> — mcpproxy cannot say whether a tool has run, because this routing mode or an unreadable status hides it. Check Recent activity below.
                 </span>
               </template>
             </div>
@@ -682,7 +699,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onUnmounted, h, type FunctionalComponent } from 'vue'
+import { ref, reactive, computed, watch, onUnmounted, nextTick, h, type FunctionalComponent } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/services/api'
 import { useOnboardingStore } from '@/stores/onboarding'
@@ -828,7 +845,8 @@ const routingMode = ref('')
 // real upstream calls that never reach the stamping handler. Hence "No upstream
 // tool call RECORDED yet": a statement about what mcpproxy measured, which is
 // true, rather than about what the user did, which we cannot see.
-const upstreamCallState = computed<'satisfied' | 'pending' | 'unknown'>(() => {
+const upstreamCallState = computed<'satisfied' | 'pending' | 'unknown' | 'checking'>(() => {
+  if (!upstreamStatusSettled.value && firstRealToolCallEver.value === null) return 'checking'
   if (firstRealToolCallEver.value === true) return 'satisfied'
   if (firstRealToolCallEver.value === false && routingMode.value === 'retrieve_tools') return 'pending'
   return 'unknown'
@@ -1163,6 +1181,26 @@ function pickInitialTab(requested: TabID | null): TabID {
 // than as a way to undo a wrong turn.
 const tabOrder: TabID[] = ['clients', 'servers', 'verify']
 const canGoBack = computed(() => tabOrder.indexOf(activeTab.value) > 0)
+// FR-053: the tab strip is a roving-tabindex tablist, so the arrow keys, Home
+// and End move between steps (Enter and Space activate a focused tab natively).
+function onTabKeydown(event: KeyboardEvent) {
+  // Arrow keys move from the FOCUSED tab, which can differ from the selected
+  // one when the wizard picks a step by itself while focus sits on another.
+  const focused = (event.currentTarget as HTMLElement | null)?.getAttribute('data-test')?.replace('tab-', '') as TabID | undefined
+  const i = focused ? tabOrder.indexOf(focused) : tabOrder.indexOf(activeTab.value)
+  let next = -1
+  if (event.key === 'ArrowRight') next = Math.min(i + 1, tabOrder.length - 1)
+  else if (event.key === 'ArrowLeft') next = Math.max(i - 1, 0)
+  else if (event.key === 'Home') next = 0
+  else if (event.key === 'End') next = tabOrder.length - 1
+  if (next < 0) return
+  event.preventDefault()
+  selectTab(tabOrder[next])
+  void nextTick(() => {
+    ;(document.querySelector(`[data-test="tab-${tabOrder[next]}"]`) as HTMLElement | null)?.focus()
+  })
+}
+
 function goBack() {
   const i = tabOrder.indexOf(activeTab.value)
   if (i > 0) selectTab(tabOrder[i - 1])
@@ -1217,7 +1255,7 @@ async function goToSettings(event: MouseEvent) {
   if (!isPlainLeftClick(event)) return
   event.preventDefault()
   await dismiss()
-  await router.push('/settings')
+  await router.push('/settings?tab=security')
 }
 
 async function goToServersList(event: MouseEvent) {
@@ -1290,6 +1328,7 @@ async function fetchRecentActivity() {
 // Never surfaces an error: a missing `activation` block leaves the milestone
 // unknown, and the row simply does not render. It must not read as "not yet"
 // — that is an assertion about the user's install we have no basis for.
+const upstreamStatusSettled = ref(false)
 async function fetchActivation() {
   try {
     const res = await api.getStatus()
@@ -1303,6 +1342,8 @@ async function fetchActivation() {
     firstRealToolCallEver.value = typeof flag === 'boolean' ? flag : null
   } catch {
     // graceful — keep prior value
+  } finally {
+    upstreamStatusSettled.value = true
   }
 }
 
