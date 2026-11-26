@@ -81,7 +81,6 @@
           />
         </template>
       </div>
-      <ViewAs />
       <ScopeChips page="servers" :scope-query="scopeQuery" :disabled="disabledScope" :unavailable="scopeUnavailableNames" />
       <p v-if="hasServers" class="text-sm text-base-content/70" data-test="servers-totals">
         <span data-test="servers-total-count">{{ counts.total }} servers, {{ counts.enabled }} enabled</span>
