@@ -33,7 +33,9 @@ const (
 // This interface is implemented by Runtime to enable event emission from ActivityService.
 type SensitiveDataEventEmitter interface {
 	// EmitSensitiveDataDetected emits an event when sensitive data is detected.
-	EmitSensitiveDataDetected(activityID string, detectionCount int, maxSeverity string, detectionTypes []string, serverName string)
+	// activityType is the type of the scanned row, so subscribers that may not
+	// read rows of that type can be denied the event.
+	EmitSensitiveDataDetected(activityID string, activityType storage.ActivityType, detectionCount int, maxSeverity string, detectionTypes []string, serverName string)
 }
 
 // SessionClientResolver maps an MCP session id to the client that opened it
@@ -849,7 +851,7 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 			s.workersWG.Add(1)
 			go func() {
 				defer s.workersWG.Done()
-				s.runAsyncDetection(record.ID, arguments, scanText, record.ServerName)
+				s.runAsyncDetection(record, arguments, scanText)
 			}()
 		}
 	}
@@ -1142,7 +1144,7 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 			s.workersWG.Add(1)
 			go func() {
 				defer s.workersWG.Done()
-				s.runAsyncDetection(record.ID, arguments, detectionSource, record.ServerName)
+				s.runAsyncDetection(record, arguments, detectionSource)
 			}()
 		}
 	}
@@ -1232,7 +1234,7 @@ func (s *ActivityService) handlePromptGet(evt Event) {
 		s.workersWG.Add(1)
 		go func() {
 			defer s.workersWG.Done()
-			s.runAsyncDetection(record.ID, arguments, detectionSource, record.ServerName)
+			s.runAsyncDetection(record, arguments, detectionSource)
 		}()
 	}
 }
@@ -1413,10 +1415,11 @@ func getSlicePayload(payload map[string]any, key string) []string {
 // runAsyncDetection performs sensitive data detection asynchronously (Spec 026).
 // It scans tool call arguments and responses for sensitive data, then updates
 // the activity record metadata with the detection results and emits an event.
-func (s *ActivityService) runAsyncDetection(recordID string, arguments map[string]interface{}, response, serverName string) {
+func (s *ActivityService) runAsyncDetection(record *storage.ActivityRecord, arguments map[string]interface{}, response string) {
 	if s.detector == nil {
 		return
 	}
+	recordID := record.ID
 
 	// Convert arguments to JSON string for scanning
 	var argsStr string
@@ -1462,10 +1465,11 @@ func (s *ActivityService) runAsyncDetection(recordID string, arguments map[strin
 
 			s.eventEmitter.EmitSensitiveDataDetected(
 				recordID,
+				record.Type,
 				len(result.Detections),
 				maxSeverity,
 				detectionTypes,
-				serverName,
+				record.ServerName,
 			)
 		}
 	} else {

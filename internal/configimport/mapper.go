@@ -2,6 +2,7 @@ package configimport
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -80,6 +81,13 @@ func MapToServerConfig(parsed *ParsedServer, now time.Time) (*config.ServerConfi
 			server.OAuth = oauth
 			warnings = append(warnings, "OAuth credentials imported; you may need to reconfigure")
 		}
+	case FormatClaudeCode:
+		oauth, oauthWarnings := mapClaudeCodeOAuth(parsed.Fields)
+		warnings = append(warnings, oauthWarnings...)
+		if oauth != nil {
+			server.OAuth = oauth
+			warnings = append(warnings, "OAuth credentials imported; you may need to reconfigure")
+		}
 	}
 
 	// Track skipped fields
@@ -123,6 +131,45 @@ func mapGeminiOAuth(fields map[string]interface{}) *config.OAuthConfig {
 		Scopes:       oauth.Scopes,
 		RedirectURI:  oauth.RedirectURI,
 	}
+}
+
+// mapClaudeCodeOAuth extracts OAuth config from Claude Code's oauth field, with
+// a warning for everything that could not be carried over.
+// Claude Code's dialect: scopes is a space-separated string and the auth
+// server is named by authServerMetadataUrl. An empty client_id stays empty:
+// mcpproxy falls back to DCR or public-client PKCE, which is what a server
+// without a static client needs anyway.
+func mapClaudeCodeOAuth(fields map[string]interface{}) (*config.OAuthConfig, []string) {
+	src, ok := fields["oauth"].(*ClaudeCodeOAuthConfig)
+	if !ok || src == nil {
+		return nil, nil
+	}
+
+	var warnings []string
+	if src.CallbackPort != 0 {
+		// mcpproxy has no port-only callback pin; oauth.redirect_uri is the
+		// full URL, so half a pin would fail validation.
+		warnings = append(warnings, fmt.Sprintf("oauth.callbackPort %d has no mcpproxy equivalent and was dropped; set oauth.redirect_uri in config or the web UI if you need a fixed callback", src.CallbackPort))
+	}
+
+	oauth := &config.OAuthConfig{
+		ClientID:              src.ClientID,
+		Scopes:                strings.Fields(src.Scopes),
+		AuthServerMetadataURL: src.AuthServerMetadataURL,
+	}
+	// The only value here that Validate can reject; its error does not echo it.
+	if err := oauth.Validate(); err != nil {
+		warnings = append(warnings, fmt.Sprintf("oauth.authServerMetadataUrl is not usable by mcpproxy and was dropped: %v", err))
+		oauth.AuthServerMetadataURL = ""
+	}
+	if oauth.ClientID != "" {
+		warnings = append(warnings, "Claude Code does not store the OAuth client secret in its config; set oauth.client_secret if this client has one")
+	}
+
+	if oauth.ClientID == "" && len(oauth.Scopes) == 0 && oauth.AuthServerMetadataURL == "" {
+		return nil, warnings
+	}
+	return oauth, warnings
 }
 
 // getSkippedFields returns a list of fields that couldn't be mapped.

@@ -1408,7 +1408,7 @@
           "status": "must",
           "ids": [
             "testid:viewing-filter",
-            "component:frontend/src/components/ViewingFilter.vue"
+            "component:frontend/src/components/ViewAs.vue"
           ],
           "tests": [
             "vitest:frontend/tests/unit/header-layout.spec.ts",
