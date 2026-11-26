@@ -1,3 +1,8 @@
+//go:build !server
+
+// Personal-edition registrations only: the -tags server router and command
+// tree are enumerated from Spec 133 PR-1b on (plan.md).
+
 package httpapi
 
 import (
