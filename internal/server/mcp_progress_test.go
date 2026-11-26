@@ -11,7 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/progressrelay"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 )
 
 type progressSession struct {
@@ -37,77 +39,80 @@ func TestWithProgressRelay_NoTokenOrNoSession(t *testing.T) {
 	p := &MCPProxyServer{config: &config.Config{}}
 	sess := &progressSession{notes: make(chan mcp.JSONRPCNotification, 4)}
 	sctx := mcpserver.NewMCPServer("t", "1").WithContext(context.Background(), sess)
-
-	assert.Nil(t, progressrelay.SinkFrom(p.withProgressRelay(sctx, progressRequest(nil))))
-	assert.Nil(t, progressrelay.SinkFrom(p.withProgressRelay(context.Background(), progressRequest("tok"))))
-	assert.NotNil(t, progressrelay.SinkFrom(p.withProgressRelay(sctx, progressRequest("tok"))))
+	relay := func(ctx context.Context, tok mcp.ProgressToken) progressrelay.Sink {
+		return progressrelay.SinkFrom(p.withProgressRelay(ctx, progressRequest(tok), "srv", "tool", contracts.ContentTrustUntrusted))
+	}
+	assert.Nil(t, relay(sctx, nil))
+	assert.Nil(t, relay(context.Background(), "tok"))
+	assert.NotNil(t, relay(sctx, "tok"))
 }
 
-// The upstream-written message passes the output policy like tool output:
-// redacted under redact, dropped (numbers kept) under block.
-func TestWithProgressRelay_MessageThroughOutputPolicy(t *testing.T) {
-	t.Run("a message that reads like the withheld marker is kept", func(t *testing.T) {
-		p := &MCPProxyServer{config: &config.Config{}}
-		assert.Equal(t, skillWordWithheld, p.progressMessageCleaner()(skillWordWithheld))
-	})
+const progressTestSecret = "AKIA1234567890ABCDEF"
 
-	// A secret that straddles the forwarding cap is still seen whole.
-	t.Run("redact before the cap", func(t *testing.T) {
-		cfg := config.DefaultOutputSanitisationConfig()
-		cfg.ResponseAction = "redact"
-		p := &MCPProxyServer{config: &config.Config{OutputSanitisation: cfg}}
-		sess := &progressSession{notes: make(chan mcp.JSONRPCNotification, 4)}
-		sctx := mcpserver.NewMCPServer("t", "1").WithContext(context.Background(), sess)
-		sink := progressrelay.SinkFrom(p.withProgressRelay(sctx, progressRequest("t")))
-		msg := strings.Repeat("a", progressrelay.MaxMessageBytes-10) + " AKIA1234567890ABCDEF"
-		sink(progressrelay.Update{Progress: 1, Message: msg})
-		got, _ := (<-sess.notes).Params.AdditionalFields["message"].(string)
+// progressMessage sends msg through the sink of one call under cfg and the
+// tool's trust and returns the forwarded notification's fields.
+func progressMessage(t *testing.T, cfg *config.OutputSanitisationConfig, trust, msg string) map[string]any {
+	t.Helper()
+	p := &MCPProxyServer{config: &config.Config{OutputSanitisation: cfg}}
+	p.sanitisationDetector = security.NewDetector(config.DefaultSensitiveDataDetectionConfig())
+	sess := &progressSession{notes: make(chan mcp.JSONRPCNotification, 4)}
+	sctx := mcpserver.NewMCPServer("t", "1").WithContext(context.Background(), sess)
+	sink := progressrelay.SinkFrom(p.withProgressRelay(sctx, progressRequest(7), "srv", "tool", trust))
+	require.NotNil(t, sink)
+	total := 10.0
+	require.True(t, sink(progressrelay.Update{Progress: 2, Total: &total, Message: msg}))
+	f := (<-sess.notes).Params.AdditionalFields
+	assert.Equal(t, 7, f["progressToken"], "the client's own token, as it sent it")
+	assert.Equal(t, 2.0, f["progress"])
+	assert.Equal(t, 10.0, f["total"])
+	return f
+}
+
+func policy(action string, mutate ...func(*config.OutputSanitisationConfig)) *config.OutputSanitisationConfig {
+	cfg := config.DefaultOutputSanitisationConfig()
+	cfg.ResponseAction = action
+	for _, m := range mutate {
+		m(cfg)
+	}
+	return cfg
+}
+
+// The message is treated like the text of the same tool's result.
+func TestWithProgressRelay_MessageLikeToolResult(t *testing.T) {
+	untrusted, trusted := contracts.ContentTrustUntrusted, contracts.ContentTrustTrusted
+	secretMsg := "uploading with key " + progressTestSecret + " now"
+
+	t.Run("spotlight default leaves it alone", func(t *testing.T) {
+		assert.Equal(t, secretMsg, progressMessage(t, policy("spotlight"), untrusted, secretMsg)["message"])
+	})
+	t.Run("redact", func(t *testing.T) {
+		got := progressMessage(t, policy("redact"), untrusted, secretMsg)["message"]
+		assert.NotContains(t, got, progressTestSecret)
+	})
+	t.Run("block leaves the message out, keeps the numbers", func(t *testing.T) {
+		_, has := progressMessage(t, policy("block"), untrusted, secretMsg)["message"]
+		assert.False(t, has)
+	})
+	t.Run("block without a critical secret forwards it", func(t *testing.T) {
+		assert.Equal(t, "step 2", progressMessage(t, policy("block"), untrusted, "step 2")["message"])
+	})
+	strip := func(c *config.OutputSanitisationConfig) { c.StripControlChars = true }
+	t.Run("strip applies to untrusted tools only", func(t *testing.T) {
+		ansi := "\x1b[31mred\x1b[0m"
+		assert.Equal(t, "red", progressMessage(t, policy("spotlight", strip), untrusted, ansi)["message"])
+		assert.Equal(t, ansi, progressMessage(t, policy("spotlight", strip), trusted, ansi)["message"])
+	})
+	spot := func(c *config.OutputSanitisationConfig) { c.SpotlightUntrusted = true }
+	t.Run("spotlight frame for untrusted tools, after the cut", func(t *testing.T) {
+		long := strings.Repeat("a", progressrelay.MaxMessageBytes+100)
+		got, _ := progressMessage(t, policy("spotlight", spot), untrusted, long)["message"].(string)
+		assert.Equal(t, security.SpotlightUntrusted(long[:progressrelay.MaxMessageBytes], "srv", "tool"), got)
+		assert.Equal(t, "plain", progressMessage(t, policy("spotlight", spot), trusted, "plain")["message"])
+	})
+	t.Run("a secret across the cut is redacted first", func(t *testing.T) {
+		msg := strings.Repeat("a", progressrelay.MaxMessageBytes-10) + " " + progressTestSecret
+		got, _ := progressMessage(t, policy("redact"), untrusted, msg)["message"].(string)
 		assert.NotContains(t, got, "AKIA123456")
 		assert.LessOrEqual(t, len(got), progressrelay.MaxMessageBytes)
 	})
-
-	const secretMsg = "uploading with key AKIA1234567890ABCDEF now"
-	for _, tc := range []struct {
-		action string
-		check  func(t *testing.T, msg any, has bool)
-	}{
-		{"spotlight", func(t *testing.T, msg any, has bool) {
-			assert.True(t, has)
-			assert.Equal(t, secretMsg, msg)
-		}},
-		{"redact", func(t *testing.T, msg any, has bool) {
-			require.True(t, has)
-			assert.NotContains(t, msg, "AKIA1234567890ABCDEF")
-		}},
-		{"block", func(t *testing.T, _ any, has bool) {
-			assert.False(t, has, "a withheld message is left out")
-		}},
-	} {
-		t.Run(tc.action, func(t *testing.T) {
-			cfg := config.DefaultOutputSanitisationConfig()
-			cfg.ResponseAction = tc.action
-			p := &MCPProxyServer{config: &config.Config{OutputSanitisation: cfg}}
-			sess := &progressSession{notes: make(chan mcp.JSONRPCNotification, 4)}
-			sctx := mcpserver.NewMCPServer("t", "1").WithContext(context.Background(), sess)
-			sink := progressrelay.SinkFrom(p.withProgressRelay(sctx, progressRequest(7)))
-			require.NotNil(t, sink)
-			total := 10.0
-			sink(progressrelay.Update{Progress: 2, Total: &total, Message: secretMsg})
-			n := <-sess.notes
-			f := n.Params.AdditionalFields
-			if tc.action == "spotlight" {
-				// A policy switched on during the call applies to its next message.
-				p.config.OutputSanitisation = &config.OutputSanitisationConfig{ResponseAction: "redact", MaxRedactions: 100}
-				p.resetSkillOutputState()
-				sink(progressrelay.Update{Progress: 3, Message: secretMsg})
-				later := (<-sess.notes).Params.AdditionalFields["message"]
-				assert.NotContains(t, later, "AKIA1234567890ABCDEF")
-			}
-			assert.Equal(t, 7, f["progressToken"], "the client's own token, as it sent it")
-			assert.Equal(t, 2.0, f["progress"])
-			assert.Equal(t, 10.0, f["total"])
-			msg, has := f["message"]
-			tc.check(t, msg, has)
-		})
-	}
 }

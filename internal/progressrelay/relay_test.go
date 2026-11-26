@@ -178,7 +178,7 @@ func TestDispatch_OverlongMessageLeftOut(t *testing.T) {
 
 func TestCapMessage_RuneBoundary(t *testing.T) {
 	long := "x" + strings.Repeat("é", MaxMessageBytes) // 2 bytes each
-	got := capMessage(long)
+	got := CapMessage(long)
 	assert.LessOrEqual(t, len(got), MaxMessageBytes)
 	assert.True(t, strings.HasPrefix(got, "xé"))
 	assert.True(t, strings.HasSuffix(got, "é"), "cut on a rune boundary")

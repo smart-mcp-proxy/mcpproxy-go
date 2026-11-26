@@ -72,9 +72,10 @@ func SinkFrom(ctx context.Context) Sink {
 // SessionSink returns a sink that sends each update to the MCP client session
 // in ctx under the client's own token, or nil when progress cannot be
 // forwarded: the client sent no token, or ctx carries no session that can
-// receive notifications. clean, when not nil, is applied to every whole
-// message before it is cut to MaxMessageBytes; a message it empties is left
-// out and the progress numbers are still sent.
+// receive notifications. clean, when not nil, gets every whole message and
+// returns what is sent; it must cut the text with CapMessage after the output
+// policy has seen it whole. Without clean the message is only cut. A message
+// that ends up empty is left out and the progress numbers are still sent.
 // Sending never blocks: an update the session cannot take now is dropped.
 func SessionSink(ctx context.Context, clientToken mcp.ProgressToken, clean func(string) string) Sink {
 	if clientToken == nil {
@@ -93,10 +94,13 @@ func SessionSink(ctx context.Context, clientToken mcp.ProgressToken, clean func(
 			params["total"] = *u.Total
 		}
 		msg := u.Message
-		if msg != "" && clean != nil {
-			msg = clean(msg)
+		if msg != "" {
+			if clean != nil {
+				msg = clean(msg)
+			} else {
+				msg = CapMessage(msg)
+			}
 		}
-		msg = capMessage(msg)
 		if msg != "" {
 			params["message"] = msg
 		}
@@ -284,9 +288,9 @@ func number(v any) (float64, bool) {
 	return x, true
 }
 
-// capMessage cuts m to at most MaxMessageBytes on a rune boundary. The cut
+// CapMessage cuts m to at most MaxMessageBytes on a rune boundary. The cut
 // is a copy, so a queued update does not keep the upstream's whole message.
-func capMessage(m string) string {
+func CapMessage(m string) string {
 	if len(m) <= MaxMessageBytes {
 		return m
 	}
