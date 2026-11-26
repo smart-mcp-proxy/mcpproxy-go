@@ -41,7 +41,7 @@ func TestWaitForOAuthCallbackAsync_RetiredInstanceInvalidatesTheLogin(t *testing
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		c.waitForOAuthCallbackAsync(ctx, nil, "verifier", state, "corr-retired")
+		c.waitForOAuthCallbackAsync(ctx, nil, "verifier", state, nil, "corr-retired")
 	}()
 	require.Eventually(t, func() bool { return cs.HasState(state) }, 2*time.Second, 5*time.Millisecond)
 

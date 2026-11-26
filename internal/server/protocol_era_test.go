@@ -45,7 +45,7 @@ func pinnedTestServer(t *testing.T) *httptest.Server {
 	)
 
 	streamable := mcpserver.NewStreamableHTTPServer(srv, clientFacingStreamableOptions(nil)...)
-	httpServer := httptest.NewServer(streamable)
+	httpServer := httptest.NewServer(clientFacingEraGuard(streamable))
 	t.Cleanup(func() { closeHTTPFixture(httpServer) })
 	return httpServer
 }

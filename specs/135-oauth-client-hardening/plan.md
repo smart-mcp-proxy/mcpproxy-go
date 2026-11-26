@@ -186,7 +186,7 @@ This section governs the rest of the design. Where an item below names an earlie
 
 ### D5. DCR `application_type` (FR-016)
 
-- After the bump, a table test pins mcp-go's registration body: `native` for every host that `config.IsLoopbackHost` accepts (`internal/config/oauth_validation.go:192-199`), including `127.0.0.2`, `[::1]` and `localhost`, and `web` otherwise (R4). The assertion and any rewrite ship in the same PR. If mcp-go's mapping differs, a new registration-request interception in the transport wrapper rewrites the field. This is new work, because today the wrapper only injects query and form parameters (`transport_wrapper.go:403-438`).
+- After the bump, a table test pins mcp-go's registration body: `native` for an `http` redirect URI on every host that `config.IsLoopbackHost` accepts (`internal/config/oauth_validation.go:192-199`), including `127.0.0.2`, `[::1]` and `localhost`, and `web` otherwise, `https` on a loopback host included (R4). PR-1 result: mcp-go v1.6 maps `127.0.0.2` to `web`, so the rewrite (`internal/oauth/dcr_application_type.go`) ships. The assertion and any rewrite ship in the same PR. If mcp-go's mapping differs, a new registration-request interception in the transport wrapper rewrites the field. This is new work, because today the wrapper only injects query and form parameters (`transport_wrapper.go:403-438`).
 
 ### D6. Opt-out and broker (FR-014, FR-015, US7)
 
@@ -209,7 +209,7 @@ This section governs the rest of the design. Where an item below names an earlie
 
 ## Test plan
 
-**Fake authorization server** `internal/oauth/oauthtest/fakeas.go` (test-only): one `httptest.Server` that serves PRM, RFC 8414 and OIDC metadata, registration, authorize (302 to the redirect URI, so the real callback server is exercised) and token. Its switches:
+**Fake authorization server** (test-only). PR-1 extends the existing in-repo test server `tests/oauthserver` instead of adding `internal/oauth/oauthtest/fakeas.go`: it already serves metadata, PRM, registration, authorize (302 to the real callback server) and token, and is used by the callback tests. PR-1 adds `AdvertiseIss`, `IssMode`, `WrongIssuer`, `RejectApplicationType`, `RegistrationRequests()` and `TokenRequestCount()`; later PRs add the remaining switches there: one `httptest.Server` that serves PRM, RFC 8414 and OIDC metadata, registration, authorize (302 to the redirect URI, so the real callback server is exercised) and token. Its switches:
 
 - `AdvertiseIss`
 - `IssMode {Correct, Omit, Empty, Wrong, Repeat}`
@@ -288,14 +288,14 @@ Two or three instances (honest H, hostile A, replacement B) cover mix-up and swa
 
 ## Delivery
 
-1. **PR-1 (bump, no new enforcement)**: FR-019, D1 (strict parse), D5 (the DCR `application_type` assertion and, if needed, the registration rewrite), and the fake AS. The only behaviour change is FR-001 and FR-016.
+1. **PR-1 (bump, no new enforcement)**: FR-019, D1 (strict parse), D5 (the DCR `application_type` assertion and, if needed, the registration rewrite), and the fake AS. Its behaviour changes are FR-001, FR-016 and the upstream changes research.md R1a records as adopted; one of them can already refuse a provider: authorization server metadata without `issuer`.
 2. **PR-2 (all enforcement, with its escape hatch)**:
    - D0: the resolver, `Snapshot`, and the last-hop guard on all three clients;
    - D3, D2, D4;
    - D6's `skip_issuer_validation` field and resolver branch;
    - the three codes, trust on first use, and the upgrade tests.
 
-   This is the first PR that can refuse a provider that works today, so it ships together with the opt-out.
+   This is the first PR whose own issuer checks can refuse a provider that works today, so it ships together with the opt-out. (PR-1 can already refuse a callback with a repeated parameter, FR-001, and metadata without `issuer`, an adopted mcp-go change.)
 3. **PR-3 (surfaces, broker, docs)**: D6's broker `issuer`, D7's surfaces and goldens, the Web UI and macOS editor fields, the docs, the e2e script and the provider verification.
 
 Each PR is cross-reviewed (opencode `gpt-6.2-sol`, round cap per the operator rules).

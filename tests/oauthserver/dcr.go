@@ -2,6 +2,7 @@ package oauthserver
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -35,9 +36,24 @@ func (s *OAuthTestServer) handleRegistration(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	rawBody, err := io.ReadAll(io.LimitReader(r.Body, 1<<20+1))
+	if err == nil && len(rawBody) > 1<<20 {
+		s.dcrError(w, http.StatusRequestEntityTooLarge, "invalid_client_metadata", "Request body too large")
+		return
+	}
 	var req ClientRegistrationRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var members map[string]json.RawMessage
+	if err != nil || json.Unmarshal(rawBody, &req) != nil || json.Unmarshal(rawBody, &members) != nil {
 		s.dcrError(w, http.StatusBadRequest, "invalid_client_metadata", "Failed to parse request body")
+		return
+	}
+	_, req.HasApplicationType = members["application_type"]
+	s.mu.Lock()
+	s.registrationRequests = append(s.registrationRequests, req.clone())
+	s.mu.Unlock()
+
+	if s.options.RejectApplicationType && req.HasApplicationType {
+		s.dcrError(w, http.StatusBadRequest, "invalid_client_metadata", "application_type is not accepted")
 		return
 	}
 

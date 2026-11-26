@@ -509,7 +509,10 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 	for i := range toolsResult.Tools {
 		tool := &toolsResult.Tools[i]
 		var paramsJSON string
-		if schemaBytes, err := json.Marshal(tool.InputSchema); err == nil {
+		// The v1.0.0 encoding of the decoded schema (legacySchema): stored,
+		// scanned and hashed, so it must not move with the library version.
+		inputSchema := legacySchema(mcp.ToolArgumentsSchema(tool.InputSchema))
+		if schemaBytes, err := json.Marshal(inputSchema); err == nil {
 			paramsJSON = string(schemaBytes)
 		}
 
@@ -558,7 +561,7 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 
 		// Compute hash for tool change detection.
 		// Hash is based on serverName + toolName + description + inputSchema + outputSchema.
-		toolMeta.Hash = hash.ComputeToolHashWithOutputSchema(c.config.Name, tool.Name, tool.Description, tool.InputSchema, outputSchemaJSON)
+		toolMeta.Hash = hash.ComputeToolHashWithOutputSchema(c.config.Name, tool.Name, tool.Description, inputSchema, outputSchemaJSON)
 
 		tools = append(tools, toolMeta)
 	}

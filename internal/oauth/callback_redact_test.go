@@ -45,7 +45,7 @@ func newObservedCallbackServer(t *testing.T, state string) (*CallbackServer, *ob
 	cs := &CallbackServer{
 		ServerName: "alpha",
 		logger:     zap.New(core),
-		waiters:    make(map[string]chan map[string]string),
+		waiters:    make(map[string]chan CallbackResult),
 	}
 	if state != "" {
 		cs.RegisterState(state)

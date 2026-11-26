@@ -39,7 +39,7 @@ func newObservedCallbackServerAtPath(t *testing.T, path string) (*CallbackServer
 		Path:       path,
 		Port:       53682,
 		logger:     zap.New(core),
-		waiters:    make(map[string]chan map[string]string),
+		waiters:    make(map[string]chan CallbackResult),
 	}, logs
 }
 

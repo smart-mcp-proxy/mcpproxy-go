@@ -121,6 +121,9 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if tok, ok := refreshProvenanceToken(ctx); ok {
+		return tok, nil // mcp-go's RefreshToken inside mcpproxy's own refresh
+	}
 
 	p.logger.Debug("🔍 Loading OAuth token from persistent storage",
 		zap.String("server_name", p.serverName),
@@ -641,6 +644,12 @@ func (m *coordinatedMemoryTokenStore) record(tok *client.Token) *storage.OAuthTo
 
 // GetToken implements client.TokenStore.
 func (m *coordinatedMemoryTokenStore) GetToken(ctx context.Context) (*client.Token, error) {
+	if tok, ok := refreshProvenanceToken(ctx); ok {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return tok, nil // mcp-go's RefreshToken inside mcpproxy's own refresh
+	}
 	tok, err := m.inner.GetToken(ctx)
 	if err != nil {
 		return nil, err

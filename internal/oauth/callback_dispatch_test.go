@@ -109,12 +109,12 @@ func exchangeCode(t *testing.T, provider *oauthserver.ServerResult, clientID, re
 	return payload
 }
 
-func recvParams(ch <-chan map[string]string, wait time.Duration) (map[string]string, bool) {
+func recvParams(ch <-chan CallbackResult, wait time.Duration) (CallbackResult, bool) {
 	select {
 	case params := <-ch:
 		return params, true
 	case <-time.After(wait):
-		return nil, false
+		return CallbackResult{}, false
 	}
 }
 
@@ -143,7 +143,7 @@ func TestCallbackDispatch_TwoConcurrentFlows(t *testing.T) {
 		stateB := fmt.Sprintf("state-background-reconnect-B-%d", round)
 		verifierA, challengeA := pkcePair(fmt.Sprintf("verifier-for-manual-login-flow-round-%d-aaaaaaaaaa", round))
 
-		var chA, chB <-chan map[string]string
+		var chA, chB <-chan CallbackResult
 		if round%2 == 0 {
 			// Flow A (the user's manual login) parks first, the background
 			// reconnect joins a moment later.
@@ -161,8 +161,8 @@ func TestCallbackDispatch_TwoConcurrentFlows(t *testing.T) {
 
 		paramsA, gotA := recvParams(chA, 3*time.Second)
 		require.True(t, gotA, "round %d: the flow that minted state A must receive the callback params", round)
-		assert.Equal(t, stateA, paramsA["state"], "round %d", round)
-		require.NotEmpty(t, paramsA["code"], "round %d: flow A must receive the authorization code", round)
+		assert.Equal(t, stateA, paramsA.Get("state"), "round %d", round)
+		require.NotEmpty(t, paramsA.Get("code"), "round %d: flow A must receive the authorization code", round)
 
 		_, gotB := recvParams(chB, 200*time.Millisecond)
 		assert.False(t, gotB, "round %d: the background reconnect (state B) must NOT consume flow A's callback", round)
@@ -170,7 +170,7 @@ func TestCallbackDispatch_TwoConcurrentFlows(t *testing.T) {
 			"round %d: the background reconnect's waiter must still be registered", round)
 
 		// The code flow A received is redeemable: a /token request actually happens.
-		token := exchangeCode(t, provider, clientID, callbackServer.RedirectURI, paramsA["code"], verifierA)
+		token := exchangeCode(t, provider, clientID, callbackServer.RedirectURI, paramsA.Get("code"), verifierA)
 		assert.NotEmpty(t, token["access_token"], "round %d: flow A's code must exchange for a token", round)
 
 		callbackServer.UnregisterState(stateA)
@@ -222,7 +222,7 @@ func TestCallbackDispatch_UnknownStateShowsFailurePage(t *testing.T) {
 
 	params, got := recvParams(chLive, 3*time.Second)
 	require.True(t, got, "the live flow must still receive its own callback")
-	assert.Equal(t, liveState, params["state"])
+	assert.Equal(t, liveState, params.Get("state"))
 }
 
 // TestCallbackDispatch_ProviderErrorShowsFailurePage verifies that a provider
@@ -255,7 +255,7 @@ func TestCallbackDispatch_ProviderErrorShowsFailurePage(t *testing.T) {
 
 	params, got := recvParams(ch, 3*time.Second)
 	require.True(t, got, "the waiting flow must still be told the provider denied the request")
-	assert.Equal(t, "access_denied", params["error"])
+	assert.Equal(t, "access_denied", params.Get("error"))
 }
 
 // TestCallbackDispatch_UnregisteredStateIsRejected verifies that a completed or
@@ -311,7 +311,7 @@ func TestCallbackDispatch_ReuseKeepsWaiters(t *testing.T) {
 
 	params, got := recvParams(ch, 3*time.Second)
 	require.True(t, got, "a waiter parked before the reuse must still receive its callback")
-	assert.Equal(t, "kept-code", params["code"])
+	assert.Equal(t, "kept-code", params.Get("code"))
 }
 
 // TestCallbackDispatch_RecordsFailureForUndeliverableCallback verifies (d): an

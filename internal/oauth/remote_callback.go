@@ -64,13 +64,14 @@ func (m *CallbackServerManager) RemoteCallbackHandler(w http.ResponseWriter, r *
 		http.NotFound(w, r)
 		return
 	}
-	// Reject missing/duplicate parameters before they can consume a waiter.
-	query, err := url.ParseQuery(r.URL.RawQuery)
-	if err != nil || len(query["state"]) != 1 || query.Get("state") == "" || len(query["code"]) > 1 || len(query["error"]) > 1 || (query.Get("code") == "" && query.Get("error") == "") || (query.Get("code") != "" && query.Get("error") != "") {
+	// Spec 135 FR-001: reject malformed, missing or repeated parameters
+	// before they can consume a waiter. Invalid public requests must not mark
+	// an otherwise healthy upstream as failed; delivery still atomically
+	// consumes the matching waiter once.
+	query, err := ParseCallbackQuery(r.URL.RawQuery)
+	if err != nil {
 		http.Error(w, "invalid OAuth callback", http.StatusBadRequest)
 		return
 	}
-	// Invalid public requests must not mark an otherwise healthy upstream as
-	// failed. Delivery still atomically consumes the matching waiter once.
-	c.handleCallbackWithFailureNotification(w, r, false)
+	c.handleParsedCallback(w, query, false)
 }
