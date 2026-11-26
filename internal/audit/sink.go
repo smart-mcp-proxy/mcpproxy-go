@@ -73,6 +73,12 @@ type writerSink struct {
 	// nothing while that repair fails (Spec 133 FR-017, plan D-C). Guarded
 	// by mu.
 	torn bool
+	// openRepair, while set, restores the boundary by appending to the file
+	// at its path: a file found torn at open whose first repair failed. The
+	// rotating writer has not opened the file yet (it opens lazily and torn
+	// blocks every write), so the path still names the torn file, and a
+	// rotation cannot run before the repair. Cleared once it succeeds.
+	openRepair func() error
 
 	clock         func() time.Time
 	failureLogger func(error)
@@ -124,12 +130,20 @@ func (s *writerSink) Write(line []byte) error {
 		// Through the writer's own handle: the file that received the
 		// partial write. (A file reopened torn was already repaired by path
 		// before the writer opened it, in NewFileSink.)
-		n, err := s.w.Write([]byte{'\n'})
-		if err == nil && n != 1 {
-			err = io.ErrShortWrite
-		}
-		if n == 1 {
-			s.torn = false
+		var err error
+		if s.openRepair != nil {
+			if err = s.openRepair(); err == nil {
+				s.torn, s.openRepair = false, nil
+			}
+		} else {
+			var n int
+			n, err = s.w.Write([]byte{'\n'})
+			if err == nil && n != 1 {
+				err = io.ErrShortWrite
+			}
+			if n == 1 {
+				s.torn = false
+			}
 		}
 		if s.torn {
 			if err == nil {
@@ -250,6 +264,8 @@ func NewFileSink(path string, maxSizeMB, maxBackups, maxAgeDays int, compress bo
 		// file that received the partial write, even if the path is renamed.
 		if err := appendNewline(path); err == nil {
 			s.torn = false
+		} else {
+			s.openRepair = func() error { return appendNewline(path) }
 		}
 	}
 	return s, nil

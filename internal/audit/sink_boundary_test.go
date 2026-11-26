@@ -212,3 +212,33 @@ func TestNewFileSink_WriteOnlyFileGetsABoundaryAtOpen(t *testing.T) {
 		t.Fatalf("the new record must start on its own line: %q", raw)
 	}
 }
+
+func TestSink_FailedOpenRepairIsRetriedByPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	if err := os.WriteFile(path, []byte("{\"se"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewFileSink(path, 1, 5, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := s.(*writerSink)
+	// Simulate the open-time repair having failed (disk full at open).
+	ws.mu.Lock()
+	ws.torn = true
+	calls := 0
+	ws.openRepair = func() error { calls++; return appendNewline(path) }
+	ws.mu.Unlock()
+	if err := s.Write([]byte(`{"seq":2}`)); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+	if calls != 1 {
+		t.Fatalf("the retry must go through the path repair, got %d calls", calls)
+	}
+	raw, _ := os.ReadFile(path)
+	if !strings.HasSuffix(string(raw), "\n{\"seq\":2}\n") {
+		t.Fatalf("got %q", raw)
+	}
+}

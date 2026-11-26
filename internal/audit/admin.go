@@ -277,6 +277,11 @@ func NewAdminAction(in AdminActionInput) (Line, error) {
 	if (kind == "none" || kind == "cli_offline") && in.RequestID != "" {
 		return Line{}, fmt.Errorf("audit.NewAdminAction: caller.kind %s never carries request_id", kind)
 	}
+	// A request entered through an ingress, so its lines are never
+	// source internal (that value means "no initiating request").
+	if in.RequestID != "" && in.Source == "internal" {
+		return Line{}, fmt.Errorf("audit.NewAdminAction: a line with a request_id has the source of its ingress, not internal")
+	}
 	// No request: no ingress, so source internal and origin local.
 	if in.RequestID == "" && (in.Source != "internal" || in.Origin != "local") {
 		return Line{}, fmt.Errorf("audit.NewAdminAction: a line with no request has source internal and origin local")

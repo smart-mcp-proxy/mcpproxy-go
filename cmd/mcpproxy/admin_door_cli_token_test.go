@@ -45,6 +45,7 @@ func TestAdminDoors_CLITokenCommandsHitTheirDoneRESTDoors(t *testing.T) {
 	// the per-name doors live below it, so point the CLI at a daemon whose
 	// mux serves the whole subtree.
 	newTokenTestDaemon(t, handler)
+	cfgPath := tokenConfigPath
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/status", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": map[string]interface{}{"running": true}})
@@ -55,20 +56,27 @@ func TestAdminDoors_CLITokenCommandsHitTheirDoneRESTDoors(t *testing.T) {
 	t.Cleanup(srv.Close)
 	t.Setenv("MCPPROXY_TRAY_ENDPOINT", srv.URL)
 
-	oldName, oldServers, oldPerms, oldExpires := tokenName, tokenServers, tokenPermissions, tokenExpires
-	tokenName, tokenServers, tokenPermissions, tokenExpires = "ci", "*", "read", "30d"
-	defer func() {
-		tokenName, tokenServers, tokenPermissions, tokenExpires = oldName, oldServers, oldPerms, oldExpires
-	}()
-
+	// Each command is executed through the registered Cobra tree, so a
+	// command wired to the wrong handler fails here.
+	execute := func(args ...string) func() error {
+		return func() error {
+			root := newRootCmd()
+			t.Cleanup(func() { root.RemoveCommand(root.Commands()...) })
+			// newRootCmd re-binds the flag variables to their defaults: set
+			// the config path and the create flags after it.
+			tokenConfigPath = cfgPath
+			root.SetArgs(args)
+			return root.Execute()
+		}
+	}
 	cases := []struct {
 		cli, restDoor, request string
 		run                    func() error
 	}{
-		{"CLI mcpproxy token create", "REST POST /api/v1/tokens/", "POST /api/v1/tokens", func() error { return runTokenCreate(nil, nil) }},
-		{"CLI mcpproxy token regenerate", "REST POST /api/v1/tokens/{name}/regenerate", "POST /api/v1/tokens/ci/regenerate", func() error { return runTokenRegenerate(nil, []string{"ci"}) }},
-		{"CLI mcpproxy token revoke", "REST DELETE /api/v1/tokens/{name}/", "DELETE /api/v1/tokens/ci", func() error { return runTokenRevoke(nil, []string{"ci"}) }},
-		{"CLI mcpproxy token delete", "REST DELETE /api/v1/tokens/{name}/permanent", "DELETE /api/v1/tokens/ci/permanent", func() error { return runTokenDelete(nil, []string{"ci"}) }},
+		{"CLI mcpproxy token create", "REST POST /api/v1/tokens/", "POST /api/v1/tokens", execute("token", "create", "--name", "ci", "--servers", "*", "--permissions", "read", "--expires", "30d")},
+		{"CLI mcpproxy token regenerate", "REST POST /api/v1/tokens/{name}/regenerate", "POST /api/v1/tokens/ci/regenerate", execute("token", "regenerate", "ci")},
+		{"CLI mcpproxy token revoke", "REST DELETE /api/v1/tokens/{name}/", "DELETE /api/v1/tokens/ci", execute("token", "revoke", "ci")},
+		{"CLI mcpproxy token delete", "REST DELETE /api/v1/tokens/{name}/permanent", "DELETE /api/v1/tokens/ci/permanent", execute("token", "delete", "ci")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.cli, func(t *testing.T) {

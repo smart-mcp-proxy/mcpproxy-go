@@ -486,3 +486,45 @@ func TestNewAdminAction_NoRequestMeansInternalLocal(t *testing.T) {
 		t.Fatal("no request with source api/origin socket must be rejected")
 	}
 }
+
+func TestMask_JWTAfterProxyTokenIsFullyMasked(t *testing.T) {
+	in := tokenRotateInput()
+	in.Target = audit.AgentTokenTarget("mcp_agt_0123456789abcdefeyJhbGciOi.eyJzdWIiOiJ4In0.c2lnbmF0dXJlLXRhaWw", "tok_7q2m9x4kab", "")
+	line, _ := mustAdmin(t, in)
+	assertSentinelAbsent(t, line, "eyJzdWIiOiJ4In0")
+	assertSentinelAbsent(t, line, "c2lnbmF0dXJlLXRhaWw")
+}
+
+func TestNewAdminAction_RequestLineIsNeverSourceInternal(t *testing.T) {
+	in := tokenRotateInput()
+	in.Source = "internal"
+	if _, err := audit.NewAdminAction(in); err == nil {
+		t.Fatal("a line with a request_id cannot be source internal")
+	}
+}
+
+func TestChange_RateLimitAndAllServersLiterals(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenCreate
+	in.Changes = []audit.Change{
+		audit.Literal(audit.FieldTokenPrefix, nil, audit.TokenPrefix("mcp_agt_9f8e")),
+		audit.Literal(audit.Path("rate_limit", "per_minute"), nil, audit.RateLimitValue(0)),
+		audit.Literal(audit.Path("rate_limit", "burst"), nil, audit.RateLimitValue(1000000)),
+		audit.AllServersGranted(audit.Path("allowed_servers")),
+	}
+	_, obj := mustAdmin(t, in)
+	byField := map[string]map[string]interface{}{}
+	for _, c := range obj["changes"].([]interface{}) {
+		m := c.(map[string]interface{})
+		byField[m["field"].(string)] = m
+	}
+	if byField["/rate_limit/per_minute"]["after"] != float64(0) {
+		t.Fatalf("per_minute 0 is a literal: %v", byField["/rate_limit/per_minute"])
+	}
+	if byField["/rate_limit/burst"]["withheld"] != "value" {
+		t.Fatalf("an out-of-bounds integer is withheld: %v", byField["/rate_limit/burst"])
+	}
+	if a := byField["/allowed_servers"]["added"].([]interface{}); len(a) != 1 || a[0] != "*" {
+		t.Fatalf("the * grant is shown: %v", byField["/allowed_servers"])
+	}
+}

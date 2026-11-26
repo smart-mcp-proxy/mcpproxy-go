@@ -45,6 +45,10 @@ var credentialPatterns = []*regexp.Regexp{
 	// leave the secret tail; sixteen or more characters after the kind
 	// prefix, so a display token_prefix (8–16 characters) never matches.
 	// GitHub fine-grained PATs (github_pat_) follow the classic gh*_ shape.
+	// A JWT first: its segments are dot-separated, so a pattern that stops
+	// at '.' (the proxy-token one) could otherwise consume its first segment
+	// and leave the payload and signature unmasked.
+	regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`),
 	regexp.MustCompile(`mcp_(agt|cli|oat|ort)_[A-Za-z0-9_-]{16,}`),
 	regexp.MustCompile(`sk-ant-[A-Za-z0-9-]{10,}`),
 	// OpenAI keys: legacy sk-{48}, and current sk-proj-/sk-svcacct-/sk-admin-
@@ -55,7 +59,6 @@ var credentialPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`gh[poushr]_[A-Za-z0-9]{16,}`),
 	regexp.MustCompile(`github_pat_[A-Za-z0-9_]{22,}`),
 	regexp.MustCompile(`AKIA[0-9A-Za-z]{8,}`),
-	regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`),
 	regexp.MustCompile(`Bearer\s+[A-Za-z0-9\-_.~+/]+=*`),
 }
 

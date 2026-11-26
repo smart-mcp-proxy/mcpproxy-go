@@ -813,17 +813,29 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 	}
 	// FR-015: every field the mint set is named; values that are not on the
 	// literal list are withheld (scope, pin, purpose, call budget).
-	changes = append(changes,
-		audit.Withheld(audit.Path("allowed_servers"), audit.WithheldValue),
-		audit.Withheld(audit.Path("permissions"), audit.WithheldValue))
+	// A grant to every server is the documented "*" sentinel and is shown;
+	// a list of server names is withheld until server-name provenance
+	// exists (Spec 133 PR-1b).
+	if len(committed.AllowedServers) == 1 && committed.AllowedServers[0] == "*" {
+		changes = append(changes, audit.AllServersGranted(audit.Path("allowed_servers")))
+	} else {
+		changes = append(changes, audit.Withheld(audit.Path("allowed_servers"), audit.WithheldValue))
+	}
+	changes = append(changes, audit.Withheld(audit.Path("permissions"), audit.WithheldValue))
+	if committed.GuardBound {
+		changes = append(changes, audit.Literal(audit.Path("guard_bound"), nil, audit.Bool(true)))
+	}
 	if committed.ProfilePin != "" {
 		changes = append(changes, audit.Withheld(audit.Path("profile_pin"), audit.WithheldValue))
 	}
 	if committed.Purpose != "" {
 		changes = append(changes, audit.Withheld(audit.Path("purpose"), audit.WithheldValue))
 	}
-	if committed.RateLimit != nil {
-		changes = append(changes, audit.Withheld(audit.Path("rate_limit"), audit.WithheldValue))
+	if rl := committed.RateLimit; rl != nil {
+		changes = append(changes, audit.Literal(audit.Path("rate_limit", "per_minute"), nil, audit.RateLimitValue(rl.PerMinute)))
+		if rl.Burst > 0 {
+			changes = append(changes, audit.Literal(audit.Path("rate_limit", "burst"), nil, audit.RateLimitValue(rl.Burst)))
+		}
 	}
 	s.recordTokenEffect(&out, audit.ActionTokenCreate, &committed, changes, committedAt)
 	s.announce(view, profile.ChangeIssue)

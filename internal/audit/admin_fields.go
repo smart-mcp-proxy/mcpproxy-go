@@ -73,18 +73,18 @@ var opaqueRoots = map[string]bool{"server_edition": true}
 // and the fixed oauth sub-schema. Anywhere else a deeper path is collapsed
 // to its fixed root, so a value smuggled in as a path segment never
 // serializes (a positional argument under /args, say).
-var nestedRoots = map[string]bool{"env": true, "headers": true, "oauth": true, "mcpServers": true, "profiles": true}
+var nestedRoots = map[string]bool{"env": true, "headers": true, "oauth": true, "mcpServers": true, "profiles": true, "rate_limit": true}
 
 // maxDepth bounds how far a path may go below a root whose children are map
 // keys or fixed fields: one key under env/headers, one fixed field under
 // oauth. A deeper path collapses to that depth.
-var maxDepth = map[string]int{"env": 2, "headers": 2, "oauth": 2}
+var maxDepth = map[string]int{"env": 2, "headers": 2, "oauth": 2, "rate_limit": 2}
 
 // knownFieldRoots are fixed config field names a change may name besides the
 // literal list, the secret-class prefixes and the nested and opaque roots.
 var knownFieldRoots = map[string]bool{
 	// agent-token record fields (token.create)
-	"allowed_servers": true, "permissions": true, "profile_pin": true, "purpose": true, "rate_limit": true,
+	"allowed_servers": true, "permissions": true, "profile_pin": true, "purpose": true, "rate_limit": true, "guard_bound": true,
 	// upstream server fields (PR-1b and PR-3 extend this list)
 	"url": true, "command": true, "args": true, "working_dir": true, "protocol": true, "quarantined": true,
 }
@@ -98,6 +98,7 @@ func knownRoot(seg string) bool {
 // any other child collapses the path to the root (FR-015b: paths come from a
 // fixed schema, never from a value). Mirrors config.OAuthConfig.
 var fixedChildren = map[string]map[string]bool{
+	"rate_limit": {"per_minute": true, "burst": true},
 	"oauth": {
 		"client_id": true, "client_secret": true, "redirect_uri": true, "callback_base_url": true,
 		"scopes": true, "pkce_enabled": true, "refresh_replay_enabled": true, "extra_params": true,
@@ -185,6 +186,7 @@ const (
 	kindTokenPrefix
 	kindTimestamp
 	kindCount
+	kindRateLimit
 )
 
 // literalFields is the literal list (contract §Changes): a path named here is
@@ -195,7 +197,11 @@ var literalFields = map[string]literalKind{
 	"pending_token_prefix": kindTokenPrefix,
 	"expires_at":           kindTimestamp,
 	"logins":               kindCount,
-	"enabled":              kindBool,
+	"guard_bound":          kindBool,
+	// Bounded integers, keyed by their full path (segments joined by '/').
+	"rate_limit/per_minute": kindRateLimit,
+	"rate_limit/burst":      kindRateLimit,
+	"enabled":               kindBool,
 }
 
 // secretPrefixes are the secret-class roots: anything at or below them is
@@ -220,20 +226,42 @@ func ClassifyField(f FieldPath) string {
 	if secretPrefixes[f.segs[0]] {
 		return classWithheldSecret
 	}
-	if len(f.segs) == 1 {
-		if _, ok := literalFields[f.segs[0]]; ok {
-			return classLiteral
-		}
+	if _, ok := literalFields[strings.Join(f.segs, "/")]; ok {
+		return classLiteral
 	}
 	return classWithheldValue
 }
 
 func literalKindOf(f FieldPath) (literalKind, bool) {
-	if len(f.segs) != 1 || secretPrefixes[f.segs[0]] {
+	if len(f.segs) == 0 || secretPrefixes[f.segs[0]] {
 		return 0, false
 	}
-	k, ok := literalFields[f.segs[0]]
+	k, ok := literalFields[strings.Join(f.segs, "/")]
 	return k, ok
+}
+
+// MaxRateLimit mirrors auth.MaxRateLimitPerMinute, the bound of the
+// call-budget integers (a literal outside it is withheld).
+const MaxRateLimit = 100000
+
+// RateLimitValue is a call-budget integer (rate_limit.per_minute, burst),
+// literal only within [0, MaxRateLimit].
+type RateLimitValue int
+
+func (RateLimitValue) literalKind() literalKind { return kindRateLimit }
+func (v RateLimitValue) render() (interface{}, bool) {
+	if v < 0 || v > MaxRateLimit {
+		return nil, false
+	}
+	return int(v), true
+}
+
+// AllServersGranted is the name-list change of a grant to every server: the
+// documented `*` sentinel added (contract §Changes, name lists). Lists that
+// name servers are reported once PR-1b's server-name provenance exists;
+// until then they are withheld.
+func AllServersGranted(field FieldPath) Change {
+	return Change{path: field, set: true, list: true, added: []interface{}{"*"}, addedCount: 1}
 }
 
 // LiteralValue is the sealed set of value types a literal change may carry.
@@ -304,10 +332,15 @@ type Change struct {
 	path FieldPath
 	// before/after hold the values rendered at construction (a caller
 	// mutating a value after Literal returned cannot change the line).
-	before   interface{}
-	after    interface{}
-	withheld WithheldKind
-	set      bool
+	before interface{}
+	after  interface{}
+	// list, added, addedCount, removedCount: a name-list diff entry.
+	list         bool
+	added        []interface{}
+	addedCount   int
+	removedCount int
+	withheld     WithheldKind
+	set          bool
 }
 
 // Literal records field going from before to after; a nil side does not
@@ -369,6 +402,14 @@ func (c Change) entry() (map[string]interface{}, error) {
 	}
 	if c.withheld != "" {
 		e["withheld"] = string(c.withheld)
+		return e, nil
+	}
+	if c.list {
+		if len(c.added) > 0 {
+			e["added"] = c.added
+		}
+		e["added_count"] = c.addedCount
+		e["removed_count"] = c.removedCount
 		return e, nil
 	}
 	if c.before == nil && c.after == nil {
