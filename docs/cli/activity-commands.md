@@ -574,7 +574,8 @@ A flag with a value the endpoint would refuse fails before any request is made.
 ### Examples
 
 ```bash
-# Which runs failed since yesterday (with --failed the newest failure is first)
+# Runs active in the last 24 hours that have failures (with --failed the
+# newest failure is first)
 mcpproxy activity sessions --failed --since -24h
 
 # The same, without sessions whose only failures were policy blocks
@@ -604,9 +605,10 @@ Timeline of one session: mcpproxy activity session <id>
 
 - `CLIENT` is the client id when the session has a client binding, else the name the client reported with a `~` in front (a client can claim any name), else the surface the calls arrived on (`rest`, `cli`, `webui`, `tray`).
 - A `RUN` column appears when at least one listed session has a run name.
+- `--since` and `--until` select by when a session was active, not by when it failed: a session that failed 25 hours ago and was still running 23 hours ago is listed by `--failed --since -24h`.
 - `DURATION` runs from the first to the last recorded call; a session that is still open is marked `(active)`.
 - `FAILURES` is the lifetime count. Policy blocks are part of it and are shown in brackets.
-- `REASON` is the short reason the server recorded for the last failure (`last_failure.reason`), or `-` when it recorded none. The server builds it from the error class, the diagnostic code and its fixed message; it never contains argument or response text.
+- `REASON` is the short reason the server recorded for the last failure (`last_failure.reason`), or `-` when it recorded none. It is a fixed sentence for the kind of failure and never contains argument or response text.
 - With an `--offset` past the last session the command says how many sessions match, instead of reporting that none do.
 
 ### Output (JSON)
@@ -618,8 +620,8 @@ Timeline of one session: mcpproxy activity session <id>
 | Code | Meaning |
 |------|---------|
 | 0 | Success (an empty list is a success) |
-| 1 | Invalid or unparsable flag value, the daemon is not running, or the daemon refused the request |
-| 4 | The configuration file (`--config`) could not be read |
+| 1 | Invalid or unparsable flag value or argument, the daemon is not running, or the daemon refused the request |
+| 4 | The configuration file (`--config`) is not valid JSON (a file that does not exist exits 1) |
 
 ---
 
@@ -688,6 +690,7 @@ More rows are stored (earlier rows: raise --before; later rows: raise --after, u
 Every failure with its context: mcpproxy activity session ws-4f2a91c07b3d55e1 --failures
 ```
 
+- The line above the table says where the page is: `Failure 1 of 3` when the row it is positioned at is a failure, `After failure 2 of 3` when it is not (with `--at end`, for example).
 - The first column marks the counted row of a failed attempt: `FAIL`, or `BLOCK` when MCPProxy itself refused the call.
 - `KIND` is the row's kind as the endpoint names it (`call`, `internal_call`, `policy_decision`, `prompt`, `other`). Three kinds are not requests of the agent and are written in capitals so they stand apart: `UPSTREAM EVENT`, `SESSION START`, `SESSION END`. An upstream event from before the session started, shown because the server was already down, says so in `DETAIL`.
 - `#` is the row's index in the timeline. `ID` is the activity id, for `activity show <id>` and `--at row:<id>`.
@@ -729,7 +732,9 @@ With `-o json` or `-o yaml` this view is one object:
 
 This is the output of `--failures --before 1`, with `session` and each `activity` shortened here. `rows` holds every context row in timeline order, each once, in the shape of the timeline endpoint's rows; a failure's own row is part of it. `failures` gives the number of each failure among the stored ones and the `index` of its row. Two fields appear only when they apply: `earlier_failures_not_stored` is `true` when retention removed earlier failures, and `failures_not_returned` counts stored failures the server named without returning their row (removed while the session was read, or not readable with the caller's credential).
 
-Failures are read by their number among the stored ones, and rows by their index. If retention removes older rows of the session while the command runs, numbers and indexes move; the command then starts over, and after three attempts it exits 1, says that the session changed and asks you to run it again (with the server's last answer, when a refusal is how the change showed). Under a heading, a failure that was not returned is left out of the numbers (`Failures 1, 3 of 3`).
+Failures are read by their number among the stored ones, and rows by their index. If retention removes older rows of the session while the command runs, numbers and indexes move; the command notices and starts over. A second or third attempt that reads a stable session prints the result and exits 0. Only when all three attempts are interrupted does the command exit 1, say that the session changed and ask you to run it again (with the server's last answer, when a refusal is how the change showed).
+
+A session that is still active can also grow while it is read: a new call, or the upstream events of a server the session calls for the first time, add rows. Every row and every failure is still returned once, but the `index` of rows read before and after such a change may differ by the rows added ahead of them. The table output says so for an active session; for stable indexes, read the session after it has ended. Under a heading, a failure that was not returned is left out of the numbers (`Failures 1, 3 of 3`).
 
 ### Output (JSON)
 
@@ -740,8 +745,8 @@ Without `--failures`, `-o json` prints the data object of `GET /api/v1/work-sess
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | Invalid or unparsable flag value, the daemon is not running, the session was not found, the daemon refused the request, or (`--failures`) the session kept changing while it was read |
-| 4 | The configuration file (`--config`) could not be read |
+| 1 | Invalid or unparsable flag value or argument, the daemon is not running, the session was not found, the daemon refused the request, or (`--failures`) the session kept changing through three attempts to read it |
+| 4 | The configuration file (`--config`) is not valid JSON (a file that does not exist exits 1) |
 
 An id that matches no session exits 1 with:
 
@@ -760,7 +765,7 @@ The same answer is given for a session that belongs to another token. A `404` th
 Several agents ran overnight. Two commands reach the failure:
 
 ```bash
-# 1. The runs that failed, newest failure first
+# 1. The runs of the last 24 hours that have failures, newest failure first
 mcpproxy activity sessions --failed --since -24h
 
 # 2. Open one at its first failure, with the 20 rows before it

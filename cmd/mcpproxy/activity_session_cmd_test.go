@@ -814,6 +814,7 @@ func TestActivitySession_FailureShownAsContextIsNotCountedMissing(t *testing.T) 
 	require.NoError(t, err)
 	require.Contains(t, out, "Failures 1-2 of 2")
 	require.Equal(t, 1, strings.Count(out, "01ROW011"))
+	require.Contains(t, out, "01ROW012", "it keeps the forward context its own page returned")
 	require.NotContains(t, out, "not returned")
 }
 
@@ -847,4 +848,84 @@ func TestActivitySession_UnparsableFlagValueExitsOne(t *testing.T) {
 			require.Empty(t, rec.all())
 		})
 	}
+}
+
+// "." and ".." are resolved away in a URL path: `session ..` would ask
+// another endpoint. They cannot be session ids, so no request is made and the
+// answer is the one for an unknown id.
+func TestActivitySession_DotIDsAreUnknownSessions(t *testing.T) {
+	for _, id := range []string{".", ".."} {
+		t.Run(id, func(t *testing.T) {
+			rec := newRESTRecorder(t, map[string]cannedResponse{})
+			_, _, err := runCLI(t, workSessionsTestRoot, "table", "session", id)
+			require.ErrorContains(t, err, "not found")
+			require.ErrorContains(t, err, "mcpproxy activity sessions")
+			require.Equal(t, ExitCodeGeneralError, classifyError(err))
+			require.Empty(t, rec.all())
+		})
+	}
+}
+
+// A refused positional argument exits 1 whatever the argument says.
+func TestActivitySession_RefusedArgumentsExitOne(t *testing.T) {
+	for name, args := range map[string][]string{
+		"sessions takes none": {"sessions", "invalid configuration"},
+		"session takes one":   {"session", "permission denied", "config"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := newRESTRecorder(t, map[string]cannedResponse{})
+			_, _, err := runCLI(t, workSessionsTestRoot, "table", args...)
+			require.Error(t, err)
+			require.Equal(t, ExitCodeGeneralError, classifyError(err))
+			require.Empty(t, rec.all())
+		})
+	}
+}
+
+// failure_index is the last failure at or before the position. When the
+// positioned row is not a failure the heading does not call it one.
+func TestActivitySession_HeadingOfAPositionThatIsNotAFailure(t *testing.T) {
+	newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/work-sessions/ws-aaa/timeline": okResp(`{"session": ` + timelineSessionJSON + `, "rows": [` +
+			timelineRow(89, "session_end", "2026-11-27T00:43:20Z", "", "") + `],
+		  "position": 89, "total_rows": 90, "failure_index": 2, "failure_total": 2, "lifetime_failures": 2, "has_before": true, "has_after": false}`),
+	})
+	out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--at", "end", "--before", "0", "--after", "0")
+	require.NoError(t, err)
+	require.Contains(t, out, "After failure 2 of 2")
+	require.NotContains(t, out, "\nFailure 2 of 2")
+}
+
+// Only the door's "no such failure" means the session lost rows. Another
+// refusal in the middle of the walk is the command's error, at once and in
+// the daemon's words.
+func TestActivitySession_FailuresWalkDoesNotRetryOtherErrors(t *testing.T) {
+	rec := newSequencedRecorder(t, "GET /api/v1/work-sessions/ws-aaa/timeline", []cannedResponse{
+		okResp(failuresPage([]string{failuresRow(10, true)}, 10, 1, 2, 2, true)),
+		refuse(http.StatusInternalServerError, `{"success":false,"error":"Failed to read activity rows","request_id":"r-7"}`),
+	})
+	_, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--failures", "--before", "0")
+	require.ErrorContains(t, err, "Failed to read activity rows")
+	require.ErrorContains(t, err, "r-7")
+	require.NotContains(t, err.Error(), "changed while")
+	require.Len(t, rec.all(), 2)
+}
+
+// Nothing holds the timeline of a running session still between two requests,
+// and the output says so when it was read in more than one.
+func TestActivitySession_FailuresOfAnActiveSessionCarryANote(t *testing.T) {
+	active := strings.Replace(timelineSessionJSON, `"status": "ended"`, `"status": "active"`, 1)
+	require.NotEqual(t, timelineSessionJSON, active)
+	page := func(row string, position, number int, hasAfter bool) string {
+		return strings.Replace(failuresPage([]string{row}, position, number, 2, 2, hasAfter), timelineSessionJSON, active, 1)
+	}
+	newSequencedRecorder(t, "GET /api/v1/work-sessions/ws-aaa/timeline", []cannedResponse{
+		okResp(page(failuresRow(10, true), 10, 1, true)),
+		okResp(page(failuresRow(600, true), 600, 2, false)),
+	})
+	out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--failures", "--before", "0")
+	require.NoError(t, err)
+	require.Contains(t, out, "this session is still active")
+	require.Contains(t, out, "01ROW010")
+	require.Contains(t, out, "01ROW600")
 }

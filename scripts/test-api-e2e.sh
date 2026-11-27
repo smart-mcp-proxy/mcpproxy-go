@@ -1430,8 +1430,10 @@ fi
 # Work sessions through the CLI (Spec 124 PR-2): the morning-after case of the
 # REST section above, with the two commands an operator types over SSH. It
 # reads the session the REST section made under $WS_RUN.
+# The JSON checks read stdout only: a warning on stderr is not part of the
+# document.
 log_test "CLI: activity sessions --failed lists the named run"
-RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity sessions --failed --run "$WS_RUN" -o json 2>&1)
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity sessions --failed --run "$WS_RUN" -o json 2>/dev/null)
 CLI_WS_ID=$(echo "$RESPONSE" | jq -r '.sessions[0].id // empty' 2>/dev/null)
 if [ -n "$CLI_WS_ID" ] && [ "$CLI_WS_ID" = "$WS_ID" ] && echo "$RESPONSE" | jq -e --arg run "$WS_RUN" '
         .total == 1 and (.sessions[0] | .run_name == $run and .failures >= 1 and .last_failure != null)' >/dev/null 2>&1; then
@@ -1454,7 +1456,7 @@ fi
 if [ -n "$CLI_WS_ID" ]; then
     # Opens at the first failure, with the calls that led to it before it.
     log_test "CLI: activity session opens at the first failure"
-    RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" -o json 2>&1)
+    RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" -o json 2>/dev/null)
     if echo "$RESPONSE" | jq -e '. as $d | $d.failure_index == 1 and $d.failure_total >= 1
             and ($d.rows | map(select(.index == $d.position)) | .[0].failed == true)
             and ($d.rows | map(select(.index < $d.position)) | length >= 2)' >/dev/null 2>&1; then
@@ -1479,7 +1481,7 @@ if [ -n "$CLI_WS_ID" ]; then
     # apart). The rows are then exactly the run from two rows before the first
     # failure to the last failure: each once, none missing, none outside.
     log_test "CLI: activity session --failures walks the failures"
-    RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" --failures --before 2 -o json 2>&1)
+    RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" --failures --before 2 -o json 2>/dev/null)
     if echo "$RESPONSE" | jq -e '. as $d | ($d.failures | length) >= 2 and ($d.failures | length) == $d.failure_total
             and ([$d.rows[].index] | length == (unique | length))
             and ([$d.failures[].number] == [range(1; ($d.failures | length) + 1)])

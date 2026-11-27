@@ -82,7 +82,8 @@ An agent token sees only its own sessions, and only the part of each that
 touched servers in its reach.
 
 Examples:
-  # The morning after: which runs failed, newest failure first
+  # The morning after: runs active in the last 24 hours that have failures,
+  # newest failure first
   mcpproxy activity sessions --failed --since -24h
 
   # The same, without sessions whose only failures were policy blocks
@@ -94,7 +95,7 @@ Examples:
 
   # Then open one at its first failure
   mcpproxy activity session <id>`,
-		Args:   argsOrHelpJSON(cobra.NoArgs),
+		Args:   workSessionArgs(cobra.NoArgs),
 		PreRun: silenceUsageAfterParse,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if limit < 1 || limit > workSessionListLimitMax {
@@ -192,7 +193,7 @@ Examples:
   mcpproxy activity session ws-4f2a91c07b3d --at end --before 50
 
 Find the id with: mcpproxy activity sessions --failed`,
-		Args:   argsOrHelpJSON(cobra.ExactArgs(1)),
+		Args:   workSessionArgs(cobra.ExactArgs(1)),
 		PreRun: silenceUsageAfterParse,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
@@ -247,6 +248,19 @@ func silenceUsageAfterParse(cmd *cobra.Command, _ []string) { cmd.SilenceUsage =
 // would exit 4, the code of an unreadable configuration file.
 func workSessionFlagError(_ *cobra.Command, err error) error {
 	return flagValidationError{err}
+}
+
+// workSessionArgs is the positional-argument rule of both commands: v, let
+// through under --help-json, with a refusal marked the same way and for the
+// same reason as a flag's (the error quotes the argument that was typed).
+func workSessionArgs(v cobra.PositionalArgs) cobra.PositionalArgs {
+	inner := argsOrHelpJSON(v)
+	return func(cmd *cobra.Command, args []string) error {
+		if err := inner(cmd, args); err != nil {
+			return flagValidationError{err}
+		}
+		return nil
+	}
 }
 
 // validateTimelinePosition applies the door's rule for `at`.
@@ -488,8 +502,12 @@ func runActivitySession(id, at string, before, after int, includeBodies bool) er
 		fmt.Printf("No stored failures · rows %d-%d of %d\n", first, last, page.TotalRows)
 	case page.FailureIndex == 0:
 		fmt.Printf("Before the first of %d failures · rows %d-%d of %d\n", page.FailureTotal, first, last, page.TotalRows)
-	default:
+	case timelinePositionFailed(page):
 		fmt.Printf("Failure %d of %d · rows %d-%d of %d\n", page.FailureIndex, page.FailureTotal, first, last, page.TotalRows)
+	default:
+		// failure_index is the last failure at or before the position; the
+		// positioned row itself is not one.
+		fmt.Printf("After failure %d of %d · rows %d-%d of %d\n", page.FailureIndex, page.FailureTotal, first, last, page.TotalRows)
 	}
 	if err := printTimelineRows(page.Rows, includeBodies); err != nil {
 		return err
@@ -510,6 +528,17 @@ func runActivitySession(id, at string, before, after int, includeBodies bool) er
 		fmt.Printf("Every failure with its context: mcpproxy activity session %s --failures\n", shellQuoteIfNeeded(id))
 	}
 	return nil
+}
+
+// timelinePositionFailed reports whether the row the page is positioned at is
+// a failure.
+func timelinePositionFailed(page *contracts.WorkSessionTimelineResponse) bool {
+	for i := range page.Rows {
+		if page.Rows[i].Index == page.Position {
+			return page.Rows[i].Failed
+		}
+	}
+	return false
 }
 
 // shellQuoteIfNeeded keeps a suggested command copyable when the id is not a
@@ -922,8 +951,9 @@ func walkSessionFailuresOnce(fetch timelineFetcher, before, after, lookahead int
 		} else if row, ok := kept[page.Position]; ok && row.Failed {
 			// An earlier page returned this row as context of the failure
 			// before it. It is shown, so it is numbered, not counted as
-			// missing.
+			// missing, and it keeps the context this page has for it.
 			failureAt[page.Position] = number
+			keep(page, page.Position)
 		}
 		previous := page.Position
 		for i := range page.Rows {
@@ -963,9 +993,10 @@ func walkSessionFailuresOnce(fetch timelineFetcher, before, after, lookahead int
 		if page, err = fetch("failure:"+strconv.Itoa(next), before, lookahead); err != nil {
 			// The door knew this failure a moment ago. A refusal now (no such
 			// failure) is how a session that lost rows in between answers.
-			var notFound *cliclient.WorkSessionNotFoundError
+			// Any other refusal (a read error of the daemon, for one) is the
+			// command's error as it is.
 			var apiErr *cliclient.APIError
-			if !errors.As(err, &notFound) && errors.As(err, &apiErr) {
+			if errors.As(err, &apiErr) && apiErr.Message == contracts.WorkSessionNoSuchPositionMessage {
 				return nil, &walkRestart{cause: err}
 			}
 			return nil, err
@@ -1025,6 +1056,11 @@ func runActivitySessionFailures(id string, before, after int, includeBodies bool
 
 	printWorkSessionHeader(&view.Session)
 	printStoredFailuresNote(view.LifetimeFailures, view.FailureTotal, view.EarlierFailuresNotStored)
+	if view.Session.Status == "active" && len(view.Failures) > 1 {
+		// The failures were read in several requests, and nothing holds the
+		// timeline still between them.
+		fmt.Println("Note: this session is still active. A call made while it was read can add rows ahead of the later failures, so the row numbers (#) of different groups may not be from the same moment. Every row and every failure is still printed once.")
+	}
 	if view.FailuresNotReturned > 0 {
 		fmt.Printf("Note: %d of the %d stored failures were not returned: their rows were removed while the session was read, or are not readable with this credential.\n",
 			view.FailuresNotReturned, view.FailureTotal)

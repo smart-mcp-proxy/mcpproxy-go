@@ -178,10 +178,30 @@ func (c *Client) ListWorkSessions(ctx context.Context, params WorkSessionListPar
 	return &out, nil
 }
 
+// workSessionPath is the path of one session's door. ok is false for an id
+// that cannot name a session and would change the path: an empty id, and the
+// dot segments "." and "..", which a URL path resolves away (a request for
+// ".." would reach another endpoint). No request is made for such an id; it
+// is answered as the door answers an unknown id.
+func workSessionPath(id, suffix string) (path string, ok bool) {
+	if id == "" || id == "." || id == ".." {
+		return "", false
+	}
+	return "/api/v1/work-sessions/" + url.PathEscape(id) + suffix, true
+}
+
+func noSuchWorkSession(id string) error {
+	return &WorkSessionNotFoundError{APIError: &APIError{Message: contracts.WorkSessionNotFoundMessage}, ID: id}
+}
+
 // GetWorkSession returns one work session.
 func (c *Client) GetWorkSession(ctx context.Context, id string) (*contracts.WorkSession, error) {
+	path, ok := workSessionPath(id, "")
+	if !ok {
+		return nil, noSuchWorkSession(id)
+	}
 	var out contracts.WorkSession
-	if err := c.workSessionGet(ctx, "/api/v1/work-sessions/"+url.PathEscape(id), nil, id, &out); err != nil {
+	if err := c.workSessionGet(ctx, path, nil, id, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -189,8 +209,12 @@ func (c *Client) GetWorkSession(ctx context.Context, id string) (*contracts.Work
 
 // GetWorkSessionTimeline returns one page of a session's timeline.
 func (c *Client) GetWorkSessionTimeline(ctx context.Context, id string, params WorkSessionTimelineParams) (*contracts.WorkSessionTimelineResponse, error) {
+	path, ok := workSessionPath(id, "/timeline")
+	if !ok {
+		return nil, noSuchWorkSession(id)
+	}
 	var out contracts.WorkSessionTimelineResponse
-	if err := c.workSessionGet(ctx, "/api/v1/work-sessions/"+url.PathEscape(id)+"/timeline", params.query(), id, &out); err != nil {
+	if err := c.workSessionGet(ctx, path, params.query(), id, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

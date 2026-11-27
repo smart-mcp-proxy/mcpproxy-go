@@ -196,3 +196,25 @@ func TestClient_WorkSessionSuccessWithoutData(t *testing.T) {
 		require.ErrorContains(t, err, "no data", body)
 	}
 }
+
+// "." and ".." are path segments a URL resolves away: a request for ".."
+// would reach another endpoint. No request is made for them, or for an empty
+// id; they are answered as an unknown id is.
+func TestClient_WorkSessionDotIDsMakeNoRequest(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		_, _ = w.Write([]byte(`{"success":true,"data":{"sessions":[],"total":0,"limit":25,"offset":0}}`))
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, nil)
+	for _, id := range []string{".", "..", ""} {
+		var notFound *WorkSessionNotFoundError
+		_, err := c.GetWorkSession(context.Background(), id)
+		require.True(t, errors.As(err, &notFound), "GetWorkSession(%q): %v", id, err)
+		_, err = c.GetWorkSessionTimeline(context.Background(), id, WorkSessionTimelineParams{})
+		require.True(t, errors.As(err, &notFound), "GetWorkSessionTimeline(%q): %v", id, err)
+		require.Equal(t, id, notFound.ID)
+	}
+	require.Zero(t, requests)
+}

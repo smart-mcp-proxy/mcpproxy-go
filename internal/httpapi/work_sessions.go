@@ -579,7 +579,7 @@ func (s *Server) handleWorkSessionTimeline(w http.ResponseWriter, r *http.Reques
 	}
 	page, from, position, okPos := col.finish()
 	if !okPos {
-		s.writeError(w, r, http.StatusBadRequest, "Invalid at. No such failure or row in this session")
+		s.writeError(w, r, http.StatusBadRequest, contracts.WorkSessionNoSuchPositionMessage)
 		return
 	}
 
