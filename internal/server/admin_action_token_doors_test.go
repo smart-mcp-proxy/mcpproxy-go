@@ -297,6 +297,7 @@ func TestAdminActionDoors_MCPCredentialsTool(t *testing.T) {
 	}, 10*time.Second, 50*time.Millisecond, "wrapper row and profile_change row share the line's request id")
 
 	require.Equal(t, "worker", l["target"].(map[string]interface{})["name"])
+	require.Equal(t, "local", l["origin"], "a TCP MCP mint enters locally, not over the socket")
 	// The prefix on the line is the display prefix of the credential the
 	// tool returned.
 	var minted map[string]interface{}

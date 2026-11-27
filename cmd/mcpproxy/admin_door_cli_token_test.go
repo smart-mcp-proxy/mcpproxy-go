@@ -9,6 +9,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -44,7 +45,19 @@ func TestAdminDoors_CLITokenCommandsHitTheirDoneRESTDoors(t *testing.T) {
 		}
 		got = append(got, r.Method+" "+r.URL.Path)
 		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/tokens" {
-			_ = json.NewDecoder(r.Body).Decode(&createBody)
+			// As strict as the real door (decodeIssuanceBody): one JSON
+			// object and nothing after it.
+			dec := json.NewDecoder(r.Body)
+			if err := dec.Decode(&createBody); err != nil || dec.More() {
+				mu.Unlock()
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if _, err := dec.Token(); err != io.EOF {
+				mu.Unlock()
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 		}
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")

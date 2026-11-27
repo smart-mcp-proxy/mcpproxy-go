@@ -744,6 +744,15 @@ func TestRenderLabel_AnyPrivateKeyHeaderLabelWithheld(t *testing.T) {
 	}
 }
 
+func TestRenderLabel_ShortBearerFullyMasked(t *testing.T) {
+	in := tokenRotateInput()
+	in.ClientName = "Bearer AB"
+	_, obj := mustAdmin(t, in)
+	if n := obj["client"].(map[string]interface{})["name"]; n != "***" {
+		t.Fatalf("a short credential keeps no tail: %q", n)
+	}
+}
+
 func TestNewAdminAction_SessionCallerCarriesNoProfilePin(t *testing.T) {
 	in := tokenRotateInput()
 	in.Caller = audit.Caller{Kind: "session_admin", UserID: "u1", Role: "admin", Provider: "oidc", ProfilePin: "ro"}

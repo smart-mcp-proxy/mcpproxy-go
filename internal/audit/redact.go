@@ -75,6 +75,16 @@ func maskMatch(s string) string {
 	return s[:4] + "***" + s[len(s)-2:]
 }
 
+// maskSpan renders a merged span. It keeps the last two bytes only of a
+// span long enough that they cannot be the whole credential body: a short
+// match such as "Bearer AB" is replaced entirely.
+func maskSpan(s string) string {
+	if len(s) < 16 {
+		return "***"
+	}
+	return maskMatch(s)
+}
+
 // applyMasking runs every fixed-prefix pattern over s in order and reports
 // whether any of them fired.
 //
@@ -190,7 +200,7 @@ func maskAllSpans(s string) (masked string, hit bool) {
 	prev := 0
 	for _, sp := range merged {
 		b.WriteString(s[prev:sp[0]])
-		b.WriteString(maskMatch(s[sp[0]:sp[1]]))
+		b.WriteString(maskSpan(s[sp[0]:sp[1]]))
 		prev = sp[1]
 	}
 	b.WriteString(s[prev:])
