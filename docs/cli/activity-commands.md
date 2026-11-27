@@ -603,7 +603,7 @@ Showing 2 of 2 sessions
 Timeline of one session: mcpproxy activity session <id>
 ```
 
-- `CLIENT` is the client id when the session has a client binding, else the name the client reported with a `~` in front (a client can claim any name), else the surface the calls arrived on (`rest`, `cli`, `webui`, `tray`).
+- `CLIENT` is the client id when the session has a client binding, else the name the client reported with a `~` in front (a client can claim any name), else the surface the calls arrived on (`mcp`, or for REST calls `rest`, `cli`, `webui`, `tray`).
 - A `RUN` column appears when at least one listed session has a run name.
 - `--since` and `--until` select by a session's recorded activity (its last activity for `--since`, its start for `--until`), not by when it failed: a session that failed 25 hours ago and made its last call 23 hours ago is listed by `--failed --since -24h`.
 - `DURATION` runs from the session's start to its last recorded activity; a session that is still open is marked `(active)`.
@@ -754,7 +754,7 @@ An id that matches no session exits 1 with:
 Error: work session "ws-nope" not found: no session with this id is stored, or it is not yours to read. List sessions with: mcpproxy activity sessions
 ```
 
-The same answer is given for a session that belongs to another token. A `404` that does not come from this endpoint (a reverse proxy without the route, for example) is reported with its own text.
+An agent token gets the same answer for a session that belongs to another token; an administrator can read every session. A `404` that does not come from this endpoint (a reverse proxy without the route, for example) is reported with its own text.
 
 ---
 

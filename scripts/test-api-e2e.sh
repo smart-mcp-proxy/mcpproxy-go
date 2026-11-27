@@ -1487,7 +1487,8 @@ if [ -n "$CLI_WS_ID" ]; then
     log_test "CLI: activity session --failures walks the failures"
     RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" --failures --before 2 -o json 2>/dev/null)
     EXIT_CODE=$?
-    if [ $EXIT_CODE -eq 0 ] && echo "$RESPONSE" | jq -e '. as $d | ($d.failures | length) >= 2 and ($d.failures | length) == $d.failure_total
+    # -s: the output is one JSON document, not several.
+    if [ $EXIT_CODE -eq 0 ] && echo "$RESPONSE" | jq -e -s 'length == 1 and (.[0] as $d | ($d.failures | length) >= 2 and ($d.failures | length) == $d.failure_total
             and ([$d.rows[].index] | length == (unique | length))
             and ([$d.failures[].number] == [range(1; ($d.failures | length) + 1)])
             and ([$d.failures[].index] | length == (unique | length))
@@ -1495,7 +1496,7 @@ if [ -n "$CLI_WS_ID" ]; then
             and ($d.failures[1].index - $d.failures[0].index <= 2)
             and ([$d.rows[].index] == [range($d.failures[0].index - 2; $d.failures[-1].index + 1)])
             and ($d.rows | map(select(.index < $d.failures[0].index)) | length == 2)
-            and ($d.rows | all(.index as $i | any($d.failures[]; .index - 2 <= $i and $i <= .index)))' >/dev/null 2>&1; then
+            and ($d.rows | all(.index as $i | any($d.failures[]; .index - 2 <= $i and $i <= .index))))' >/dev/null 2>&1; then
         log_pass "CLI: activity session --failures walks the failures"
     else
         log_fail "CLI: activity session --failures walks the failures"

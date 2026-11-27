@@ -422,7 +422,8 @@ func dashIfEmpty(s string) string {
 
 // workSessionClientCell is the client id when the session carries a binding,
 // else the client's self-reported name marked with "~" (a client can claim
-// any name), else the surface the calls arrived on (rest, cli, webui, tray).
+// any name), else the surface the calls arrived on (mcp, or rest, cli, webui,
+// tray for REST calls).
 func workSessionClientCell(ws *contracts.WorkSession) string {
 	switch {
 	case ws.ClientID != "":
