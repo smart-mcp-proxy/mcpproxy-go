@@ -604,7 +604,7 @@ A row carries the server, the kind, the diagnostic code (`MCPX_*`) and its fixed
 
 **Reading a session.** `GET /api/v1/work-sessions` lists sessions (`?failed=true` for the ones that failed), and `GET /api/v1/work-sessions/{id}/timeline` returns one session's rows and upstream events in time order, positioned at its first failure with the 20 rows before it. See the [REST API reference](../api/rest-api.md#work-sessions).
 
-**From the terminal.** `mcpproxy activity sessions --failed` lists the sessions that failed, and `mcpproxy activity session <id>` prints one session's timeline at its first failure that is still stored; `--failures` prints every stored failure with the rows before it. See [Activity commands](../cli/activity-commands.md#activity-sessions).
+**From the terminal.** `mcpproxy activity sessions --failed` lists the sessions that failed, and `mcpproxy activity session <id>` prints one session's timeline at its first failure that is still stored (at its first row when none is); `--failures` prints every stored failure with the rows before it. See [Activity commands](../cli/activity-commands.md#activity-sessions).
 
 Sessions do not continue across a restart of MCPProxy: a long run that spans one shows as two sessions.
 

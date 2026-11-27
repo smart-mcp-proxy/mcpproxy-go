@@ -650,7 +650,7 @@ mcpproxy activity session <id> [flags]
 | `--failures` | `false` | Print every stored failure with the rows before it. Cannot be combined with `--at` |
 | `--include-bodies` | `false` | Include argument and response bodies |
 
-Without `--at` and without `--failures`, the view opens at the first failure that is still stored; a session with no stored failure opens at the first row of its timeline. With `--failures`, a session with no stored failure has nothing to walk: the table output is the session header and the line `No stored failures in this session.`, and the `-o json` or `-o yaml` object has empty `rows` and `failures`.
+Without `--at` and without `--failures`, the view opens at the first failure that is still stored; a session with no stored failure opens at the first row of its timeline. With `--failures`, a session with no stored failure has nothing to walk: the table output is the session header, its notes (for example how many failures the session had in its lifetime) and the line `No stored failures in this session.`, and the `-o json` or `-o yaml` object has empty `rows` and `failures`.
 
 ### Examples
 
@@ -689,7 +689,7 @@ The timeline has more rows (earlier and later). Widen the page with --before / -
 Every failure with its context: mcpproxy activity session ws-4f2a91c07b3d55e1 --failures
 ```
 
-- The line above the table says where the page is. It is one of: `Failure 1 of 3` (the page is positioned at a failure); `After failure 2 of 3` (the positioned row is not a failure, with `--at end` or `--at row:<id>`); `Before the first of 3 failures`; `No stored failures`; and `Failures up to the position: 1 of 3`, used when the positioned row was not returned and it is therefore not known whether it is that failure or a later row. Whenever the positioned row was not returned (removed since the server found it, or not readable with the caller's credential), the line also adds `(row N, the position, was not returned)`. When the page has no rows at all, there is no table: the command prints `No rows were returned at this position; the timeline has N rows.` and suggests `--at first_failure` or `--at end`.
+- The line above the table says where the page is. It is one of: `Failure 1 of 3` (the page is positioned at a failure); `After failure 2 of 3` (the positioned row is not a failure, with `--at end` or `--at row:<id>`); `Before the first of 3 failures`; `No stored failures`; and `Failures up to the position: 1 of 3`, used when the positioned row was not returned and it is therefore not known whether it is that failure or a later row. On a page that has rows, the line also adds `(row N, the position, was not returned)` whenever the positioned row is not among them (removed since the server found it, or not readable with the caller's credential). When the page has no rows at all, there is neither this line nor a table: the command prints `No rows were returned at this position; the timeline has N rows.` and suggests `--at first_failure` or `--at end`.
 - The first column marks the counted row of a failed attempt: `FAIL`, or `BLOCK` when MCPProxy itself refused the call.
 - `KIND` is the row's kind as the endpoint names it (`call`, `internal_call`, `policy_decision`, `prompt`, `other`). Three kinds are not requests of the agent and are written in capitals so they stand apart: `UPSTREAM EVENT`, `SESSION START`, `SESSION END`. An upstream event from before the session started, shown because the server was already down, says so in `DETAIL`.
 - `#` is the row's index in the timeline. `ID` is the activity id, for `activity show <id>` and `--at row:<id>`.
@@ -772,12 +772,12 @@ mcpproxy activity sessions --failed --since -24h
 mcpproxy activity session ws-4f2a91c07b3d55e1
 ```
 
-The timeline shows the failed call, its reason, what the same agent did before, and the upstream events of the servers the session called (a lost connection, an exited process, a required login) at the time they happened. An event next to a failure is a likely cause when it is on the server the failed call went to; events of the session's other servers are listed too. To see every failure of the run, add `--failures`. To read what one call sent and received, pass its id to `mcpproxy activity show <id> --include-response`.
+The timeline shows the failed call, its reason, what the same agent did before, and the upstream events of the servers the session called (a lost connection, an exited process, a required login) at the time they happened. An event next to a failure is a likely cause when it is on the server the failed call went to; events of the session's other servers are listed too. To see every failure of the run that is still stored, add `--failures`. To read what one call sent and received, pass its id to `mcpproxy activity show <id> --include-response`.
 
-Give each agent its own token (`mcpproxy token create --name <name> --profile <profile>`), or have each script send an `X-MCPProxy-Run` header, so that each run is its own session. Over SSH on a headless machine the commands work as they do locally; add `-o json` to feed a script:
+Give each agent its own token (`mcpproxy token create --name <name> --profile <profile>`), or have each script send its own `X-MCPProxy-Run` name, so that the work of different agents lands in different sessions. Calls with the same credential, client and run name are one session until 30 minutes pass without a call. Over SSH on a headless machine the commands work as they do locally; add `-o json` to feed a script:
 
 ```bash
-# Ids of the sessions that failed on a network error
+# Ids of the sessions whose last failure was a network error
 mcpproxy activity sessions --failed --error-class network -o json | jq -r '.sessions[].id'
 ```
 
