@@ -78,7 +78,7 @@ describe('Clients page', () => {
     await flushPromises()
     expect(writeText).toHaveBeenCalledWith(JSON.stringify({ mcpServers: { mcpproxy: { url: `${window.location.origin}/mcp` } } }, null, 2))
 
-    await wrapper.findAll('tbody tr')[0].trigger('click')
+    await wrapper.get('[data-test="client-manage-cursor"]').trigger('click')
     await flushPromises()
     expect(api.getClient).toHaveBeenCalledTimes(1)
     expect(api.getClient).toHaveBeenCalledWith('cursor')
@@ -92,25 +92,31 @@ describe('Clients page', () => {
     expect(wrapper.find('a[href="/usage?client=cursor"]').exists()).toBe(true)
   })
 
-  it('exposes a keyboard-operable expander button whose aria-expanded flips (I7)', async () => {
+  it('Manage is one keyboard-operable button per row; Escape closes the panel and returns focus to it (FR-060)', async () => {
     const router = makeRouter()
     await router.push('/clients')
     await router.isReady()
     const wrapper = mount(Clients, {
       global: { plugins: [router], stubs: { ClientConnectList: true, AgentTokens: true, ModeSwitcher: true } },
+      attachTo: document.body,
     })
     await flushPromises()
-    const btn = wrapper.find('[data-test="client-expand-cursor"]')
+    const btn = wrapper.get('[data-test="client-manage-cursor"]')
     expect(btn.element.tagName).toBe('BUTTON')
-    expect(btn.attributes('aria-expanded')).toBe('false')
-    expect(btn.attributes('aria-label')).toContain('Show details for')
+    expect(btn.attributes('aria-label')).toBe('Manage Cursor')
+    expect(wrapper.findAll('tbody tr:first-child button')).toHaveLength(1)
+    ;(btn.element as HTMLElement).focus()
     await btn.trigger('click')
     await flushPromises()
-    expect(btn.attributes('aria-expanded')).toBe('true')
     expect(api.getClient).toHaveBeenCalledTimes(1)
-    await btn.trigger('click')
+    const panel = wrapper.get('[data-test="client-manage-panel-cursor"]')
+    expect(panel.attributes('role')).toBe('dialog')
+    expect(document.activeElement).toBe(wrapper.get('[data-test="client-manage-title"]').element)
+    await panel.trigger('keydown', { key: 'Escape' })
     await flushPromises()
-    expect(btn.attributes('aria-expanded')).toBe('false')
+    expect(wrapper.find('[data-test="client-manage-panel-cursor"]').exists()).toBe(false)
+    expect(document.activeElement).toBe(btn.element)
+    wrapper.unmount()
   })
 
   it('reads the tab from the URL and preserves unrelated query parameters when changing tabs', async () => {
@@ -162,7 +168,12 @@ describe('Clients page', () => {
     await flushPromises()
 
     expect(api.getClient).not.toHaveBeenCalled()
-    await wrapper.find('[data-test="check-client-connection"]').trigger('click')
+    // The state cell says "unverified"; the explicit check is in the panel.
+    expect(wrapper.get('[data-test="client-unverified-cursor"]').text()).toBe('unverified')
+    await wrapper.get('[data-test="client-manage-cursor"]').trigger('click')
+    await flushPromises()
+    ;(api.getClient as any).mockClear()
+    await wrapper.get('[data-test="check-client-connection"]').trigger('click')
     await flushPromises()
     expect(api.getClient).toHaveBeenCalledWith('cursor')
   })
@@ -175,6 +186,7 @@ describe('Clients page', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-test="focused-client-row"]').text()).toContain('Cursor')
+    expect(wrapper.find('[data-test="client-manage-panel-cursor"]').exists()).toBe(true)
     expect(api.getClient).toHaveBeenCalledWith('cursor')
     expect(wrapper.text()).toContain('Restart Cursor to load MCPProxy')
   })

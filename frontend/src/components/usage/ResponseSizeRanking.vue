@@ -2,14 +2,14 @@
   <div data-test="usage-response-size-ranking">
     <div class="flex items-center justify-between mb-1">
       <h3 class="font-semibold text-sm">Token sinks</h3>
-      <span class="text-xs opacity-60">by response size</span>
+      <span class="text-xs text-base-content/60">by response size</span>
     </div>
     <!-- FR-006: response size is a size-based proxy for token cost, not a real
          tokenizer count. Make that explicit so the number isn't mistaken for tokens. -->
-    <p class="text-xs opacity-50 mb-2">
+    <p class="text-xs text-base-content/60 mb-2">
       Ranked by total response bytes (size-based proxy for token cost).
     </p>
-    <div v-if="ranked.length === 0" class="text-sm opacity-60 py-8 text-center" data-test="usage-response-size-ranking-empty">
+    <div v-if="ranked.length === 0" class="text-sm text-base-content/60 py-8 text-center" data-test="usage-response-size-ranking-empty">
       No sized responses in this window.
     </div>
     <div v-else class="relative" :style="{ height: chartHeight }">
@@ -31,11 +31,13 @@ import {
 } from 'chart.js'
 import type { ChartOptions } from 'chart.js'
 import type { UsageToolStat } from '@/types'
-import { formatBytes, partitionUsageTools, toolLabel, paletteColor } from '@/utils/usageFormat'
+import { formatBytes, partitionUsageTools, toolLabel } from '@/utils/usageFormat'
+import { chartTextOptions, useChartColors } from '@/utils/chartColors'
 
 ChartJS.register(BarElement, CategoryScale, LinearScale, Tooltip, Legend)
 
 const props = defineProps<{ tools: UsageToolStat[] }>()
+const colors = useChartColors()
 
 // Rank by total response bytes descending; drop tools with no sized output, and
 // tools that never completed a call. An error message is a response with bytes,
@@ -55,7 +57,7 @@ const chartData = computed(() => ({
     {
       label: 'Total response bytes',
       data: ranked.value.map(t => t.total_resp_bytes),
-      backgroundColor: ranked.value.map((_, i) => paletteColor(i)),
+      backgroundColor: colors.value.brand,
       borderWidth: 0,
       borderRadius: 3,
     },
@@ -82,10 +84,11 @@ const chartOptions = computed<ChartOptions<'bar'>>(() => ({
   scales: {
     x: {
       beginAtZero: true,
-      title: { display: true, text: 'Total response bytes' },
-      ticks: { callback: (v) => formatBytes(Number(v)) },
+      title: { display: true, text: 'Total response bytes', color: colors.value.muted },
+      ...chartTextOptions(colors.value),
+      ticks: { callback: (v) => formatBytes(Number(v)), color: colors.value.muted },
     },
-    y: { ticks: { autoSkip: false, font: { size: 11 } } },
+    y: { ...chartTextOptions(colors.value), ticks: { autoSkip: false, font: { size: 12 }, color: colors.value.muted } },
   },
 }))
 </script>
