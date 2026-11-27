@@ -137,9 +137,16 @@ page disagree):
   `/usage?profile=` and `/sessions?client=` load filtered, with a removable
   chip that survives navigation and Back).
 - `profiles-unhide.spec.ts`: Spec 109-l un-hide of Spec 108 (Profiles in the
+
+- `shell-pr1.spec.ts` (Spec 134 shell: skip link, palette, phone menu, footer, theme menu, 390px) and `tools-pr6.spec.ts` (Spec 134 Tools: grouped default, Details, filters, Flat list, batch across collapsed sections, 390px) run in the same advisory sweep.
+
   sidebar and `+ Add`, the Viewing chip across pages, Clients-row and
   agent-token-row links, `/servers?profile=`, a Spec 108 warning surfacing as a
   needs-attention item, layout and keyboard order).
+- `clients-tokens-usage-pr7.spec.ts`: Spec 134 PR 7: the Clients table (one row and
+  one button per client), the Manage side panel opened by keyboard with its four
+  groups, `?focus=` opening it, the agent-tokens table at 1280 px (no horizontal
+  scroll, no clipped cell) and 390 px, and the four Usage charts with data.
 - `shell-pr1.spec.ts`: the Spec 134 shell (skip link, palette never opens on Tab, phone menu, footer disclosure, header Add server, theme menu by keyboard, no sideways scroll at 390 px).
 - `home-pr4.spec.ts`: Spec 134 Home (section order, attention list visible without scrolling at 1440 and 390, See all, shortcuts and the collapsed topology by keyboard, 44 px buttons at 390).
 - `activity-pr5.spec.ts`: the Activity calls view (Spec 134 PR 5): five data columns, row detail, Sort control, filter popover over the results, chip overflow at 390 px, Group repeats default.

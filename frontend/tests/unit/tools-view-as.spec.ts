@@ -74,6 +74,9 @@ async function mountToolsAt(path: string, options: { tenant?: boolean } = {}) {
   return { wrapper, router }
 }
 
+// Spec 134 PR 6: these cases read the flat table; the page opens grouped by default.
+window.localStorage.setItem('mcpproxy.tools.layout', 'flat')
+
 describe('Tools view-as (Spec 108-j)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())

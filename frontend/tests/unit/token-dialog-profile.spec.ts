@@ -122,15 +122,24 @@ describe('Token dialog and list (Spec 108-i T093, FR-043)', () => {
     expect(api.listAgentTokens).toHaveBeenCalledWith({ profile: 'work-full', token: undefined })
   })
 
-  it('lists Kind, Profile, Mode and the Legacy scope badge', async () => {
+  it('lists five columns; Kind, Mode, Prefix and Last used sit in the row disclosure; the badge describes configured limits (FR-061)', async () => {
     const { wrapper } = await mountTokens()
-    expect(wrapper.findAll('thead th').map(th => th.text())).toEqual(['Name', 'Kind', 'Profile', 'Mode', 'Prefix', 'Expires', 'Last Used', 'Status', 'Actions'])
-    expect(wrapper.get('[data-test="token-kind-ci"]').text()).toBe('Agent')
+    expect(wrapper.findAll('thead th').map(th => th.text())).toEqual(['Name', 'Profile', 'Expires', 'Status', 'Actions'])
     expect(wrapper.get('[data-test="token-profile-ci"]').text()).toBe('Work')
-    expect(wrapper.get('[data-test="token-kind-client-cursor"]').text()).toBe('Client')
-    expect(wrapper.get('[data-test="token-row-client-cursor"]').text()).toContain('Locked')
     expect(wrapper.find('[data-test="token-legacy-badge-ci"]').exists()).toBe(false)
-    expect(wrapper.get('[data-test="token-legacy-badge-old-bot"]').text()).toBe('Legacy scope')
+    // Wording describes the token's own server list, not effective access.
+    expect(wrapper.get('[data-test="token-legacy-badge-old-bot"]').text()).toBe('Own server list')
+    expect(wrapper.text()).not.toContain('Legacy scope badge')
+    expect(wrapper.get('[data-test="token-row-old-bot"]').text()).not.toContain('Legacy scope')
+    await wrapper.get('[data-test="token-expand-ci"]').trigger('click')
+    const facts = wrapper.get('[data-test="token-facts-ci"]')
+    expect(facts.get('[data-test="token-kind-ci"]').text()).toBe('Agent')
+    for (const label of ['Kind', 'Mode', 'Prefix', 'Last used']) expect(facts.text()).toContain(label)
+    // The raw profile id stays visible even though the chip shows the title.
+    expect(wrapper.get('[data-test="token-profile-id-ci"]').text()).toBeTruthy()
+    await wrapper.get('[data-test="token-expand-client-cursor"]').trigger('click')
+    expect(wrapper.get('[data-test="token-kind-client-cursor"]').text()).toBe('Client')
+    expect(wrapper.get('[data-test="token-facts-client-cursor"]').text()).toContain('Locked')
   })
 
   it('a legacy row expands to its scope read-only with the migrate hint and a prefilled dialog', async () => {

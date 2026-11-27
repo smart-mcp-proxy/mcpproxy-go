@@ -3,14 +3,14 @@
     <div class="flex items-start justify-between gap-4">
       <div><h1 class="text-3xl font-bold">Clients</h1><p class="text-base-content/70 mt-1">Connect AI clients, check presence, and manage agent tokens.</p></div>
       <div v-if="authStore.principalKind !== 'tenant'" class="flex flex-wrap justify-end gap-2" data-test="clients-toolbar">
-        <button v-if="tab === 'clients' && hasAdminKeyWarning" type="button" class="btn btn-warning btn-sm" data-test="clients-upgrade-admin-key" @click="upgradeOpen = true">Upgrade admin-key clients&hellip;</button>
-        <button v-if="tab === 'clients'" type="button" class="btn btn-outline btn-sm" data-test="clients-bulk-move" @click="bulkOpen = true">Move clients&hellip;</button>
-        <button v-if="tab === 'clients'" type="button" class="btn btn-outline btn-sm" data-test="clients-add-other" @click="customOpen = true">Add other client&hellip;</button>
-        <button class="btn btn-primary" data-test="open-client-connect" @click="connectOpen = true">Connect client</button>
+        <button v-if="tab === 'clients' && hasAdminKeyWarning" type="button" class="btn btn-outline btn-warning btn-sm max-sm:min-h-11" data-test="clients-upgrade-admin-key" @click="upgradeOpen = true">Upgrade admin-key clients&hellip;</button>
+        <button v-if="tab === 'clients'" type="button" class="btn btn-outline btn-sm max-sm:min-h-11" data-test="clients-bulk-move" @click="bulkOpen = true">Move clients&hellip;</button>
+        <button v-if="tab === 'clients'" type="button" class="btn btn-outline btn-sm max-sm:min-h-11" data-test="clients-add-other" @click="customOpen = true">Add other client&hellip;</button>
+        <button class="btn btn-primary max-sm:min-h-11" data-test="open-client-connect" @click="connectOpen = true; connectReveal = ''">Connect client</button>
       </div>
     </div>
     <div role="tablist" class="tabs tabs-boxed w-fit" data-test="clients-tabs">
-      <button v-for="item in tabs" :key="item.id" class="tab" :class="tab === item.id && 'tab-active'" @click="selectTab(item.id)">{{ item.label }}</button>
+      <button v-for="item in tabs" :key="item.id" class="tab max-sm:min-h-11" :class="tab === item.id && 'tab-active'" @click="selectTab(item.id)">{{ item.label }}</button>
     </div>
     <!-- Spec 134 FR-016: View as and its chips in the filter row of the Clients
          and Tokens tabs (the Endpoint tab applies no scope). -->
@@ -22,25 +22,14 @@
       <ClientsWarningsBanner :warnings="store.warnings" @upgrade="upgradeOpen = true" @move="moveClient" />
       <div v-if="store.loading" class="py-12 text-center"><span class="loading loading-spinner loading-lg" /></div>
       <div v-else-if="store.error" class="alert alert-error">{{ store.error }}</div>
-      <div v-else class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
-        <table class="table"><thead><tr><th>Client</th><th>State</th><th>Last seen</th><th>Sessions</th><th>Config path</th><th>Profile</th></tr></thead>
-          <tbody><template v-for="client in store.clients" :key="client.id"><tr class="cursor-pointer hover" :class="focusedClient === client.id && 'bg-primary/10'" :data-test="focusedClient === client.id ? 'focused-client-row' : undefined" @click="toggle(client.id)"><td class="font-medium"><button type="button" class="btn btn-ghost btn-xs btn-square mr-1 align-middle" :data-test="`client-expand-${client.id}`" :aria-expanded="expanded === client.id" :aria-controls="`client-details-${client.id}`" :aria-label="`Show details for ${client.display_name}`" @click.stop="toggle(client.id)"><svg class="h-4 w-4 transition-transform" :class="expanded === client.id && 'rotate-90'" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M7.2 4.2a1 1 0 011.4 0l5 5a1 1 0 010 1.4l-5 5a1 1 0 11-1.4-1.4L11.6 10 7.2 5.6a1 1 0 010-1.4z" clip-rule="evenodd" /></svg></button>{{ client.display_name }}<CredentialLifecycle v-if="client.kind === 'custom' || client.issuer" class="mt-1" :id="client.id" kind="client" :profile="client.profile" :mode="client.profile_mode" :issuer="client.issuer" :lease="client.lease" :expires-at="client.expires_at" :revoked="client.credential_state === 'revoked'" :revoked-at="client.revoked_at" :credential-state="client.credential_state" :purpose="client.purpose" :profile-state="client.profile_state" :show-state="true" /></td><td><span class="badge badge-sm">{{ stateLabel(client.state) }}</span><button v-if="client.connection_unverified" type="button" class="btn btn-ghost btn-xs ml-2" data-test="check-client-connection" @click.stop="checkConnection(client.id)">Check connection</button></td><td>{{ relative(client.last_seen) }}</td><td>{{ client.active_sessions }}</td><td><code class="text-xs break-all">{{ client.display_path || '—' }}</code></td><td><ProfileChip :client="client" :auto-open="moveRequest === client.id" /></td></tr>
-          <tr v-if="rowErrors[client.id]" :data-test="`client-row-error-${client.id}`"><td colspan="6" class="bg-base-200/40"><GuardRefusal v-if="isGuardRefusal(rowErrors[client.id])" :refusal="rowErrors[client.id] as any" @navigate="bindings.clearRowError(client.id)" /><div v-else role="alert" class="alert alert-error text-sm">{{ describeError(rowErrors[client.id]) }}</div></td></tr>
-          <tr v-if="expanded === client.id" :id="`client-details-${client.id}`"><td colspan="6" class="bg-base-200/40">
-            <p v-if="client.reload_hint" class="text-sm mb-2">{{ client.reload_hint }}</p>
-            <div v-if="clientScopeAvailable" class="flex flex-wrap gap-x-3 gap-y-1 mb-2 text-sm">
-              <router-link class="link" :data-test="`clients-row-link-activity-${client.id}`" :aria-label="`Activity for ${client.display_name}`" :to="scopeQuery.linkTo('activity', { view: 'calls', client: client.id, token: '' })">Activity</router-link>
-              <router-link class="link" :data-test="`clients-row-link-sessions-${client.id}`" :aria-label="`Sessions for ${client.display_name}`" :to="scopeQuery.linkTo('activity', { view: 'sessions', client: client.id, token: '' })">Sessions</router-link>
-              <router-link class="link" :data-test="`clients-row-link-tools-${client.id}`" :aria-label="`Tools it sees for ${client.display_name}`" :to="scopeQuery.linkTo('tools', { client: client.id })">Tools it sees</router-link>
-              <router-link class="link" :data-test="`clients-row-link-usage-${client.id}`" :aria-label="`Usage for ${client.display_name}`" :to="scopeQuery.linkTo('usage', { client: client.id, token: '' })">Usage</router-link>
-            </div>
-            <ClientCredentials class="mb-3" :client="client" @changed="refreshSilently" />
-            <ClientBindingControls class="mb-3" :client="client" @changed="refreshSilently" @forget="forgetTarget = $event" @credential="showCredential" />
-            <p v-if="!client.sessions?.length" class="text-sm opacity-60">No sessions recorded.</p>
-            <router-link v-for="session in client.sessions" :key="session.id" :to="`/activity?view=sessions&session=${encodeURIComponent(session.work_session_id || session.id)}`" class="link block text-sm">Session {{ session.work_session_id || session.id }}</router-link>
-          </td></tr></template></tbody>
-        </table>
-      </div>
+      <template v-else>
+        <ClientsTable :clients="shownClients" :focused-id="focusedClient" :errors="rowErrors" :hide-error-for="panelId" test-id="clients-table" @manage="openPanel" @clear-error="bindings.clearRowError" />
+        <!-- Spec 134 FR-060: only supported apps that are positively not detected fold. -->
+        <details v-if="undetectedClients.length" :open="undetectedOpen" @toggle="undetectedOpen = ($event.target as HTMLDetailsElement).open" class="rounded-box border border-base-300 bg-base-100" data-test="clients-undetected">
+          <summary class="flex min-h-11 cursor-pointer items-center gap-2 px-3 text-sm font-medium" data-test="clients-undetected-summary"><UiIcon name="chevronDown" class="h-4 w-4 transition-transform" :class="!undetectedOpen && '-rotate-90'" />{{ undetectedClients.length }} supported app{{ undetectedClients.length === 1 ? '' : 's' }} not detected</summary>
+          <ClientsTable :clients="undetectedClients" :focused-id="focusedClient" :errors="rowErrors" :hide-error-for="panelId" test-id="clients-undetected-table" @manage="openPanel" @clear-error="bindings.clearRowError" />
+        </details>
+      </template>
       <div class="rounded-box border border-dashed border-base-300 p-4 text-sm space-y-2" data-test="other-client-snippet">
         <div><strong>Other client?</strong> Add MCPProxy to its MCP configuration with this endpoint. This example contains no admin key.</div>
         <pre v-if="otherClientSnippet" class="overflow-x-auto rounded bg-base-200 p-3 text-xs"><code>{{ otherClientSnippet }}</code></pre>
@@ -51,28 +40,38 @@
     </section>
     <section v-else-if="tab === 'endpoint'" class="card bg-base-100 border border-base-300"><div class="card-body"><h2 class="card-title">Endpoint &amp; mode</h2><p class="text-sm text-base-content/70">Choose the MCP surface this instance serves. Changes are saved immediately and apply after restart.</p><ModeSwitcher /><dl v-if="store.routing" class="grid gap-1 text-sm" data-test="endpoint-list"><div v-for="(endpoint, name) in store.routing.endpoints" :key="name" class="flex items-start justify-between gap-3 rounded-lg px-2 py-1.5 hover:bg-base-200" :data-test="`endpoint-${name}`"><div class="min-w-0"><dt class="font-medium">{{ name }} <span v-if="name === 'default'" class="badge badge-xs badge-primary">default</span></dt><dd><code>{{ endpoint }}</code></dd><dd class="text-xs text-base-content/60" :data-test="`endpoint-description-${name}`">{{ endpointDescription(name) }}</dd></div><button v-if="systemStore.listenAddr" type="button" class="btn btn-ghost btn-xs shrink-0" :data-test="`copy-endpoint-${name}`" :aria-label="`Copy ${name} endpoint URL`" @click="copyEndpoint(name, endpoint)">{{ copiedEndpoint === name ? 'Copied' : 'Copy URL' }}</button></div></dl><p v-if="store.routing?.restart_required" class="alert alert-warning text-sm">Restart MCPProxy to apply {{ store.routing.pending_routing_mode }} mode.</p></div></section>
     <AgentTokens v-else />
-    <ClientConnectList :show="connectOpen" @close="connectOpen = false" @updated="refreshClients" />
+    <ClientManagePanel
+      :key="panelClient?.id ?? 'none'"
+      :client="panelClient"
+      :move-request="moveRequest"
+      @close="closePanel"
+      @changed="refreshSilently"
+      @forget="forgetTarget = $event"
+      @credential="showCredential"
+      @check="checkConnection"
+      @busy="onPanelBusy"
+      @connect="openConnectFor"
+    />
+    <ClientConnectList :show="connectOpen" :reveal-client="connectReveal" @close="connectOpen = false; connectReveal = ''" @updated="refreshClients" />
     <CustomClientDialog :open="customOpen" @close="customOpen = false" @created="onCustomCreated" />
     <BulkMoveDialog :open="bulkOpen" :clients="store.clients" @close="bulkOpen = false" @done="refreshSilently" />
     <UpgradeAdminKeyDialog :open="upgradeOpen" @close="upgradeOpen = false" @done="refreshSilently" />
-    <ForgetClientDialog v-if="forgetTarget" :open="true" :client="forgetTarget" @close="forgetTarget = null" @done="refreshSilently" />
+    <ForgetClientDialog v-if="forgetTarget" :open="true" :client="forgetTarget" @close="onForgetClose" @done="refreshSilently" />
     <CredentialOnceDialog :open="!!secret" :credential="secret?.credential ?? ''" :snippet="secret?.snippet" :title="secret?.title" @close="secret = null" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ViewAs from '@/components/ViewAs.vue'
 import ScopeChips from '@/components/scope/ScopeChips.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useClientsStore } from '@/stores/clients'
-import CredentialLifecycle from '@/components/clients/CredentialLifecycle.vue'
 import { useAuthStore } from '@/stores/auth'
 import ClientConnectList from '@/components/ClientConnectList.vue'
-import ProfileChip from '@/components/ProfileChip.vue'
-import ClientBindingControls from '@/components/ClientBindingControls.vue'
-import ClientCredentials from '@/components/clients/ClientCredentials.vue'
-import GuardRefusal from '@/components/GuardRefusal.vue'
+import UiIcon from '@/components/UiIcon.vue'
+import ClientsTable from '@/components/clients/ClientsTable.vue'
+import ClientManagePanel from '@/components/clients/ClientManagePanel.vue'
 import ClientsWarningsBanner from '@/components/clients/ClientsWarningsBanner.vue'
 import CustomClientDialog from '@/components/clients/CustomClientDialog.vue'
 import BulkMoveDialog from '@/components/clients/BulkMoveDialog.vue'
@@ -81,7 +80,7 @@ import CredentialOnceDialog from '@/components/clients/CredentialOnceDialog.vue'
 import ForgetClientDialog from '@/components/clients/ForgetClientDialog.vue'
 import { useProfilesStore } from '@/stores/profiles'
 import { useClientBindingsStore } from '@/stores/clientBindings'
-import { describeError, isGuardRefusal } from '@/utils/profiles'
+import { isUndetectedSupported } from '@/utils/clientReach'
 import type { ClientPresence, CustomClientResponse } from '@/types/api'
 import ModeSwitcher from '@/components/ModeSwitcher.vue'
 import AgentTokens from '@/views/AgentTokens.vue'
@@ -94,8 +93,11 @@ const tabs = [{ id: 'clients', label: 'Clients' }, { id: 'endpoint', label: 'End
 const defaultTab = 'clients'
 function validTab(value: unknown): value is string { return typeof value === 'string' && tabs.some(item => item.id === value) }
 const tab = ref(validTab(route.query.tab) ? route.query.tab : defaultTab)
-const expanded = ref('')
+// Spec 134 FR-060: the Manage side panel replaces the inline expansion.
+const panelId = ref('')
 const focusedClient = ref('')
+const connectReveal = ref('')
+const undetectedOpen = ref(false)
 const connectOpen = ref(false)
 const customOpen = ref(false)
 const bulkOpen = ref(false)
@@ -108,7 +110,6 @@ const moveRequest = ref('')
 const forgetTarget = ref<ClientPresence | null>(null)
 const hasAdminKeyWarning = computed(() => store.warnings.some(warning => warning.code === 'client_holds_admin_key'))
 const scopeQuery = useScopeQuery('clients')
-const clientScopeAvailable = computed(() => isScopeParamAvailable('client'))
 // Spec 134 FR-016: every carried view-as value stays visible and removable here.
 // A tenant's list is never narrowed by them; a value the build does not list is
 // marked "Filter unavailable on this server".
@@ -158,6 +159,19 @@ async function copyOtherClientSnippet() {
   }
 }
 function selectTab(id: string) { tab.value = id }
+// The panel belongs to the Clients tab: leaving it (a tab, the palette, a link) closes it and its dialogs.
+// A credential rotation in flight keeps the panel until its one-time secret has reached the page.
+let panelBusy = false
+let closeWhenIdle = false
+let queuedOpen = ''
+function onPanelBusy(busy: boolean) {
+  panelBusy = busy
+  if (busy) return
+  if (closeWhenIdle) { closeWhenIdle = false; queuedOpen = ''; panelId.value = '' }
+  else if (queuedOpen) { const id = queuedOpen; queuedOpen = ''; void openPanel(id) }
+}
+function dropPanel() { if (panelBusy) closeWhenIdle = true; else panelId.value = '' }
+watch(tab, (value) => { if (value !== 'clients') { handledFocus = ''; if (panelId.value) dropPanel() } })
 watch(tab, value => {
   if (route.path !== '/clients') return
   const query = { ...route.query }
@@ -177,21 +191,58 @@ watch(() => route.query.tab, value => {
     void router.replace({ query })
   }
 }, { immediate: true })
-async function toggle(id: string) { expanded.value = expanded.value === id ? '' : id; if (expanded.value) await store.loadDetail(id) }
-async function checkConnection(id: string) { expanded.value = id; await store.loadDetail(id) }
+const panelClient = computed(() => store.clients.find(client => client.id === panelId.value) ?? null)
+// A focused client or the one in the panel is always revealed, even when undetected.
+function isFolded(client: ClientPresence) { return isUndetectedSupported(client) && client.id !== focusedClient.value && client.id !== panelId.value }
+const shownClients = computed(() => store.clients.filter(client => !isFolded(client)))
+const undetectedClients = computed(() => store.clients.filter(isFolded))
+async function openPanel(id: string) {
+  // The panel of a client with a rotation or revoke in flight is not swapped out under it.
+  if (panelBusy && panelId.value && panelId.value !== id) { queuedOpen = id; return }
+  panelId.value = id
+  await store.loadDetail(id)
+}
+async function closePanel() {
+  const id = panelId.value
+  // A panel opened on an undetected app revealed its row; once closed the row folds again,
+  // so the fold opens to keep the Manage button where focus returns.
+  const closing = store.clients.find(client => client.id === id)
+  if (closing && isUndetectedSupported(closing)) undetectedOpen.value = true
+  panelId.value = ''
+  await nextTick()
+  await nextTick()
+  // Back to the row's Manage button, or the toolbar when the row no longer exists.
+  const trigger = id ? document.querySelector<HTMLElement>(`[data-test="client-manage-${id}"]`) : null
+  const fallback = document.querySelector<HTMLElement>('[data-test="open-client-connect"]') ?? document.querySelector<HTMLElement>('[data-test="clients-tabs"] button')
+  ;(trigger ?? fallback)?.focus()
+}
+async function checkConnection(id: string) { await store.loadDetail(id) }
+// Dismissing the Forget dialog with no panel left puts focus back on the toolbar.
+async function onForgetClose() {
+  forgetTarget.value = null
+  if (panelId.value) return
+  await nextTick()
+  document.querySelector<HTMLElement>('[data-test="open-client-connect"]')?.focus()
+}
+function openConnectFor(id: string) { connectReveal.value = id; connectOpen.value = true }
+// The panel's client left the roster (Forget, a refresh): close it and keep focus on the page.
+watch(() => store.clients.some(client => client.id === panelId.value), (present) => { if (panelId.value && !present && !store.loading) void closePanel() })
+// `?focus=<id>` opens the panel once per value, on the Clients tab, for a client in the roster this caller received.
+let handledFocus = ''
 async function focusClientFromRoute() {
   const id = typeof route.query.focus === 'string' ? route.query.focus : ''
-  if (!id || !store.clients.some(client => client.id === id)) {
+  if (!id || tab.value !== 'clients' || !store.clients.some(client => client.id === id)) {
     focusedClient.value = ''
+    if (!id) handledFocus = ''
     return
   }
   focusedClient.value = id
-  if (expanded.value !== id) {
-    expanded.value = id
-    await store.loadDetail(id)
-  }
+  if (handledFocus === id) return
+  handledFocus = id
+  await openPanel(id)
 }
-watch([() => route.query.focus, () => store.clients.map(client => client.id).join('|')], () => { void focusClientFromRoute() }, { immediate: true })
+watch([() => route.query.focus, () => tab.value, () => store.clients.map(client => client.id).join('|')], () => { void focusClientFromRoute() }, { immediate: true })
+watch(undetectedClients, (list) => { if (list.length === 0) undetectedOpen.value = false })
 // Spec 108-f: the profile/client scope (Viewing chip or a link) filters the rows
 // on the server; the warnings stay instance-level.
 function restScope(): { profile?: string; client?: string } {
@@ -209,13 +260,11 @@ function onCustomCreated(result: CustomClientResponse) {
 }
 function showCredential(payload: { credential: string; snippet?: { generic_http: string; header_name: string } | null; title: string }) { secret.value = payload }
 async function moveClient(id: string) {
-  expanded.value = id
   moveRequest.value = id
-  await store.loadDetail(id)
+  await openPanel(id)
 }
-function stateLabel(value: string) { return value.replaceAll('_', ' ') }
-function relative(value?: string | null) { return value ? new Date(value).toLocaleString() : 'Never' }
-watch(() => [scopeQuery.state.profile, scopeQuery.state.client], () => { if (authStore.principalKind !== 'tenant') refreshClients() })
+// A scope change reloads the roster: the panel of a client from the old list closes with it.
+watch(() => [scopeQuery.state.profile, scopeQuery.state.client], () => { dropPanel(); if (authStore.principalKind !== 'tenant') refreshClients() })
 watch(() => route.query.move, value => { moveRequest.value = value === '1' && typeof route.query.focus === 'string' ? route.query.focus : '' }, { immediate: true })
 onMounted(() => {
   if (authStore.principalKind === 'tenant') return

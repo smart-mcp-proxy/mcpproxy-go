@@ -299,8 +299,10 @@ async function credentials(client: string): Promise<any[]> {
 
 async function openClient(page: Page, id: string) {
   await page.goto(`${BASE}/ui/clients`)
-  await t(page, `client-expand-${id}`).click()
+  await t(page, `client-manage-${id}`).click()
   await expect(t(page, `client-credentials-${id}`)).toBeVisible()
+  // Spec 134 FR-060: the revocations sit in the closed "Disconnect or remove" group.
+  await page.locator(`[data-test="client-manage-remove-${id}"] summary`).click()
 }
 
 test('i. /ui/clients lists the API key and the login; revoking the API key alone leaves the login', async ({ page }) => {
@@ -322,7 +324,7 @@ test('i. /ui/clients lists the API key and the login; revoking the API key alone
   const creds = await credentials(id)
   expect(creds.find((c) => c.kind === 'api_key')?.state).toBe('revoked')
   expect(creds.filter((c) => c.kind === 'browser_login' && c.state === 'active')).toHaveLength(1)
-  await expect(loginRow.locator('[data-test^="revoke-login-"]')).toBeVisible()
+  await expect(page.locator('[data-test^="revoke-login-"]')).toBeVisible()
 })
 
 test('j. /ui/clients revokes one login through the dialog; Cancel changes nothing', async ({ page }) => {
