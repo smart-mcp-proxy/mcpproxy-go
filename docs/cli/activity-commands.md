@@ -621,7 +621,7 @@ Timeline of one session: mcpproxy activity session <id>
 |------|---------|
 | 0 | Success (an empty list is a success) |
 | 1 | Invalid or unparsable flag value or argument, the daemon is not running, or the daemon refused the request |
-| 1 or 4 | The configuration file given with `--config` cannot be loaded. The code is the one every `mcpproxy` command gives for that problem |
+| other | A configuration file (`--config`) that cannot be loaded exits with the code every `mcpproxy` command gives for that problem |
 
 ---
 
@@ -690,7 +690,7 @@ The timeline has more rows (earlier and later). Widen the page with --before / -
 Every failure with its context: mcpproxy activity session ws-4f2a91c07b3d55e1 --failures
 ```
 
-- The line above the table says where the page is: `Failure 1 of 3` when it is positioned at a failure; `After failure 2 of 3` or `Before the first of 3 failures` when the positioned row is not one (with `--at end` or `--at row:<id>`); `No stored failures` when the session has none.
+- The line above the table says where the page is: `Failure 1 of 3` when it is positioned at a failure; `After failure 2 of 3` or `Before the first of 3 failures` when the positioned row is not one (with `--at end` or `--at row:<id>`); `No stored failures` when the session has none. When the positioned row itself was not returned, the line says so.
 - The first column marks the counted row of a failed attempt: `FAIL`, or `BLOCK` when MCPProxy itself refused the call.
 - `KIND` is the row's kind as the endpoint names it (`call`, `internal_call`, `policy_decision`, `prompt`, `other`). Three kinds are not requests of the agent and are written in capitals so they stand apart: `UPSTREAM EVENT`, `SESSION START`, `SESSION END`. An upstream event from before the session started, shown because the server was already down, says so in `DETAIL`.
 - `#` is the row's index in the timeline. `ID` is the activity id, for `activity show <id>` and `--at row:<id>`.
@@ -746,7 +746,7 @@ Without `--failures`, `-o json` prints the data object of `GET /api/v1/work-sess
 |------|---------|
 | 0 | Success |
 | 1 | Invalid or unparsable flag value or argument, the daemon is not running, the session was not found, the daemon refused the request, or (`--failures`) the session kept changing through three attempts to read it |
-| 1 or 4 | The configuration file given with `--config` cannot be loaded. The code is the one every `mcpproxy` command gives for that problem |
+| other | A configuration file (`--config`) that cannot be loaded exits with the code every `mcpproxy` command gives for that problem |
 
 An id that matches no session exits 1 with:
 

@@ -492,7 +492,7 @@ func runActivitySession(id, at string, before, after int, includeBodies bool) er
 		if page.TotalRows > 0 {
 			// The door found the position and then had no row to return for
 			// it: removed in between, or not readable with this credential.
-			fmt.Printf("No rows were returned at this position; %d rows of the session are stored. Try --at first_failure or --at end.\n", page.TotalRows)
+			fmt.Printf("No rows were returned at this position; the timeline has %d rows. Try --at first_failure or --at end.\n", page.TotalRows)
 			return nil
 		}
 		fmt.Println("No rows of this session are stored.")
@@ -514,6 +514,11 @@ func runActivitySession(id, at string, before, after int, includeBodies bool) er
 		fmt.Printf("Failure %d of %d%s · rows %d-%d of %d\n", page.FailureIndex, page.FailureTotal, missing, first, last, page.TotalRows)
 	case timelinePositionFailed(page):
 		fmt.Printf("Failure %d of %d · rows %d-%d of %d\n", page.FailureIndex, page.FailureTotal, first, last, page.TotalRows)
+	case !timelinePositionReturned(page):
+		// The positioned row is not on the page, so whether it is a failure
+		// is not known: only what the door says about the position is said.
+		fmt.Printf("Row %d was not returned; failures up to it: %d of %d · rows %d-%d of %d\n",
+			page.Position, page.FailureIndex, page.FailureTotal, first, last, page.TotalRows)
 	default:
 		// failure_index is the last failure at or before the position; the
 		// positioned row itself is not one.
@@ -551,6 +556,13 @@ func timelinePositionRow(page *contracts.WorkSessionTimelineResponse) (*contract
 		}
 	}
 	return nil, false
+}
+
+// timelinePositionReturned reports whether the door returned the row the page
+// is positioned at.
+func timelinePositionReturned(page *contracts.WorkSessionTimelineResponse) bool {
+	_, ok := timelinePositionRow(page)
+	return ok
 }
 
 // timelinePositionFailed reports whether the row the page is positioned at is

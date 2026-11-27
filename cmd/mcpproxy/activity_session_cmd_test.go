@@ -830,7 +830,7 @@ func TestActivitySession_EmptyPageOfAStoredSession(t *testing.T) {
 	out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--at", "row:01GONE", "--before", "0", "--after", "0")
 	require.NoError(t, err)
 	require.NotContains(t, out, "No rows of this session are stored")
-	require.Contains(t, out, "90 rows of the session are stored")
+	require.Contains(t, out, "the timeline has 90 rows")
 }
 
 // A flag value Cobra cannot parse is a mistyped command line and exits 1,
@@ -945,6 +945,21 @@ func TestActivitySession_HeadingWhenTheFailureRowIsNotReturned(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, out, "Failure 1 of 2 (its row was not returned)")
 	require.NotContains(t, out, "After failure")
+}
+
+// The same hole under --at row:<id>: the positioned row is not on the page,
+// so the heading does not say whether it is a failure or comes after one.
+func TestActivitySession_HeadingWhenAPositionedRowIsNotReturned(t *testing.T) {
+	newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/work-sessions/ws-aaa/timeline": okResp(`{"session": ` + timelineSessionJSON + `, "rows": [` +
+			failuresRow(39, false) + `],
+		  "position": 40, "total_rows": 90, "failure_index": 1, "failure_total": 2, "lifetime_failures": 2, "has_before": true, "has_after": true}`),
+	})
+	out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--at", "row:01GONE", "--before", "1", "--after", "0")
+	require.NoError(t, err)
+	require.Contains(t, out, "Row 40 was not returned; failures up to it: 1 of 2")
+	require.NotContains(t, out, "After failure")
+	require.NotContains(t, out, "\nFailure 1 of 2")
 }
 
 // The repeat count of a collapsed upstream event survives a long message: the
