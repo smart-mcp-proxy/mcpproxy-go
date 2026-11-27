@@ -650,7 +650,7 @@ mcpproxy activity session <id> [flags]
 | `--failures` | `false` | Print every stored failure with the rows before it. Cannot be combined with `--at` |
 | `--include-bodies` | `false` | Include argument and response bodies |
 
-Without `--at` and without `--failures`, the view opens at the first failure that is still stored; a session with no stored failure opens at the first row of its timeline. With `--failures`, a session with no stored failure prints `No stored failures in this session.` and no rows.
+Without `--at` and without `--failures`, the view opens at the first failure that is still stored; a session with no stored failure opens at the first row of its timeline. With `--failures`, a session with no stored failure has nothing to walk: the table output is the session header and the line `No stored failures in this session.`, and the `-o json` or `-o yaml` object has empty `rows` and `failures`.
 
 ### Examples
 
