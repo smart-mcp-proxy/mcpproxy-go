@@ -1475,8 +1475,9 @@ if [ -n "$CLI_WS_ID" ]; then
     fi
 
     # Every failure with the two rows before it. The run failed twice in a
-    # row, so the two contexts overlap: each row is printed once, the two rows
-    # before the first failure are there, and nothing outside a context is.
+    # row, so the two contexts overlap (the failures are at most two rows
+    # apart). The rows are then exactly the run from two rows before the first
+    # failure to the last failure: each once, none missing, none outside.
     log_test "CLI: activity session --failures walks the failures"
     RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" --failures --before 2 -o json 2>&1)
     if echo "$RESPONSE" | jq -e '. as $d | ($d.failures | length) >= 2 and ($d.failures | length) == $d.failure_total
@@ -1484,6 +1485,8 @@ if [ -n "$CLI_WS_ID" ]; then
             and ([$d.failures[].number] == [range(1; ($d.failures | length) + 1)])
             and ([$d.failures[].index] | length == (unique | length))
             and ([$d.failures[].index] == [$d.rows[] | select(.failed == true) | .index])
+            and ($d.failures[1].index - $d.failures[0].index <= 2)
+            and ([$d.rows[].index] == [range($d.failures[0].index - 2; $d.failures[-1].index + 1)])
             and ($d.rows | map(select(.index < $d.failures[0].index)) | length == 2)
             and ($d.rows | all(.index as $i | any($d.failures[]; .index - 2 <= $i and $i <= .index)))' >/dev/null 2>&1; then
         log_pass "CLI: activity session --failures walks the failures"

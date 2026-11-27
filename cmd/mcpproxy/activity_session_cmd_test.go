@@ -672,15 +672,17 @@ func TestActivitySession_FailuresWalkRestartsWhenTheNextNumberIsRefused(t *testi
 		require.Contains(t, out, "01ROW300")
 		require.NotContains(t, out, "01ROW010")
 	})
-	t.Run("a refusal that stays is reported in the door's words", func(t *testing.T) {
+	t.Run("a refusal that stays is reported with the door's words", func(t *testing.T) {
 		rec := newSequencedRecorder(t, "GET /api/v1/work-sessions/ws-aaa/timeline", []cannedResponse{
 			okResp(failuresPage([]string{failuresRow(10, true)}, 10, 1, 2, 2, true)), noSuchFailure,
 			okResp(failuresPage([]string{failuresRow(10, true)}, 10, 1, 2, 2, true)), noSuchFailure,
 			okResp(failuresPage([]string{failuresRow(10, true)}, 10, 1, 2, 2, true)), noSuchFailure,
 		})
 		out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--failures", "--before", "0")
+		require.ErrorContains(t, err, "changed while its failures were being read")
+		require.ErrorContains(t, err, "run the command again")
 		require.ErrorContains(t, err, "No such failure")
-		require.ErrorContains(t, err, "r-5")
+		require.Equal(t, ExitCodeGeneralError, classifyError(err))
 		require.Len(t, rec.all(), 6)
 		require.NotContains(t, out, "01ROW")
 	})
@@ -761,4 +763,88 @@ func TestActivitySession_BodyLineIsValidJSON(t *testing.T) {
 	}
 	require.Equal(t, "a\u202eb", arguments["q"], "the line decodes to the value the call carried")
 	require.Equal(t, "next\u0085line \x1b[2J", response)
+}
+
+// The check for moved indexes covers every row a page returns, not only the
+// rows kept as context: a row far ahead of the first failure, seen on the
+// first page and not kept, still contradicts a later page that has another
+// row at its index.
+func TestActivitySession_FailuresWalkComparesRowsItDoesNotKeep(t *testing.T) {
+	named := func(index int, id string, failed bool) string {
+		extra, status := "", "success"
+		if failed {
+			extra, status = `"failed": true`, "error"
+		}
+		return timelineRow(index, "call", "2026-11-26T22:00:00Z", extra, callActivity(id, "2026-11-26T22:00:00Z", "github", "t", status, ""))
+	}
+	rec := newSequencedRecorder(t, "GET /api/v1/work-sessions/ws-aaa/timeline", []cannedResponse{
+		// Failure 1 at row 10; the page reaches row 260, an ordinary call.
+		okResp(failuresPage([]string{named(10, "01FAILA", true), named(11, "01NEXT", false), named(260, "01FAR", false)}, 10, 1, 2, 2, true)),
+		// One older row is gone: the second failure, once at row 261, is at 260.
+		okResp(failuresPage([]string{named(260, "01FAILB", true)}, 260, 2, 2, 2, false)),
+		// Second pass.
+		okResp(failuresPage([]string{named(9, "01FAILA", true)}, 9, 1, 2, 2, true)),
+		okResp(failuresPage([]string{named(260, "01FAILB", true)}, 260, 2, 2, 2, false)),
+	})
+	out, _, err := runCLI(t, workSessionsTestRoot, "json", "session", "ws-aaa", "--failures", "--before", "0")
+	require.NoError(t, err)
+	require.Len(t, rec.all(), 4, "the contradiction at row 260 starts the walk over")
+	var got struct {
+		Failures []struct {
+			Index int `json:"index"`
+		} `json:"failures"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Len(t, got.Failures, 2)
+	require.Equal(t, 9, got.Failures[0].Index, "both failures are indexed in one timeline")
+	require.Equal(t, 260, got.Failures[1].Index)
+}
+
+// A failure that an earlier page returned as context is shown. When the door
+// then names it and returns no row for it, it is numbered from the row that
+// is already there, not counted as missing next to its own row.
+func TestActivitySession_FailureShownAsContextIsNotCountedMissing(t *testing.T) {
+	newSequencedRecorder(t, "GET /api/v1/work-sessions/ws-aaa/timeline", []cannedResponse{
+		// Failure 2 (row 11) is the one row of forward context of failure 1.
+		okResp(failuresPage([]string{failuresRow(10, true), failuresRow(11, true)}, 10, 1, 2, 2, true)),
+		// Asked for on its own, its row is gone; the row after it is there.
+		okResp(failuresPage([]string{failuresRow(12, false)}, 11, 2, 2, 2, false)),
+	})
+	out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--failures", "--before", "0", "--after", "1", "--include-bodies")
+	require.NoError(t, err)
+	require.Contains(t, out, "Failures 1-2 of 2")
+	require.Equal(t, 1, strings.Count(out, "01ROW011"))
+	require.NotContains(t, out, "not returned")
+}
+
+// The door can find a position and return no row for it. That is not a
+// session without rows.
+func TestActivitySession_EmptyPageOfAStoredSession(t *testing.T) {
+	newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/work-sessions/ws-aaa/timeline": okResp(`{"session": ` + timelineSessionJSON + `, "rows": [],
+		  "position": 40, "total_rows": 90, "failure_index": 1, "failure_total": 2, "lifetime_failures": 2, "has_before": true, "has_after": true}`),
+	})
+	out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--at", "row:01GONE", "--before", "0", "--after", "0")
+	require.NoError(t, err)
+	require.NotContains(t, out, "No rows of this session are stored")
+	require.Contains(t, out, "90 rows of the session are stored")
+}
+
+// A flag value Cobra cannot parse is a mistyped command line and exits 1,
+// whatever words the value contains: the exit-code heuristics do not read it.
+func TestActivitySession_UnparsableFlagValueExitsOne(t *testing.T) {
+	for name, args := range map[string][]string{
+		"sessions limit":  {"sessions", "--limit", "invalid configuration"},
+		"sessions offset": {"sessions", "--offset", "config"},
+		"session before":  {"session", "ws-1", "--before", "permission denied"},
+		"session after":   {"session", "ws-1", "--after", "config"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := newRESTRecorder(t, map[string]cannedResponse{})
+			_, _, err := runCLI(t, workSessionsTestRoot, "table", args...)
+			require.Error(t, err)
+			require.Equal(t, ExitCodeGeneralError, classifyError(err))
+			require.Empty(t, rec.all())
+		})
+	}
 }

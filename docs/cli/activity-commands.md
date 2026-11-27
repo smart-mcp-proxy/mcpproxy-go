@@ -606,7 +606,7 @@ Timeline of one session: mcpproxy activity session <id>
 - A `RUN` column appears when at least one listed session has a run name.
 - `DURATION` runs from the first to the last recorded call; a session that is still open is marked `(active)`.
 - `FAILURES` is the lifetime count. Policy blocks are part of it and are shown in brackets.
-- `REASON` is built from the error class, the diagnostic code and its fixed message. It never contains argument or response text.
+- `REASON` is the short reason the server recorded for the last failure (`last_failure.reason`), or `-` when it recorded none. The server builds it from the error class, the diagnostic code and its fixed message; it never contains argument or response text.
 - With an `--offset` past the last session the command says how many sessions match, instead of reporting that none do.
 
 ### Output (JSON)
@@ -618,7 +618,7 @@ Timeline of one session: mcpproxy activity session <id>
 | Code | Meaning |
 |------|---------|
 | 0 | Success (an empty list is a success) |
-| 1 | Invalid flag value, the daemon is not running, or the daemon refused the request |
+| 1 | Invalid or unparsable flag value, the daemon is not running, or the daemon refused the request |
 | 4 | The configuration file (`--config`) could not be read |
 
 ---
@@ -649,7 +649,7 @@ mcpproxy activity session <id> [flags]
 | `--failures` | `false` | Print every stored failure with the rows before it. Cannot be combined with `--at` |
 | `--include-bodies` | `false` | Include argument and response bodies |
 
-Without `--at` the view opens at the first failure that is still stored. A session with no stored failure opens at its earliest stored row.
+Without `--at` the view opens at the first failure that is still stored. A session with no stored failure opens at the start of its timeline, the `SESSION START` row.
 
 ### Examples
 
@@ -729,7 +729,7 @@ With `-o json` or `-o yaml` this view is one object:
 
 This is the output of `--failures --before 1`, with `session` and each `activity` shortened here. `rows` holds every context row in timeline order, each once, in the shape of the timeline endpoint's rows; a failure's own row is part of it. `failures` gives the number of each failure among the stored ones and the `index` of its row. Two fields appear only when they apply: `earlier_failures_not_stored` is `true` when retention removed earlier failures, and `failures_not_returned` counts stored failures the server named without returning their row (removed while the session was read, or not readable with the caller's credential).
 
-Failures are read by their number among the stored ones, and rows by their index. If retention removes older rows of the session while the command runs, numbers and indexes move; the command then starts over, and after three attempts it exits 1 and asks you to run it again. Under a heading, a failure that was not returned is left out of the numbers (`Failures 1, 3 of 3`).
+Failures are read by their number among the stored ones, and rows by their index. If retention removes older rows of the session while the command runs, numbers and indexes move; the command then starts over, and after three attempts it exits 1, says that the session changed and asks you to run it again (with the server's last answer, when a refusal is how the change showed). Under a heading, a failure that was not returned is left out of the numbers (`Failures 1, 3 of 3`).
 
 ### Output (JSON)
 
@@ -740,7 +740,7 @@ Without `--failures`, `-o json` prints the data object of `GET /api/v1/work-sess
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | Invalid flag value, the daemon is not running, the session was not found, the daemon refused the request, or (`--failures`) the session kept changing while it was read |
+| 1 | Invalid or unparsable flag value, the daemon is not running, the session was not found, the daemon refused the request, or (`--failures`) the session kept changing while it was read |
 | 4 | The configuration file (`--config`) could not be read |
 
 An id that matches no session exits 1 with:
