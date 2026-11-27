@@ -68,19 +68,32 @@ async function restCall(tool: string, args: unknown) {
   await r.text()
 }
 
-/** Good calls, one call MCPProxy refuses (a tool the server does not have), one more good call. */
+const FIRST_FAILURE = 'no_such_tool_spec_124_first'
+const SECOND_FAILURE = 'no_such_tool_spec_124_second'
+const GOOD_BEFORE = 12
+const ATTEMPTS = GOOD_BEFORE + 4
+
+const getJSON = async (route: string): Promise<any> => (await fetch(`${BASE}/api/v1${route}`, { headers: headers() })).json()
+
+/**
+ * Twelve good calls (two rows each: more than the 20 rows of context), a call
+ * MCPProxy refuses (a tool the server does not have), a good call, a second
+ * refused call and a last good one. Two failures tell "first" from "last".
+ * Returns once every attempt is recorded.
+ */
 async function seedRun(): Promise<string> {
-  for (let i = 1; i <= 4; i++) await restCall(`${SERVER}:echo`, { msg: `sweep 124 step ${i}` })
-  await restCall(`${SERVER}:no_such_tool_spec_124`, {})
+  for (let i = 1; i <= GOOD_BEFORE; i++) await restCall(`${SERVER}:echo`, { msg: `sweep 124 step ${i}` })
+  await restCall(`${SERVER}:${FIRST_FAILURE}`, {})
+  await restCall(`${SERVER}:echo`, { msg: 'sweep 124 between the failures' })
+  await restCall(`${SERVER}:${SECOND_FAILURE}`, {})
   await restCall(`${SERVER}:echo`, { msg: 'sweep 124 after the failure' })
-  for (let i = 0; i < 40; i++) {
-    const r = await fetch(`${BASE}/api/v1/work-sessions?run=${encodeURIComponent(RUN)}&failed=true`, { headers: headers() })
-    const body: any = await r.json()
-    const id = body?.data?.sessions?.[0]?.id
-    if (id) return id
+  for (let i = 0; i < 60; i++) {
+    const body = await getJSON(`/work-sessions?run=${encodeURIComponent(RUN)}&failed=true`)
+    const session = body?.data?.sessions?.[0]
+    if (session?.id && session.attempts >= ATTEMPTS && session.failures >= 2) return session.id
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
-  throw new Error(`the seeded run ${RUN} never appeared as a failed work session`)
+  throw new Error(`the seeded run ${RUN} never appeared as a failed work session with ${ATTEMPTS} attempts`)
 }
 
 // ---- fixture page ------------------------------------------------------------
@@ -179,14 +192,19 @@ test('two actions from the list to the first failure: "Failed only", then the ro
   await page.locator('[data-test="work-sessions-failed-toggle"]').check()
   await expect(page).toHaveURL(/[?&]failed=true/)
   // The rows of the unfiltered list stay on screen, inert, until the filtered answer is shown.
-  await filtered
+  const filteredURL = new URL((await filtered).url())
   await expect(page.locator('[data-test="work-sessions-table-wrap"]')).not.toHaveAttribute('aria-busy', 'true')
-  // Failed sessions read newest failure first.
+  // Failed sessions read newest failure first: the control says so, the door
+  // was asked for it, and the rows are in that order.
   await expect(page.locator('[data-test="work-sessions-sort"]')).toHaveValue('last_failure')
+  expect(filteredURL.searchParams.get('sort')).toBe('last_failure')
+  const lastFailures = (await page.locator('[data-test="work-sessions-row"] [data-test="ws-last-failure"]').allInnerTexts()).map((text) => text.slice(0, 23))
+  expect(lastFailures.every((text) => /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/.test(text)), lastFailures.join(' | ')).toBe(true)
+  expect(lastFailures, 'rows are ordered by last failure, newest first').toEqual([...lastFailures].sort().reverse())
   const row = page.locator(`[data-test="work-sessions-row"][data-session="${seeded}"]`)
   await expect(row).toBeVisible()
   await expect(row.locator('[data-test="ws-client"]')).toContainText(RUN)
-  await expect(row.locator('[data-test="ws-failures"]')).toContainText('1')
+  await expect(row.locator('[data-test="ws-failures"] .font-mono')).toHaveText('2')
   await expect(row.locator('[data-test="ws-last-failure"]')).toContainText(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/)
   // Every row left has a failure.
   const failures = await page.locator('[data-test="work-sessions-row"] [data-test="ws-failures"] .font-mono').allInnerTexts()
@@ -201,7 +219,11 @@ test('two actions from the list to the first failure: "Failed only", then the ro
   expect(await sidewaysScroll(page), 'page scrolls sideways').toBeLessThanOrEqual(0)
   await shot(page, 'sessions-list-1280-light')
 
-  // Action 2: the row's Timeline link, by keyboard.
+  // Action 2: the row's Timeline link, by keyboard. Every timeline request from here on is recorded.
+  const timelineRequests: string[] = []
+  page.on('request', (request) => {
+    if (request.url().includes(`/work-sessions/${seeded}/timeline`)) timelineRequests.push(request.url())
+  })
   await row.locator(`[data-test="ws-open-${seeded}"]`).focus()
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(new RegExp(`[?&]ws=${seeded}`))
@@ -209,31 +231,50 @@ test('two actions from the list to the first failure: "Failed only", then the ro
   await expect(positioned).toHaveAttribute('data-failed', 'true')
   // The operator lands ON the failure: it is on screen without scrolling.
   await expect(positioned).toBeInViewport()
-  await expect(positioned).toContainText(`${SERVER}:no_such_tool_spec_124`)
+  // The FIRST failure, not the last one.
+  await expect(positioned).toContainText(`${SERVER}:${FIRST_FAILURE}`)
   await expect(positioned).toContainText('Blocked')
   await expect(positioned.locator('[data-test="timeline-time"]')).toHaveText(/^\d{2}:\d{2}:\d{2}\.\d{3}$/)
-  await expect(page.locator('[data-test="timeline-failure-label"]')).toHaveText('failure 1 of 1')
+  await expect(page.locator('[data-test="timeline-failure-label"]')).toHaveText('failure 1 of 2')
+  // The page is the door's default page: the same rows, the same position, 20 rows before it.
+  const door = (await getJSON(`/work-sessions/${seeded}/timeline`)).data
+  const shownIndices = await page.locator('[data-test="timeline-row"]').evaluateAll((rows) => rows.map((r) => Number(r.getAttribute('data-index'))))
+  expect(shownIndices).toEqual(door.rows.map((r: any) => r.index))
+  expect(Number(await positioned.getAttribute('data-index'))).toBe(door.position)
+  expect(shownIndices.filter((index) => index < door.position).length, 'rows before the first failure').toBe(20)
+  expect(door.rows.find((r: any) => r.index === door.position).activity.tool_name).toBe(FIRST_FAILURE)
   // The calls before the failure are on the page, and the start of the session.
-  await expect(page.locator('[data-test="timeline-row"][data-kind="session_start"]')).toHaveCount(1)
   await expect(page.locator('[data-test="timeline-row"][data-kind="call"]').first()).toContainText(`${SERVER}:echo`)
   await expect(page.locator('[data-test="timeline-cli"]')).toHaveText(`mcpproxy activity session ${seeded}`)
   expect(await sidewaysScroll(page), 'timeline: page scrolls sideways').toBeLessThanOrEqual(0)
   await shot(page, 'timeline-1280-light')
 
-  // Bodies come only on request.
+  // Bodies come only on request: no request so far asked for them, and
+  // opening one row asks once, for that row.
   const firstCall = page.locator('[data-test="timeline-row"][data-kind="call"]').first()
   const index = await firstCall.getAttribute('data-index')
   await expect(page.locator('main')).not.toContainText('sweep 124 step')
-  const bodies = page.waitForRequest((request) => request.url().includes('/timeline') && request.url().includes('include_bodies=true'))
+  expect(timelineRequests.length).toBeGreaterThan(0)
+  expect(timelineRequests.filter((u) => u.includes('include_bodies')), 'bodies asked for before any row was opened').toEqual([])
   await firstCall.locator(`[data-test="timeline-expand-${index}"]`).click()
-  await bodies
   await expect(page.locator(`[data-test="timeline-detail-${index}"]`)).toContainText('sweep 124 step')
+  const withBodies = timelineRequests.filter((u) => u.includes('include_bodies=true')).map((u) => new URL(u).searchParams)
+  expect(withBodies.length).toBe(1)
+  expect(withBodies[0].get('at')).toMatch(/^row:/)
+  expect([withBodies[0].get('before'), withBodies[0].get('after')]).toEqual(['0', '0'])
   await expect(page.locator('[data-test="timeline-cli"]')).toHaveText(`mcpproxy activity session ${seeded} --include-bodies`)
+
+  // One step on: the second failure, and the highlight with it.
+  await page.locator('[data-test="timeline-next-failure"]').click()
+  await expect(page.locator('[data-test="timeline-failure-label"]')).toHaveText('failure 2 of 2')
+  await expect(page.locator('[data-test="timeline-row"][data-position="true"]')).toContainText(`${SERVER}:${SECOND_FAILURE}`)
+  await expect(page.locator('[data-test="timeline-next-failure"]')).toBeDisabled()
+  await expect(page).toHaveURL(/[?&]at=failure(:|%3A)2/)
 
   // The address is the state: a reload opens the same session at the same row.
   await page.reload()
   await page.waitForLoadState('domcontentloaded')
-  await expect(page.locator('[data-test="timeline-row"][data-position="true"]')).toHaveAttribute('data-failed', 'true')
+  await expect(page.locator('[data-test="timeline-row"][data-position="true"]')).toContainText(`${SERVER}:${SECOND_FAILURE}`)
   await expect(page.locator('[data-test="timeline-session-id"]')).toHaveText(seeded)
 
   // Back: the list, with the filter it was opened from.
@@ -259,9 +300,12 @@ test('a session row keeps its link to the Tool calls view filtered by the sessio
   for (const request of seen) expect(new URL(request).searchParams.get('work_session_id'), request).toBe(seeded)
 
   // And the way back: a call's detail opens its session timeline at that row.
-  // Not the first failure, which is where a dropped position would land.
-  const opener = page.locator('[data-test="activity-row"]', { hasText: 'sweep 124 after the failure' }).or(page.locator('[data-test="activity-row"]')).locator('button[data-test^="activity-open-"]').first()
-  const rowId = (await opener.getAttribute('data-test'))!.replace('activity-open-', '')
+  // The call made after both failures: not where a dropped position would land.
+  const calls = (await getJSON(`/activity?work_session_id=${seeded}&type=tool_call&limit=100`)).data.activities as any[]
+  const rowId = calls.find((a) => a.arguments?.msg === 'sweep 124 after the failure')?.id
+  expect(rowId, 'the call made after the failures is recorded').toBeTruthy()
+  const opener = page.locator(`[data-test="activity-open-${rowId}"]`)
+  await expect(opener).toBeVisible()
   await opener.click()
   await page.locator('[data-test="activity-open-timeline"]').click()
   await expect(page).toHaveURL(new RegExp(`[?&]ws=${seeded}`))
@@ -392,7 +436,7 @@ test('390 px: list and timeline fit, controls are 44 px tall', async ({ page }) 
     await expect(phoneRow.locator('[data-test="ws-started-narrow"]')).toContainText(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} · \d+(ms|s)/)
     await expect(phoneRow.locator('[data-test="ws-reason-narrow"]')).toBeVisible()
     await expect(phoneRow.locator('[data-test="ws-reason-narrow"]')).toContainText(/\d{2}:\d{2}:\d{2}\.\d{3}/)
-    await expect(phoneRow.locator('[data-test="ws-failures"]')).toContainText('1')
+    await expect(phoneRow.locator('[data-test="ws-failures"] .font-mono')).toHaveText('2')
     await expect(phoneRow.locator(`[data-test="ws-calls-link-${seeded}"]`)).toBeVisible()
     await expect(phoneRow.locator(`[data-test="ws-open-${seeded}"]`)).toBeVisible()
   }
@@ -444,8 +488,24 @@ test('dark theme: list and timeline', async ({ page }) => {
   await expect(page.locator('[data-test="timeline-row"][data-position="true"]')).toBeVisible()
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
   // The failed row is tinted with the dark theme's token, not the light one.
-  const failedSurface = await page.locator('[data-test="timeline-row"][data-index="43"] td').first().evaluate((td) => getComputedStyle(td).backgroundColor)
-  expect(failedSurface).not.toBe('rgba(0, 0, 0, 0)')
+  const surfaces = await page.locator('[data-test="timeline-row"][data-index="43"] td').first().evaluate((td) => {
+    const probe = document.createElement('div')
+    probe.style.background = 'var(--status-error-soft)'
+    td.appendChild(probe)
+    const token = getComputedStyle(probe).backgroundColor
+    probe.remove()
+    return { cell: getComputedStyle(td).backgroundColor, token }
+  })
+  expect(surfaces.cell).toBe(surfaces.token)
+  // And that token is the dark theme's: a dark tint, not the light one.
+  const lightness = await page.evaluate((color) => {
+    const c = document.createElement('canvas').getContext('2d')!
+    c.fillStyle = color
+    c.fillRect(0, 0, 1, 1)
+    const [r, g, b] = c.getImageData(0, 0, 1, 1).data
+    return (r + g + b) / 3
+  }, surfaces.cell)
+  expect(lightness, `failed row background ${surfaces.cell}`).toBeLessThan(128)
   await shot(page, 'timeline-fixture-1440-dark')
   await page.evaluate(() => window.localStorage.removeItem('mcpproxy-theme'))
 })

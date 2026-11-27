@@ -482,6 +482,7 @@ watch([sessionId, at], () => {
  * opened again must show what the door answers now.
  */
 function refresh(): void {
+  bodiesEpoch++ // an answer still on its way was asked before this refresh
   bodies.clear()
   expanded.clear()
   void load()
@@ -745,6 +746,8 @@ function detailFacts(row: WorkSessionTimelineRow): { label: string; value: strin
 interface BodyState { loading: boolean; error?: string; record?: ActivityRecord; removed?: boolean }
 const expanded = reactive(new Set<string>())
 const bodies = reactive(new Map<string, BodyState>())
+/** Raised by Refresh: a body answer asked for before it is dropped. */
+let bodiesEpoch = 0
 
 const rowKey = (row: WorkSessionTimelineRow): string => row.activity?.id ?? `i${row.index}`
 const isExpanded = (row: WorkSessionTimelineRow): boolean => expanded.has(rowKey(row))
@@ -768,17 +771,19 @@ async function loadBodies(row: WorkSessionTimelineRow): Promise<void> {
   if (!id || row.bodies_removed || row.kind === 'upstream_event') return
   const key = rowKey(row)
   const session = sessionId.value
+  const epoch = bodiesEpoch
+  const current = (): boolean => session === sessionId.value && epoch === bodiesEpoch
   bodies.set(key, { loading: true })
   try {
     const response = await api.getWorkSessionTimeline(session, { at: `row:${id}`, before: 0, after: 0, include_bodies: true })
-    if (session !== sessionId.value) return
+    if (!current()) return
     const fresh = response?.rows?.find(r => r.activity?.id === id)
     if (!fresh?.activity) bodies.set(key, { loading: false, error: 'This row is no longer in the log.' })
     // Retention may have removed the bodies since the page was read.
     else if (fresh.bodies_removed) bodies.set(key, { loading: false, removed: true })
     else bodies.set(key, { loading: false, record: fresh.activity })
   } catch (err) {
-    if (session !== sessionId.value) return
+    if (!current()) return
     bodies.set(key, {
       loading: false,
       error: statusOf(err) === 400 || statusOf(err) === 404

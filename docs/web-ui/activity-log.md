@@ -105,7 +105,7 @@ The table of MCP connections that this tab used to show (capabilities, token cou
 **Timeline.** A row's Timeline button opens `/ui/activity?view=sessions&ws=<session id>&at=<position>`. The address names the session and the row the page is positioned at, so it can be shared and reloaded. Without `at` the page opens at the first failure, with the 20 rows before it and the 20 after.
 
 - A failed call has a red bar and background; a call MCPProxy refused is amber and says "Blocked". The row the page is positioned at has an outline.
-- An **upstream event** (connection lost, process exited, token refresh failed, login required, connection restored) is a row of its own with a plug icon, the server name, the fixed message and the `MCPX_*` code. This is the row that says why the call under it failed. Repeats within a minute are one row at the time of the first, with the count and the time of the last.
+- An **upstream event** (connection lost, process exited, token refresh failed, login required, connection restored) is a row of its own with a plug icon, the server name, the fixed message and the `MCPX_*` code. It is context, placed by time: what happened to a server the session called, at that moment. It is often, but not necessarily, the reason a later call to that server failed; an event of one server can sit above a call to another. Repeats within a minute are one row at the time of the first, with the count and the time of the last.
 - **Session started** and **Session ended** rows mark the two ends.
 - Times are printed to the millisecond; hover a time for the date.
 - **Previous failure** and **Next failure** step through the failures still in the log, and the label says "failure N of M". **Latest rows** jumps to the end of the session.
@@ -118,7 +118,7 @@ The table of MCP connections that this tab used to show (capabilities, token cou
 - **Refresh** reads the same page again, for a session that is still running.
 - **Tool calls of this session** opens the Tool calls view filtered by the session. From there, a call's detail panel has **Open in session timeline**, which opens the timeline at that call.
 
-**What retention changes.** A session is listed for at most `session_retention_days` (7 by default). While it is listed, its counts are lifetime facts and stay exact. Under the record or size cap a whole session can be removed before that, oldest last activity first; its address then shows "Session not found". When retention has removed rows, the timeline says so instead of showing a shorter history as if it were complete:
+**What retention changes.** A session leaves the list once its last activity is older than `session_retention_days` (7 by default); the cleanup pass applies this, so a long run that is still active stays listed. While it is listed, its counts are lifetime facts and stay exact. Under the record or size cap a whole session can be removed before that, oldest last activity first; its address then shows "Session not found". When retention has removed rows, the timeline says so instead of showing a shorter history as if it were complete:
 
 - "The start of this session is no longer in the log" appears at the top when the first rows are gone, and the list row carries "Start trimmed".
 - "This session had N failures in all. M are still in the log" appears when failures were removed. The failure steps then count the M that are left.

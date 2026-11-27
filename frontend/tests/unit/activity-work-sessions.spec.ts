@@ -28,7 +28,11 @@ vi.mock('@/services/api', () => {
         ok({ period: '24h', total_count: 2, call_count: 2, success_count: 1, error_count: 1, blocked_count: 0, rejected_count: 0 })),
       getSessions: vi.fn(() => ok({ sessions: [] })),
       getActivityExportUrl: vi.fn(() => 'http://localhost/export'),
-      getWorkSessions: vi.fn(() => Promise.resolve({ sessions: [WS_FAILED, WS_OK], total: 2, limit: 25, offset: 0 })),
+      // The door filters: a failed-only request does not hold the clean session.
+      getWorkSessions: vi.fn((params: { failed?: boolean } = {}) => {
+        const sessions = params.failed ? [WS_FAILED] : [WS_FAILED, WS_OK]
+        return Promise.resolve({ sessions, total: sessions.length, limit: 25, offset: 0 })
+      }),
       getWorkSessionTimeline: vi.fn(() => Promise.resolve(timelinePage())),
     },
   }
@@ -100,8 +104,9 @@ describe('Activity Sessions view (Spec 124)', () => {
     expect(router.currentRoute.value.query.at).toBeUndefined()
     expect(router.currentRoute.value.query).toMatchObject({ view: 'sessions', failed: 'true' })
     expect(wrapper.find('[data-test="session-timeline"]').exists()).toBe(false)
-    expect(wrapper.findAll('[data-test="work-sessions-row"]')).toHaveLength(2)
     expect(api.getWorkSessions.mock.calls.at(-1)[0]).toMatchObject({ failed: true })
+    // The rows on screen are the answer to that request: the failed session only.
+    expect(wrapper.findAll('[data-test="work-sessions-row"]').map(r => r.attributes('data-session'))).toEqual([WS_FAILED.id])
     wrapper.unmount()
   })
 

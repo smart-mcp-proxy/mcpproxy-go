@@ -296,6 +296,31 @@ describe('Session timeline (Spec 124 FR-062)', () => {
     expect(detail).not.toContain('abc123')
   })
 
+  it('a body answer asked for before Refresh does not come back after it', async () => {
+    const page = timelinePage()
+    const unmasked = structuredClone(page.rows[4]) as any
+    unmasked.activity.response = 'token=abc123'
+    const masked = structuredClone(page.rows[4]) as any
+    masked.activity.response = 'token=***'
+    const { wrapper, api } = await mountTimeline()
+    // The first body request stays open across the refresh and answers last.
+    let answerFirst!: (value: unknown) => void
+    api.getWorkSessionTimeline.mockImplementationOnce(() => new Promise(resolve => { answerFirst = resolve }))
+    await wrapper.get('[data-test="timeline-expand-14"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="timeline-refresh"]').trigger('click')
+    await flushPromises()
+    door.bodies = { ...page, rows: [masked] }
+    await wrapper.get('[data-test="timeline-expand-14"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="timeline-detail-14"]').text()).toContain('token=***')
+    answerFirst({ ...page, rows: [unmasked] })
+    await flushPromises()
+    const detail = wrapper.get('[data-test="timeline-detail-14"]').text()
+    expect(detail).toContain('token=***')
+    expect(detail).not.toContain('abc123')
+  })
+
   it('the CLI command names the page on screen while another one is on its way', async () => {
     const { wrapper, api } = await mountTimeline()
     let answerNext!: (value: unknown) => void
@@ -475,13 +500,54 @@ describe('Session timeline (Spec 124 FR-062)', () => {
     setAvailableFeatures([])
   })
 
+  /** A page of plain calls, indices `from`..`from + count - 1`, positioned at `position`. */
+  const cleanPage = (session: Record<string, unknown>, from: number, count: number, position: number, extra: Record<string, unknown> = {}) => ({
+    session,
+    rows: Array.from({ length: count }, (_, i) => ({
+      index: from + i,
+      kind: 'call',
+      at: `2026-11-26T22:00:${String(from + i).padStart(2, '0')}.000Z`,
+      activity: { id: `c${from + i}`, type: 'tool_call', status: 'success', timestamp: `2026-11-26T22:00:${String(from + i).padStart(2, '0')}.000Z`, server_name: 'github', tool_name: 'echo', duration_ms: 3 },
+    })),
+    position,
+    total_rows: 50,
+    failure_index: 0,
+    failure_total: 0,
+    lifetime_failures: 0,
+    has_before: from > 0,
+    has_after: from + count < 50,
+    ...extra,
+  })
+
   it('a session that never failed moves to its most recent row when the address names no position', async () => {
     const clean = { ...WS_FAILED, failures: 0, policy_blocks: 0, stored_failures: 0, last_failure: undefined, first_failure_at: undefined }
-    door.page = timelinePage({ session: clean, position: 0, failure_index: 0, failure_total: 0, lifetime_failures: 0, earlier_failures_not_stored: false })
-    const { router, api } = await mountTimeline(`/activity?view=sessions&ws=${WS_FAILED.id}`)
+    const api = (await import('@/services/api')).default as any
+    // What the door answers: the earliest rows for the default, the last rows for `end`.
+    api.getWorkSessionTimeline.mockImplementation((_id: string, params: { at: string }) =>
+      Promise.resolve(params.at === 'end' ? cleanPage(clean, 29, 21, 49) : cleanPage(clean, 0, 21, 0)))
+    const { wrapper, router } = await mountTimeline(`/activity?view=sessions&ws=${WS_FAILED.id}`)
     expect(router.currentRoute.value.query.at).toBe('end')
     expect(api.getWorkSessionTimeline).toHaveBeenLastCalledWith(WS_FAILED.id, { at: 'end', before: 20, after: 20 })
     expect(api.getWorkSessionTimeline).toHaveBeenCalledTimes(2)
+    // The newest row is the one that is marked; the earliest page was never shown.
+    const marked = wrapper.findAll('[data-test="timeline-row"][data-position="true"]')
+    expect(marked.map(r => r.attributes('data-index'))).toEqual(['49'])
+    expect(wrapper.find('[data-test="timeline-row"][data-index="0"]').exists()).toBe(false)
+    expect(wrapper.get('[data-test="timeline-failure-label"]').text()).toBe('No failures in this session')
+  })
+
+  it('a session whose failures were all removed by retention stays at its earliest row', async () => {
+    // Lifetime failures, none stored: the door's earliest-row answer is the right one.
+    const trimmed = { ...WS_FAILED, failures: 4, stored_failures: 0 }
+    const api = (await import('@/services/api')).default as any
+    api.getWorkSessionTimeline.mockImplementation(() =>
+      Promise.resolve(cleanPage(trimmed, 0, 21, 0, { lifetime_failures: 4, earlier_failures_not_stored: true })))
+    const { wrapper, router } = await mountTimeline(`/activity?view=sessions&ws=${WS_FAILED.id}`)
+    expect(router.currentRoute.value.query.at).toBeUndefined()
+    expect(api.getWorkSessionTimeline).toHaveBeenCalledTimes(1)
+    expect(wrapper.findAll('[data-test="timeline-row"][data-position="true"]').map(r => r.attributes('data-index'))).toEqual(['0'])
+    expect(wrapper.get('[data-test="timeline-failure-label"]').text()).toBe('No failures left in the log')
+    expect(wrapper.get('[data-test="timeline-earlier-failures"]').text()).toContain('4 failures')
   })
 
   it('renders a scoped caller\'s session without the administrator-only fields', async () => {
