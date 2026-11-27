@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -469,4 +470,60 @@ func TestCredentials_Unauthenticated(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+// Spec 135 FR-001: a malformed callback (here a repeated code) is rejected
+// before any exchange or provider-error report, and does not use up the
+// pending flow: the valid callback for the same state still completes.
+func TestCredentialsCallback_StrictParse_RepeatedCodeRejectedFlowKept(t *testing.T) {
+	var tokenCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		tokenCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"NEW-ACCESS","refresh_token":"NEW-REFRESH","token_type":"Bearer","expires_in":3600}`)
+	}))
+	defer ts.Close()
+
+	store := credTestStore(t)
+	srv := brokerHTTPServer("connect-srv", config.AuthBrokerModeOAuthConnect)
+	srv.AuthBroker.TokenEndpoint = ts.URL
+	sk := serverKeyFor(srv)
+	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
+	r := credRouter(t, h, defaultAuthContext())
+
+	connReq := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials/connect-srv/connect", http.NoBody)
+	connReq.Host = "gw.example.com"
+	connW := httptest.NewRecorder()
+	r.ServeHTTP(connW, connReq)
+	require.Equal(t, http.StatusFound, connW.Code)
+	loc, _ := url.Parse(connW.Header().Get("Location"))
+	state := loc.Query().Get("state")
+
+	for _, bad := range []string{
+		"code=a&code=b&state=" + url.QueryEscape(state),
+		"code=a&error=access_denied&state=" + url.QueryEscape(state),
+		"error=access_denied&error=x&state=" + url.QueryEscape(state),
+		"code=a&state=" + url.QueryEscape(state) + "&iss=x&iss=y",
+		"code=&state=" + url.QueryEscape(state),
+		"state=" + url.QueryEscape(state),
+	} {
+		cbReq := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials/connect-srv/callback?"+bad, http.NoBody)
+		cbReq.Host = "gw.example.com"
+		cbW := httptest.NewRecorder()
+		r.ServeHTTP(cbW, cbReq)
+		require.Equal(t, http.StatusFound, cbW.Code, bad)
+		assert.Contains(t, cbW.Header().Get("Location"), "connect_failed", bad)
+	}
+	assert.Zero(t, tokenCalls.Load(), "no exchange for a rejected callback")
+	_, err := store.Get(testUserID, sk)
+	assert.ErrorIs(t, err, broker.ErrNotFound)
+
+	cbReq := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials/connect-srv/callback?code=good&state="+url.QueryEscape(state), http.NoBody)
+	cbReq.Host = "gw.example.com"
+	cbW := httptest.NewRecorder()
+	r.ServeHTTP(cbW, cbReq)
+	require.Equal(t, http.StatusFound, cbW.Code)
+	cred, err := store.Get(testUserID, sk)
+	require.NoError(t, err, "the pending flow survived the rejected callbacks")
+	assert.Equal(t, "NEW-ACCESS", cred.AccessToken)
 }

@@ -114,6 +114,9 @@ describe('attention parity on the Web UI (SC-002)', () => {
 
   it('Home lists every item in the served order', async () => {
     const wrapper = await mountWith(Home, { AttentionList: false, UsageSummaryStrip: false })
+    // Spec 134: five rows, then See all reveals the full ordered list in place.
+    const seeAll = wrapper.find('[data-test="attention-see-all"]')
+    if (seeAll.exists()) await seeAll.trigger('click')
     const ids = wrapper
       .findAll('[data-test^="attention-item-"]')
       .map(row => row.attributes('data-test')!.replace('attention-item-', ''))

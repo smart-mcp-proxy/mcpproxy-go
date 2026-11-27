@@ -37,7 +37,7 @@ func captureProbe(t *testing.T, cfg *config.Config) *httptest.Server {
 		return mcp.NewToolResultText(strings.Join(snap.Names(), ",")), nil
 	})
 	streamable := mcpserver.NewStreamableHTTPServer(srv, clientFacingStreamableOptions(func() *config.Config { return cfg })...)
-	hs := httptest.NewServer(streamable)
+	hs := httptest.NewServer(clientFacingEraGuard(streamable))
 	t.Cleanup(func() { closeHTTPFixture(hs) })
 	return hs
 }
@@ -96,7 +96,7 @@ func TestClientFacingCapture_SwitchOffAndNilProvider(t *testing.T) {
 
 	// nil provider: no capture, no panic.
 	srv := mcpserver.NewMCPServer("p", "1")
-	hs := httptest.NewServer(mcpserver.NewStreamableHTTPServer(srv, clientFacingStreamableOptions(nil)...))
+	hs := httptest.NewServer(clientFacingEraGuard(mcpserver.NewStreamableHTTPServer(srv, clientFacingStreamableOptions(nil)...)))
 	defer hs.Close()
 	resp, err := http.Post(hs.URL, "application/json", strings.NewReader(`{}`))
 	require.NoError(t, err)

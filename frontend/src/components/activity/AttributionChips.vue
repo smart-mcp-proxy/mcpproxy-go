@@ -17,7 +17,7 @@
       ><span class="truncate min-w-0">~{{ record.client_name }} (reported)</span></span>
 
       <router-link
-        v-if="record.profile"
+        v-if="record.profile && !clientOnly"
         :to="profileEditorLink(record.profile)"
         class="badge badge-sm badge-outline max-w-full min-w-0 justify-start hover:bg-base-200"
         :title="`Open profile ${record.profile}`"
@@ -26,7 +26,7 @@
       ><span class="truncate min-w-0">{{ profileLabel }}</span></router-link>
 
       <router-link
-        v-if="showToken"
+        v-if="showToken && !clientOnly"
         :to="scopeQuery.linkTo('tokens', { token: record.token_name! })"
         class="badge badge-sm badge-outline max-w-full min-w-0 justify-start hover:bg-base-200"
         :title="`Token ${record.token_name}`"
@@ -73,6 +73,8 @@ const props = defineProps<{
   testId?: string
   /** One chip per line (a narrow table column); each truncates instead of widening it. */
   stacked?: boolean
+  /** The calls table's Client column: the client chip only; profile and token stay in the row detail. */
+  clientOnly?: boolean
 }>()
 
 const profiles = useProfilesStore()
@@ -94,10 +96,19 @@ const showToken = computed(() => {
   return !(clientId.value && name === `client-${clientId.value}`)
 })
 
-const hasAny = computed(() => Boolean(clientId.value || props.record.client_name || props.record.profile || props.record.token_name))
+const hasAny = computed(() =>
+  props.clientOnly
+    ? Boolean(clientId.value || props.record.client_name)
+    : Boolean(clientId.value || props.record.client_name || props.record.profile || props.record.token_name)
+)
 
 // A system event (a config change, a scan) is never attributed: a dash says so
 // without calling it "unattributed" like a call that lost its attribution.
 const CALL_TYPES = new Set(['tool_call', 'internal_tool_call', 'policy_decision', 'prompt_get'])
-const emptyLabel = computed(() => (props.record.type && !CALL_TYPES.has(props.record.type) ? '—' : 'unattributed'))
+const emptyLabel = computed(() => {
+  if (props.record.type && !CALL_TYPES.has(props.record.type)) return '—'
+  // A profile or token with no client is attributed, just not to a client.
+  if (props.clientOnly && (props.record.profile || props.record.token_name)) return 'no client'
+  return 'unattributed'
+})
 </script>

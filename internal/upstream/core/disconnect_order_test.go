@@ -19,13 +19,15 @@ import (
 )
 
 // closeLogTransport is an MCP transport that records its Close, which for stdio is what closes the
-// server's stdin. The embedded nil interface panics on anything else.
+// server's stdin, after delay. The embedded nil interface panics on anything else.
 type closeLogTransport struct {
 	transport.Interface
-	log string
+	log   string
+	delay time.Duration
 }
 
 func (t closeLogTransport) Close() error {
+	time.Sleep(t.delay)
 	f, err := os.OpenFile(t.log, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -36,22 +38,20 @@ func (t closeLogTransport) Close() error {
 }
 
 // installDockerLogging puts a docker on PATH that logs the command it got, answers `ps` with row
-// and makes `wait` succeed (the container exited) or outlast its caller.
-func installDockerLogging(t *testing.T, log, row string, exits bool) {
+// and makes `wait` succeed (the container exited), outlast its caller or fail at once.
+func installDockerLogging(t *testing.T, log, row, wait string) {
 	t.Helper()
 	dir := t.TempDir()
 	if runtime.GOOS == osWindows {
-		onWait := "exit /b 0"
-		if !exits {
-			onWait = `"` + filepath.Join(os.Getenv("SystemRoot"), "System32", "ping.exe") + `" -n 4 127.0.0.1 >nul`
-		}
+		onWait := map[string]string{
+			waitExits: "exit /b 0",
+			waitStays: `"` + filepath.Join(os.Getenv("SystemRoot"), "System32", "ping.exe") + `" -n 4 127.0.0.1 >nul`,
+			waitFails: "exit /b 1",
+		}[wait]
 		script := fmt.Sprintf("@echo off\r\necho %%1>>\"%s\"\r\nif %%1==ps echo %s\r\nif %%1==wait %s\r\n", log, row, onWait)
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "docker.cmd"), []byte(script), 0o600))
 	} else {
-		onWait := "exit 0"
-		if !exits {
-			onWait = "exec /bin/sleep 3"
-		}
+		onWait := map[string]string{waitExits: "exit 0", waitStays: "exec /bin/sleep 3", waitFails: "exit 1"}[wait]
 		script := fmt.Sprintf("#!/bin/sh\necho \"$1\" >> '%s'\n[ \"$1\" = ps ] && printf '%%s\\n' '%s'\n[ \"$1\" = wait ] && %s\nexit 0\n", log, row, onWait)
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o755))
 	}
@@ -59,28 +59,39 @@ func installDockerLogging(t *testing.T, log, row string, exits bool) {
 	useRealDockerResolver(t)
 }
 
+// What `docker wait` does in installDockerLogging.
+const (
+	waitExits = "exits"
+	waitStays = "stays"
+	waitFails = "fails"
+)
+
 // The MCP lifecycle for stdio is: close stdin, wait, then signal. `docker stop` is the signal.
 func TestDisconnectDocker_ClosesStdinBeforeStopping(t *testing.T) {
-	const id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	const (
+		id         = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+		closeDelay = 300 * time.Millisecond // a stop that does not wait for the close comes first
+	)
 	for _, tt := range []struct {
-		name  string
-		exits bool
+		name string
+		wait string
 	}{
-		{"container that exits when its stdin closes", true},
-		{"container that stays", false},
+		{"container that exits when its stdin closes", waitExits},
+		{"container that stays", waitStays},
+		{"docker wait that fails at once", waitFails},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c, _, _ := newOwnershipClient("smoke", nil)
 			log := filepath.Join(t.TempDir(), "calls.log")
 			row := strings.Join([]string{id, "mcpproxy-smoke-ab12", "smoke", GetInstanceID(), "Up 5 minutes"}, "\t")
-			installDockerLogging(t, log, row, tt.exits)
+			installDockerLogging(t, log, row, tt.wait)
 
 			proc, err := dialgate.New().TrackProcess(func() {})
 			require.NoError(t, err)
 			c.stdioProc = proc
 			c.isDockerCommand = true
 			c.containerID, c.containerOwner = id, "smoke"
-			c.client = mcpclient.NewClient(closeLogTransport{log: log})
+			c.client = mcpclient.NewClient(closeLogTransport{log: log, delay: closeDelay})
 
 			begin := time.Now()
 			require.NoError(t, c.DisconnectWithContext(context.Background()))
@@ -94,13 +105,15 @@ func TestDisconnectDocker_ClosesStdinBeforeStopping(t *testing.T) {
 			require.GreaterOrEqual(t, closeAt, 0, calls)
 			require.Contains(t, calls, "wait")
 			require.Empty(t, c.containerID)
-			if tt.exits {
+			if tt.wait == waitExits {
 				require.NotContains(t, calls, "stop", "a container that already exited is not stopped")
 				return
 			}
 			require.Equal(t, "stop", calls[len(calls)-1])
 			require.Less(t, closeAt, len(calls)-1, calls)
-			require.GreaterOrEqual(t, elapsed, stdinCloseGrace, "the container gets time to exit on its own first")
+			if tt.wait == waitStays {
+				require.GreaterOrEqual(t, elapsed, stdinCloseGrace, "the container gets time to exit on its own first")
+			}
 		})
 	}
 }

@@ -170,7 +170,7 @@ func releaseProcessGroup(_ int, _ *exec.Cmd, _ *zap.Logger, _ string) {}
 func requestProcessTreeExit(int) {}
 
 // holdProcessID does nothing on Unix, where requestProcessTreeExit signals nothing.
-func holdProcessID(int) (release func()) { return func() {} }
+func holdProcessID(int) (release func(), held bool) { return func() {}, true }
 
 // killProcessTreeNow is the retirement kill (Spec 116 PR4, FR-023a): SIGKILL
 // to the whole process group, at once and without waiting, so a retired

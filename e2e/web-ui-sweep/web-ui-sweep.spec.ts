@@ -64,12 +64,12 @@ test('servers list renders the fleet with KPI counters', async ({ page }) => {
   expect(errors, `uncaught page errors on /servers: ${errors.join(' | ')}`).toHaveLength(0)
 })
 
-test('server detail opens and exposes the security tab', async ({ page }) => {
+test('server detail opens and exposes the review and scans tab', async ({ page }) => {
   test.skip(!SERVER, 'no fixture upstream registered for this sweep')
   const errors = watchPageErrors(page)
-  await goto(page, `/servers/${encodeURIComponent(SERVER)}`, '[data-test="security-tab"]')
+  await goto(page, `/servers/${encodeURIComponent(SERVER)}`, '[data-test="review-tab"]')
 
-  await page.locator('[data-test="security-tab"]').click()
+  await page.locator('[data-test="review-tab"]').click()
   await expect(page.locator('[data-test="server-status-badge"]').first()).toBeVisible()
   expect(errors, `uncaught page errors on /servers/${SERVER}: ${errors.join(' | ')}`).toHaveLength(0)
 })

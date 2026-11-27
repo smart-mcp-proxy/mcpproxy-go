@@ -823,6 +823,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
 		dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
 		dispatchCtx = p.withReviewDirtyRecheck(dispatchCtx, serverName)
+		dispatchCtx = p.withProgressRelay(dispatchCtx, request, serverName, toolName, contracts.ContentTrustForTool(annotations)) // GH #1967
 		// Spec 126 FR-037: the incarnation the call is dispatched against, read
 		// BEFORE the dispatch so a remove + re-add while the call is in flight
 		// cannot reclassify its outcome against the replacement.

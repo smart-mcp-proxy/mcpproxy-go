@@ -60,7 +60,7 @@ func TestCreateOAuthConfig_HonorsCustomCallbackPath(t *testing.T) {
 
 	select {
 	case params := <-ch:
-		assert.Equal(t, "test-code", params["code"])
+		assert.Equal(t, "test-code", params.Get("code"))
 	default:
 		t.Fatal("the callback handler did not deliver params to the registered waiter")
 	}
@@ -394,7 +394,7 @@ func TestStartCallbackServerOnHost_MessyPathIsNotRedirectedByServeMux(t *testing
 
 	select {
 	case params := <-ch:
-		assert.Equal(t, "test-code", params["code"])
+		assert.Equal(t, "test-code", params.Get("code"))
 	default:
 		t.Fatal("the callback handler did not deliver params to the registered waiter")
 	}

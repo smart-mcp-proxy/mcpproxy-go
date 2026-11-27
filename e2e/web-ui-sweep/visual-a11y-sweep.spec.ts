@@ -309,7 +309,12 @@ for (const theme of THEMES) {
   test(`contrast AA: / with a live MCP client (${theme})`, async ({ page }) => {
     const session = await openMcpSession(KEY, [], 'e2e-home-client', true)
     try {
+      // The live clients sit in the topology section, collapsed by default
+      // (spec 134 FR-040); open it the way a user does and keep its state.
       await goto(page, '/', theme)
+      await page.evaluate(() => localStorage.setItem('mcpproxy.home.topology', 'open'))
+      await page.reload()
+      await page.locator('main').first().waitFor({ state: 'visible' })
       const age = page.locator('[data-test="dashboard-live-client-age"]').first()
       await expect(age).toBeVisible()
       const failures = await contrastFailures(page)
@@ -387,7 +392,7 @@ test('contrast AA: buttons and links on a coloured alert, hovered', async ({ pag
   const measured: Record<string, number> = {}
   for (const theme of THEMES) {
     measured[theme] = 0
-    for (const route of ['/', '/servers'] as const) {
+    for (const route of ['/', '/servers', '/clients', '/tools', '/activity', '/settings', '/review'] as const) {
       await goto(page, route, theme)
       const targets = page.locator(
         ':is(.alert-info, .alert-success, .alert-warning, .alert-error) :is(.btn-ghost, a.link, .btn-link)',
@@ -434,6 +439,14 @@ test('contrast AA: buttons and links on a coloured alert, hovered', async ({ pag
         ).toBeGreaterThanOrEqual(4.5 - 0.005)
       }
     }
+  }
+  // Spec 134 PR 4: Home's notices are no longer daisyUI coloured alerts, so on
+  // a clean instance no swept route may show one. Say so instead of failing;
+  // when one is on screen (update notice from another page, a refusal) it is
+  // still measured above, and must then be measured in both themes.
+  if (THEMES.every((t) => measured[t] === 0)) {
+    test.info().annotations.push({ type: 'skip-part', description: 'no hovered .btn-ghost inside a coloured alert on the swept routes' })
+    return
   }
   // Per theme, and specifically a ghost button — the variant daisyUI repaints
   // on hover. An ordinary link passing in one theme is not coverage.
@@ -793,4 +806,72 @@ test.describe('Profiles v3 screens (Spec 108-i)', () => {
       expect(unnamed, `unnamed form controls on ${route}`).toEqual([])
     }
   })
+})
+
+// ---------------------------------------------------------------------------
+// Spec 134 PR 3: server detail tabs (FR-030/FR-031), contrast, layout, 44 px buttons.
+// ---------------------------------------------------------------------------
+const DETAIL_SERVER = process.env.SWEEP_SERVER_NAME || ''
+const DETAIL_ROUTES = DETAIL_SERVER
+  ? (['tools', 'review', 'security', 'logs', 'config'] as const).map((t) => `/servers/${encodeURIComponent(DETAIL_SERVER)}?tab=${t}`)
+  : []
+
+for (const theme of THEMES) {
+  for (const route of DETAIL_ROUTES) {
+    test(`contrast AA: ${route} (${theme}) [spec 134 PR 3]`, async ({ page }) => {
+      await goto(page, route, theme)
+      await page.locator('[data-test="server-facts"]').waitFor({ state: 'visible' })
+      const failures = await contrastFailures(page)
+      expect(
+        failures,
+        `WCAG AA contrast failures on ${route} (${theme}):\n` +
+          failures.map((f) => `  ${f.ratio}:1  ${f.selector}  ${f.fg} on ${f.bg}  "${f.text}"`).join('\n'),
+      ).toEqual([])
+    })
+  }
+}
+
+for (const vp of VIEWPORTS) {
+  test(`server detail layout holds at ${vp.width}px [spec 134 PR 3]`, async ({ page }) => {
+    test.skip(!DETAIL_SERVER, 'no fixture upstream registered for this sweep')
+    await page.setViewportSize({ width: vp.width, height: vp.height })
+    for (const route of DETAIL_ROUTES) {
+      await goto(page, route)
+      await page.locator('[data-test="server-facts"]').waitFor({ state: 'visible' })
+      const overflow = await page.evaluate(
+        () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      )
+      expect(overflow, `horizontal page overflow on ${route} at ${vp.width}px`).toBeLessThanOrEqual(1)
+      if (vp.width < 768) {
+        const small = await page.evaluate(() =>
+          Array.from(document.querySelectorAll('main .btn, main .tab'))
+            .filter((el) => (el as HTMLElement).offsetParent !== null && !el.closest('dialog:not([open])'))
+            .map((el) => ({ el: (el as HTMLElement).dataset.test || el.textContent?.trim().slice(0, 30) || el.className, h: el.getBoundingClientRect().height }))
+            .filter((b) => b.h < 43.5),
+        )
+        expect(small, `body buttons under 44 px on ${route} at ${vp.width}px`).toEqual([])
+      }
+    }
+  })
+}
+
+test('server detail: Review and scans parts, first-screen facts and keyboard [spec 134 PR 3]', async ({ page }) => {
+  test.skip(!DETAIL_SERVER, 'no fixture upstream registered for this sweep')
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await goto(page, `/servers/${encodeURIComponent(DETAIL_SERVER)}?tab=review`)
+  await expect(page.locator('[data-test="server-facts"]')).toBeVisible()
+  await expect(page.locator('[data-test="review-part"]')).toBeVisible()
+  await expect(page.locator('[data-test="scans-part"]')).toBeVisible()
+  // The scan part keeps Scan Now; the Scans link by keyboard moves focus into it.
+  await page.locator('[data-test="scans-part-link"]').focus()
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(/tab=security/)
+  await expect(page.locator('[data-test="scans-part"]')).toBeFocused()
+  await expect(page.locator('[data-test="scan-button"]')).toBeVisible()
+  // The complete diagnostic opens from the first screen, on a tab other than Tools, and Escape returns focus.
+  await page.locator('[data-test="open-diagnostic"]').focus()
+  await page.keyboard.press('Enter')
+  await expect(page.locator('[data-test="diagnostic-dialog"][open]')).toHaveCount(1)
+  await page.keyboard.press('Escape')
+  await expect(page.locator('[data-test="open-diagnostic"]')).toBeFocused()
 })

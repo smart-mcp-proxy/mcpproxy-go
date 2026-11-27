@@ -136,8 +136,13 @@ func (c *Client) dockerRunMayUseOtherDaemon(env []string) bool {
 	for _, key := range []string{"DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG"} {
 		own, _ := lastEnvValue(ours, key)
 		run, _ := lastEnvValue(env, key)
-		if viaLoginShell && login[key] != os.Getenv(key) {
-			run = login[key] // the profile sets its own
+		if viaLoginShell {
+			// login is what the profile makes of mcpproxy's own environment. What it does to a
+			// value only the server's env sets, such as `unset DOCKER_HOST`, is unknown.
+			if run != os.Getenv(key) {
+				return true
+			}
+			run = login[key]
 		}
 		if run != own {
 			return true

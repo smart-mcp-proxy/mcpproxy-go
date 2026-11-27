@@ -83,6 +83,11 @@ export function useDialogOpen(isOpen: () => boolean, onClose?: () => void) {
   }
 
   function handleNativeClose() {
+    // `close()` clears `open` at once but fires `close` later, as a queued
+    // task. A dialog that is open again by then (Escape, then Ctrl+K straight
+    // away) was reopened after that close: the event is stale, and acting on
+    // it would shut the new opening.
+    if (dialogEl.value?.open) return
     // isOpen() is still true only when nothing in Vue-land initiated this —
     // a genuine native dismissal that Vue's state does not know about yet.
     if (onClose && isOpen()) onClose()

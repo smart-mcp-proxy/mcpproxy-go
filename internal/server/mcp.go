@@ -3790,6 +3790,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	dispatchCtx, fwdSink := headerfwd.WithSink(callCtx)
 	dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
 	dispatchCtx = p.withReviewDirtyRecheck(dispatchCtx, serverName)
+	dispatchCtx = p.withProgressRelay(dispatchCtx, request, serverName, actualToolName, contentTrust) // GH #1967
 	result, err := p.dispatchOnEpoch(dispatchCtx, certified, toolName, args)
 	p.noteUpstreamDispatched(dispatchCtx) // one attempt per request that reached the transport
 	outcome := p.beginUpstreamOutcome(dispatchCtx, serverName, callInc)

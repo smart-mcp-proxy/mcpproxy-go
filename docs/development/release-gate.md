@@ -140,6 +140,9 @@ page disagree):
   sidebar and `+ Add`, the Viewing chip across pages, Clients-row and
   agent-token-row links, `/servers?profile=`, a Spec 108 warning surfacing as a
   needs-attention item, layout and keyboard order).
+- `shell-pr1.spec.ts`: the Spec 134 shell (skip link, palette never opens on Tab, phone menu, footer disclosure, header Add server, theme menu by keyboard, no sideways scroll at 390 px).
+- `home-pr4.spec.ts`: Spec 134 Home (section order, attention list visible without scrolling at 1440 and 390, See all, shortcuts and the collapsed topology by keyboard, 44 px buttons at 390).
+- `activity-pr5.spec.ts`: the Activity calls view (Spec 134 PR 5): five data columns, row detail, Sort control, filter popover over the results, chip overflow at 390 px, Group repeats default.
 - `demo-ux-fixes.spec.ts`: the layout findings of the live Web UI demo, measured
   at 1440 and 900 px: the token Profile chip is one line inside its cell, and
   radio labels sit next to their radios in the create-profile, custom-client and

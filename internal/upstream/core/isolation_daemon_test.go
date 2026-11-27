@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -35,9 +36,12 @@ func TestDockerIsolation_SigProxyOffOnlyOnOurOwnDaemon(t *testing.T) {
 		{name: "nothing set", login: map[string]string{}},
 		{name: "set for mcpproxy itself", own: "tcp://a", env: []string{host + "=tcp://a"}, login: map[string]string{}},
 		{name: "only in docker run's env", env: []string{host + "=tcp://a"}, login: map[string]string{}, other: true},
-		{name: "in the server's env", env: []string{host + "=tcp://a"}, serverEnv: true, login: map[string]string{}},
-		{name: "relative DOCKER_CONFIG without working_dir", env: []string{"DOCKER_CONFIG=cfg"}, serverEnv: true, login: map[string]string{}},
-		{name: "relative DOCKER_CONFIG with working_dir", env: []string{"DOCKER_CONFIG=cfg"}, serverEnv: true, workDir: "/srv", login: map[string]string{}, other: true},
+		// With DOCKER_HOST in mcpproxy's own env, docker runs directly, without the login profile.
+		{name: "in the server's env, docker run directly", own: "tcp://a", env: []string{host + "=tcp://b"}, serverEnv: true, login: map[string]string{}},
+		// The profile may change or unset it (`unset DOCKER_HOST`), and login cannot show that.
+		{name: "in the server's env, docker run through the login shell", env: []string{host + "=tcp://a"}, serverEnv: true, login: map[string]string{}, other: unix},
+		{name: "relative DOCKER_CONFIG without working_dir", own: "tcp://a", env: []string{"DOCKER_CONFIG=cfg"}, serverEnv: true, login: map[string]string{}},
+		{name: "relative DOCKER_CONFIG with working_dir", own: "tcp://a", env: []string{"DOCKER_CONFIG=cfg"}, serverEnv: true, workDir: "/srv", login: map[string]string{}, other: true},
 		{name: "only in the login profile", login: map[string]string{host: "tcp://a"}, other: unix},
 		{name: "context in the login profile", login: map[string]string{"DOCKER_CONTEXT": "podman"}, other: unix},
 		{name: "login profile unknown", login: nil, other: unix},
@@ -93,4 +97,40 @@ func TestDockerIsolation_FailedSpawnForgetsInit(t *testing.T) {
 	require.NoError(t, err)
 	probes := slices.DeleteFunc(strings.Fields(string(raw)), func(s string) bool { return s != "version" })
 	require.Len(t, probes, 2, "one probe per failed spawn")
+}
+
+// A probe that answers after the answers were forgotten must not put its answer back.
+func TestDockerIsolation_ProbeRunningWhileForgottenIsNotRemembered(t *testing.T) {
+	dir := t.TempDir()
+	log, gate := filepath.Join(dir, "calls.log"), filepath.Join(dir, "gate")
+	// The shim answers only once the gate exists, so the test decides when the probe ends.
+	name, script := "docker", "#!/bin/sh\necho \"$1\" >> '"+log+"'\nwhile [ ! -e '"+gate+"' ]; do /bin/sleep 0.1; done\necho docker-init\n"
+	if runtime.GOOS == osWindows {
+		ping := filepath.Join(os.Getenv("SystemRoot"), "System32", "ping.exe")
+		name, script = "docker.cmd", "@echo off\r\necho %1>>\""+log+"\"\r\n:wait\r\nif exist \""+gate+"\" goto done\r\n\""+ping+"\" -n 2 127.0.0.1 >nul\r\ngoto wait\r\n:done\r\necho docker-init\r\n"
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755))
+	t.Setenv("PATH", dir)
+	t.Setenv("SHELL", "")
+	t.Setenv("DOCKER_HOST", "")
+	forceDockerDaemonEnvGOOS(t, osDarwin)
+	useRealDockerResolver(t)
+	clearDockerInitKnown()
+	t.Cleanup(clearDockerInitKnown)
+
+	probes := func() int {
+		raw, _ := os.ReadFile(log)
+		return strings.Count(string(raw), "version")
+	}
+	c := newIsolatedTestClient()
+	first := make(chan bool)
+	go func() { first <- c.dockerHasInit(context.Background(), os.Environ()) }()
+	require.Eventually(t, func() bool { return probes() == 1 }, 5*time.Second, 10*time.Millisecond)
+
+	clearDockerInitKnown() // a failed spawn forgets while the probe still runs
+	require.NoError(t, os.WriteFile(gate, nil, 0o600))
+	require.True(t, <-first)
+
+	require.True(t, c.dockerHasInit(context.Background(), os.Environ()))
+	require.Equal(t, 2, probes(), "the daemon is asked again")
 }
