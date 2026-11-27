@@ -58,6 +58,9 @@ async function mountToolsAt(path: string) {
 const toolRows = (wrapper: Awaited<ReturnType<typeof mountToolsAt>>) =>
   wrapper.findAll('[data-test="tool-row"]')
 
+// Spec 134 PR 6: these cases read the flat table; the page opens grouped by default.
+window.localStorage.setItem('mcpproxy.tools.layout', 'flat')
+
 describe('Tools — server/status stay client-side (Spec 109-k T113)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())

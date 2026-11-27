@@ -133,6 +133,9 @@ page disagree):
   `/usage?profile=` and `/sessions?client=` load filtered, with a removable
   chip that survives navigation and Back).
 - `profiles-unhide.spec.ts`: Spec 109-l un-hide of Spec 108 (Profiles in the
+
+- `shell-pr1.spec.ts` (Spec 134 shell: skip link, palette, phone menu, footer, theme menu, 390px) and `tools-pr6.spec.ts` (Spec 134 Tools: grouped default, Details, filters, Flat list, batch across collapsed sections, 390px) run in the same advisory sweep.
+
   sidebar and `+ Add`, the Viewing chip across pages, Clients-row and
   agent-token-row links, `/servers?profile=`, a Spec 108 warning surfacing as a
   needs-attention item, layout and keyboard order).
