@@ -732,6 +732,26 @@ func TestRenderLabel_ControlCharactersReplaced(t *testing.T) {
 	}
 }
 
+func TestRenderLabel_AnyPrivateKeyHeaderLabelWithheld(t *testing.T) {
+	for _, name := range []string{
+		"-----BEGIN DEVICE_SIGNING PRIVATE KEY-----MIIEsecretbody",
+		"-----BEGIN device.signing PRIVATE KEY-----MIIEsecretbody",
+	} {
+		in := tokenRotateInput()
+		in.ClientName = name
+		line, _ := mustAdmin(t, in)
+		assertSentinelAbsent(t, line, "MIIEsecretbody")
+	}
+}
+
+func TestNewAdminAction_SessionCallerCarriesNoProfilePin(t *testing.T) {
+	in := tokenRotateInput()
+	in.Caller = audit.Caller{Kind: "session_admin", UserID: "u1", Role: "admin", Provider: "oidc", ProfilePin: "ro"}
+	if _, err := audit.NewAdminAction(in); err == nil {
+		t.Fatal("profile_pin belongs to agent-token callers only")
+	}
+}
+
 func TestRenderLabel_HyphenatedPrivateKeyHeaderWithheld(t *testing.T) {
 	in := tokenRotateInput()
 	in.ClientName = "-----BEGIN DEVICE-SIGNING PRIVATE KEY-----MIIEsecretbody"

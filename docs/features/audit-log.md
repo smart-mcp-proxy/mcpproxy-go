@@ -316,7 +316,8 @@ as `eyJ…`); only then are those characters written as `?`.
 
 **Crash window.** An `admin_action` line is written right after its effect
 commits. A process killed between the commit and the write keeps the change and
-loses its line, the same window as for `authz` lines. The audit file therefore
+loses its line — the same window as the `tool_call` line of a dispatched call
+(the `authz` line is written before dispatch, so it is not exposed to it). The audit file therefore
 proves that a change happened; the absence of a line does not prove that it did
 not — check the activity log or the stored state as well.
 

@@ -437,7 +437,7 @@ func containsPrivateKey(s string) bool {
 
 // privateKeyHeader is a PEM private-key block header (RSA, EC, OPENSSH,
 // ENCRYPTED, PKCS#8 …) or a PGP private-key block header.
-var privateKeyHeader = regexp.MustCompile(`-----BEGIN [A-Z0-9 -]*PRIVATE KEY( BLOCK)?-----`)
+var privateKeyHeader = regexp.MustCompile(`-----BEGIN [^\r\n]*PRIVATE KEY( BLOCK)?-----`)
 
 // renderLabel applies the label order: private-key check on the original,
 // mask, then the 64-rune cap. ok=false means the label must not be
@@ -532,7 +532,7 @@ func buildAdminCaller(c Caller) (map[string]interface{}, error) {
 		if c.Role != want {
 			return nil, fmt.Errorf("audit.NewAdminAction: %s caller requires role %s", c.Kind, want)
 		}
-		if c.TokenName != "" || c.TokenPrefix != "" {
+		if c.TokenName != "" || c.TokenPrefix != "" || c.ProfilePin != "" || c.Ref != "" || c.TokenNameWithheld {
 			return nil, fmt.Errorf("audit.NewAdminAction: session caller carries no token fields")
 		}
 	}

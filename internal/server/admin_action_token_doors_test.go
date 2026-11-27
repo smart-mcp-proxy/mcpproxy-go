@@ -172,6 +172,8 @@ func TestAdminActionDoors_RESTTokenDoors(t *testing.T) {
 	require.Equal(t, "req-rotate-1", lines[0]["request_id"])
 	require.Equal(t, map[string]interface{}{"kind": "api_key"}, lines[0]["caller"], "TCP with the API key is api_key, not socket")
 	require.Equal(t, "local", lines[0]["origin"])
+	require.Equal(t, "api", lines[0]["source"])
+	require.Equal(t, "cli", lines[0]["client"].(map[string]interface{})["surface"], "the CLI client header classifies the surface")
 	ch := lines[0]["changes"].([]interface{})[0].(map[string]interface{})
 	require.Equal(t, "/token_prefix", ch["field"])
 	createdPrefix := l["changes"].([]interface{})[0].(map[string]interface{})["after"]
@@ -342,6 +344,11 @@ func TestAdminActionDoors_MCPCredentialsTool(t *testing.T) {
 		}
 		return types[string(storage.ActivityTypeProfileChange)] == 1 && len(rows) >= 2
 	}, 10*time.Second, 50*time.Millisecond, "the revoke line joins its wrapper and profile_change rows")
+
+	// A retried revoke of the already-revoked token writes nothing.
+	res, err = c.CallTool(context.Background(), callReq("credentials", map[string]any{"operation": "revoke", "token": "worker"}))
+	require.NoError(t, err)
+	require.Empty(t, e.adminLines(&seen), "a no-op revoke writes no line (error=%v)", res.IsError)
 
 	// A refused operation (unknown token) writes nothing.
 	res, err = c.CallTool(context.Background(), callReq("credentials", map[string]any{"operation": "revoke", "token": "nope"}))
