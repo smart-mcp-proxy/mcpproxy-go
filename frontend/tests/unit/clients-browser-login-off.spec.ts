@@ -52,7 +52,7 @@ async function mountPage(row: Record<string, unknown>) {
   await router.isReady()
   const wrapper = mount(Clients, { global: { plugins: [router], stubs: { ClientConnectList: true, AgentTokens: true, ModeSwitcher: true, ClientBindingControls: true, ProfileChip: true } } })
   await flushPromises()
-  await wrapper.get('[data-test="client-expand-cursor"]').trigger('click')
+  await wrapper.get('[data-test="client-manage-cursor"]').trigger('click')
   await flushPromises()
   return wrapper
 }

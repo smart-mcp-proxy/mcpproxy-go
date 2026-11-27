@@ -57,11 +57,11 @@ describe('Settings reacts to a query-only navigation while already mounted (revi
   })
 
   it('switches tab and applies ?focus= when the query changes without a remount', async () => {
-    const { wrapper, router } = await mountSettings('/settings')
+    const { wrapper, router } = await mountSettings('/settings?tab=security')
     await flushPromises()
 
-    // Precondition: default tab is Security, not General (routing_mode lives
-    // in the General section).
+    // Precondition: Access and keys is showing, not General (routing_mode
+    // lives in the General section).
     expect(wrapper.find('[data-test="settings-tab-security"]').classes()).toContain('tab-active')
 
     // Simulate the ModeSwitcher RouterLink click while already on /settings:
@@ -79,7 +79,7 @@ describe('Settings reacts to a query-only navigation while already mounted (revi
     const { wrapper, router } = await mountSettings('/settings')
     await flushPromises()
 
-    expect(wrapper.find('[data-test="settings-tab-security"]').classes()).toContain('tab-active')
+    expect(wrapper.find('[data-test="settings-tab-general"]').classes()).toContain('tab-active')
 
     await router.push('/settings?tab=raw')
     await flushPromises()

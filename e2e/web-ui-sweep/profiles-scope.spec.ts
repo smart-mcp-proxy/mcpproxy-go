@@ -31,6 +31,9 @@ function url(route: string): string {
 }
 
 async function open(page: Page, route: string) {
+  // Spec 134 PR 6: these cases drive the Flat list (Access column, per-row Why?).
+  // The grouped default is covered by case 1c below and by tools-pr6.spec.ts.
+  await page.addInitScript(() => { try { window.localStorage.setItem('mcpproxy.tools.layout', 'flat') } catch { /* ignore */ } })
   await page.goto(url(route))
   await page.waitForLoadState('domcontentloaded')
   const closeWizard = page.locator('[data-test="close-wizard"]')
@@ -131,6 +134,34 @@ test('1. Tools view-as: filtered from the first render, greyed rows with reasons
   await expect(why).toBeFocused()
 })
 
+test('1c. Tools view-as, grouped default: Details carries the verdict and Why?, a real Escape returns focus', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.addInitScript(() => { try { window.localStorage.removeItem('mcpproxy.tools.layout') } catch { /* ignore */ } })
+  await page.goto(url(`/tools?client=${SCOPE_CLIENT}`))
+  await page.waitForLoadState('domcontentloaded')
+  const closeWizard = page.locator('[data-test="close-wizard"]')
+  if (await closeWizard.isVisible().catch(() => false)) await closeWizard.click()
+  await expect(page.locator('[data-test="tools-grouped"]')).toBeVisible()
+  await expect(page.locator('[data-test="tools-view-as-banner"]')).toContainText('Viewing as E2E Scope')
+  await expect(page.locator('[data-test="tools-select-all"]')).toBeDisabled()
+  const row = page.locator(`[data-test="tool-row"]:has-text("echo")`).first()
+  await expect(row.locator('[data-test="tool-not-callable"]')).toBeVisible()
+  const details = row.locator('[data-test="tool-details-button"]')
+  await details.focus()
+  await page.keyboard.press('Enter')
+  const dialog = page.locator('[data-test="tool-details-dialog"]')
+  await expect(dialog.locator('[data-test="tool-details-access"]')).toContainText('Denied by rule')
+  await dialog.locator('[data-test="tool-details-why"]').click()
+  const explainer = page.locator('[data-test="access-explainer"]')
+  await expect(explainer.locator('[data-test="explain-verdict"]')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(explainer.locator('[data-test="explain-verdict"]')).toHaveCount(0)
+  await expect(dialog.locator('[data-test="tool-details-why"]')).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(dialog.locator('[data-test="tool-details"]')).toHaveCount(0)
+  await expect(details).toBeFocused()
+})
+
 test('1b. Both client and profile: the conflict state and no scoped /tools request (rule 8)', async ({ page }) => {
   const scoped: string[] = []
   page.on('request', request => {
@@ -196,15 +227,18 @@ test('5. A blocked call: attribution chips, Allow in profile… and Why?', async
   const rows = page.locator('[data-test="activity-row"]')
   await expect(rows).toHaveCount(1)
   await expect(rows.first()).toContainText('echo')
-  await expect(page.locator('[data-test="activity-scope-col"]')).toBeVisible()
-  const chips = rows.first().locator('[data-test^="activity-attribution-"]')
+  // Spec 134 FR-045/049: the calls table has a Client column; profile and token chips live in the row detail.
+  await expect(page.locator('[data-test="activity-col-client"]')).toBeVisible()
+  await expect(rows.first().locator('[data-test="attribution-client"]')).toContainText('E2E Scope')
+  await expect(rows.first().locator('[data-test="attribution-profile"]')).toHaveCount(0)
+  await shot(page, 'activity-1440')
+
+  await rows.first().locator('[data-test^="activity-open-"]').click()
+  const chips = page.locator('[data-test="activity-detail-panel"] [data-test^="activity-attribution-"]')
   await expect(chips.locator('[data-test="attribution-client"]')).toContainText('E2E Scope')
   await expect(chips.locator('[data-test="attribution-profile"]')).toContainText('E2E Scope RO · locked by credential')
   // The client's own credential (client-<id>) is the client chip already.
   await expect(chips.locator('[data-test="attribution-token"]')).toHaveCount(0)
-  await shot(page, 'activity-1440')
-
-  await rows.first().locator('[data-test^="activity-open-"]').click()
   const allow = page.locator('[data-test^="activity-allow-in-profile-"]')
   await expect(allow).toContainText('Allow in profile…')
   await allow.click()
@@ -269,7 +303,7 @@ for (const width of [1440, 1280, 1100, 1024, 900, 768, 390]) {
         const rowWhy = page.locator('[data-test^="activity-row-why-"]').first()
         if (width >= 1280) await expect(rowWhy).toBeVisible()
         else await expect(rowWhy).toBeHidden()
-        const status = page.locator('[data-test="activity-row"]').first().locator('.badge').last()
+        const status = page.locator('[data-test="activity-row"]').first().locator('[data-test="activity-status"]')
         const statusBox = await status.boundingBox()
         expect(statusBox, `status badge at ${width}`).not.toBeNull()
         expect(statusBox!.x + statusBox!.width, `status badge at ${width} inside the viewport`).toBeLessThanOrEqual(width)

@@ -221,6 +221,14 @@ func (c *Client) newListChangedStream(cl *client.Client, info *mcp.InitializeRes
 			c.urlElicitations.Complete(n)
 			return
 		}
+		// GH #1967: an upstream whose server library hands one session's
+		// notifications to whichever stream reads first (mcp-go does) sends a
+		// call's progress here too. Each carries its call's own token, so it
+		// must not be coalesced either; Dispatch never blocks.
+		if n.Method == string(mcp.MethodNotificationProgress) {
+			c.progress.Dispatch(n)
+			return
+		}
 		queue.push(n)
 	}
 	if len(c.relayFeatures()) > 0 {

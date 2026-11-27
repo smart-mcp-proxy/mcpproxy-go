@@ -261,10 +261,15 @@ func (c *Client) dispatchNotification(notification mcp.JSONRPCNotification) {
 		c.handlePromptsListChangedNotification()
 	case string(mcp.MethodNotificationElicitationComplete):
 		c.urlElicitations.Complete(notification)
+	case string(mcp.MethodNotificationProgress):
+		c.progress.Dispatch(notification) // GH #1967
 	default:
-		// Ignore all other notifications (logging, resources, progress, ...).
+		// Ignore all other notifications (logging, resources, ...).
 	}
 }
+
+// clearProgressCalls forgets the progress tokens of every call in flight.
+func (c *Client) clearProgressCalls() { c.progress.Clear() }
 
 // handleToolsListChangedNotification forwards a notifications/tools/list_changed
 // signal to the onToolsChanged callback. serverInfo and the callback are read
@@ -347,6 +352,11 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	c.logger.Info("Disconnecting from upstream MCP server",
 		zap.Bool("was_connected", wasConnected))
 
+	// GH #1967: forget the progress tokens of the calls in flight now. A
+	// call that registers while the teardown runs is removed when its
+	// CallTool returns, like any other.
+	c.clearProgressCalls()
+
 	// GH #1910: end the standalone GET stream before the transport closes.
 	// c.mu is not held here, so the wait cannot block the listener's dispatch.
 	c.stopListChangedStream(true)
@@ -372,8 +382,11 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	// Step 3: Close the MCP client. For stdio this follows the MCP lifecycle:
 	// it closes the server's stdin at once, waits, then (Unix) sends SIGTERM
 	// and finally SIGKILL to the process.
+	held := false
 	if stdioProc != nil && !isDocker && pgid > 0 {
-		defer holdProcessID(pgid)() // before the close reaps it: step 5 may still signal its PID
+		release, ok := holdProcessID(pgid) // before the close reaps it: step 5 may still signal its PID
+		defer release()
+		held = ok
 	}
 	closeDone := make(chan struct{})
 	go func() {
@@ -430,8 +443,11 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 			select {
 			case <-closeDone: // both were ready: the child is reaped, nothing left to ask
 			default:
-				// Windows has no SIGTERM: ask the process tree to exit in its place.
-				requestProcessTreeExit(pgid)
+				// Windows has no SIGTERM: ask the process tree to exit in its place,
+				// unless its PID could not be held and may be another process's.
+				if held {
+					requestProcessTreeExit(pgid)
+				}
 			}
 		}
 	}
@@ -529,6 +545,8 @@ func (c *Client) closeUpstreamLog() {
 		_ = c.upstreamLogger.Sync()
 	}
 	if c.upstreamLogCloser != nil {
+		c.upstreamLogSinkMu.Lock()
+		defer c.upstreamLogSinkMu.Unlock()
 		if err := c.upstreamLogCloser.Close(); err != nil {
 			c.logger.Debug("Failed to close upstream log sink", zap.Error(err))
 		}

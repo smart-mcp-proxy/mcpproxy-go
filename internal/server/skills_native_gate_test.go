@@ -460,8 +460,9 @@ func TestNativeSkills_NonObjectParamsAndRepeatedURI(t *testing.T) {
 	defer func() { assert.NoError(t, resp.Body.Close()) }()
 	raw, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	// A repeated member in params is the transport's: an ordinary read, the
-	// SDK's own answer, never a native one.
-	assert.Contains(t, string(raw), "handler not found for resource URI", "the SDK's answer: %s", raw)
+	// A repeated member in params is the transport's: the SDK's own answer,
+	// never a native one. Since mcp-go v1.6 the SDK refuses a duplicate
+	// member outright (Spec 135 research R1a); before, it read the last one.
+	assert.Contains(t, string(raw), `duplicate member \"params.uri\"`, "the SDK's answer: %s", raw)
 	assert.NotContains(t, string(raw), "missing required parameter")
 }

@@ -136,7 +136,7 @@ type Server struct {
 	oauthStreams         atomic.Pointer[oauthStreamRegistry]
 	oauthStreamsMu       sync.Mutex // guards oauthStreamsStopping and the registry's creation
 	oauthStreamsRun      uint64     // server-run generation, bumped by resetOAuthStreams
-	oauthStreamsStopping bool       // set by stopOAuthStreams, cleared by a new run
+	oauthStreamsStopping bool       // set by stopOAuthStreamsOfRun, cleared by a new run
 	// testHookAfterEpochCapture pauses oauthResourceAuth between the switch-off
 	// epoch capture and the authentication (tests only; nil in production).
 	testHookAfterEpochCapture func()
@@ -1612,6 +1612,9 @@ func (s *Server) Shutdown() error {
 	}
 	s.shutdown = true
 	httpServer := s.httpServer
+	// The run whose browser-login watcher is joined after the HTTP shutdown,
+	// read with httpServer: StartServer resets it under s.mu.
+	oauthRun := s.oauthRunGen()
 	startTime := s.startTime
 	reason := s.shutdownReason
 	signal := s.shutdownSignal
@@ -1661,10 +1664,6 @@ func (s *Server) Shutdown() error {
 
 	s.logger.Info("Shutting down MCP proxy server...")
 
-	// Spec 132: end every tracked browser-login request and join the watcher
-	// first, or the HTTP shutdown below would wait for open streams.
-	s.stopOAuthStreams()
-
 	// Gracefully shutdown HTTP server first to stop accepting new connections
 	if httpServer != nil {
 		s.logger.Info("Gracefully shutting down HTTP server...")
@@ -1679,6 +1678,10 @@ func (s *Server) Shutdown() error {
 			s.logger.Info("HTTP server shutdown completed gracefully")
 		}
 	}
+
+	// Spec 132: join the browser-login watcher. Only now: the HTTP shutdown
+	// above lets their calls finish and ends their streams like any other.
+	s.stopOAuthStreamsOfRun(oauthRun)
 
 	// Spec 101 US3 (B17): unsubscribe the activation observer and join any
 	// running re-protection sweep BEFORE the runtime closes, so no sweep
@@ -2886,6 +2889,9 @@ func (s *Server) stopServer(run *serverRun) error {
 	// installs a new context, which the tail below must not cancel or unmark.
 	httpServer := s.httpServer
 	stoppingCtx, stoppingCancel := s.serverCtx, s.serverCancel
+	// The run whose browser-login watcher is joined after the HTTP shutdown,
+	// read with httpServer: StartServer resets it under s.mu.
+	oauthRun := s.oauthRunGen()
 	s.mu.Unlock()
 
 	// Notify about server stopping
@@ -2893,10 +2899,6 @@ func (s *Server) stopServer(run *serverRun) error {
 	_ = s.logger.Sync()
 
 	s.updateStatus(runtime.PhaseStopping, "Server is stopping...")
-
-	// Spec 132: end tracked browser-login requests (open SSE streams) and join
-	// their watcher, or the graceful shutdown below waits for them.
-	s.stopOAuthStreams()
 
 	// STEP 1: Gracefully shutdown HTTP server FIRST to stop accepting new connections
 	// This must happen before we disconnect upstream servers to prevent new requests
@@ -2918,6 +2920,10 @@ func (s *Server) stopServer(run *serverRun) error {
 		}
 		_ = s.logger.Sync()
 	}
+
+	// Spec 132: join the browser-login watcher. Only now: the HTTP shutdown
+	// above lets their calls finish and ends their streams like any other.
+	s.stopOAuthStreamsOfRun(oauthRun)
 
 	// STEP 2: Disconnect upstream servers AFTER HTTP server is shut down
 	// This ensures no new requests can come in while we're disconnecting
@@ -3617,7 +3623,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// Spec 107 T050: tag every MCP-mount request with {ClientIP, Mount: mcp}
 	// for the audit line (the mount is fixed here, never by a header).
 	tagMCP := httpapi.TagRequestMeta(reqcontext.MountMCP, s.trustedProxiesProvider())
-	mcpHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(streamableServer)))))
+	mcpHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(clientFacingEraGuard(streamableServer))))))
 	mux.Handle("/mcp", mcpHandler)
 	mux.Handle("/mcp/", mcpHandler) // Handle trailing slash
 
@@ -3626,21 +3632,21 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// /mcp/all → direct mode (all tools with serverName__toolName naming)
 	directStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeDirect),
 		clientFacingStreamableOptions(s.liveConfig)...)
-	directHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(directStreamable)))))
+	directHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(clientFacingEraGuard(directStreamable))))))
 	mux.Handle("/mcp/all", directHandler)
 	mux.Handle("/mcp/all/", directHandler)
 
 	// /mcp/code → code_execution mode (JS orchestration)
 	codeExecStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeCodeExecution),
 		clientFacingStreamableOptions(s.liveConfig)...)
-	codeExecHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(codeExecStreamable)))))
+	codeExecHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(clientFacingEraGuard(codeExecStreamable))))))
 	mux.Handle("/mcp/code", codeExecHandler)
 	mux.Handle("/mcp/code/", codeExecHandler)
 
 	// /mcp/call → retrieve_tools mode (focused: retrieve_tools + call_tool_read/write/destructive)
 	callToolStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools),
 		clientFacingStreamableOptions(s.liveConfig)...)
-	callToolHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(callToolStreamable)))))
+	callToolHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(clientFacingEraGuard(callToolStreamable))))))
 	mux.Handle("/mcp/call", callToolHandler)
 	mux.Handle("/mcp/call/", callToolHandler)
 
@@ -3649,7 +3655,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// so that agent-token scope can compose downstream with the profile scope.
 	profileStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools),
 		clientFacingStreamableOptions(s.liveConfig)...)
-	profileHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(s.profileMiddleware(loggingHandler(profileStreamable))))))
+	profileHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(s.profileMiddleware(loggingHandler(clientFacingEraGuard(profileStreamable)))))))
 	mux.Handle("/mcp/p/", profileHandler)
 	mux.Handle("/mcp/p", profileHandler)
 
@@ -3952,7 +3958,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux.Handle("/", rootHandler)
 	// Spec 132: opt-in browser login. Behaves exactly like the handlers above
 	// until mcp_oauth_enabled is switched on (or the feature has been used).
-	oauthMCPHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.oauthResourceAuth(loggingHandler(streamableServer)))))
+	oauthMCPHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.oauthResourceAuth(loggingHandler(clientFacingEraGuard(streamableServer))))))
 	s.registerOAuthLoginRoutes(mux, mcpHandler, rootHandler, oauthMCPHandler)
 	s.logger.Info("Registered Web UI endpoints", zap.Strings("ui_endpoints", []string{"/ui/", "/"}))
 
@@ -6092,5 +6098,7 @@ func (s *Server) serveSingleServer(w http.ResponseWriter, r *http.Request) {
 	if ep.native {
 		next = s.mcpProxy.nativeSkillsInterceptor(ep, next)
 	}
-	singleServerSessionGuard(name, ep.gen, next).ServeHTTP(w, r.WithContext(ctx))
+	// The era guard runs after admission and the session check, so an
+	// unknown or out-of-scope server still answers 404 (Spec 135 R1a).
+	singleServerSessionGuard(name, ep.gen, clientFacingEraGuard(next)).ServeHTTP(w, r.WithContext(ctx))
 }
