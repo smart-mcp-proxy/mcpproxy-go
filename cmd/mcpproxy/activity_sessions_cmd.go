@@ -499,31 +499,29 @@ func runActivitySession(id, at string, before, after int, includeBodies bool) er
 		return nil
 	}
 	first, last := page.Rows[0].Index, page.Rows[len(page.Rows)-1].Index
+	// Where the page is, in the door's terms: failure_index is the last
+	// failure at or before the position.
+	returned := timelinePositionReturned(page)
+	var where string
 	switch {
 	case page.FailureTotal == 0:
-		fmt.Printf("No stored failures · rows %d-%d of %d\n", first, last, page.TotalRows)
+		where = "No stored failures"
 	case page.FailureIndex == 0:
-		fmt.Printf("Before the first of %d failures · rows %d-%d of %d\n", page.FailureTotal, first, last, page.TotalRows)
-	case at == "" || at == "first_failure" || strings.HasPrefix(at, "failure:"):
-		// The position was asked for as a failure and is one, whether the
-		// door returned its row or not.
-		missing := ""
-		if _, returned := timelinePositionRow(page); !returned {
-			missing = " (its row was not returned)"
-		}
-		fmt.Printf("Failure %d of %d%s · rows %d-%d of %d\n", page.FailureIndex, page.FailureTotal, missing, first, last, page.TotalRows)
-	case timelinePositionFailed(page):
-		fmt.Printf("Failure %d of %d · rows %d-%d of %d\n", page.FailureIndex, page.FailureTotal, first, last, page.TotalRows)
-	case !timelinePositionReturned(page):
-		// The positioned row is not on the page, so whether it is a failure
-		// is not known: only what the door says about the position is said.
-		fmt.Printf("Row %d was not returned; failures up to it: %d of %d · rows %d-%d of %d\n",
-			page.Position, page.FailureIndex, page.FailureTotal, first, last, page.TotalRows)
+		where = fmt.Sprintf("Before the first of %d failures", page.FailureTotal)
+	case at == "" || at == "first_failure" || strings.HasPrefix(at, "failure:") || timelinePositionFailed(page):
+		// Asked for as a failure, or seen to be one.
+		where = fmt.Sprintf("Failure %d of %d", page.FailureIndex, page.FailureTotal)
+	case !returned:
+		// The positioned row is not on the page, so whether it is that
+		// failure or comes after it is not known.
+		where = fmt.Sprintf("Failures up to the position: %d of %d", page.FailureIndex, page.FailureTotal)
 	default:
-		// failure_index is the last failure at or before the position; the
-		// positioned row itself is not one.
-		fmt.Printf("After failure %d of %d · rows %d-%d of %d\n", page.FailureIndex, page.FailureTotal, first, last, page.TotalRows)
+		where = fmt.Sprintf("After failure %d of %d", page.FailureIndex, page.FailureTotal)
 	}
+	if !returned {
+		where += fmt.Sprintf(" (row %d, the position, was not returned)", page.Position)
+	}
+	fmt.Printf("%s · rows %d-%d of %d\n", where, first, last, page.TotalRows)
 	if err := printTimelineRows(page.Rows, includeBodies); err != nil {
 		return err
 	}

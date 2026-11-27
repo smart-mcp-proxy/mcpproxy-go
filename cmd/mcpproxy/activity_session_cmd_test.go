@@ -943,7 +943,7 @@ func TestActivitySession_HeadingWhenTheFailureRowIsNotReturned(t *testing.T) {
 	})
 	out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--at", "failure:1", "--before", "1", "--after", "1")
 	require.NoError(t, err)
-	require.Contains(t, out, "Failure 1 of 2 (its row was not returned)")
+	require.Contains(t, out, "Failure 1 of 2 (row 40, the position, was not returned)")
 	require.NotContains(t, out, "After failure")
 }
 
@@ -957,9 +957,32 @@ func TestActivitySession_HeadingWhenAPositionedRowIsNotReturned(t *testing.T) {
 	})
 	out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--at", "row:01GONE", "--before", "1", "--after", "0")
 	require.NoError(t, err)
-	require.Contains(t, out, "Row 40 was not returned; failures up to it: 1 of 2")
+	require.Contains(t, out, "Failures up to the position: 1 of 2 (row 40, the position, was not returned)")
 	require.NotContains(t, out, "After failure")
 	require.NotContains(t, out, "\nFailure 1 of 2")
+}
+
+// A missing positioned row is said under every heading, also when the
+// position is before the first failure or the session has none.
+func TestActivitySession_MissingPositionIsSaidUnderEveryHeading(t *testing.T) {
+	for name, tc := range map[string]struct {
+		failureIndex, failureTotal int
+		want                       string
+	}{
+		"before the first failure": {0, 2, "Before the first of 2 failures (row 40, the position, was not returned)"},
+		"no stored failures":       {0, 0, "No stored failures (row 40, the position, was not returned)"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			newRESTRecorder(t, map[string]cannedResponse{
+				"GET /api/v1/work-sessions/ws-aaa/timeline": okResp(fmt.Sprintf(`{"session": %s, "rows": [%s],
+				  "position": 40, "total_rows": 90, "failure_index": %d, "failure_total": %d, "lifetime_failures": %d, "has_before": true, "has_after": true}`,
+					timelineSessionJSON, failuresRow(39, false), tc.failureIndex, tc.failureTotal, tc.failureTotal)),
+			})
+			out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--at", "row:01GONE", "--before", "1", "--after", "0")
+			require.NoError(t, err)
+			require.Contains(t, out, tc.want)
+		})
+	}
 }
 
 // The repeat count of a collapsed upstream event survives a long message: the
