@@ -242,6 +242,9 @@ type AdminActionInput struct {
 
 // NewAdminAction builds and structurally validates one admin_action line.
 func NewAdminAction(in AdminActionInput) (Line, error) {
+	if y := in.Ts.UTC().Year(); y < 0 || y > 9999 {
+		return Line{}, fmt.Errorf("audit.NewAdminAction: ts year %d is outside the four-digit wire layout", y)
+	}
 	if !adminActionSet[in.Action] {
 		return Line{}, fmt.Errorf("audit.NewAdminAction: unknown action %q", in.Action)
 	}
@@ -437,6 +440,15 @@ func renderLabel(s string) (string, bool) {
 	if s == "" || containsPrivateKey(s) {
 		return "", false
 	}
+	// Control characters are replaced first: JSON escapes them (\u000e), and
+	// the whole-line sanitizer, which reads the escaped form, could otherwise
+	// match a credential shape across the escape and rewrite the label.
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, s)
 	masked, hit := maskAllSpans(s)
 	if hit {
 		noteFieldMask()

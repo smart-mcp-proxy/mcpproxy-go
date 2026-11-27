@@ -458,7 +458,7 @@ func TestChange_UnknownRootIsNeverSpelled(t *testing.T) {
 	in.Changes = []audit.Change{audit.Withheld(audit.Path("private-customer-hostname"), audit.WithheldValue)}
 	line, obj := mustAdmin(t, in)
 	assertSentinelAbsent(t, line, "private-customer-hostname")
-	if f := obj["changes"].([]interface{})[0].(map[string]interface{})["field"]; f != "/" {
+	if f := obj["changes"].([]interface{})[0].(map[string]interface{})["field"]; f != "" {
 		t.Fatalf("got %v", f)
 	}
 }
@@ -686,5 +686,26 @@ func TestLiteral_TypedNilIsAnAbsentSide(t *testing.T) {
 	ch := obj["changes"].([]interface{})[0].(map[string]interface{})
 	if _, has := ch["before"]; has || ch["after"] == nil {
 		t.Fatalf("a typed nil side is absent: %v", ch)
+	}
+}
+
+func TestRenderLabel_ControlCharactersReplaced(t *testing.T) {
+	in := tokenRotateInput()
+	in.ClientName = "\x0eyJabc.eyJdef.signature"
+	line, obj := mustAdmin(t, in)
+	raw, _ := line.JSON()
+	if out, hit := audit.SanitizeLine(raw); hit || string(out) != string(raw) {
+		t.Fatalf("the sanitizer must not rewrite a label across a JSON escape: %s", raw)
+	}
+	if n := obj["client"].(map[string]interface{})["name"].(string); strings.ContainsRune(n, 0x0e) {
+		t.Fatalf("control characters are replaced: %q", n)
+	}
+}
+
+func TestNewAdminAction_TimestampYearBound(t *testing.T) {
+	in := tokenRotateInput()
+	in.Ts = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := audit.NewAdminAction(in); err == nil {
+		t.Fatal("a five-digit year is rejected")
 	}
 }

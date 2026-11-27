@@ -127,9 +127,9 @@ func (f FieldPath) render() (string, bool) {
 	}
 	// FR-015b: the root segment comes from the fixed schema. An unknown root
 	// could be arbitrary text, so it is never spelled: the entry is reported
-	// at the document root with field_masked.
+	// at the document root (the RFC 6901 root pointer "") with field_masked.
 	if !knownRoot(segs[0]) {
-		return "/", true
+		return "", true
 	}
 	if len(segs) > 1 && (opaqueRoots[segs[0]] || !nestedRoots[segs[0]]) {
 		segs = segs[:1]
@@ -183,8 +183,8 @@ func (f FieldPath) render() (string, bool) {
 	out := b.String()
 	if out == "" {
 		// The first segment itself was a private-key label: no fixed parent
-		// to report; the root pointer names "a field changed".
-		return "/", true
+		// to report; the root pointer "" names "a field changed".
+		return "", true
 	}
 	if utf8.RuneCountInString(out) > maxPointerLength && len(segs) > 0 {
 		return "/" + escapeSeg(segs[0]), true

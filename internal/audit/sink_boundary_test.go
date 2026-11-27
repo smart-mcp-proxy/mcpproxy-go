@@ -432,3 +432,46 @@ func (e *errAfterFullWriteOnceWriter) Write(p []byte) (int, error) {
 	}
 	return n, err
 }
+
+// The write that crosses the rotation threshold is itself torn: lumberjack
+// rotates first, so the partial record and its repair are in the new file,
+// and the old file stays complete.
+func TestNewFileSink_TornWriteThatTriggersRotation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	s, err := NewFileSink(path, 1, 5, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := s.(*writerSink)
+	if err := s.Write([]byte(`{"pad":"` + strings.Repeat("x", 1024*1024-20) + `"}`)); err != nil {
+		t.Fatal(err)
+	}
+	ws.mu.Lock()
+	ws.w = &shortOnceWriter{w: ws.w, n: 5}
+	ws.mu.Unlock()
+	_ = s.Write([]byte(`{"seq":1,"crosses":"the threshold"}`))
+	if err := s.Write([]byte(`{"seq":2}`)); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+	entries, _ := os.ReadDir(dir)
+	if len(entries) < 2 {
+		t.Fatalf("the torn write must have rotated, got %d file(s)", len(entries))
+	}
+	found := 0
+	for _, e := range entries {
+		raw, _ := os.ReadFile(filepath.Join(dir, e.Name()))
+		if len(raw) > 0 && raw[len(raw)-1] != '\n' {
+			t.Fatalf("%s ends mid-record", e.Name())
+		}
+		for _, l := range assertWellDelimited(t, raw) {
+			if l == `{"seq":2}` {
+				found++
+			}
+		}
+	}
+	if found != 1 {
+		t.Fatalf("the record after the torn write must be readable once, found %d", found)
+	}
+}

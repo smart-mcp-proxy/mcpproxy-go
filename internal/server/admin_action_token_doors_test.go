@@ -287,6 +287,22 @@ func TestAdminActionDoors_MCPCredentialsTool(t *testing.T) {
 	}, 10*time.Second, 50*time.Millisecond, "wrapper row and profile_change row share the line's request id")
 
 	require.Equal(t, "worker", l["target"].(map[string]interface{})["name"])
+	// The prefix on the line is the display prefix of the credential the
+	// tool returned.
+	var minted map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(getToolResultText(res)), &minted))
+	secret, _ := minted["credential"].(string)
+	require.NotEmpty(t, secret, "create_token returns the credential once")
+	wantPrefix := auth.TokenPrefix(secret)
+	prefixOf := func(line map[string]interface{}, side string) interface{} {
+		for _, c := range line["changes"].([]interface{}) {
+			if m := c.(map[string]interface{}); m["field"] == "/token_prefix" {
+				return m[side]
+			}
+		}
+		return nil
+	}
+	require.Equal(t, wantPrefix, prefixOf(l, "after"))
 	createRef := l["target"].(map[string]interface{})["ref"]
 	require.Equal(t, map[string]interface{}{"kind": "api_key"}, l["caller"])
 
@@ -303,6 +319,7 @@ func TestAdminActionDoors_MCPCredentialsTool(t *testing.T) {
 	require.Equal(t, "mcp", r["client"].(map[string]interface{})["surface"])
 	require.Equal(t, createRef, r["target"].(map[string]interface{})["ref"], "same token, same ref")
 	require.Equal(t, "worker", r["target"].(map[string]interface{})["name"])
+	require.Equal(t, wantPrefix, prefixOf(r, "before"), "the revoked key is the one minted")
 	revokeID, _ := r["request_id"].(string)
 	require.NotEmpty(t, revokeID)
 	require.NotEqual(t, rid, revokeID, "each MCP call has its own request id")
@@ -503,4 +520,38 @@ func TestAdminActionDoors_WebUISurface(t *testing.T) {
 		require.Len(t, lines, 1, step.action)
 		check(lines[0], step.action, rid)
 	}
+}
+
+// A scoped agent token is refused every token mutation (403) and its refused
+// attempt writes no admin_action line (FR-013: nothing committed).
+func TestAdminActionDoors_ScopedAgentTokenRefusedWritesNothing(t *testing.T) {
+	e := newAdminE2E(t)
+	code, body := e.rest(http.MethodPost, "/api/v1/tokens", "", map[string]any{"name": "scoped-bot", "expires_in": "1h"})
+	require.Equal(t, http.StatusCreated, code, string(body))
+	var created struct {
+		Data struct {
+			Token string `json:"token"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(body, &created))
+	require.NotEmpty(t, created.Data.Token)
+	seen := len(e.sink.snapshot())
+	for _, step := range []struct{ method, path string }{
+		{http.MethodPost, "/api/v1/tokens"},
+		{http.MethodPost, "/api/v1/tokens/scoped-bot/regenerate"},
+		{http.MethodDelete, "/api/v1/tokens/scoped-bot"},
+		{http.MethodDelete, "/api/v1/tokens/scoped-bot/permanent"},
+	} {
+		req, err := http.NewRequest(step.method, e.base+step.path, strings.NewReader(`{"name":"other","expires_in":"1h"}`))
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer "+created.Data.Token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		require.Equal(t, http.StatusForbidden, resp.StatusCode, "%s %s", step.method, step.path)
+	}
+	require.Empty(t, e.adminLines(&seen), "a refused mutation writes no admin_action line")
+	stored, _ := e.env.proxyServer.runtime.StorageManager().GetAgentTokenByName("scoped-bot")
+	require.False(t, stored.Revoked, "nothing was committed")
 }

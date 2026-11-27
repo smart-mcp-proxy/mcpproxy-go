@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -31,6 +32,13 @@ func TestAdminDoors_CLITokenCommandsHitTheirDoneRESTDoors(t *testing.T) {
 			// before any audit line is written.
 			mu.Unlock()
 			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.Method != http.MethodGet && !strings.HasPrefix(r.Header.Get("X-MCPProxy-Client"), "cli/") {
+			// Without the CLI's own client header the line would say
+			// client.surface: api, not cli.
+			mu.Unlock()
+			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 		got = append(got, r.Method+" "+r.URL.Path)
