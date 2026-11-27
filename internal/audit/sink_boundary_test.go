@@ -447,8 +447,11 @@ func TestNewFileSink_TornWriteThatTriggersRotation(t *testing.T) {
 	if err := s.Write([]byte(`{"pad":"` + strings.Repeat("x", 1024*1024-20) + `"}`)); err != nil {
 		t.Fatal(err)
 	}
+	// The pad leaves 9 bytes before 1 MiB; forwarding 15 bytes of the next
+	// record makes lumberjack rotate on that very write, which then tears in
+	// the new file.
 	ws.mu.Lock()
-	ws.w = &shortOnceWriter{w: ws.w, n: 5}
+	ws.w = &shortOnceWriter{w: ws.w, n: 15}
 	ws.mu.Unlock()
 	_ = s.Write([]byte(`{"seq":1,"crosses":"the threshold"}`))
 	if err := s.Write([]byte(`{"seq":2}`)); err != nil {
@@ -473,5 +476,9 @@ func TestNewFileSink_TornWriteThatTriggersRotation(t *testing.T) {
 	}
 	if found != 1 {
 		t.Fatalf("the record after the torn write must be readable once, found %d", found)
+	}
+	cur, _ := os.ReadFile(path)
+	if !strings.HasPrefix(string(cur), `{"seq":1,"cross`+"\n") {
+		t.Fatalf("the torn fragment and its repair are in the new file: %q", cur)
 	}
 }

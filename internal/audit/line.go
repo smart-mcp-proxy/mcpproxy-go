@@ -9,6 +9,7 @@ package audit
 // "Redaction (FR-015)").
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -21,12 +22,32 @@ const tsLayout = "2006-01-02T15:04:05.000000000Z"
 // Line is a single, already-validated audit line.
 type Line struct {
 	fields map[string]interface{}
+	// noHTMLEscape (admin_action) serializes without HTML escaping, so
+	// '<', '>' and '&' are written as themselves and no \u00xx escape can
+	// sit next to a label where the whole-line sanitizer would read it as
+	// part of a credential. The legacy kinds keep json.Marshal (FR-004).
+	noHTMLEscape bool
 }
 
 // JSON serialises the line. encoding/json sorts map[string]interface{} keys,
 // so repeated calls on the same Line are byte-stable.
 func (l Line) JSON() ([]byte, error) {
+	if l.noHTMLEscape {
+		return marshalNoHTMLEscape(l.fields)
+	}
 	return json.Marshal(l.fields)
+}
+
+// marshalNoHTMLEscape is json.Marshal without HTML escaping and without the
+// encoder's trailing newline.
+func marshalNoHTMLEscape(v interface{}) ([]byte, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
 }
 
 func newBase(event string, ts time.Time, requestID, origin, source string, caller Caller) map[string]interface{} {

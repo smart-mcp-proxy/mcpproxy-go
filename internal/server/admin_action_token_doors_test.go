@@ -222,6 +222,7 @@ func TestAdminActionDoors_RESTTokenDoors(t *testing.T) {
 	require.Equal(t, "token.delete", lines[0]["action"])
 	require.Equal(t, ref, lines[0]["target"].(map[string]interface{})["ref"])
 	require.Equal(t, "req-delete-1", lines[0]["request_id"])
+	require.Equal(t, "agent_token", lines[0]["target"].(map[string]interface{})["kind"])
 	require.Equal(t, "api", lines[0]["source"])
 	require.Equal(t, "local", lines[0]["origin"])
 	require.Equal(t, "cli", lines[0]["client"].(map[string]interface{})["surface"])
@@ -504,6 +505,10 @@ func TestAdminActionDoors_WebUISurface(t *testing.T) {
 		require.Equal(t, rid, l["request_id"], action)
 		require.Equal(t, "web", l["client"].(map[string]interface{})["surface"], action)
 		require.Equal(t, "webui/1.0", l["client"].(map[string]interface{})["name"], action)
+		require.Equal(t, "agent_token", l["target"].(map[string]interface{})["kind"], action)
+		if action != "token.delete" { // a permanent delete writes no activity row
+			require.Equal(t, 1, e.activityRequestIDs(rid), "%s joins its activity row", action)
+		}
 	}
 	lines := e.adminLines(&seen)
 	require.Len(t, lines, 1)

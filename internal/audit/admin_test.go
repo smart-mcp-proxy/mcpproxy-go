@@ -709,3 +709,23 @@ func TestNewAdminAction_TimestampYearBound(t *testing.T) {
 		t.Fatal("a five-digit year is rejected")
 	}
 }
+
+func TestRenderLabel_BearerWithATabIsMasked(t *testing.T) {
+	in := tokenRotateInput()
+	in.ClientName = "Bearer\tSecretExample123"
+	line, _ := mustAdmin(t, in)
+	assertSentinelAbsent(t, line, "SecretExample123")
+}
+
+func TestAdminLine_NoHTMLEscapeNextToALabel(t *testing.T) {
+	in := tokenRotateInput()
+	in.ClientName = ">yJabc.eyJdef.signature"
+	line, obj := mustAdmin(t, in)
+	raw, _ := line.JSON()
+	if out, hit := audit.SanitizeLine(raw); hit || string(out) != string(raw) {
+		t.Fatalf("no escape may join a label into a credential shape: %s", raw)
+	}
+	if obj["client"].(map[string]interface{})["name"] != ">yJabc.eyJdef.signature" {
+		t.Fatalf("got %v", obj["client"])
+	}
+}

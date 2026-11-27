@@ -34,7 +34,8 @@ func TestAdminDoors_CLITokenCommandsHitTheirDoneRESTDoors(t *testing.T) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		if r.Method != http.MethodGet && !strings.HasPrefix(r.Header.Get("X-MCPProxy-Client"), "cli/") {
+		surface := r.Header.Get("X-MCPProxy-Surface")
+		if r.Method != http.MethodGet && (!strings.HasPrefix(r.Header.Get("X-MCPProxy-Client"), "cli/") || (surface != "" && surface != "cli")) {
 			// Without the CLI's own client header the line would say
 			// client.surface: api, not cli.
 			mu.Unlock()

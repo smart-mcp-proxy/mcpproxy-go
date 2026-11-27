@@ -13,7 +13,6 @@ package audit
 // 16 KiB budget and returns an error for any violation.
 
 import (
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/mail"
@@ -391,14 +390,14 @@ func NewAdminAction(in AdminActionInput) (Line, error) {
 	if err := checkRenderedPrefixes(in.Action, f); err != nil {
 		return Line{}, err
 	}
-	return Line{fields: f}, nil
+	return Line{fields: f, noHTMLEscape: true}, nil
 }
 
 // fitAdminBudget drops trailing change entries, then target.names, until the
 // serialized line fits MaxAdminLineBytes (contract §Size).
 func fitAdminBudget(f map[string]interface{}, fullChanges int) error {
 	for {
-		raw, err := json.Marshal(f)
+		raw, err := marshalNoHTMLEscape(f)
 		if err != nil {
 			return fmt.Errorf("audit.NewAdminAction: %w", err)
 		}
@@ -440,19 +439,20 @@ func renderLabel(s string) (string, bool) {
 	if s == "" || containsPrivateKey(s) {
 		return "", false
 	}
-	// Control characters are replaced first: JSON escapes them (\u000e), and
-	// the whole-line sanitizer, which reads the escaped form, could otherwise
-	// match a credential shape across the escape and rewrite the label.
-	s = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return '?'
-		}
-		return r
-	}, s)
+	// Mask the original first (a tab in "Bearer\t…" is part of the match),
+	// then replace the characters JSON would escape (\u000e, \u2028): the
+	// whole-line sanitizer reads the escaped form and could otherwise match a
+	// credential shape across an escape and rewrite the label.
 	masked, hit := maskAllSpans(s)
 	if hit {
 		noteFieldMask()
 	}
+	masked = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || r == 0x2028 || r == 0x2029 {
+			return '?'
+		}
+		return r
+	}, masked)
 	r := []rune(masked)
 	if len(r) > maxLabelRunes {
 		r = r[:maxLabelRunes]
