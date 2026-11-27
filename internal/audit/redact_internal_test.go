@@ -2,6 +2,7 @@ package audit
 
 import (
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -58,6 +59,9 @@ func TestMaskAllSpans_BoundStopsAtTheRunEnd(t *testing.T) {
 
 // A retry repairs the torn file itself, even after it was renamed.
 func TestSink_RetryRepairsTheHeldTornFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows cannot rename a file that is still open")
+	}
 	dir := t.TempDir()
 	path := dir + "/audit.jsonl"
 	if err := os.WriteFile(path, []byte("{\"se"), 0o600); err != nil {
