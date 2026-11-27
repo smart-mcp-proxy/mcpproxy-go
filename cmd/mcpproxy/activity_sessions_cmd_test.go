@@ -73,7 +73,7 @@ func TestActivitySessions_Table(t *testing.T) {
 		require.Contains(t, second, want, out)
 	}
 	require.NotContains(t, second, "Z*", "only a session whose start was trimmed is starred")
-	require.Contains(t, out, "* the start of this session is no longer stored")
+	require.Contains(t, out, "* the timeline of this session no longer reaches back to its start")
 	require.Contains(t, out, "Showing 2 of 2 sessions")
 	require.Contains(t, out, "mcpproxy activity session <id>")
 

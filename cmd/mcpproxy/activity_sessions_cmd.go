@@ -352,7 +352,7 @@ func runActivitySessions(params cliclient.WorkSessionListParams) error {
 	}
 	fmt.Println()
 	if truncated {
-		fmt.Println("* the start of this session is no longer stored (retention removed its oldest rows)")
+		fmt.Println("* the timeline of this session no longer reaches back to its start (retention trimmed it)")
 	}
 	fmt.Printf("Showing %d of %d sessions", len(list.Sessions), list.Total)
 	if list.Offset > 0 {
@@ -610,7 +610,7 @@ func printWorkSessionHeader(ws *contracts.WorkSession) {
 		ws.StartedAt.UTC().Format(workSessionTimeLayout), ws.LastActivityAt.UTC().Format(workSessionTimeLayout),
 		formatSessionDuration(ws.DurationMs), ws.Attempts, calls, failures)
 	if ws.TruncatedStartAt != nil {
-		fmt.Printf("Note: the start of this session is no longer stored: retention removed its rows up to %s.\n",
+		fmt.Printf("Note: the timeline of this session no longer reaches back to its start: retention trimmed it up to %s.\n",
 			ws.TruncatedStartAt.UTC().Format(workSessionTimeLayout))
 	}
 }
@@ -746,7 +746,7 @@ func printTimelineBodies(rows []contracts.WorkSessionTimelineRow) {
 	printed := false
 	heading := func() {
 		if !printed {
-			fmt.Println("\nBodies (capped here; -o json has them as they are stored):")
+			fmt.Println("\nBodies (capped here; -o json has them as the server returns them):")
 			printed = true
 		}
 	}

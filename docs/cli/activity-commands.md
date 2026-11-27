@@ -598,7 +598,7 @@ ID                   TOKEN     CLIENT       PROJECT  STARTED                DURA
 ws-4f2a91c07b3d55e1  ci-agent  claude-code  shop     2026-11-26 22:00:04Z   2h13m     412    3 (1 blocked)  2026-11-27 00:13:20Z  The upstream server could not be reached.
 ws-07e9c4dd3185bb35  ci-agent  claude-code  billing  2026-11-26 22:00:09Z*  3h2m      1960   1              2026-11-26 23:41:07Z  The upstream server needs a login.
 
-* the start of this session is no longer stored (retention removed its oldest rows)
+* the timeline of this session no longer reaches back to its start (retention trimmed it)
 Showing 2 of 2 sessions
 Timeline of one session: mcpproxy activity session <id>
 ```
@@ -694,9 +694,9 @@ Every failure with its context: mcpproxy activity session ws-4f2a91c07b3d55e1 --
 - The first column marks the counted row of a failed attempt: `FAIL`, or `BLOCK` when MCPProxy itself refused the call.
 - `KIND` is the row's kind as the endpoint names it (`call`, `internal_call`, `policy_decision`, `prompt`, `other`). Three kinds are not requests of the agent and are written in capitals so they stand apart: `UPSTREAM EVENT`, `SESSION START`, `SESSION END`. An upstream event from before the session started, shown because the server was already down, says so in `DETAIL`.
 - `#` is the row's index in the timeline. `ID` is the activity id, for `activity show <id>` and `--at row:<id>`.
-- Times are UTC, to the millisecond.
-- When retention removed the oldest rows, a note under the header says up to which time. When the session failed more often than the log still shows, a note gives both counts; failure numbers count the stored failures only.
-- With `--include-bodies` the argument and response bodies follow the table. Each is one line of JSON (the arguments as an object, the response as a quoted string, so a line break reads `\n`), capped at 2,000 characters. `-o json` prints a body as it is stored; the activity log itself shortens a response over its size limit and marks the row `response_truncated`. A row whose bodies were removed by retention says so.
+- Times are UTC. The `TIME` of a row is to the millisecond; the two times in the header are to the second.
+- When retention trimmed the start of the session's timeline, a note under the header says up to which time. When the session failed more often than the log still shows, a note gives both counts; failure numbers count the stored failures only.
+- With `--include-bodies` the argument and response bodies follow the table. Each is one line of JSON (the arguments as an object, the response as a quoted string, so a line break reads `\n`), capped at 2,000 characters. `-o json` prints a body as the server returns it, without this cap. That is not always the original text: the activity log shortens a response over its size limit (the row is marked `response_truncated`), and a value flagged as sensitive is returned masked. A row whose bodies were removed by retention says so.
 
 ### All failures of a session
 

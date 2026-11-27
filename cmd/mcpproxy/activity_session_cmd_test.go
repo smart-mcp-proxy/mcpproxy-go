@@ -77,7 +77,7 @@ func TestActivitySession_Table(t *testing.T) {
 	require.Contains(t, out, "120 calls")
 	require.Contains(t, out, "5 failures (1 blocked)")
 	// FR-061 and FR-043: what is no longer stored is said, not hidden.
-	require.Contains(t, out, "the start of this session is no longer stored")
+	require.Contains(t, out, "the timeline of this session no longer reaches back to its start")
 	require.Contains(t, out, "5 failures in its lifetime, 3 are still stored")
 	require.Contains(t, out, "Failure 1 of 3")
 	require.Contains(t, out, "rows 0-5 of 6")
