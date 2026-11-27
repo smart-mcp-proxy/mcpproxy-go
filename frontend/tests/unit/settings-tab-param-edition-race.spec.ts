@@ -81,9 +81,9 @@ describe('Settings ?tab=teams vs. late systemStore.status (review round 2, findi
     const wrapper = await mountSettings('/settings?tab=teams')
     await flushPromises()
 
-    // The user clicks over to General before the status frame arrives.
-    await wrapper.find('[data-test="settings-tab-general"]').trigger('click')
-    expect(wrapper.find('[data-test="settings-tab-general"]').classes()).toContain('tab-active')
+    // The user clicks over to Access and keys before the status frame arrives.
+    await wrapper.find('[data-test="settings-tab-security"]').trigger('click')
+    expect(wrapper.find('[data-test="settings-tab-security"]').classes()).toContain('tab-active')
 
     const systemStore = useSystemStore()
     // @ts-expect-error partial StatusUpdate is enough for this computed
@@ -92,7 +92,7 @@ describe('Settings ?tab=teams vs. late systemStore.status (review round 2, findi
 
     // The late-arriving status must not retroactively yank the user back to
     // the tab from the URL.
-    expect(wrapper.find('[data-test="settings-tab-general"]').classes()).toContain('tab-active')
+    expect(wrapper.find('[data-test="settings-tab-security"]').classes()).toContain('tab-active')
     wrapper.unmount()
   })
 
@@ -106,7 +106,8 @@ describe('Settings ?tab=teams vs. late systemStore.status (review round 2, findi
     await flushPromises()
 
     expect(wrapper.find('[data-test="settings-tab-teams"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="settings-tab-security"]').classes()).toContain('tab-active')
+    // Falls back to the default section, General (FR-050).
+    expect(wrapper.find('[data-test="settings-tab-general"]').classes()).toContain('tab-active')
     wrapper.unmount()
   })
 })

@@ -745,3 +745,10 @@ details.dropdown > summary::-webkit-details-marker { display: none; }
 .soft-panel.tone-error .soft-panel__title { color: var(--status-error); }
 .soft-panel.tone-review .soft-panel__title { color: var(--status-review); }
 .soft-panel.tone-busy .soft-panel__title { color: var(--status-busy); }
+
+/* Spec 134 FR-050: the active Settings section is brand-soft with brand-text. */
+.settings-nav-active,
+.settings-nav-active:hover {
+  background-color: var(--brand-soft);
+  color: var(--brand-text);
+}

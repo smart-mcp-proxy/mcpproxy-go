@@ -325,5 +325,12 @@ describe('OnboardingWizard import footer (Spec 109-ux-navigation-consistency FR-
 
     expect(wrapper.emitted('close')).toBeTruthy()
     expect(router.currentRoute.value.path).toBe('/settings')
+    // Spec 134 FR-050: names its section instead of relying on the default.
+    expect(router.currentRoute.value.query.tab).toBe('security')
+  })
+
+  it('the Settings summary link href names the security section (FR-050)', async () => {
+    const { wrapper } = await openServersTab(['memory'])
+    expect(wrapper.find('[data-test="security-defaults-summary"] a').attributes('href')).toContain('tab=security')
   })
 })

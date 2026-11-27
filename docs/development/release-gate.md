@@ -126,6 +126,10 @@ page disagree):
 - `shell-pr1.spec.ts`: Spec 134 PR 1 shell: skip link, command palette keys,
   phone menu overlay and focus, footer disclosure, theme menu by keyboard, View as
   placement, carried scope chips, the 390 px header and no dead shell links.
+- `settings-pr8.spec.ts`: Spec 134 PR 8: Settings opens on General, sections as a
+  side list (a select at 390 px), full field help one activation away, Save and
+  Discard in flow under the last field, `?tab=` and `?focus=` links, and the
+  profile editor's action row after the tool rules.
 - `profiles-clients.spec.ts`: Spec 108 Profiles and Clients screens, the goal
   flow, the binding-guard refusal, the Viewing chip, dialogs and layout.
 - `profiles-scope.spec.ts`: Spec 108 profile scope on Tools, Activity, Sessions
