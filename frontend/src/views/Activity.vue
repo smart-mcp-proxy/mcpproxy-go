@@ -3062,6 +3062,16 @@ const closeDetailDrawer = () => {
  * text and offered nothing (F25, #1046). Prefer the work session (Spec 082) and
  * fall back to the transport id, exactly as the filter itself accepts both.
  */
+// Spec 124: a session timeline opened from inside the page (a call's detail,
+// a list row) replaces what had the focus. Focus follows, to its heading. Not
+// on a page load: `ws` already in the address is not a change.
+watch(() => route.query.ws, async (id, before) => {
+  if (!id || before) return
+  await nextTick()
+  await nextTick()
+  document.querySelector<HTMLElement>('[data-test="timeline-heading"]')?.focus()
+})
+
 /** Spec 124: the row's work session, opened at this row. */
 const timelineLinkFor = (activity: ActivityRecord) =>
   scopeQuery.linkTo('activity', { view: 'sessions', ws: activity.work_session_id ?? '', at: `row:${activity.id}` })

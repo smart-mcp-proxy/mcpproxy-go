@@ -77,6 +77,7 @@ export interface FailureNavigation {
  */
 export function failureNavigation(
   page: Pick<WorkSessionTimelineResponse, 'rows' | 'position' | 'failure_index' | 'failure_total' | 'lifetime_failures'>,
+  at: string = '',
 ): FailureNavigation {
   const total = page.failure_total
   const index = page.failure_index
@@ -87,7 +88,12 @@ export function failureNavigation(
       next: undefined,
     }
   }
-  const onFailure = page.rows.some(row => row.index === page.position && row.failed === true)
+  const positioned = page.rows.find(row => row.index === page.position)
+  // The door found the position and then could not read the row (retention
+  // removed it in between): the row is missing from the page. A position that
+  // was asked for as a failure is that failure, not a row after it.
+  const askedForFailure = at === `failure:${index}` || (at === TIMELINE_AT_DEFAULT && index >= 1)
+  const onFailure = positioned ? positioned.failed === true : askedForFailure
   const next = index < total ? `failure:${index + 1}` : undefined
   if (onFailure) {
     return { label: `failure ${index} of ${total}`, prev: index > 1 ? `failure:${index - 1}` : undefined, next }

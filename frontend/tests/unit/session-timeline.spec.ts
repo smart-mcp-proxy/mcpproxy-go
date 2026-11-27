@@ -259,6 +259,74 @@ describe('Session timeline (Spec 124 FR-062)', () => {
     expect(detail).toContain('Request id: req-a14')
   })
 
+  it('shows why MCPProxy refused a call, in the row and in its details', async () => {
+    const page = timelinePage()
+    ;(page.rows[5] as any).bodies_removed = false
+    ;(page.rows[5] as any).activity.metadata = { decision: 'blocked', reason: 'Permission denied: the profile does not allow delete_repo' }
+    door.page = page
+    door.bodies = { ...page, rows: [page.rows[5]] }
+    const { wrapper } = await mountTimeline()
+    expect(rowAt(wrapper, 15).text()).toContain('Permission denied: the profile does not allow delete_repo')
+    await wrapper.get('[data-test="timeline-expand-15"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="timeline-detail-message-15"]').text()).toBe('Permission denied: the profile does not allow delete_repo')
+  })
+
+  it('Refresh drops bodies read earlier, so a row opened again shows what the door answers now', async () => {
+    const page = timelinePage()
+    const first = structuredClone(page.rows[4]) as any
+    first.activity.response = 'token=abc123'
+    door.bodies = { ...page, rows: [first] }
+    const { wrapper } = await mountTimeline()
+    await wrapper.get('[data-test="timeline-expand-14"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="timeline-detail-14"]').text()).toContain('token=abc123')
+
+    const masked = structuredClone(page.rows[4]) as any
+    masked.activity.response = 'token=***'
+    door.bodies = { ...page, rows: [masked] }
+    await wrapper.get('[data-test="timeline-refresh"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="timeline-detail-14"]').exists()).toBe(false)
+    expect(wrapper.get('[data-test="timeline-cli"]').text()).not.toContain('--include-bodies')
+    await wrapper.get('[data-test="timeline-expand-14"]').trigger('click')
+    await flushPromises()
+    const detail = wrapper.get('[data-test="timeline-detail-14"]').text()
+    expect(detail).toContain('token=***')
+    expect(detail).not.toContain('abc123')
+  })
+
+  it('the CLI command names the page on screen while another one is on its way', async () => {
+    const { wrapper, api } = await mountTimeline()
+    let answerNext!: (value: unknown) => void
+    api.getWorkSessionTimeline.mockImplementationOnce(() => new Promise(resolve => { answerNext = resolve }))
+    await wrapper.get('[data-test="timeline-next-failure"]').trigger('click')
+    await flushPromises()
+    // Still failure 2 on screen, so still failure 2 in the command.
+    expect(wrapper.get('[data-test="timeline-failure-label"]').text()).toBe('failure 2 of 5')
+    expect(wrapper.get('[data-test="timeline-cli"]').text()).toBe(`mcpproxy activity session ${WS_FAILED.id} --at failure:2`)
+    answerNext(timelinePage({ failure_index: 3, position: 15 }))
+    await flushPromises()
+    expect(wrapper.get('[data-test="timeline-cli"]').text()).toBe(`mcpproxy activity session ${WS_FAILED.id} --at failure:3`)
+  })
+
+  it('does not ask for bodies in the command when the opened row has left the page', async () => {
+    const page = timelinePage()
+    const withBodies = structuredClone(page.rows[4]) as any
+    withBodies.activity.arguments = { repo: 'octo/demo' }
+    door.bodies = { ...page, rows: [withBodies] }
+    const { wrapper } = await mountTimeline()
+    await wrapper.get('[data-test="timeline-expand-14"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="timeline-cli"]').text()).toContain('--include-bodies')
+    // The next page does not hold row a14.
+    door.page = timelinePage({ rows: page.rows.slice(5), position: 15, failure_index: 3 })
+    await wrapper.get('[data-test="timeline-load-earlier"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="timeline-detail-14"]').exists()).toBe(false)
+    expect(wrapper.get('[data-test="timeline-cli"]').text()).not.toContain('--include-bodies')
+  })
+
   it('says so when retention removed the bodies after the page was read', async () => {
     const page = timelinePage()
     door.bodies = { ...page, rows: [{ ...(page.rows[4] as any), bodies_removed: true }] }
@@ -397,7 +465,11 @@ describe('Session timeline (Spec 124 FR-062)', () => {
   it('says that the page filters do not narrow a timeline', async () => {
     setAvailableFeatures(['profile', 'client', 'token'])
     const scoped = await mountTimeline(`/activity?view=sessions&ws=${WS_FAILED.id}&client=cursor`)
-    expect(scoped.wrapper.get('[data-test="timeline-scope-note"]').text()).toContain('do not change this timeline')
+    expect(scoped.wrapper.get('[data-test="timeline-scope-note"]').text()).toContain('are not applied to it')
+    // So the link to the session's tool calls does not carry them either.
+    const calls = new URL(scoped.wrapper.get('[data-test="timeline-calls-link"]').attributes('href')!, 'http://x').searchParams
+    expect(calls.has('client')).toBe(false)
+    expect(calls.get('session')).toBe(WS_FAILED.id)
     const plain = await mountTimeline()
     expect(plain.wrapper.find('[data-test="timeline-scope-note"]').exists()).toBe(false)
     setAvailableFeatures([])
@@ -501,5 +573,13 @@ describe('work-session helpers', () => {
     expect(failureNavigation(timelinePage({ position: 10, failure_index: 0, failure_total: 0 }) as any)).toEqual({
       label: 'No failures left in the log', prev: undefined, next: undefined,
     })
+    // The positioned row is missing from the page (removed between the door's
+    // index pass and its read): a position asked for as a failure is that
+    // failure, so "previous" leads to the one before it and not to itself.
+    const missing = timelinePage({ rows: timelinePage().rows.filter(r => r.index !== 14) }) as any
+    expect(failureNavigation(missing, 'failure:2')).toEqual({ label: 'failure 2 of 5', prev: 'failure:1', next: 'failure:3' })
+    expect(failureNavigation(missing, 'row:a15')).toEqual({ label: 'after failure 2 of 5', prev: 'failure:2', next: 'failure:3' })
+    const firstMissing = timelinePage({ rows: [], position: 12, failure_index: 1 }) as any
+    expect(failureNavigation(firstMissing, 'first_failure')).toEqual({ label: 'failure 1 of 5', prev: undefined, next: 'failure:2' })
   })
 })

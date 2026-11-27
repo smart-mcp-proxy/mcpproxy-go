@@ -86,6 +86,20 @@ describe('timeline address in the scope contract (Spec 124 FR-063)', () => {
     expect(router.currentRoute.value.query.profile).toBeUndefined()
   })
 
+  it('two writes in one tick both land: the second builds on the first', async () => {
+    // "Clear Filters" removes the list filter, and the page's own write-back
+    // removes `status` right after it, before the first navigation finished.
+    const { scope, router } = await scopeQueryAt('/activity?view=sessions&failed=true&include_blocked=false&status=error')
+    scope.set({ failed: undefined, include_blocked: undefined })
+    scope.set({ status: undefined })
+    await flushPromises()
+    expect(router.currentRoute.value.query).toEqual({ view: 'sessions' })
+    // And a later write starts from the address as it now is.
+    scope.set({ failed: 'true' })
+    await flushPromises()
+    expect(router.currentRoute.value.query).toEqual({ view: 'sessions', failed: 'true' })
+  })
+
   it('never sends the timeline address to the activity REST request', async () => {
     const { scope } = await scopeQueryAt(`${ADDRESS}&failed=true&sort=last_failure&include_blocked=false`)
     const rest = scope.toRest()!

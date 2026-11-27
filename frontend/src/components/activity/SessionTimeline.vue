@@ -85,7 +85,7 @@
             <div class="flex-1"></div>
             <!-- FR-065: the session's rows in the Tool calls view. -->
             <router-link
-              :to="scopeQuery.linkTo('activity', { view: 'calls', session: sessionId })"
+              :to="callsLink"
               class="btn btn-sm btn-outline max-sm:min-h-11 border-[var(--ds-border)]"
               data-test="timeline-calls-link"
             >Tool calls of this session</router-link>
@@ -152,7 +152,7 @@
               class="btn btn-sm btn-outline gap-2 max-sm:min-h-11 border-[var(--ds-border)]"
               data-test="timeline-refresh"
               :disabled="loading"
-              @click="load()"
+              @click="refresh()"
             >
               <UiIcon name="refresh" class="w-4 h-4" :class="{ 'animate-spin': loading }" />
               Refresh
@@ -275,7 +275,7 @@
                           <dd class="inline break-all">{{ item.value }}</dd>
                         </div>
                       </dl>
-                      <p v-if="row.activity?.error_message && row.kind !== 'upstream_event'" class="text-sm break-words mb-2">{{ row.activity.error_message }}</p>
+                      <p v-if="detailMessage(row)" class="text-sm break-words mb-2" :data-test="`timeline-detail-message-${row.index}`">{{ detailMessage(row) }}</p>
 
                       <div :data-test="`timeline-bodies-${row.index}`">
                         <p v-if="row.bodies_removed || bodyState(row)?.removed" class="text-sm text-base-content/70">
@@ -409,6 +409,8 @@ function goTo(position: string): void {
 const before = ref(TIMELINE_CONTEXT_DEFAULT)
 const after = ref(TIMELINE_CONTEXT_DEFAULT)
 const page = ref<WorkSessionTimelineResponse | null>(null)
+/** The position and width of the page on screen, as opposed to the one being asked for. */
+const shown = ref({ at: TIMELINE_AT_DEFAULT, before: TIMELINE_CONTEXT_DEFAULT, after: TIMELINE_CONTEXT_DEFAULT })
 const loading = ref(false)
 const error = ref('')
 const notFound = ref(false)
@@ -423,9 +425,10 @@ async function load(): Promise<void> {
   const id = sessionId.value
   if (!id) return
   const seq = ++loadSeq
+  const asked = { at: at.value, before: before.value, after: after.value }
   loading.value = true
   try {
-    const response = await api.getWorkSessionTimeline(id, { at: at.value, before: before.value, after: after.value })
+    const response = await api.getWorkSessionTimeline(id, asked)
     if (seq !== loadSeq) return
     // Spec 124 US1 scenario 6: a session that never failed opens at its most
     // recent row. The door's default is the first failure, and with none it
@@ -436,6 +439,7 @@ async function load(): Promise<void> {
       return
     }
     page.value = response
+    shown.value = asked
     error.value = ''
     notFound.value = false
     if (scrollToPosition) {
@@ -471,6 +475,17 @@ watch([sessionId, at], () => {
   scrollToPosition = true
   void load()
 })
+
+/**
+ * Reads the page again. Bodies read earlier are dropped with it: the core may
+ * mask a response once its sensitive-data scan has finished, and a row that is
+ * opened again must show what the door answers now.
+ */
+function refresh(): void {
+  bodies.clear()
+  expanded.clear()
+  void load()
+}
 
 /** The first or the last stored row of the page: where a page past the door's
  * limit continues from. */
@@ -510,7 +525,7 @@ function loadLater(): void {
 const session = computed<WorkSession>(() => page.value!.session)
 
 const navigation = computed(() =>
-  page.value ? failureNavigation(page.value) : { label: '', prev: undefined, next: undefined })
+  page.value ? failureNavigation(page.value, shown.value.at) : { label: '', prev: undefined, next: undefined })
 
 const rangeText = computed(() => {
   const rows = page.value?.rows ?? []
@@ -577,9 +592,17 @@ const facts = computed<Fact[]>(() => {
   return out
 })
 
+/**
+ * FR-065: this session's rows in the Tool calls view. The page filters do not
+ * narrow a timeline, so they are not carried to the calls view either, where
+ * they would hide rows of the session that is on screen.
+ */
+const callsLink = computed(() =>
+  scopeQuery.linkTo('activity', { view: 'calls', session: sessionId.value, profile: '', client: '', token: '' }))
+
 const scopeNote = computed(() => {
   const applied = scopeQuery.chips.value.some(chip => chip.name === 'profile' || chip.name === 'client' || chip.name === 'token')
-  return applied ? 'The profile, client and token filters of the page narrow the list of sessions. They do not change this timeline.' : ''
+  return applied ? 'This timeline shows the whole session. The profile, client and token filters of the page are not applied to it.' : ''
 })
 
 // ---- rows ------------------------------------------------------------------
@@ -649,8 +672,14 @@ function rowMessage(row: WorkSessionTimelineRow): string {
   // A problem carries its fixed text as the row's error; a recovery, which is
   // no error, carries it in the metadata.
   if (row.kind === 'upstream_event') return a.error_message || (typeof a.metadata?.message === 'string' ? a.metadata.message : '')
-  if (row.failed || a.status === 'error' || a.status === 'blocked') return a.error_message || ''
+  // A refusal by MCPProxy keeps its explanation as the decision's reason.
+  if (row.failed || a.status === 'error' || a.status === 'blocked') return a.error_message || decisionReason(row)
   return ''
+}
+
+function decisionReason(row: WorkSessionTimelineRow): string {
+  const reason = row.kind === 'policy_decision' ? row.activity?.metadata?.reason : undefined
+  return typeof reason === 'string' ? reason : ''
 }
 
 function resultLabel(row: WorkSessionTimelineRow): string {
@@ -674,6 +703,12 @@ function durationText(row: WorkSessionTimelineRow): string {
   const ms = row.activity?.duration_ms
   if (typeof ms !== 'number' || row.kind === 'upstream_event') return ''
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(2)}s`
+}
+
+/** The full message of a row, in its details: an event already prints its own in the row. */
+function detailMessage(row: WorkSessionTimelineRow): string {
+  if (row.kind === 'upstream_event') return ''
+  return row.activity?.error_message || decisionReason(row)
 }
 
 function detailFacts(row: WorkSessionTimelineRow): { label: string; value: string }[] {
@@ -715,7 +750,7 @@ const rowKey = (row: WorkSessionTimelineRow): string => row.activity?.id ?? `i${
 const isExpanded = (row: WorkSessionTimelineRow): boolean => expanded.has(rowKey(row))
 const bodyState = (row: WorkSessionTimelineRow): BodyState | undefined => bodies.get(rowKey(row))
 /** True once the bodies of any row were shown: the CLI needs --include-bodies for the same view. */
-const bodiesShown = computed(() => [...expanded].some(key => !!bodies.get(key)?.record))
+const bodiesShown = computed(() => (page.value?.rows ?? []).some(row => isExpanded(row) && !!bodyState(row)?.record))
 
 function toggle(row: WorkSessionTimelineRow): void {
   const key = rowKey(row)
@@ -762,11 +797,13 @@ const argumentsText = (row: WorkSessionTimelineRow): string =>
 
 // ---- the same view from the command line (FR-064) --------------------------
 
+// The command of the page ON SCREEN: while another position or width is on
+// its way, it still names the rows the operator is looking at.
 const cliCommand = computed(() => timelineCliCommand({
   id: sessionId.value,
-  at: at.value,
-  before: before.value,
-  after: after.value,
+  at: shown.value.at,
+  before: shown.value.before,
+  after: shown.value.after,
   includeBodies: bodiesShown.value,
 }))
 

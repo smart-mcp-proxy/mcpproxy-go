@@ -56,10 +56,21 @@ async function mountAt(path: string) {
   return { wrapper, router, api }
 }
 
+/** Opens the filter popover (its open state is remembered per browser) and returns "Clear Filters". */
+async function clearFiltersButton(wrapper: Awaited<ReturnType<typeof mountAt>>['wrapper']) {
+  if (!wrapper.find('[data-test="activity-filter-popover"]').exists()) {
+    await wrapper.get('[data-test="activity-filters-toggle"]').trigger('click')
+  }
+  const button = wrapper.findAll('[data-test="activity-filter-popover"] button').find(b => b.text().includes('Clear Filters'))
+  expect(button, 'the popover offers Clear Filters').toBeTruthy()
+  return button!
+}
+
 describe('Activity Sessions view (Spec 124)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    window.localStorage.clear()
   })
 
   it('lists work sessions from their own door and issues no /activity request', async () => {
@@ -107,14 +118,23 @@ describe('Activity Sessions view (Spec 124)', () => {
   it('"Failed only" counts as a filter of the page: it is in the count and Clear Filters removes it', async () => {
     const { wrapper, router } = await mountAt('/activity?view=sessions&failed=true&include_blocked=false&sort=last_activity')
     expect(wrapper.get('[data-test="activity-filters-count"]').text()).toBe('1')
-    await wrapper.get('[data-test="activity-filters-toggle"]').trigger('click')
-    const clear = wrapper.findAll('[data-test="activity-filter-popover"] button').find(b => b.text().includes('Clear Filters'))!
-    await clear.trigger('click')
+    await (await clearFiltersButton(wrapper)).trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.query.failed).toBeUndefined()
     expect(router.currentRoute.value.query.include_blocked).toBeUndefined()
     // The order is not a filter.
     expect(router.currentRoute.value.query).toMatchObject({ view: 'sessions', sort: 'last_activity' })
+    wrapper.unmount()
+  })
+
+  it('Clear Filters removes "Failed only" together with another filter of the page', async () => {
+    // Clearing `status` makes the page write the address a second time; that
+    // write must not put the session filters back.
+    const { wrapper, router } = await mountAt('/activity?view=sessions&failed=true&include_blocked=false&status=error')
+    await (await clearFiltersButton(wrapper)).trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(router.currentRoute.value.query).toEqual({ view: 'sessions' })
     wrapper.unmount()
   })
 
@@ -133,6 +153,13 @@ describe('Activity Sessions view (Spec 124)', () => {
     expect(query.get('view')).toBe('sessions')
     expect(query.get('ws')).toBe(WS_FAILED.id)
     expect(query.get('at')).toBe('row:act-1')
+
+    // Following it moves the focus into the timeline that replaces the calls view.
+    await wrapper.get('[data-test="activity-open-timeline"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.find('[data-test="session-timeline"]').exists()).toBe(true)
+    expect(document.activeElement?.getAttribute('data-test')).toBe('timeline-heading')
     wrapper.unmount()
   })
 

@@ -256,7 +256,7 @@ describe('Work-session list (Spec 124 FR-060)', () => {
     const { wrapper } = await mountPanel()
     const row = wrapper.findAll('[data-test="work-sessions-row"]')[0]
     expect(row.get('[data-test="ws-last-failure"]').text()).toMatch(/\d{2}:\d{2}:00\.250/)
-    expect(row.get('[data-test="ws-last-failure"]').attributes('title')).toMatch(/^First failure: 2026-11-2\d \d{2}:\d{2}:00\.000$/)
+    expect(row.get('[data-test="ws-first-failure"]').text()).toMatch(/^first failure 2026-11-2\d \d{2}:\d{2}:00\.000$/)
     // Started and duration fold into the same cell below md.
     const started = row.get('[data-test="ws-started-narrow"]')
     expect(started.classes()).toContain('md:hidden')
@@ -265,6 +265,14 @@ describe('Work-session list (Spec 124 FR-060)', () => {
     expect(narrow.classes()).toContain('sm:hidden')
     expect(narrow.text()).toContain('The upstream server needs a login.')
     expect(narrow.text()).toMatch(/\d{2}:\d{2}:00\.250/)
+    expect(narrow.text()).toContain('auth · github:list_issues')
+    expect(narrow.text()).toMatch(/first failure 2026-11-2\d \d{2}:\d{2}:00\.000/)
+    // One failure: nothing to add to the time of the last one.
+    list.rows = [{ ...WS_FAILED, first_failure_at: WS_FAILED.last_failure.at }]
+    await wrapper.get('[data-test="work-sessions-refresh"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('[data-test="work-sessions-row"]')).toHaveLength(1)
+    expect(wrapper.find('[data-test="ws-first-failure"]').exists()).toBe(false)
   })
 
   it('rows of the previous page cannot be opened while the next one is on its way', async () => {
@@ -352,9 +360,14 @@ describe('Work-session list (Spec 124 FR-060)', () => {
   })
 
   it('does not send the unattributed filter, and says so', async () => {
-    const { wrapper, api } = await mountPanel('/activity?view=sessions&client=-')
+    const { wrapper, api } = await mountPanel('/activity?view=sessions&client=-&token=nightly-bot')
     expect(api.getWorkSessions.mock.calls[0][0].client).toBeUndefined()
     expect(wrapper.get('[data-test="work-sessions-unattributed-note"]').text()).toContain('Client: unattributed')
+    // The Calls link does not carry the filter the list did not apply; it keeps the one it did.
+    const calls = new URL(wrapper.get(`[data-test="ws-calls-link-${WS_FAILED.id}"]`).attributes('href')!, 'http://x').searchParams
+    expect(calls.has('client')).toBe(false)
+    expect(calls.get('token')).toBe('nightly-bot')
+    expect(calls.get('session')).toBe(WS_FAILED.id)
   })
 
   it('names the reason when the list is empty', async () => {
@@ -371,6 +384,7 @@ describe('Work-session list (Spec 124 FR-060)', () => {
     list.fail = new Error('core said no')
     const { wrapper, api } = await mountPanel()
     expect(wrapper.get('[data-test="work-sessions-error"]').text()).toContain('core said no')
+    expect(wrapper.get('[role="status"]').text()).toBe('Could not load the sessions: core said no')
     list.fail = null
     await wrapper.get('[data-test="work-sessions-retry"]').trigger('click')
     await flushPromises()

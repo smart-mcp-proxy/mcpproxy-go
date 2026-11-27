@@ -75,7 +75,7 @@
         </p>
 
         <p class="sr-only" role="status" aria-live="polite" aria-atomic="true">
-          {{ loading ? 'Loading sessions' : `Showing ${sessions.length} of ${total} sessions` }}
+          {{ error ? `Could not load the sessions: ${error}` : loading ? 'Loading sessions' : `Showing ${sessions.length} of ${total} sessions` }}
         </p>
 
         <div v-if="error" class="alert alert-error" data-test="work-sessions-error">
@@ -157,7 +157,9 @@
                   <!-- Below sm the last-failure cell folds into this one. -->
                   <div v-if="ws.last_failure" class="sm:hidden text-xs mt-0.5" data-test="ws-reason-narrow">
                     <div class="break-words">{{ reasonText(ws) }}</div>
+                    <div v-if="reasonWhere(ws)" class="text-base-content/70 break-words">{{ reasonWhere(ws) }}</div>
                     <div class="text-base-content/70 break-words">{{ formatDateTimeMillis(ws.last_failure.at) }}</div>
+                    <div v-if="firstFailure(ws)" class="text-base-content/70 break-words">first failure {{ firstFailure(ws) }}</div>
                   </div>
                   <!-- FR-061: in the cell that shows at every width. -->
                   <div v-if="ws.truncated_start_at" class="mt-0.5">
@@ -179,7 +181,7 @@
                      Tool calls view, at every width. -->
                 <td class="text-right">
                   <router-link
-                    :to="scopeQuery.linkTo('activity', { view: 'calls', session: ws.id })"
+                    :to="callsLink(ws.id)"
                     class="link font-mono max-sm:inline-flex max-sm:min-h-11 max-sm:min-w-11 max-sm:items-center max-sm:justify-end"
                     :title="`Tool calls of this session`"
                     :aria-label="`${ws.attempts} calls: open the Tool calls of session ${sessionName(ws)}`"
@@ -195,12 +197,12 @@
                     <div class="text-sm truncate" data-test="ws-reason" :title="`${reasonText(ws)}${reasonWhere(ws) ? ` (${reasonWhere(ws)})` : ''}`">
                       {{ reasonText(ws) }}<span v-if="reasonWhere(ws)" class="text-base-content/70"> · {{ reasonWhere(ws) }}</span>
                     </div>
-                    <div
-                      class="text-xs text-base-content/70 truncate"
-                      data-test="ws-last-failure"
-                      :title="ws.first_failure_at ? `First failure: ${formatDateTimeMillis(ws.first_failure_at)}` : undefined"
-                    >
+                    <div class="text-xs text-base-content/70 truncate" data-test="ws-last-failure">
                       {{ formatDateTimeMillis(ws.last_failure.at) }} · {{ formatRelative(ws.last_failure.at) }}
+                    </div>
+                    <!-- With more than one failure, when the first one happened. -->
+                    <div v-if="firstFailure(ws)" class="text-xs text-base-content/70 truncate" data-test="ws-first-failure">
+                      first failure {{ firstFailure(ws) }}
                     </div>
                   </template>
                   <span v-else class="text-base-content/60" data-test="ws-last-failure">—</span>
@@ -523,6 +525,23 @@ function clientNote(ws: WorkSession): string {
 
 function sessionName(ws: WorkSession): string {
   return ws.run_name || sessionTokenName(ws) || (ws.client_id ? clientLabel(ws.client_id) : '') || ws.client_name || ws.surface || ws.id
+}
+
+/** When the first failure happened, if it is not also the last one. */
+function firstFailure(ws: WorkSession): string {
+  if (!ws.first_failure_at || !ws.last_failure || ws.first_failure_at === ws.last_failure.at) return ''
+  return formatDateTimeMillis(ws.first_failure_at)
+}
+
+/**
+ * FR-065: the session's rows in the Tool calls view. A page filter that this
+ * list did not apply is not carried along: the list showed the session without
+ * it, and the calls view would apply it and could come up empty.
+ */
+function callsLink(id: string): RouteLocationRaw {
+  const patch: Record<string, string> = { view: 'calls', session: id }
+  for (const chip of scopeChips.value) if (notApplied(chip)) patch[chip.name] = ''
+  return scopeQuery.linkTo('activity', patch)
 }
 
 /** Red for a failure that is not a policy block, amber when blocks are all there is. */
