@@ -565,7 +565,7 @@ func TestActivitySession_FailuresWalkGivesUpWhenTheSessionKeepsChanging(t *testi
 		okResp(failuresPage([]string{failuresRow(600, true)}, 600, 2, 2, 3, true)),
 	})
 	out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--failures", "--before", "0")
-	require.ErrorContains(t, err, "changed while they were being read")
+	require.ErrorContains(t, err, "changed while its failures were being read")
 	require.Equal(t, ExitCodeGeneralError, classifyError(err))
 	require.Len(t, rec.all(), 6, "three passes")
 	require.NotContains(t, out, "01ROW")
@@ -609,4 +609,156 @@ func TestActivitySession_FailuresWithoutARowAreCountedNotShown(t *testing.T) {
 		require.Equal(t, 400, got.Failures[0].Index)
 		require.Equal(t, 1, got.FailuresNotReturned)
 	})
+}
+
+// Rows are addressed by their index in the timeline, and an index moves when
+// retention removes an older row between two requests, even when no failure
+// is removed. Two pages then name different rows by one index. The walk sees
+// the contradiction and starts over; it never lets one row replace another.
+func TestActivitySession_FailuresWalkRestartsWhenIndexesMove(t *testing.T) {
+	named := func(index int, id string) string {
+		return timelineRow(index, "call", "2026-11-26T22:00:00Z", `"failed": true`, callActivity(id, "2026-11-26T22:00:00Z", "github", "t", "error", ""))
+	}
+	rec := newSequencedRecorder(t, "GET /api/v1/work-sessions/ws-aaa/timeline", []cannedResponse{
+		// Failure A at row 10 (bodies are asked for, so the page reaches no further).
+		okResp(failuresPage([]string{named(10, "01FAILA")}, 10, 1, 2, 2, true)),
+		// One older row was removed: failure B, once at row 11, is at row 10.
+		okResp(failuresPage([]string{named(10, "01FAILB")}, 10, 2, 2, 2, false)),
+		// Second pass.
+		okResp(failuresPage([]string{named(9, "01FAILA")}, 9, 1, 2, 2, true)),
+		okResp(failuresPage([]string{named(10, "01FAILB")}, 10, 2, 2, 2, false)),
+	})
+	out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--failures", "--before", "0", "--include-bodies")
+	require.NoError(t, err)
+	require.Len(t, rec.all(), 4)
+	require.Equal(t, 1, strings.Count(out, "01FAILA"), out)
+	require.Equal(t, 1, strings.Count(out, "01FAILB"), out)
+	require.Contains(t, out, "Failures 1-2 of 2")
+	require.NotContains(t, out, "not returned")
+}
+
+// The same when the timeline got shorter between two requests.
+func TestActivitySession_FailuresWalkRestartsWhenRowsAreRemoved(t *testing.T) {
+	shorter := func(page string) string { return strings.Replace(page, `"total_rows": 900`, `"total_rows": 880`, 1) }
+	rec := newSequencedRecorder(t, "GET /api/v1/work-sessions/ws-aaa/timeline", []cannedResponse{
+		okResp(failuresPage([]string{failuresRow(40, true)}, 40, 1, 2, 2, true)),
+		okResp(shorter(failuresPage([]string{failuresRow(680, true)}, 680, 2, 2, 2, false))),
+		okResp(shorter(failuresPage([]string{failuresRow(20, true)}, 20, 1, 2, 2, true))),
+		okResp(shorter(failuresPage([]string{failuresRow(680, true)}, 680, 2, 2, 2, false))),
+	})
+	out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--failures", "--before", "0")
+	require.NoError(t, err)
+	require.Len(t, rec.all(), 4)
+	require.NotContains(t, out, "01ROW040", "a row of the abandoned pass is not shown")
+	require.Contains(t, out, "01ROW020")
+	require.Contains(t, out, "01ROW680")
+}
+
+// The door knew the next failure a moment ago and now refuses its number: an
+// older failure was removed in between. That is a changed session, not a
+// wrong command, and the walk starts over.
+func TestActivitySession_FailuresWalkRestartsWhenTheNextNumberIsRefused(t *testing.T) {
+	noSuchFailure := refuse(http.StatusBadRequest, `{"success":false,"error":"Invalid at. No such failure or row in this session","request_id":"r-5"}`)
+	t.Run("recovers", func(t *testing.T) {
+		rec := newSequencedRecorder(t, "GET /api/v1/work-sessions/ws-aaa/timeline", []cannedResponse{
+			okResp(failuresPage([]string{failuresRow(10, true)}, 10, 1, 2, 2, true)),
+			noSuchFailure,
+			okResp(failuresPage([]string{failuresRow(300, true)}, 300, 1, 1, 2, false)),
+		})
+		out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--failures", "--before", "0")
+		require.NoError(t, err)
+		require.Len(t, rec.all(), 3)
+		require.Contains(t, out, "Failure 1 of 1")
+		require.Contains(t, out, "01ROW300")
+		require.NotContains(t, out, "01ROW010")
+	})
+	t.Run("a refusal that stays is reported in the door's words", func(t *testing.T) {
+		rec := newSequencedRecorder(t, "GET /api/v1/work-sessions/ws-aaa/timeline", []cannedResponse{
+			okResp(failuresPage([]string{failuresRow(10, true)}, 10, 1, 2, 2, true)), noSuchFailure,
+			okResp(failuresPage([]string{failuresRow(10, true)}, 10, 1, 2, 2, true)), noSuchFailure,
+			okResp(failuresPage([]string{failuresRow(10, true)}, 10, 1, 2, 2, true)), noSuchFailure,
+		})
+		out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--failures", "--before", "0")
+		require.ErrorContains(t, err, "No such failure")
+		require.ErrorContains(t, err, "r-5")
+		require.Len(t, rec.all(), 6)
+		require.NotContains(t, out, "01ROW")
+	})
+}
+
+// A page can lack a row in its middle (not readable with this credential, or
+// removed since the door found it). That row may have been a failure, so the
+// failures after the hole are not numbered by counting on: the door is asked,
+// and it says which number each has. The heading names the failures that are
+// shown, not a range that claims the one that is not.
+func TestActivitySession_FailuresAreNotNumberedAcrossAMissingRow(t *testing.T) {
+	pages := []cannedResponse{
+		// Failure 1 at row 10. Row 12 is missing; rows 13 and 14 failed.
+		okResp(failuresPage([]string{failuresRow(10, true), failuresRow(11, false), failuresRow(13, true), failuresRow(14, true)}, 10, 1, 4, 4, false)),
+		// "failure:2" is the missing row 12. The rows after it are numbered from it.
+		okResp(failuresPage([]string{failuresRow(13, true), failuresRow(14, true)}, 12, 2, 4, 4, false)),
+	}
+	t.Run("json", func(t *testing.T) {
+		rec := newSequencedRecorder(t, "GET /api/v1/work-sessions/ws-aaa/timeline", pages)
+		out, _, err := runCLI(t, workSessionsTestRoot, "json", "session", "ws-aaa", "--failures", "--before", "0")
+		require.NoError(t, err)
+		requests := rec.all()
+		require.Len(t, requests, 2)
+		q, _ := url.ParseQuery(requests[1].RawQuery)
+		require.Equal(t, "failure:2", q.Get("at"), "the failure after the first is asked for, not counted past the hole")
+		var got struct {
+			Failures []struct {
+				Number int `json:"number"`
+				Index  int `json:"index"`
+			} `json:"failures"`
+			FailuresNotReturned int `json:"failures_not_returned"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+		require.Len(t, got.Failures, 3)
+		require.Equal(t, []int{1, 3, 4}, []int{got.Failures[0].Number, got.Failures[1].Number, got.Failures[2].Number})
+		require.Equal(t, []int{10, 13, 14}, []int{got.Failures[0].Index, got.Failures[1].Index, got.Failures[2].Index})
+		require.Equal(t, 1, got.FailuresNotReturned)
+	})
+	t.Run("table", func(t *testing.T) {
+		newSequencedRecorder(t, "GET /api/v1/work-sessions/ws-aaa/timeline", pages)
+		// With two rows of context the windows of failures 1 and 3 touch
+		// (rows 8-10 and 11-13), so they share a heading.
+		out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--failures", "--before", "2")
+		require.NoError(t, err)
+		require.Contains(t, out, "Failures 1, 3, 4 of 4")
+		require.NotContains(t, out, "Failures 1-4 of 4")
+		require.Contains(t, out, "1 of the 4 stored failures were not returned")
+	})
+}
+
+// A body line is JSON and stays JSON after the characters a terminal would
+// act on are escaped: U+0085 becomes \u0085, never the \x85 of a table cell.
+func TestActivitySession_BodyLineIsValidJSON(t *testing.T) {
+	body := `{"session": ` + timelineSessionJSON + `, "rows": [` +
+		timelineRow(7, "call", "2026-11-26T22:00:03Z", "",
+			callActivity("01CALL2", "2026-11-26T22:00:03Z", "github", "read", "success",
+				`"arguments": {"q": "a\u202eb"}, "response": "next\u0085line \u001b[2J"`)) + `],
+	  "position": 7, "total_rows": 9, "failure_index": 0, "failure_total": 0, "lifetime_failures": 0, "has_before": false, "has_after": false}`
+	newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/work-sessions/ws-aaa/timeline": okResp(body),
+	})
+	out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--include-bodies")
+	require.NoError(t, err)
+	require.NotContains(t, out, "\x1b")
+	require.NotContains(t, out, "\u0085")
+	require.NotContains(t, out, "\u202e")
+	require.NotContains(t, out, `\x85`)
+	var arguments map[string]string
+	var response string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if rest, ok := strings.CutPrefix(line, "arguments:"); ok {
+			require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(rest)), &arguments), line)
+		}
+		if rest, ok := strings.CutPrefix(line, "response:"); ok {
+			require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(rest)), &response), line)
+		}
+	}
+	require.Equal(t, "a\u202eb", arguments["q"], "the line decodes to the value the call carried")
+	require.Equal(t, "next\u0085line \x1b[2J", response)
 }

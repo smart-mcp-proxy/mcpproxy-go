@@ -557,7 +557,7 @@ mcpproxy activity sessions [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--failed` | `false` | Only sessions with at least one failure |
-| `--no-blocked` | `false` | With `--failed`: do not count a policy block (a refusal by MCPProxy itself) as a failure |
+| `--no-blocked` | `false` | With `--failed`: leave out sessions whose only failures are policy blocks (refusals by MCPProxy itself). It changes which sessions are listed, not the `FAILURES` and `LAST FAILURE` shown for them |
 | `--token` | | Filter by agent token name |
 | `--client` | | Filter by client id |
 | `--profile` | | Filter by profile (administrators only) |
@@ -619,6 +619,7 @@ Timeline of one session: mcpproxy activity session <id>
 |------|---------|
 | 0 | Success (an empty list is a success) |
 | 1 | Invalid flag value, the daemon is not running, or the daemon refused the request |
+| 4 | The configuration file (`--config`) could not be read |
 
 ---
 
@@ -681,14 +682,14 @@ Failure 1 of 3 · rows 37-41 of 418
        38  2026-11-26 22:41:09.480Z  call            github:get_issue     success  187ms     01JFXYZ123ABC0000000000038  -
        39  2026-11-26 22:41:10.002Z  UPSTREAM EVENT  github               error    -         01JFXYZ123ABC0000000000039  connection_lost · MCPX_UPSTREAM_CONNECTION_LOST · The connection to the server was lost · x3
 FAIL   40  2026-11-26 22:41:10.731Z  call            github:create_issue  error    30.0s     01JFXYZ123ABC0000000000040  network: The upstream server could not be reached.
-       41  2026-11-26 22:41:12.004Z  call            github:list_issues   error    1ms       01JFXYZ123ABC0000000000041  network: The upstream server could not be reached.
+FAIL   41  2026-11-26 22:41:12.004Z  call            github:list_issues   error    1ms       01JFXYZ123ABC0000000000041  network: The upstream server could not be reached.
 
 More rows are stored (earlier rows: raise --before; later rows: raise --after, up to 250; or move with --at failure:<n>, --at row:<id>, --at end).
 Every failure with its context: mcpproxy activity session ws-4f2a91c07b3d55e1 --failures
 ```
 
 - The first column marks the counted row of a failed attempt: `FAIL`, or `BLOCK` when MCPProxy itself refused the call.
-- Rows that are not calls carry their kind in capitals: `UPSTREAM EVENT`, `SESSION START`, `SESSION END`. An upstream event from before the session started, shown because the server was already down, says so in `DETAIL`.
+- `KIND` is the row's kind as the endpoint names it (`call`, `internal_call`, `policy_decision`, `prompt`, `other`). Three kinds are not requests of the agent and are written in capitals so they stand apart: `UPSTREAM EVENT`, `SESSION START`, `SESSION END`. An upstream event from before the session started, shown because the server was already down, says so in `DETAIL`.
 - `#` is the row's index in the timeline. `ID` is the activity id, for `activity show <id>` and `--at row:<id>`.
 - Times are UTC, to the millisecond.
 - When retention removed the oldest rows, a note under the header says up to which time. When the session failed more often than the log still shows, a note gives both counts; failure numbers count the stored failures only.
@@ -728,18 +729,19 @@ With `-o json` or `-o yaml` this view is one object:
 
 This is the output of `--failures --before 1`, with `session` and each `activity` shortened here. `rows` holds every context row in timeline order, each once, in the shape of the timeline endpoint's rows; a failure's own row is part of it. `failures` gives the number of each failure among the stored ones and the `index` of its row. Two fields appear only when they apply: `earlier_failures_not_stored` is `true` when retention removed earlier failures, and `failures_not_returned` counts stored failures the server named without returning their row (removed while the session was read, or not readable with the caller's credential).
 
-Failures are read by their number among the stored ones. If retention removes an older failure while the command runs, the numbers move; the command then starts over, and after three attempts it exits 1 and asks you to run it again.
+Failures are read by their number among the stored ones, and rows by their index. If retention removes older rows of the session while the command runs, numbers and indexes move; the command then starts over, and after three attempts it exits 1 and asks you to run it again. Under a heading, a failure that was not returned is left out of the numbers (`Failures 1, 3 of 3`).
 
 ### Output (JSON)
 
-Without `--failures`, `-o json` prints the data object of `GET /api/v1/work-sessions/{id}/timeline` with its values unchanged: `session`, `rows`, `position`, `total_rows`, `failure_index`, `failure_total`, `lifetime_failures`, `has_before`, `has_after`. `-o yaml` prints the same fields, with terminal control characters shown as visible text, as for `activity sessions`. See the [REST API reference](../api/rest-api.md#work-sessions).
+Without `--failures`, `-o json` prints the data object of `GET /api/v1/work-sessions/{id}/timeline` with its values unchanged: `session`, `rows`, `position`, `total_rows`, `failure_index`, `failure_total`, `lifetime_failures`, `has_before`, `has_after`, and `earlier_failures_not_stored` when retention removed earlier failures. `-o yaml` prints the same fields, with terminal control characters shown as visible text, as for `activity sessions`. See the [REST API reference](../api/rest-api.md#work-sessions).
 
 ### Exit Codes
 
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | Invalid flag value, the daemon is not running, the session was not found, or the daemon refused the request |
+| 1 | Invalid flag value, the daemon is not running, the session was not found, the daemon refused the request, or (`--failures`) the session kept changing while it was read |
+| 4 | The configuration file (`--config`) could not be read |
 
 An id that matches no session exits 1 with:
 
@@ -761,7 +763,7 @@ Several agents ran overnight. Two commands reach the failure:
 # 1. The runs that failed, newest failure first
 mcpproxy activity sessions --failed --since -24h
 
-# 2. Open one at its first failure, with the 20 calls before it
+# 2. Open one at its first failure, with the 20 rows before it
 mcpproxy activity session ws-4f2a91c07b3d55e1
 ```
 

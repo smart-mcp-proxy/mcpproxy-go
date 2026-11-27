@@ -184,3 +184,15 @@ func TestClient_WorkSessionNonJSONBodyIsCapped(t *testing.T) {
 	require.Error(t, err)
 	require.Less(t, len(err.Error()), 400)
 }
+
+// A success without a data object is an error, not an empty timeline.
+func TestClient_WorkSessionSuccessWithoutData(t *testing.T) {
+	for _, body := range []string{`{"success":true,"data":null}`, `{"success":true}`} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		_, err := NewClient(srv.URL, nil).GetWorkSessionTimeline(context.Background(), "ws-1", WorkSessionTimelineParams{})
+		srv.Close()
+		require.ErrorContains(t, err, "no data", body)
+	}
+}

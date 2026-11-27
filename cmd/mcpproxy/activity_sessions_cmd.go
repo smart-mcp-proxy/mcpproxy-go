@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -262,13 +263,19 @@ func workSessionError(err error) error {
 		return cliRefusalError{fmt.Errorf("work session %q not found: no session with this id is stored, or it is not yours to read. List sessions with: mcpproxy activity sessions",
 			termSafeText(notFound.ID))}
 	}
+	// The text below is the daemon's, or a body that was not the daemon's JSON
+	// (a proxy's error page). It is shown as text on one line: a line break
+	// in it must not read as a second message of the CLI.
 	var apiErr *cliclient.APIError
 	if errors.As(err, &apiErr) {
-		return cliRefusalError{errors.New(termSafeText(apiErr.FormatWithRequestID()))}
+		msg := termEscape(apiErr.Message, false)
+		if apiErr.HasRequestID() {
+			id := termEscape(apiErr.RequestID, false)
+			msg += fmt.Sprintf("\n\nRequest ID: %s\nUse 'mcpproxy activity list --request-id %s' to find related logs.", id, id)
+		}
+		return cliRefusalError{errors.New(msg)}
 	}
-	// Anything else can quote a body that was not the daemon's JSON (a
-	// proxy's error page): it is shown as text too.
-	return cliRefusalError{errors.New(termSafeText(err.Error()))}
+	return cliRefusalError{errors.New(termEscape(err.Error(), false))}
 }
 
 // workSessionLineSeparators shows the Unicode line and paragraph separators
@@ -305,7 +312,9 @@ func runActivitySessions(params cliclient.WorkSessionListParams) error {
 	}
 	if len(list.Sessions) == 0 {
 		if list.Total > 0 {
-			fmt.Printf("No sessions at offset %d: %d sessions match. Lower --offset.\n", list.Offset, list.Total)
+			// The door answers with its own, clamped offset; the one that
+			// was asked for is the one to name.
+			fmt.Printf("No sessions at offset %d: %d sessions match. Lower --offset.\n", params.Offset, list.Total)
 			return nil
 		}
 		fmt.Println("No work sessions found")
@@ -703,13 +712,15 @@ func printTimelineBodies(rows []contracts.WorkSessionTimelineRow) {
 // escaped, and the line is capped at workSessionBodyRunes. It does not go
 // through sanitizeCell, whose cap is the 200 runes of a table cell.
 func timelineBodyText(v any) string {
-	var buf strings.Builder
+	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(v); err != nil {
 		return "(not printable: " + termEscape(err.Error(), false) + ")"
 	}
-	safe := termEscape(strings.TrimSuffix(buf.String(), "\n"), false)
+	// What a terminal would still act on becomes its \uXXXX escape, which is
+	// JSON too: a line that was not capped still parses.
+	safe := string(jsonTermSafe(bytes.TrimSuffix(buf.Bytes(), []byte("\n"))))
 	if runes := []rune(safe); len(runes) > workSessionBodyRunes {
 		return string(runes[:workSessionBodyRunes]) + "..."
 	}
@@ -748,24 +759,51 @@ type workSessionFailuresView struct {
 // timelineFetcher reads one page of the timeline positioned at `at`.
 type timelineFetcher func(at string, before, after int) (*contracts.WorkSessionTimelineResponse, error)
 
-// errWorkSessionChanged reports that the stored failures of a session moved
-// while they were being walked.
-var errWorkSessionChanged = errors.New("the stored failures of this session changed while they were being read (retention removed some of them). Run the command again")
+// errWorkSessionChanged reports that the rows of a session moved while its
+// failures were being walked.
+var errWorkSessionChanged = errors.New("this session changed while its failures were being read (retention removed some of its rows). Run the command again")
+
+// walkRestart ends one pass of the walk because the session changed under it.
+// cause is the door's refusal when that is how the change showed.
+type walkRestart struct{ cause error }
+
+func (e *walkRestart) Error() string {
+	if e.cause != nil {
+		return e.cause.Error()
+	}
+	return errWorkSessionChanged.Error()
+}
 
 // walkSessionFailures reads every stored failure of a session with `before`
 // rows ahead of it and `after` rows behind it.
 //
-// Failures are addressed by their number among the stored ones, and that
-// number moves when retention removes an older failure in the middle of the
-// walk. A walk that sees it happen is thrown away and started over, so a
-// result never mixes two numberings.
+// Failures are addressed by their number among the stored ones, and rows by
+// their index in the timeline. Both move when retention removes older rows in
+// the middle of the walk. A pass that sees it happen is thrown away and the
+// walk starts over, so a result never mixes two numberings.
 func walkSessionFailures(fetch timelineFetcher, before, after, lookahead int) (*workSessionFailuresView, error) {
 	for attempt := 1; ; attempt++ {
 		view, err := walkSessionFailuresOnce(fetch, before, after, lookahead)
-		if !errors.Is(err, errWorkSessionChanged) || attempt == workSessionWalkAttempts {
+		var restart *walkRestart
+		if !errors.As(err, &restart) {
 			return view, err
 		}
+		if attempt == workSessionWalkAttempts {
+			if restart.cause != nil {
+				return nil, restart.cause
+			}
+			return nil, errWorkSessionChanged
+		}
 	}
+}
+
+// timelineRowKey identifies a row across pages: its activity id, or its kind
+// for the two rows that are derived from the session and have none.
+func timelineRowKey(row *contracts.WorkSessionTimelineRow) string {
+	if row.Activity != nil && row.Activity.ID != "" {
+		return row.Activity.ID
+	}
+	return "kind:" + row.Kind
 }
 
 // walkSessionFailuresOnce is one pass of the walk.
@@ -802,19 +840,35 @@ func walkSessionFailuresOnce(fetch timelineFetcher, before, after, lookahead int
 	}
 	// Failures that are gone from the log: the lifetime count is exact, the
 	// stored count is what the door walked. Retention removes the oldest rows,
-	// so when this number grows every stored failure has moved down by as
-	// much. A failure recorded while the walk runs raises both counts and
-	// leaves it as it was.
+	// so when this number changes every stored failure has a new number. A
+	// failure recorded while the walk runs raises both counts and leaves it
+	// as it was.
 	removed := page.LifetimeFailures - page.FailureTotal
 
 	kept := map[int]contracts.WorkSessionTimelineRow{}
-	failureAt := map[int]int{} // row index -> failure number
-	keep := func(page *contracts.WorkSessionTimelineResponse, failureIndex int) {
+	indexOf := map[string]int{} // row key -> the index it was kept at
+	failureAt := map[int]int{}  // row index -> failure number
+	// keep stores the rows of a page that are context of the failure at
+	// failureIndex. It reports false when a row contradicts one kept from an
+	// earlier page: another row at the same index, or the same row at another
+	// index. Rows were then removed ahead of them between the two requests and
+	// the indexes of the two pages do not describe the same timeline.
+	keep := func(page *contracts.WorkSessionTimelineResponse, failureIndex int) bool {
 		for i := range page.Rows {
-			if idx := page.Rows[i].Index; idx >= failureIndex-before && idx <= failureIndex+after {
-				kept[idx] = page.Rows[i]
+			row := &page.Rows[i]
+			if row.Index < failureIndex-before || row.Index > failureIndex+after {
+				continue
 			}
+			key := timelineRowKey(row)
+			if prev, ok := kept[row.Index]; ok && timelineRowKey(&prev) != key {
+				return false
+			}
+			if at, ok := indexOf[key]; ok && at != row.Index {
+				return false
+			}
+			kept[row.Index], indexOf[key] = *row, row.Index
 		}
+		return true
 	}
 
 	requested := 1
@@ -844,18 +898,33 @@ func walkSessionFailuresOnce(fetch timelineFetcher, before, after, lookahead int
 		covered := 1
 		if anchored {
 			failureAt[page.Position] = number
-			keep(page, page.Position)
+			if !keep(page, page.Position) {
+				return nil, &walkRestart{}
+			}
 		}
+		previous := page.Position
 		for i := range page.Rows {
 			row := &page.Rows[i]
-			if !row.Failed || row.Index <= page.Position {
+			if row.Index <= page.Position {
+				continue
+			}
+			if row.Index != previous+1 {
+				// A row is missing here. It may have been a failure, so the
+				// number of the next one is not known from this page: it is
+				// the next position, and the door says which it is.
+				break
+			}
+			previous = row.Index
+			if !row.Failed {
 				continue
 			}
 			if row.Index+after > last && page.HasAfter {
 				break // its forward context is cut: it is the next position
 			}
 			failureAt[row.Index] = number + covered
-			keep(page, row.Index)
+			if !keep(page, row.Index) {
+				return nil, &walkRestart{}
+			}
 			covered++
 		}
 
@@ -869,11 +938,22 @@ func walkSessionFailuresOnce(fetch timelineFetcher, before, after, lookahead int
 			break
 		}
 		requested = next
+		rowsBefore := page.TotalRows
 		if page, err = fetch("failure:"+strconv.Itoa(next), before, lookahead); err != nil {
+			// The door knew this failure a moment ago. A refusal now (no such
+			// failure) is how a session that lost rows in between answers.
+			var notFound *cliclient.WorkSessionNotFoundError
+			var apiErr *cliclient.APIError
+			if !errors.As(err, &notFound) && errors.As(err, &apiErr) {
+				return nil, &walkRestart{cause: err}
+			}
 			return nil, err
 		}
-		if page.LifetimeFailures-page.FailureTotal != removed {
-			return nil, errWorkSessionChanged
+		// Rows of a session are only ever added at its end or removed from its
+		// start: fewer rows, or a new distance between the lifetime and the
+		// stored failure count, means indexes and numbers have moved.
+		if page.TotalRows < rowsBefore || page.LifetimeFailures-page.FailureTotal != removed {
+			return nil, &walkRestart{}
 		}
 	}
 
@@ -936,11 +1016,7 @@ func runActivitySessionFailures(id string, before, after int, includeBodies bool
 	}
 	for _, group := range groupFailureContexts(view) {
 		fmt.Println()
-		if group.first == group.last {
-			fmt.Printf("Failure %d of %d\n", group.first, view.FailureTotal)
-		} else {
-			fmt.Printf("Failures %d-%d of %d\n", group.first, group.last, view.FailureTotal)
-		}
+		fmt.Println(failureGroupHeading(group.numbers, view.FailureTotal))
 		if err := printTimelineRows(group.rows, includeBodies); err != nil {
 			return err
 		}
@@ -951,8 +1027,26 @@ func runActivitySessionFailures(id string, before, after int, includeBodies bool
 // failureContextGroup is a run of rows that is the context of one failure, or
 // of several whose contexts overlap or touch.
 type failureContextGroup struct {
-	first, last int // failure numbers
-	rows        []contracts.WorkSessionTimelineRow
+	numbers []int // the failures shown in the group, ascending
+	rows    []contracts.WorkSessionTimelineRow
+}
+
+// failureGroupHeading names the failures of a group: "Failure 3 of 7",
+// "Failures 1-3 of 7" for a run, and "Failures 1, 3 of 7" when one in between
+// is not shown, so the heading never claims a failure that is not under it.
+func failureGroupHeading(numbers []int, total int) string {
+	if len(numbers) == 1 {
+		return fmt.Sprintf("Failure %d of %d", numbers[0], total)
+	}
+	first, last := numbers[0], numbers[len(numbers)-1]
+	if last-first == len(numbers)-1 {
+		return fmt.Sprintf("Failures %d-%d of %d", first, last, total)
+	}
+	parts := make([]string, len(numbers))
+	for i, n := range numbers {
+		parts[i] = strconv.Itoa(n)
+	}
+	return fmt.Sprintf("Failures %s of %d", strings.Join(parts, ", "), total)
 }
 
 // groupFailureContexts splits the walked rows where the context of one
@@ -964,11 +1058,12 @@ func groupFailureContexts(view *workSessionFailuresView) []failureContextGroup {
 	for _, f := range view.Failures {
 		from, to := f.Index-view.Before, f.Index+view.After
 		if len(groups) == 0 || from > end+1 {
-			groups = append(groups, failureContextGroup{first: f.Number, last: f.Number})
+			groups = append(groups, failureContextGroup{})
+			end = to
 		}
 		g := &groups[len(groups)-1]
-		g.last = f.Number
-		if to > end || len(g.rows) == 0 {
+		g.numbers = append(g.numbers, f.Number)
+		if to > end {
 			end = to
 		}
 		for next < len(view.Rows) && view.Rows[next].Index <= end {

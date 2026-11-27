@@ -236,12 +236,27 @@ func TestActivitySessions_TableEscapesLineSeparators(t *testing.T) {
 // An offset past the last session is not "nothing matches".
 func TestActivitySessions_OffsetPastTheEnd(t *testing.T) {
 	newRESTRecorder(t, map[string]cannedResponse{
+		// The door clamps the offset it reports to the number of matches.
 		"GET /api/v1/work-sessions": okResp(`{"sessions":[],"total":10,"limit":25,"offset":10}`),
 	})
-	out, _, err := runCLI(t, workSessionsTestRoot, "table", "sessions", "--offset", "10")
+	out, _, err := runCLI(t, workSessionsTestRoot, "table", "sessions", "--offset", "100")
 	require.NoError(t, err)
 	require.NotContains(t, out, "No work sessions found")
-	require.Contains(t, out, "No sessions at offset 10: 10 sessions match")
+	require.Contains(t, out, "No sessions at offset 100: 10 sessions match", "the offset that was asked for is the one named")
+}
+
+// A line break in the daemon's text must not read as a second message of the
+// CLI.
+func TestActivitySessions_RefusalIsOneLine(t *testing.T) {
+	newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/work-sessions": refuse(http.StatusBadRequest, `{"success":false,"error":"Request denied\nShowing 0 of 0 sessions\tok","request_id":"r\n1"}`),
+	})
+	_, _, err := runCLI(t, workSessionsTestRoot, "table", "sessions")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Request denied")
+	require.NotContains(t, err.Error(), "denied\nShowing")
+	require.NotContains(t, err.Error(), "\t")
+	require.NotContains(t, err.Error(), "r\n1")
 }
 
 // A body that is not the daemon's JSON (a proxy's error page) is quoted as

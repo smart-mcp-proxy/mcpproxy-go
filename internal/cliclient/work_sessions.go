@@ -1,6 +1,7 @@
 package cliclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -157,6 +158,10 @@ func (c *Client) workSessionGet(ctx context.Context, path string, query url.Valu
 			return &WorkSessionNotFoundError{APIError: apiErr, ID: id}
 		}
 		return apiErr
+	}
+	// A success without a data object is not an empty result.
+	if data := bytes.TrimSpace(env.Data); len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		return fmt.Errorf("API returned status %d with no data", resp.StatusCode)
 	}
 	if err := json.Unmarshal(env.Data, out); err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)

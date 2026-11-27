@@ -1243,7 +1243,9 @@ WS_ID=""
 for _ in $(seq 1 40); do
     curl -s --max-time 10 $CURL_CA_OPTS -H "X-API-Key: $API_KEY" \
         "${API_BASE}/work-sessions?run=${WS_RUN}&failed=true" > "$TEST_RESULTS_FILE"
-    WS_ID=$(jq -r '.data.sessions[0].id // empty' < "$TEST_RESULTS_FILE" 2>/dev/null)
+    # Activity rows are written asynchronously: wait until both failures of
+    # the run are stored, not only until the session exists.
+    WS_ID=$(jq -r '.data.sessions[0] | select(.failures >= 2) | .id // empty' < "$TEST_RESULTS_FILE" 2>/dev/null)
     [ -n "$WS_ID" ] && break
     sleep 0.25
 done
@@ -1479,7 +1481,9 @@ if [ -n "$CLI_WS_ID" ]; then
     RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" --failures --before 2 -o json 2>&1)
     if echo "$RESPONSE" | jq -e '. as $d | ($d.failures | length) >= 2 and ($d.failures | length) == $d.failure_total
             and ([$d.rows[].index] | length == (unique | length))
-            and (([$d.failures[].index] - [$d.rows[] | select(.failed == true) | .index]) | length == 0)
+            and ([$d.failures[].number] == [range(1; ($d.failures | length) + 1)])
+            and ([$d.failures[].index] | length == (unique | length))
+            and ([$d.failures[].index] == [$d.rows[] | select(.failed == true) | .index])
             and ($d.rows | map(select(.index < $d.failures[0].index)) | length == 2)
             and ($d.rows | all(.index as $i | any($d.failures[]; .index - 2 <= $i and $i <= .index)))' >/dev/null 2>&1; then
         log_pass "CLI: activity session --failures walks the failures"
