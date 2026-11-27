@@ -190,6 +190,13 @@ func (f FieldPath) render() (string, bool) {
 		// to report; the root pointer "" names "a field changed".
 		return "", true
 	}
+	// Segments are masked one by one; a credential shape can still form
+	// across a '/' (e.g. "Bearer " + "/description"). The sanitizer would
+	// rewrite that pointer silently, so collapse it to its root instead.
+	if _, hit := maskAllSpans(out); hit && len(segs) > 1 {
+		noteFieldMask()
+		return "/" + escapeSeg(segs[0]), true
+	}
 	if utf8.RuneCountInString(out) > maxPointerLength && len(segs) > 0 {
 		return "/" + escapeSeg(segs[0]), true
 	}

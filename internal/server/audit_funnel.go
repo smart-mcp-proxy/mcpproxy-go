@@ -341,11 +341,13 @@ func isPostDispatchBlockKey(reasonKey string) bool {
 // business (counter + rate-limited log) and never surface to the caller.
 func (p *MCPProxyServer) auditWrite(line audit.Line, err error) {
 	if err != nil {
+		audit.NoteBuildFailure()
 		p.logger.Warn("audit: line rejected by builder", zap.Error(err))
 		return
 	}
 	raw, err := line.JSON()
 	if err != nil {
+		audit.NoteBuildFailure()
 		p.logger.Warn("audit: line not serialisable", zap.Error(err))
 		return
 	}

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net"
 	"net/mail"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -431,11 +432,12 @@ func fitAdminBudget(f map[string]interface{}, fullChanges int) error {
 // containsPrivateKey reports a private-key block header anywhere in s
 // (contract §Target: no byte of such a label is serialized).
 func containsPrivateKey(s string) bool {
-	if !strings.Contains(s, "-----BEGIN") {
-		return false
-	}
-	return strings.Contains(s, "PRIVATE KEY") || strings.Contains(s, "PGP PRIVATE KEY BLOCK")
+	return privateKeyHeader.MatchString(s)
 }
+
+// privateKeyHeader is a PEM private-key block header (RSA, EC, OPENSSH,
+// ENCRYPTED, PKCS#8 …) or a PGP private-key block header.
+var privateKeyHeader = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----`)
 
 // renderLabel applies the label order: private-key check on the original,
 // mask, then the 64-rune cap. ok=false means the label must not be

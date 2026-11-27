@@ -503,6 +503,13 @@ func TestAdminDoorRegistry_ListsEveryFixerAfterStartup(t *testing.T) {
 	for _, k := range diagnostics.FixerKeys() {
 		require.True(t, rows["fixer "+k], "diagnostics fixer %q registered at startup has no registry row", k)
 	}
+	live := map[string]bool{}
+	for _, k := range diagnostics.FixerKeys() {
+		live["fixer "+k] = true
+	}
+	for branch := range rows {
+		require.True(t, live[branch], "registry row %q names a fixer that is no longer registered", branch)
+	}
 }
 
 // The Web UI's own header classifies the surface as web.

@@ -759,3 +759,27 @@ func TestNewAdminAction_NoneTakesConfigFileOnly(t *testing.T) {
 		t.Fatal("a policy decision is internal, never none")
 	}
 }
+
+func TestChange_CredentialAcrossSegmentsCollapses(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
+	in.Changes = []audit.Change{audit.Withheld(audit.Path("profiles", "Bearer ", "description"), audit.WithheldValue)}
+	line, obj := mustAdmin(t, in)
+	raw, _ := line.JSON()
+	if out, hit := audit.SanitizeLine(raw); hit || string(out) != string(raw) {
+		t.Fatalf("the sanitizer must not rewrite a pointer: %s", raw)
+	}
+	ch := obj["changes"].([]interface{})[0].(map[string]interface{})
+	if ch["field"] != "/profiles" || ch["field_masked"] != true {
+		t.Fatalf("got %v", ch)
+	}
+}
+
+func TestRenderLabel_CertificateHeaderIsNotAPrivateKey(t *testing.T) {
+	in := tokenRotateInput()
+	in.ClientName = "-----BEGIN CERTIFICATE----- (PRIVATE KEY stored separately)"
+	_, obj := mustAdmin(t, in)
+	if obj["client"].(map[string]interface{})["name"] == nil {
+		t.Fatal("a certificate header is not a private-key block")
+	}
+}

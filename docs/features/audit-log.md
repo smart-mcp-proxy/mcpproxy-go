@@ -285,7 +285,7 @@ Example (the CLI over the tray socket rotating a token):
 | `outcome` | ✔ | `success` — the effect committed |
 | `changes` | optional | `[{field, before?, after?}]`, `[{field, withheld: "secret"\|"value"}]`, or a name-list diff `[{field, added?, removed?, added_count, removed_count, truncated?}]` (today only `/allowed_servers`, whose `*` sentinel is shown). `field` is a JSON Pointer. A value appears only for typed, non-free-text fields (booleans, closed enums, bounded integers, timestamps, display prefixes, counts, name lists); every other value is withheld, with **no** value and **no** hash. Capped at 128 entries (`changes_truncated`, `changes_count`) |
 | `request_id_masked` | optional | `true` when a credential-shaped `request_id` was masked (that line's join is lost) |
-| `trigger`, `policy` | iff the proxy decided or observed | `trigger` iff `caller.kind` is `none` or `internal` (`config_file`, `admission`, `policy`, `startup`, `schedule`); `policy` iff `trigger: policy` |
+| `trigger`, `policy` | iff the proxy decided or observed | `trigger` iff `caller.kind` is `none` or `internal`: `none` (an observed external edit) takes `config_file` only; `internal` takes `config_file`, `admission`, `policy`, `startup` or `schedule`; `policy` iff `trigger: policy` |
 | `client.surface` | optional | `web`\|`macos`\|`cli`\|`mcp`\|`api` — the caller-asserted surface (`X-MCPProxy-Surface` / `X-MCPProxy-Client`), classified at the ingress; untrusted, like `client.name` |
 
 An `admin_action` line never carries `surface`, `operation`, `decision`, `disclosed`,
