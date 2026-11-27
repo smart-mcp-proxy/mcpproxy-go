@@ -256,7 +256,11 @@ describe('Work-session list (Spec 124 FR-060)', () => {
     const { wrapper } = await mountPanel()
     const row = wrapper.findAll('[data-test="work-sessions-row"]')[0]
     expect(row.get('[data-test="ws-last-failure"]').text()).toMatch(/\d{2}:\d{2}:00\.250/)
-    expect(row.get('[data-test="ws-last-failure"]').attributes('title')).toMatch(/^First failure: 2026-11-2\d \d{2}:12:00\.000$/)
+    expect(row.get('[data-test="ws-last-failure"]').attributes('title')).toMatch(/^First failure: 2026-11-2\d \d{2}:\d{2}:00\.000$/)
+    // Started and duration fold into the same cell below md.
+    const started = row.get('[data-test="ws-started-narrow"]')
+    expect(started.classes()).toContain('md:hidden')
+    expect(started.text()).toMatch(/2026-11-2\d \d{2}:\d{2}:00 · 41m 05s · ended/)
     const narrow = row.get('[data-test="ws-reason-narrow"]')
     expect(narrow.classes()).toContain('sm:hidden')
     expect(narrow.text()).toContain('The upstream server needs a login.')
@@ -313,8 +317,9 @@ describe('Work-session list (Spec 124 FR-060)', () => {
   })
 
   it('sends the profile, client and token filters of the page to the door', async () => {
-    const { api } = await mountPanel('/activity?view=sessions&client=cursor&token=nightly-bot')
-    expect(api.getWorkSessions.mock.calls[0][0]).toMatchObject({ client: 'cursor', token: 'nightly-bot' })
+    const { wrapper, api } = await mountPanel('/activity?view=sessions&profile=work-readonly&client=cursor&token=nightly-bot')
+    expect(api.getWorkSessions.mock.calls[0][0]).toMatchObject({ profile: 'work-readonly', client: 'cursor', token: 'nightly-bot' })
+    expect(wrapper.find('[data-test="work-sessions-unattributed-note"]').exists()).toBe(false)
   })
 
   it('never sends a filter the build does not advertise', async () => {

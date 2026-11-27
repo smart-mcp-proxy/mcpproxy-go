@@ -94,7 +94,7 @@ Above the table:
 
 - **Failed only** keeps the sessions that have at least one failure. With it on, **Include blocked** decides whether a call MCPProxy itself refused (quarantine, a profile, a rate limit) counts as a failure. Switch it off to see only sessions where something else failed.
 - **Sort** orders by last activity or by last failure, newest first. With "Failed only" on, the list reads newest failure first unless you choose otherwise.
-- The filter, the order and the paging are applied by the server, so the list is exact however long the log is. The profile, client and token filters of the page ("View as", the Filters popover) narrow the list too. The page reads the list again every 30 seconds while Auto-refresh is on.
+- The filter, the order and the paging are applied by the server, so the list is exact however long the log is. The profile, client and token filters of the page ("View as", the Filters popover) narrow the list too, with two exceptions that a line under the toolbar names when they apply: "unattributed" has no meaning for work sessions, and a signed-in user of the server edition cannot filter by profile. The page reads the list again every 30 seconds while Auto-refresh is on.
 
 The filter and the order are part of the address (`failed=true`, `include_blocked=false`, `sort=last_failure` or `sort=last_activity` when it is not the default), so a filtered list can be bookmarked. "Clear Filters" in the Filters popover switches "Failed only" off as well.
 
@@ -118,7 +118,7 @@ The table of MCP connections that this tab used to show (capabilities, token cou
 - **Refresh** reads the same page again, for a session that is still running.
 - **Tool calls of this session** opens the Tool calls view filtered by the session. From there, a call's detail panel has **Open in session timeline**, which opens the timeline at that call.
 
-**What retention changes.** A session is listed for `session_retention_days` (7 by default). Its counts are lifetime facts and stay exact. When retention has removed rows, the timeline says so instead of showing a shorter history as if it were complete:
+**What retention changes.** A session is listed for at most `session_retention_days` (7 by default). While it is listed, its counts are lifetime facts and stay exact. Under the record or size cap a whole session can be removed before that, oldest last activity first; its address then shows "Session not found". When retention has removed rows, the timeline says so instead of showing a shorter history as if it were complete:
 
 - "The start of this session is no longer in the log" appears at the top when the first rows are gone, and the list row carries "Start trimmed".
 - "This session had N failures in all. M are still in the log" appears when failures were removed. The failure steps then count the M that are left.

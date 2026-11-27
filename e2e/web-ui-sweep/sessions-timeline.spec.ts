@@ -90,7 +90,17 @@ const call = (id: string, ms: number, extra: Record<string, unknown> = {}) => ({
   id, type: 'tool_call', status: 'success', timestamp: at(ms), server_name: 'github', tool_name: 'list_issues', duration_ms: 42, request_id: `req-${id}`, ...extra,
 })
 
-function fixturePage(failureIndex: number) {
+function fixturePage(failureIndex: number, before = 20) {
+  const page = fixtureBase(failureIndex)
+  // A wider request reaches one more row; the door then has nothing earlier.
+  if (before > 20) {
+    page.rows.unshift({ index: 39, kind: 'call', at: at(-9_000), activity: call('f39', -9_000, { tool_name: 'search_issues' }) })
+    page.has_before = false
+  }
+  return page
+}
+
+function fixtureBase(failureIndex: number): any {
   return {
     session: {
       id: FIXTURE_WS, token_name: 'nightly-bot', client_name: 'overnight-agent', project_name: 'payments', surface: 'mcp',
@@ -146,7 +156,8 @@ async function mockTimeline(page: Page): Promise<string[]> {
     const position = new URL(route.request().url()).searchParams.get('at') || ''
     asked.push(position)
     const failureIndex = position === 'failure:3' ? 3 : 2
-    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: fixturePage(failureIndex) }) })
+    const before = Number(new URL(route.request().url()).searchParams.get('before') ?? 20)
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: fixturePage(failureIndex, before) }) })
   })
   return asked
 }
@@ -164,8 +175,12 @@ test('two actions from the list to the first failure: "Failed only", then the ro
   await expect(page.locator('[data-test="work-sessions-table"]')).toBeVisible()
 
   // Action 1: Failed only. The filter is the door's, and it lands in the address.
+  const filtered = page.waitForResponse((response) => /\/api\/v1\/work-sessions\?/.test(response.url()) && response.url().includes('failed=true'))
   await page.locator('[data-test="work-sessions-failed-toggle"]').check()
   await expect(page).toHaveURL(/[?&]failed=true/)
+  // The rows of the unfiltered list stay on screen, inert, until the filtered answer is shown.
+  await filtered
+  await expect(page.locator('[data-test="work-sessions-table-wrap"]')).not.toHaveAttribute('aria-busy', 'true')
   // Failed sessions read newest failure first.
   await expect(page.locator('[data-test="work-sessions-sort"]')).toHaveValue('last_failure')
   const row = page.locator(`[data-test="work-sessions-row"][data-session="${seeded}"]`)
@@ -192,6 +207,8 @@ test('two actions from the list to the first failure: "Failed only", then the ro
   await expect(page).toHaveURL(new RegExp(`[?&]ws=${seeded}`))
   const positioned = page.locator('[data-test="timeline-row"][data-position="true"]')
   await expect(positioned).toHaveAttribute('data-failed', 'true')
+  // The operator lands ON the failure: it is on screen without scrolling.
+  await expect(positioned).toBeInViewport()
   await expect(positioned).toContainText(`${SERVER}:no_such_tool_spec_124`)
   await expect(positioned).toContainText('Blocked')
   await expect(positioned.locator('[data-test="timeline-time"]')).toHaveText(/^\d{2}:\d{2}:\d{2}\.\d{3}$/)
@@ -242,11 +259,19 @@ test('a session row keeps its link to the Tool calls view filtered by the sessio
   for (const request of seen) expect(new URL(request).searchParams.get('work_session_id'), request).toBe(seeded)
 
   // And the way back: a call's detail opens its session timeline at that row.
-  await page.locator('[data-test="activity-row"] button[data-test^="activity-open-"]').first().click()
+  // Not the first failure, which is where a dropped position would land.
+  const opener = page.locator('[data-test="activity-row"]', { hasText: 'sweep 124 after the failure' }).or(page.locator('[data-test="activity-row"]')).locator('button[data-test^="activity-open-"]').first()
+  const rowId = (await opener.getAttribute('data-test'))!.replace('activity-open-', '')
+  await opener.click()
   await page.locator('[data-test="activity-open-timeline"]').click()
   await expect(page).toHaveURL(new RegExp(`[?&]ws=${seeded}`))
-  await expect(page).toHaveURL(/[?&]at=row(:|%3A)/)
-  await expect(page.locator('[data-test="timeline-row"][data-position="true"]')).toHaveCount(1)
+  expect(new URL(page.url()).searchParams.get('at')).toBe(`row:${rowId}`)
+  const landed = page.locator('[data-test="timeline-row"][data-position="true"]')
+  await expect(landed).toHaveCount(1)
+  await expect(landed).not.toHaveAttribute('data-failed', 'true')
+  const landedIndex = await landed.getAttribute('data-index')
+  await landed.locator(`[data-test="timeline-expand-${landedIndex}"]`).click()
+  await expect(page.locator(`[data-test="timeline-detail-${landedIndex}"]`)).toContainText(`Row id: ${rowId}`)
 })
 
 test('timeline rows: an upstream event above the failure it explains, retention notes, failure steps', async ({ page }) => {
@@ -258,12 +283,17 @@ test('timeline rows: an upstream event above the failure it explains, retention 
   const row = (index: number) => page.locator(`[data-test="timeline-row"][data-index="${index}"]`)
   await expect(row(43)).toHaveAttribute('data-position', 'true')
   await expect(row(43)).toHaveAttribute('aria-current', 'true')
+  await expect(row(39)).toHaveCount(0)
   await expect(row(43)).toContainText('The upstream server needs a login.')
 
   // The event sits one row above the failed call, 600 ms earlier, and says what happened.
   await expect(row(42)).toHaveAttribute('data-kind', 'upstream_event')
   await expect(row(42)).toContainText('Token refresh failed')
   await expect(row(42)).toContainText('MCPX_OAUTH_REFRESH_FAILED')
+  // In time order, oldest first: the cause is ABOVE the call it explains.
+  const order = await page.locator('[data-test="timeline-row"]').evaluateAll((rows) => rows.map((r) => Number(r.getAttribute('data-index'))))
+  expect(order).toEqual([...order].sort((a, b) => a - b))
+  expect(order.indexOf(43) - order.indexOf(42), 'the event row sits directly above the failed call').toBe(1)
   const [eventTime, failureTime] = [await row(42).locator('[data-test="timeline-time"]').innerText(), await row(43).locator('[data-test="timeline-time"]').innerText()]
   expect(eventTime.slice(-4)).toBe('.650')
   expect(failureTime.slice(-4)).toBe('.250')
@@ -298,13 +328,19 @@ test('timeline rows: an upstream event above the failure it explains, retention 
   await expect(page).toHaveURL(/[?&]at=failure(:|%3A)3/)
   await expect(page.locator('[data-test="timeline-failure-label"]')).toHaveText('failure 3 of 5')
   expect(asked.at(-1)).toBe('failure:3')
+  // The highlight moved with it.
+  await expect(row(44)).toHaveAttribute('data-position', 'true')
+  await expect(row(43)).not.toHaveAttribute('data-position', 'true')
   await expect(page.locator('[data-test="timeline-cli"]')).toHaveText(`mcpproxy activity session ${FIXTURE_WS} --at failure:3`)
 
   // Load earlier rows: the same position, a wider page.
   const wider = page.waitForRequest((request) => request.url().includes(`/work-sessions/${FIXTURE_WS}/timeline`) && request.url().includes('before=70'))
   await page.locator('[data-test="timeline-load-earlier"]').click()
   await wider
-  await expect(page.locator('[data-test="timeline-load-later"]')).toHaveCount(0)
+  // The wider page holds a row the first one did not, around the same position.
+  await expect(row(39)).toContainText('github:search_issues')
+  await expect(row(44)).toHaveAttribute('data-position', 'true')
+  await expect(page.locator('[data-test="timeline-cli"]')).toHaveText(`mcpproxy activity session ${FIXTURE_WS} --at failure:3 --before 70`)
 
   // The Sessions tab leaves the timeline for the list.
   await page.locator('[data-test="activity-view-tab-sessions"]').click()
@@ -338,14 +374,28 @@ test('the connections table is still there, one level down', async ({ page }) =>
 test('390 px: list and timeline fit, controls are 44 px tall', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await mockTimeline(page)
-  const small = () => page.locator('[data-test="work-sessions"] button, [data-test="work-sessions"] a.btn, [data-test="work-sessions"] summary, [data-test="session-timeline"] button, [data-test="session-timeline"] a.btn').evaluateAll((els) =>
+  const small = () => page.locator('[data-test="work-sessions"] button, [data-test="work-sessions"] a.btn, [data-test="work-sessions"] a[data-test^="ws-calls-link-"], [data-test="work-sessions"] select, [data-test="work-sessions"] label, [data-test="work-sessions"] summary, [data-test="session-timeline"] button, [data-test="session-timeline"] a.btn').evaluateAll((els) =>
     // What a closed <details> holds is not shown, though Chromium still gives it a box.
     els.filter((el) => { const r = (el as HTMLElement).getBoundingClientRect(); const closed = el.tagName !== 'SUMMARY' && el.closest('details:not([open])'); return !closed && r.width > 0 && r.height > 0 && r.height < 43.5 }).map((el) => `${el.tagName}.${(el as HTMLElement).className}`.slice(0, 80)))
 
-  await open(page, '/activity?view=sessions')
+  await open(page, '/activity?view=sessions&failed=true')
   await expect(page.locator('[data-test="work-sessions"]')).toBeVisible()
   expect(await sidewaysScroll(page), 'list: page scrolls sideways').toBeLessThanOrEqual(0)
   expect(await small(), 'list controls under 44 px').toEqual([])
+  if (SERVER) {
+    // A populated row shows every fact of FR-060 at this width, folded into
+    // the cells that are left, and keeps the FR-065 link.
+    const phoneRow = page.locator(`[data-test="work-sessions-row"][data-session="${seeded}"]`)
+    await expect(phoneRow).toBeVisible()
+    await expect(phoneRow.locator('[data-test="ws-client"]')).toBeVisible()
+    await expect(phoneRow.locator('[data-test="ws-started-narrow"]')).toBeVisible()
+    await expect(phoneRow.locator('[data-test="ws-started-narrow"]')).toContainText(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} · \d+(ms|s)/)
+    await expect(phoneRow.locator('[data-test="ws-reason-narrow"]')).toBeVisible()
+    await expect(phoneRow.locator('[data-test="ws-reason-narrow"]')).toContainText(/\d{2}:\d{2}:\d{2}\.\d{3}/)
+    await expect(phoneRow.locator('[data-test="ws-failures"]')).toContainText('1')
+    await expect(phoneRow.locator(`[data-test="ws-calls-link-${seeded}"]`)).toBeVisible()
+    await expect(phoneRow.locator(`[data-test="ws-open-${seeded}"]`)).toBeVisible()
+  }
   // No cell is cut off: the table fits its wrapper and the Timeline button is whole.
   const fit = await page.evaluate(() => {
     const table = document.querySelector('[data-test="work-sessions-table"]')
@@ -359,6 +409,7 @@ test('390 px: list and timeline fit, controls are 44 px tall', async ({ page }) 
       clippedHeads: heads.filter((th) => th.scrollWidth > (th as HTMLElement).clientWidth + 1).map((th) => th.textContent?.trim()),
     }
   })
+  if (SERVER) expect(fit, 'the seeded run is listed, so there is a table').not.toBeNull()
   if (fit) {
     expect(fit.wrap, 'list table scrolls sideways at 390 px').toBeLessThanOrEqual(0)
     expect(fit.buttonRight, 'Timeline button past the table edge').toBeLessThanOrEqual(0)
@@ -386,10 +437,15 @@ test('dark theme: list and timeline', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await mockTimeline(page)
   await open(page, '/activity?view=sessions', 'dark')
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
   await expect(page.locator('[data-test="work-sessions"]')).toBeVisible()
   await shot(page, 'sessions-list-1440-dark')
   await open(page, `/activity?view=sessions&ws=${FIXTURE_WS}&at=failure:2`)
   await expect(page.locator('[data-test="timeline-row"][data-position="true"]')).toBeVisible()
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
+  // The failed row is tinted with the dark theme's token, not the light one.
+  const failedSurface = await page.locator('[data-test="timeline-row"][data-index="43"] td').first().evaluate((td) => getComputedStyle(td).backgroundColor)
+  expect(failedSurface).not.toBe('rgba(0, 0, 0, 0)')
   await shot(page, 'timeline-fixture-1440-dark')
   await page.evaluate(() => window.localStorage.removeItem('mcpproxy-theme'))
 })

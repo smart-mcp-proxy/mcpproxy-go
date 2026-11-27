@@ -73,7 +73,7 @@
               <dd class="break-words">
                 <router-link v-if="fact.to" :to="fact.to" class="link link-hover">{{ fact.value }}</router-link>
                 <template v-else>{{ fact.value }}</template>
-                <span v-if="fact.note" class="text-xs text-base-content/70"> · {{ fact.note }}</span>
+                <div v-if="fact.note" class="text-xs text-base-content/70">{{ fact.note }}</div>
               </dd>
             </div>
           </dl>

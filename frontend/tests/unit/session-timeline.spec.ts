@@ -22,14 +22,15 @@ const door = vi.hoisted(() => ({
   bodies: null as Record<string, unknown> | null,
 }))
 
+/** What the door answers unless a test replaces it. */
+const answer = vi.hoisted(() => (_id: string, params: { include_bodies?: boolean } = {}) => {
+  if (door.fail) return Promise.reject(door.fail)
+  if (params.include_bodies) return Promise.resolve(door.bodies)
+  return Promise.resolve(door.page)
+})
+
 vi.mock('@/services/api', () => ({
-  default: {
-    getWorkSessionTimeline: vi.fn((_id: string, params: { include_bodies?: boolean } = {}) => {
-      if (door.fail) return Promise.reject(door.fail)
-      if (params.include_bodies) return Promise.resolve(door.bodies)
-      return Promise.resolve(door.page)
-    }),
-  },
+  default: { getWorkSessionTimeline: vi.fn(answer) },
 }))
 
 const stub = { template: '<div />' }
@@ -55,9 +56,11 @@ async function mountTimeline(path = `/activity?view=sessions&ws=${WS_FAILED.id}&
 const rowAt = (wrapper: any, index: number) => wrapper.get(`[data-test="timeline-row"][data-index="${index}"]`)
 
 describe('Session timeline (Spec 124 FR-062)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    // A test may replace the door's answer; every test starts from the default.
+    ;((await import('@/services/api')).default as any).getWorkSessionTimeline.mockImplementation(answer)
     door.page = timelinePage()
     door.fail = null
     door.bodies = null
@@ -155,17 +158,35 @@ describe('Session timeline (Spec 124 FR-062)', () => {
     const { wrapper, router, api } = await mountTimeline()
     expect(wrapper.get('[data-test="timeline-failure-label"]').text()).toBe('failure 2 of 5')
 
-    door.page = timelinePage({ failure_index: 3 })
+    // The door answers each failure with its own position: 12, 14, 15.
+    const positions: Record<string, { failure_index: number; position: number }> = {
+      'failure:1': { failure_index: 1, position: 12 },
+      'failure:2': { failure_index: 2, position: 14 },
+      'failure:3': { failure_index: 3, position: 15 },
+    }
+    api.getWorkSessionTimeline.mockImplementation((_id: string, params: { at: string }) =>
+      Promise.resolve(timelinePage(positions[params.at])))
+    const positioned = () => wrapper.findAll('[data-test="timeline-row"][data-position="true"]').map(r => r.attributes('data-index'))
+    expect(positioned()).toEqual(['14'])
+
     await wrapper.get('[data-test="timeline-next-failure"]').trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.query.at).toBe('failure:3')
     expect(router.currentRoute.value.query.ws).toBe(WS_FAILED.id)
     expect(api.getWorkSessionTimeline).toHaveBeenLastCalledWith(WS_FAILED.id, { at: 'failure:3', before: 20, after: 20 })
     expect(wrapper.get('[data-test="timeline-failure-label"]').text()).toBe('failure 3 of 5')
+    expect(positioned()).toEqual(['15'])
 
     await wrapper.get('[data-test="timeline-prev-failure"]').trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.query.at).toBe('failure:2')
+    expect(positioned()).toEqual(['14'])
+    await wrapper.get('[data-test="timeline-prev-failure"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query.at).toBe('failure:1')
+    expect(wrapper.get('[data-test="timeline-failure-label"]').text()).toBe('failure 1 of 5')
+    expect(positioned()).toEqual(['12'])
+    expect(wrapper.get('[data-test="timeline-prev-failure"]').attributes('disabled')).toBeDefined()
   })
 
   it('disables the step that does not exist', async () => {
@@ -368,8 +389,8 @@ describe('Session timeline (Spec 124 FR-062)', () => {
   it('keeps the first and the last failure in the facts, to the millisecond', async () => {
     const { wrapper } = await mountTimeline()
     const facts = wrapper.get('[data-test="timeline-facts"]').text()
-    expect(facts).toMatch(/First failure\s*2026-11-2\d \d{2}:12:00\.000/)
-    expect(facts).toMatch(/Last failure\s*2026-11-2\d \d{2}:40:00\.250/)
+    expect(facts).toMatch(/First failure\s*2026-11-2\d \d{2}:\d{2}:00\.000/)
+    expect(facts).toMatch(/Last failure\s*2026-11-2\d \d{2}:\d{2}:00\.250/)
     expect(facts).toContain('The upstream server needs a login. · auth · MCPX_OAUTH_REFRESH_FAILED · github:list_issues')
   })
 

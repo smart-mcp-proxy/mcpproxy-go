@@ -150,10 +150,14 @@
                   <div v-if="ws.project_name" class="text-xs text-base-content/70 truncate" :title="`Project: ${ws.project_name}`">
                     project: <span data-test="ws-project">{{ ws.project_name }}</span>
                   </div>
+                  <!-- Below md the Started cell folds into this one. -->
+                  <div class="md:hidden text-xs text-base-content/70 break-words mt-0.5" data-test="ws-started-narrow">
+                    {{ formatDateTime(ws.started_at) }} · {{ formatSessionDuration(ws.duration_ms) }} · {{ ws.status === 'active' ? 'active' : 'ended' }}
+                  </div>
                   <!-- Below sm the last-failure cell folds into this one. -->
                   <div v-if="ws.last_failure" class="sm:hidden text-xs mt-0.5" data-test="ws-reason-narrow">
-                    <div class="truncate" :title="reasonText(ws)">{{ reasonText(ws) }}</div>
-                    <div class="text-base-content/70 truncate">{{ formatDateTimeMillis(ws.last_failure.at) }}</div>
+                    <div class="break-words">{{ reasonText(ws) }}</div>
+                    <div class="text-base-content/70 break-words">{{ formatDateTimeMillis(ws.last_failure.at) }}</div>
                   </div>
                   <!-- FR-061: in the cell that shows at every width. -->
                   <div v-if="ws.truncated_start_at" class="mt-0.5">
