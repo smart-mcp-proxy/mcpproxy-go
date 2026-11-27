@@ -57,6 +57,9 @@ function rowFor(wrapper: ReturnType<typeof mount>, name: string) {
   return row!
 }
 
+// Spec 134 PR 6: these cases read the flat table; the page opens grouped by default.
+window.localStorage.setItem('mcpproxy.tools.layout', 'flat')
+
 describe('Tools row Review link', () => {
   beforeEach(() => {
     setActivePinia(createPinia())

@@ -20,6 +20,7 @@ func (s *OAuthTestServer) buildDiscoveryMetadata() *DiscoveryMetadata {
 			"client_secret_post",
 			"none",
 		},
+		AuthorizationResponseIssParameterSupported: s.options.AdvertiseIss,
 	}
 
 	// Build grant types based on enabled features

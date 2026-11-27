@@ -1,8 +1,8 @@
 <template>
   <div class="space-y-6">
     <!-- Page Header -->
-    <div class="flex justify-between items-center">
-      <div>
+    <div class="flex flex-wrap justify-between items-center gap-3">
+      <div class="min-w-0">
         <h1 class="text-3xl font-bold">Agent Tokens</h1>
         <p class="text-base-content/70 mt-1">Create and manage scoped API tokens for AI agents and automation</p>
       </div>
@@ -10,7 +10,7 @@
         <button
           @click="refreshTokens"
           :disabled="loading"
-          class="btn btn-outline"
+          class="btn btn-outline max-sm:min-h-11"
         >
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
@@ -20,7 +20,7 @@
         </button>
         <button
           @click="openCreateDialog"
-          class="btn btn-primary"
+          class="btn btn-primary max-sm:min-h-11"
         >
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
@@ -36,7 +36,7 @@
     <ScopeChips v-if="scopeQuery" page="tokens" :scope-query="scopeQuery" :unavailable="scopeUnavailable" />
 
     <!-- Summary Stats — clickable cards drive the token filter (issue #436) -->
-    <div class="stats shadow bg-base-100 w-full">
+    <div class="stats stats-vertical sm:stats-horizontal shadow bg-base-100 w-full">
       <button
         type="button"
         data-test="kpi-card-total"
@@ -119,34 +119,34 @@
       </button>
     </div>
 
-    <!-- Token List Table -->
-    <div v-else class="overflow-x-auto">
-      <table class="table table-zebra w-full">
-        <thead>
+    <!-- Token List Table. Spec 134 FR-061: five columns fit 1280 px without a
+         horizontal scrollbar; Kind, Mode, Prefix and Last used sit in the row
+         disclosure (the token name opens it), and every row action stays. -->
+    <div v-else class="rounded-box border border-base-300 bg-base-100" data-test="tokens-table">
+      <table class="table w-full max-sm:block">
+        <thead class="max-sm:sr-only">
           <tr>
-            <th class="min-w-[14rem]">Name</th>
-            <th>Kind</th>
-            <th class="min-w-[10rem]">Profile</th>
-            <th>Mode</th>
-            <th>Prefix</th>
-            <th>Expires</th>
-            <th>Last Used</th>
-            <th>Status</th>
-            <th>Actions</th>
+            <th scope="col">Name</th>
+            <th scope="col">Profile</th>
+            <th scope="col">Expires</th>
+            <th scope="col">Status</th>
+            <th scope="col">Actions</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody class="max-sm:block">
           <template v-for="token in filteredTokens" :key="token.name">
-          <tr :data-test="`token-row-${token.name}`">
-            <td class="font-medium">
+          <tr :data-test="`token-row-${token.name}`" class="max-sm:flex max-sm:flex-col max-sm:gap-1 max-sm:border-b max-sm:border-base-300 max-sm:px-3 max-sm:py-3">
+            <td class="font-medium align-top max-sm:p-0 max-sm:border-0! min-w-0">
               <button
                 type="button"
-                class="link link-hover text-left"
+                class="link link-hover text-left break-all max-sm:min-h-11"
                 :aria-expanded="expandedToken === token.name ? 'true' : 'false'"
                 :data-test="`token-expand-${token.name}`"
                 @click="expandedToken = expandedToken === token.name ? '' : token.name"
               >{{ token.name }}</button>
-              <span v-if="token.legacy_scope" class="badge badge-warning badge-xs ml-2" :data-test="`token-legacy-badge-${token.name}`">Legacy scope</span>
+              <!-- Spec 134 FR-061: describes the configured limits (own server and permission
+                   list), not effective access, which a profile or a lock can narrow further. -->
+              <StateTag v-if="token.legacy_scope" tone="review" class="ml-2" :data-test="`token-legacy-badge-${token.name}`" title="This token carries its own server list and permissions">Own server list</StateTag>
               <CredentialLifecycle
                 v-if="token.issuer || token.purpose || token.profile_state === 'dangling'"
                 class="mt-1"
@@ -163,104 +163,93 @@
                 :purpose="token.purpose"
                 :profile-state="token.profile_state"
                 :hide-lease="true"
+                :hide-binding="!!token.profile_pin"
                 :now="now"
               />
               <!-- Spec 109-l: the Token-row links of the link map (agent rows only;
                    a client credential is filtered as a client, from Clients). -->
-              <div v-if="tokenLinksAvailable && !isClientCredential(token)" class="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs font-normal">
-                <router-link class="link" :data-test="`token-row-link-activity-${token.name}`" :aria-label="`Activity for token ${token.name}`" :to="scopeQuery!.linkTo('activity', { view: 'calls', token: token.name, client: '' })">Activity</router-link>
-                <router-link class="link" :data-test="`token-row-link-usage-${token.name}`" :aria-label="`Usage for token ${token.name}`" :to="scopeQuery!.linkTo('usage', { token: token.name, client: '' })">Usage</router-link>
+              <div v-if="tokenLinksAvailable && !isClientCredential(token)" class="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm font-normal">
+                <router-link class="link inline-flex min-h-11 items-center sm:min-h-0" :data-test="`token-row-link-activity-${token.name}`" :aria-label="`Activity for token ${token.name}`" :to="scopeQuery!.linkTo('activity', { view: 'calls', token: token.name, client: '' })">Activity</router-link>
+                <router-link class="link inline-flex min-h-11 items-center sm:min-h-0" :data-test="`token-row-link-usage-${token.name}`" :aria-label="`Usage for token ${token.name}`" :to="scopeQuery!.linkTo('usage', { token: token.name, client: '' })">Usage</router-link>
               </div>
             </td>
-            <td :data-test="`token-kind-${token.name}`">{{ isClientCredential(token) ? 'Client' : 'Agent' }}</td>
-            <td>
+            <td class="align-top max-sm:p-0 max-sm:border-0!">
+              <span class="sm:hidden text-sm text-base-content/70">Profile </span>
               <span v-if="token.profile_pin" class="badge badge-outline badge-sm max-w-[12rem] min-w-0 justify-start overflow-hidden whitespace-nowrap" :title="profilesStore.titleFor(token.profile_pin)" :data-test="`token-profile-${token.name}`"><span class="truncate">{{ profilesStore.titleFor(token.profile_pin) }}</span></span>
-              <span v-else class="text-base-content/40 text-sm">&mdash;</span>
+              <span v-else class="text-base-content/70 text-sm">&mdash;<span class="sr-only">No profile</span></span>
             </td>
-            <td>
-              <span v-if="isClientCredential(token) && token.profile_mode" class="text-sm">{{ modeLabel(token.profile_mode) }}</span>
-              <span v-else class="text-base-content/40 text-sm">&mdash;</span>
-            </td>
-            <td>
-              <code class="text-sm bg-base-200 px-2 py-1 rounded">{{ token.token_prefix }}</code>
-            </td>
-            <td>
-              <span :class="{ 'text-warning': isExpiringSoon(token), 'text-error': isExpired(token) && !token.lease }" :data-test="`token-expiry-${token.name}`">
+            <td class="align-top whitespace-nowrap max-sm:p-0 max-sm:border-0! text-sm">
+              <span class="sm:hidden text-base-content/70">Expires </span><span :class="{ 'text-warning': isExpiringSoon(token), 'text-error': isExpired(token) && !token.lease }" :data-test="`token-expiry-${token.name}`">
                 {{ expiryText(token) }}
               </span>
             </td>
-            <td>
-              <span v-if="token.last_used_at" class="text-sm">
-                {{ formatDate(token.last_used_at) }}
-              </span>
-              <span v-else class="text-base-content/40 text-sm">Never</span>
-            </td>
-            <td>
+            <td class="align-top max-sm:p-0 max-sm:border-0!">
               <span v-if="token.revoked" class="flex flex-col items-start gap-0.5" :data-test="`token-state-${token.name}`">
-                <span class="badge badge-error badge-sm">Revoked</span>
-                <span v-if="token.revoked_at" class="text-xs opacity-70 whitespace-nowrap">{{ formatDate(token.revoked_at) }}</span>
+                <StateTag tone="error">Revoked</StateTag>
+                <span v-if="token.revoked_at" class="text-xs text-base-content/70 whitespace-nowrap">{{ formatDate(token.revoked_at) }}</span>
               </span>
-              <span v-else-if="isExpired(token) && token.lease" class="badge badge-ghost badge-sm" :data-test="`token-state-${token.name}`">Lease ended</span>
-              <span v-else-if="isExpired(token)" class="badge badge-warning badge-sm">Expired</span>
-              <span v-else class="badge badge-success badge-sm">Active</span>
+              <StateTag v-else-if="isExpired(token) && token.lease" tone="off" :data-test="`token-state-${token.name}`">Lease ended</StateTag>
+              <StateTag v-else-if="isExpired(token)" tone="review">Expired</StateTag>
+              <StateTag v-else tone="ok">Active</StateTag>
             </td>
-            <td>
+            <td class="align-top max-sm:p-0 max-sm:border-0!">
               <!-- A client credential is rotated through the staged path on the
                    Clients page, never regenerated or deleted here (Spec 108-i I20). -->
-              <div v-if="isClientCredential(token)" class="text-xs" :data-test="`token-client-note-${token.name}`">
+              <div v-if="isClientCredential(token)" class="text-sm" :data-test="`token-client-note-${token.name}`">
                 Client credential for {{ token.client_id }} &mdash;
                 <router-link class="link" :to="{ name: 'clients', query: { focus: token.client_id } }">manage from Clients</router-link>
               </div>
-              <div v-else class="flex gap-1">
+              <div v-else class="flex flex-wrap gap-1">
                 <button
                   @click="handleRegenerate(token.name)"
                   :disabled="token.revoked"
-                  class="btn btn-xs btn-outline"
+                  class="btn btn-xs btn-outline whitespace-nowrap max-sm:min-h-11"
                   title="Regenerate token secret"
                 >
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                  </svg>
+                  <UiIcon name="refresh" class="w-4 h-4" />
                   Regenerate
                 </button>
                 <button
                   @click="handleRevoke(token.name)"
                   :disabled="token.revoked"
-                  class="btn btn-xs btn-error btn-outline"
+                  class="btn btn-xs btn-error btn-outline whitespace-nowrap max-sm:min-h-11"
                   title="Revoke token"
                 >
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
-                  </svg>
+                  <UiIcon name="x" class="w-4 h-4" />
                   Revoke
                 </button>
                 <button
                   v-if="token.revoked || isExpired(token)"
                   @click="handleDelete(token.name)"
-                  class="btn btn-xs btn-error"
+                  class="btn btn-xs btn-error btn-outline whitespace-nowrap max-sm:min-h-11"
                   title="Permanently delete token and free its name for reuse"
                 >
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                  </svg>
                   Delete
                 </button>
               </div>
             </td>
           </tr>
-          <!-- The scope of a token, read only. A legacy token's scope is its own
-               server list and permissions; a profile token's comes from the profile. -->
-          <tr v-if="expandedToken === token.name" :data-test="`token-detail-${token.name}`">
-            <td colspan="9" class="bg-base-200/40 space-y-2">
+          <!-- The row disclosure: the facts that left the table, then the scope of the
+               token, read only. A token with its own server list shows that list and its
+               permissions; a profile token's scope comes from the profile. -->
+          <tr v-if="expandedToken === token.name" :data-test="`token-detail-${token.name}`" class="max-sm:block">
+            <td colspan="5" class="bg-base-200/40 space-y-2 max-sm:block">
+              <dl class="flex flex-wrap gap-x-6 gap-y-1 text-sm" :data-test="`token-facts-${token.name}`">
+                <div v-if="token.profile_pin" class="flex gap-2"><dt class="text-base-content/70">Profile id</dt><dd :data-test="`token-profile-id-${token.name}`"><code class="text-sm">{{ token.profile_pin }}</code></dd></div>
+                <div class="flex gap-2"><dt class="text-base-content/70">Kind</dt><dd :data-test="`token-kind-${token.name}`">{{ isClientCredential(token) ? 'Client' : 'Agent' }}</dd></div>
+                <div class="flex gap-2"><dt class="text-base-content/70">Mode</dt><dd>{{ isClientCredential(token) && token.profile_mode ? modeLabel(token.profile_mode) : '—' }}</dd></div>
+                <div class="flex gap-2"><dt class="text-base-content/70">Prefix</dt><dd><code class="text-sm bg-base-200 px-2 py-1 rounded">{{ token.token_prefix }}</code></dd></div>
+                <div class="flex gap-2"><dt class="text-base-content/70">Last used</dt><dd :data-test="`token-last-used-${token.name}`">{{ token.last_used_at ? formatDate(token.last_used_at) : 'Never' }}</dd></div>
+              </dl>
               <div class="flex flex-wrap items-center gap-2 text-sm">
-                <span class="opacity-60">Servers</span>
+                <span class="text-base-content/70">Servers</span>
                 <span v-for="server in token.allowed_servers" :key="server" class="badge badge-outline badge-sm">{{ server }}</span>
-                <span class="opacity-60 ml-3">Permissions</span>
+                <span class="text-base-content/70 ml-3">Permissions</span>
                 <span v-for="perm in token.permissions" :key="perm" class="badge badge-sm" :class="permissionBadgeClass(perm)">{{ perm }}</span>
               </div>
               <div v-if="token.legacy_scope && !isClientCredential(token)" class="flex flex-wrap items-center gap-2 text-sm" :data-test="`token-migrate-${token.name}`">
                 <span>Migrate: create a new token with a profile.</span>
-                <button type="button" class="btn btn-xs btn-outline" :data-test="`token-migrate-button-${token.name}`" @click="openMigrateDialog(token)">Create with a profile&hellip;</button>
+                <button type="button" class="btn btn-xs btn-outline max-sm:min-h-11" :data-test="`token-migrate-button-${token.name}`" @click="openMigrateDialog(token)">Create with a profile&hellip;</button>
               </div>
             </td>
           </tr>
@@ -347,7 +336,7 @@
             <label class="label">
               <span class="label-text font-medium">Expires In</span>
             </label>
-            <select v-model="createForm.expiresIn" class="select select-bordered w-full">
+            <select v-model="createForm.expiresIn" aria-label="Expires in" class="select select-bordered w-full">
               <option value="168h">7 days</option>
               <option value="720h">30 days</option>
               <option value="2160h">90 days</option>
@@ -479,6 +468,8 @@ import { expiresText, expiringSoon, isNeverExpires, leaseText } from '@/utils/cr
 import { CREDENTIALS_CHANGED_EVENT, CLIENT_BINDING_CHANGED_EVENT } from '@/stores/clients'
 import { PROFILES_CHANGED_EVENT } from '@/stores/profiles'
 import CredentialLifecycle from '@/components/clients/CredentialLifecycle.vue'
+import StateTag from '@/components/StateTag.vue'
+import UiIcon from '@/components/UiIcon.vue'
 import { useNow } from '@/composables/useNow'
 import type { ApiError } from '@/services/api'
 import type { AgentTokenInfo, CreateAgentTokenRequest, Server } from '@/types'

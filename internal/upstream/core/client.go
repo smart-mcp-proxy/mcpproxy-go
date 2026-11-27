@@ -62,6 +62,10 @@ type Client struct {
 	// closes it (issue #1266); the sink reopens on the next write, so a
 	// reconnecting server logs on as before. nil for console (CLI) loggers.
 	upstreamLogCloser io.Closer
+	// upstreamLogSinkMu orders OAuth log writes against closing the sink
+	// (GH #1827 review): retiredDropCore writes under the read lock and
+	// re-checks retirement; closeUpstreamLog closes under the write lock.
+	upstreamLogSinkMu sync.RWMutex
 
 	// MCP client and server info
 	client     *client.Client
@@ -505,7 +509,10 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 	for i := range toolsResult.Tools {
 		tool := &toolsResult.Tools[i]
 		var paramsJSON string
-		if schemaBytes, err := json.Marshal(tool.InputSchema); err == nil {
+		// The v1.0.0 encoding of the decoded schema (legacySchema): stored,
+		// scanned and hashed, so it must not move with the library version.
+		inputSchema := legacySchema(mcp.ToolArgumentsSchema(tool.InputSchema))
+		if schemaBytes, err := json.Marshal(inputSchema); err == nil {
 			paramsJSON = string(schemaBytes)
 		}
 
@@ -554,7 +561,7 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 
 		// Compute hash for tool change detection.
 		// Hash is based on serverName + toolName + description + inputSchema + outputSchema.
-		toolMeta.Hash = hash.ComputeToolHashWithOutputSchema(c.config.Name, tool.Name, tool.Description, tool.InputSchema, outputSchemaJSON)
+		toolMeta.Hash = hash.ComputeToolHashWithOutputSchema(c.config.Name, tool.Name, tool.Description, inputSchema, outputSchemaJSON)
 
 		tools = append(tools, toolMeta)
 	}
@@ -1026,7 +1033,18 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 	// The instance's gated transport (FR-024): a retired instance sends no
 	// refresh token and no client secret.
 	httpClient := c.Gate().HTTPClient(30 * time.Second)
+	sentAt := time.Now()
 	resp, err := httpClient.Do(req)
+	// GH #1827: this request does not pass the OAuth transport wrapper, so
+	// it logs its own token-request line, once the body has been read (a slow
+	// log write must not eat the request's timeout).
+	status, logErr := 0, err
+	if resp != nil {
+		status = resp.StatusCode
+	}
+	defer func() {
+		oauth.LogTokenRequest(ctx, c.oauthLogger(), "refresh_token", status, logErr, time.Since(sentAt))
+	}()
 	if err != nil {
 		return nil, fmt.Errorf("failed to send refresh request: %w", err)
 	}
@@ -1034,6 +1052,11 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			// A success cut short: say so in the request line. An error
+			// status is an answer either way, as on the wrapper path.
+			logErr = err
+		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			// The status arrived even though the body did not. Keep it, so a
 			// truncated rejection is classified as the answer it is and not
@@ -1216,10 +1239,45 @@ func (c *Client) oauthLogger() *zap.Logger {
 	case c.upstreamLogger == nil:
 		return c.logger
 	case c.logger == nil:
-		return c.upstreamLogger
+		return zap.New(retiredDropCore{Core: c.upstreamLogger.Core(), retired: c.retiredNow, mu: &c.upstreamLogSinkMu})
 	default:
-		return zap.New(zapcore.NewTee(c.logger.Core(), c.upstreamLogger.Core()))
+		return zap.New(zapcore.NewTee(c.logger.Core(), retiredDropCore{Core: c.upstreamLogger.Core(), retired: c.retiredNow, mu: &c.upstreamLogSinkMu}))
 	}
+}
+
+// retiredDropCore drops writes to this instance's server log file once the
+// instance is retired (GH #1827 review): a refresh flight or token request
+// that finishes after Disconnect closed the file would otherwise reopen it
+// (lumberjack reopens on write) with nobody left to close it.
+type retiredDropCore struct {
+	zapcore.Core
+	retired func() bool
+	mu      *sync.RWMutex // nil: no sink to order against
+}
+
+func (r retiredDropCore) With(fields []zapcore.Field) zapcore.Core {
+	return retiredDropCore{Core: r.Core.With(fields), retired: r.retired, mu: r.mu}
+}
+
+func (r retiredDropCore) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+	if r.retired() || !r.Enabled(e.Level) {
+		return ce
+	}
+	return ce.AddCore(e, r)
+}
+
+// Write checks again, under the sink lock: the instance may have been
+// retired between Check and Write, and a sink closed under the write lock is
+// not reopened by a write that started before.
+func (r retiredDropCore) Write(e zapcore.Entry, fields []zapcore.Field) error {
+	if r.mu != nil {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+	}
+	if r.retired() {
+		return nil
+	}
+	return r.Core.Write(e, fields)
 }
 
 // cappedScrub renders an upstream-authored response body for an error message:
@@ -1297,3 +1355,6 @@ func (c *Client) logCallInterrupted(parent, callCtx context.Context, toolName st
 		zap.String("resulting_state", state),
 	)
 }
+
+// retiredNow reports whether the instance's gate is retired, read at call time.
+func (c *Client) retiredNow() bool { return c.Gate().Retired() }

@@ -76,7 +76,7 @@ describe('Security page info alert no longer instructs a raw config edit (FR-018
     expect(source).not.toContain('security.deep_scan.enabled')
   })
 
-  it('points users at the Settings → Security toggle instead', () => {
-    expect(source).toMatch(/Settings\s*→\s*Security/)
+  it('points users at the Settings → Access and keys toggle instead', () => {
+    expect(source).toMatch(/Settings\s*→\s*Access and keys/)
   })
 })

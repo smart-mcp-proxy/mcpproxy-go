@@ -63,7 +63,15 @@ async function mountClients(clients: any[], warnings: any[] = [], query = '') {
   await router.isReady()
   const wrapper = mount(Clients, { global: { plugins: [router], stubs: { ClientConnectList: true, AgentTokens: true, ModeSwitcher: true } }, attachTo: document.body })
   await flushPromises()
+  // Spec 134 FR-060: a client's controls are in its Manage side panel. A page with one
+  // client opens it at once; a test with several opens the one it needs.
+  if (clients.length === 1 && !query.includes('focus=')) await openManage(wrapper, clients[0].id)
   return { wrapper, router }
+}
+
+async function openManage(wrapper: any, id: string) {
+  await wrapper.get(`[data-test="client-manage-${id}"]`).trigger('click')
+  await flushPromises()
 }
 
 describe('Client binding controls on the Clients page (Spec 108-i T092)', () => {
@@ -78,7 +86,10 @@ describe('Client binding controls on the Clients page (Spec 108-i T092)', () => 
 
   it('keeps Spec 109 columns and order, and appends one Profile column', async () => {
     const { wrapper } = await mountClients([cursor])
-    expect(wrapper.findAll('thead th').map(th => th.text())).toEqual(['Client', 'State', 'Last seen', 'Sessions', 'Config path', 'Profile'])
+    // Spec 134 FR-060: name, state, reach, last seen and one button per client.
+    expect(wrapper.findAll('thead th').map(th => th.text())).toEqual(['Client', 'State', 'Reach', 'Last seen', 'Actions'])
+    expect(wrapper.findAll('tbody tr')).toHaveLength(1)
+    expect(wrapper.findAll('tbody tr button')).toHaveLength(1)
   })
 
   it('the chip lists All servers plus the profiles with title and slug', async () => {
@@ -180,10 +191,16 @@ describe('Client binding controls on the Clients page (Spec 108-i T092)', () => 
   it('labels the source: locked by credential (pin) or switchable (binding)', async () => {
     const { wrapper } = await mountClients([cursor, claude])
     const label = (id: string) => wrapper.get(`[data-test="client-profile-chip-${id}"] .whitespace-normal`).text()
+    // The table row says the same words as the chip in the panel.
+    expect(wrapper.get('[data-test="client-reach-cursor"]').text()).toContain('Work · Read-only · locked by credential')
+    expect(wrapper.get('[data-test="client-reach-claude-code"]').text()).toContain('Work Full · Everything · switchable')
+    await openManage(wrapper, 'cursor')
     expect(label('cursor')).toBe('Work · Read-only · locked by credential')
-    expect(label('claude-code')).toBe('Work Full · Everything · switchable')
     // The lock is an icon plus text, never the icon alone.
     expect(wrapper.get('[data-test="client-profile-chip-cursor"] .sr-only').text()).toBe('Locked')
+    await wrapper.get('[data-test="client-manage-close"]').trigger('click')
+    await openManage(wrapper, 'claude-code')
+    expect(label('claude-code')).toBe('Work Full · Everything · switchable')
     expect(wrapper.find('[data-test="client-profile-chip-claude-code"] .sr-only').exists()).toBe(false)
   })
 
@@ -402,6 +419,8 @@ describe('Client binding controls on the Clients page (Spec 108-i T092)', () => 
     ;(api.finalizeClientRotation as any).mockResolvedValue({ client: { ...custom, rotation_pending: false }, rotation: { state: 'finalized' } })
     await useClientsStore().load()
     await flushPromises()
+    // The panel stays open across a reload; the refreshed row carries the pending rotation.
+    ;(api.getClient as any).mockResolvedValue({ success: true, data: { ...custom, rotation_pending: true } })
     expect(wrapper.get('[data-test="client-rotation-badge-dev-laptop"]').text()).toBe('Rotation pending')
     expect(wrapper.get('[data-test="client-rotation-pending-dev-laptop"]').text()).toContain('Both secrets work for 24 h')
     await wrapper.get('[data-test="client-finalize-dev-laptop"]').trigger('click')

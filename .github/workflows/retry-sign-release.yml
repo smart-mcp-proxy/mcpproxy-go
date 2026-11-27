@@ -78,7 +78,7 @@ jobs:
           path: unsigned/*.exe
 
       - name: Submit to SignPath for signing
-        uses: signpath/github-action-submit-signing-request@4a84eb4ad763290f059275786f2deed97c2c672b  # v3.1
+        uses: signpath/github-action-submit-signing-request@a2c5b60d9c75f073142b653c354b632eedce097b  # v3.2
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           organization-id: '84efd51b-c11c-4a85-82e6-7c3b1157d7ca'

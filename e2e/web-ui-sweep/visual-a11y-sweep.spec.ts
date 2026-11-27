@@ -11,7 +11,7 @@
 //
 // Launcher: scripts/run-web-smoke.sh (see docs/development/web-ui-verification.md).
 import { test, expect, Page } from '@playwright/test'
-import { CLIENT_ID, RO_PROFILE, SERVER, cleanupProfiles, openMcpSession, seedMissingProfile, seedProfiles } from './profiles-seed'
+import { CLIENT_ID, RO_PROFILE, SERVER, cleanupProfiles, openMcpSession, seedMissingProfile, seedProfiles, openManagePanel } from './profiles-seed'
 
 const BASE = process.env.MCPPROXY_BASE_URL || 'http://127.0.0.1:18080'
 const KEY = process.env.MCPPROXY_API_KEY || ''
@@ -25,7 +25,7 @@ const VIEWPORTS = [
   { name: 'mobile', width: 390, height: 844 },
 ] as const
 
-const ROUTES = ['/', '/servers', '/activity', '/tools', '/sessions', '/review', '/secrets'] as const
+const ROUTES = ['/', '/servers', '/activity', '/tools', '/sessions', '/review', '/secrets', '/usage', '/clients?tab=tokens'] as const
 
 function url(route: string): string {
   const sep = route.includes('?') ? '&' : '?'
@@ -99,30 +99,36 @@ for (const theme of THEMES) {
         })
       })
       await goto(page, '/clients', theme)
-      const badges = page.locator('[data-test^="client-credential-badge-"]')
-      await expect(badges).toHaveCount(2)
-      await expect(badges).toHaveText(['No credential', 'No credential'])
-      // The rotation badge sits in the same narrow column and wraps the same way.
-      const rotationBadges = page.locator('[data-test^="client-rotation-badge-"]')
-      await expect(rotationBadges).toHaveCount(2)
-      await expect(badges.first()).toBeVisible()
-      await badges.first().scrollIntoViewIfNeeded()
-      await page.screenshot({ path: testInfo.outputPath('credential-badges.png'), fullPage: true })
-      for (const badge of [...await badges.all(), ...await rotationBadges.all()]) {
-        const overflow = await badge.evaluate(el => {
-          const box = el.getBoundingClientRect()
-          const range = document.createRange()
-          range.selectNodeContents(el)
-          return Array.from(range.getClientRects()).map(text => ({
-            above: box.top - text.top,
-            below: text.bottom - box.bottom,
-            left: box.left - text.left,
-            right: text.right - box.right,
-          }))
-        })
-        for (const line of overflow) {
-          for (const amount of Object.values(line)) expect(amount).toBeLessThanOrEqual(1)
+      // Spec 134 FR-060: the credential and rotation badges sit in the Manage panel (the
+      // profile column is gone), one client at a time.
+      for (const id of ['badge-layout-0', 'badge-layout-1']) {
+        await page.locator(`[data-test="client-manage-${id}"]`).click()
+        const badges = page.locator('[data-test^="client-credential-badge-"]')
+        await expect(badges).toHaveCount(1)
+        await expect(badges).toHaveText('No credential')
+        const rotationBadges = page.locator('[data-test^="client-rotation-badge-"]')
+        await expect(rotationBadges).toHaveCount(1)
+        await expect(badges.first()).toBeVisible()
+        await badges.first().scrollIntoViewIfNeeded()
+        await page.screenshot({ path: testInfo.outputPath(`credential-badges-${id}.png`), fullPage: true })
+        for (const badge of [...await badges.all(), ...await rotationBadges.all()]) {
+          const overflow = await badge.evaluate(el => {
+            const box = el.getBoundingClientRect()
+            const range = document.createRange()
+            range.selectNodeContents(el)
+            return Array.from(range.getClientRects()).map(text => ({
+              above: box.top - text.top,
+              below: text.bottom - box.bottom,
+              left: box.left - text.left,
+              right: text.right - box.right,
+            }))
+          })
+          for (const line of overflow) {
+            for (const amount of Object.values(line)) expect(amount).toBeLessThanOrEqual(1)
+          }
         }
+        await page.keyboard.press('Escape')
+        await expect(page.locator(`[data-test="client-manage-panel-${id}"]`)).toHaveCount(0)
       }
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width)
     })
@@ -742,8 +748,7 @@ test.describe('Profiles v3 screens (Spec 108-i)', () => {
         await goto(page, route, theme)
         // The chip, the credential badges and the danger text must be on screen when measured.
         if (route === '/clients') {
-          await expect(page.locator('[data-test^="client-profile-chip-"]').first()).toBeVisible()
-          await expect(page.locator('[data-test="client-profile-chip-e2e-orphan"]')).toContainText('missing')
+          await expect(page.locator('[data-test="client-reach-e2e-orphan"]')).toContainText('missing')
           await expect(page.locator('[data-test="clients-warnings-banner"]')).toBeVisible()
         }
         if (route.startsWith('/profiles/')) await expect(page.locator('[data-test="profile-editor"]')).toBeVisible()
@@ -753,6 +758,13 @@ test.describe('Profiles v3 screens (Spec 108-i)', () => {
         }
         if (route.startsWith('/activity?client=')) await expect(page.locator('[data-test="scope-chip-client"]')).toBeVisible()
         const failures = await contrastFailures(page)
+        if (route === '/clients') {
+          // The Manage panel with its chip, badges and danger text.
+          await page.locator('[data-test="client-manage-e2e-orphan"]').click()
+          await expect(page.locator('[data-test="client-profile-chip-e2e-orphan"]')).toContainText('missing')
+          await page.locator('[data-test="client-manage-remove-e2e-orphan"] summary').click()
+          failures.push(...await contrastFailures(page))
+        }
         expect(
           failures,
           `WCAG AA contrast failures on ${route} (${theme}):\n` +

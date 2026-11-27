@@ -98,7 +98,11 @@ func TestOAuthEndpointOverrides_EndToEndWithMCPGoHandler(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "at", tok.AccessToken)
 
-	_, err = h.RefreshToken(ctx, "rt1")
+	// mcpproxy refreshes through mcp-go with the provenance of the handler's
+	// current metadata (Spec 135 FR-019; mcp-go >= v1.3 refuses without it).
+	md, err := h.GetServerMetadata(ctx)
+	require.NoError(t, err)
+	_, err = h.RefreshToken(WithRefreshProvenance(ctx, "rt1", md.Issuer), "rt1")
 	require.NoError(t, err)
 
 	mu.Lock()

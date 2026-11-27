@@ -115,7 +115,9 @@ test('activity log renders and its filter panel expands', async ({ page }) => {
 
 test('settings page renders its tabs and security posture', async ({ page }) => {
   const errors = watchPageErrors(page)
-  await goto(page, '/settings', '[data-test="settings-tabs"]')
+  // Spec 134 FR-050: Settings opens on General; the posture summary and the
+  // API key live under Access and keys (`?tab=security`).
+  await goto(page, '/settings?tab=security', '[data-test="settings-tabs"]')
 
   await expect(page.locator('[data-test="settings-posture"]')).toBeVisible()
   await expect(page.locator('[data-test="setting-secret-api_key"]')).toBeVisible()

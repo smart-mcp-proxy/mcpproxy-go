@@ -2,9 +2,11 @@ package oauth
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -13,6 +15,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 )
 
 // wrapperEndpoints is the Spec 113-b discovery context of one wrapper: the
@@ -175,38 +179,70 @@ func (w *OAuthTransportWrapper) RoundTrip(req *http.Request) (*http.Response, er
 		}
 	}
 
+	// Spec 135 FR-016: the registration request carries the right
+	// application_type for its redirect URI.
+	req = w.rewriteRegistrationApplicationType(req)
+
 	tokenReq := w.matchesToken(req)
 
+	if tokenReq && !isJSONBody(req) {
+		// GH #1827: every token request leaves one line after it returns:
+		// grant type, the refresh flight that sent it, status and duration.
+		authz := len(w.extraParams) > 0 && w.matchesAuthorization(req) // one answer for injection and log
+		grantType, parsed := peekTokenGrantType(req)
+		if v, ok := w.extraParams["grant_type"]; ok && parsed && !authz {
+			grantType = tokenRequestGrantType(v) // what injectFormParams sends
+		}
+		start := time.Now()
+		var obs tokenResponseObs
+		resp, err := w.roundTripParams(req, authz, tokenReq, &obs)
+		logErr := err
+		if logErr == nil {
+			logErr = obs.bodyErr // a 2xx whose body was cut short
+		}
+		LogTokenRequest(req.Context(), w.logger, grantType, obs.status, logErr, time.Since(start))
+		return resp, err
+	}
+	return w.roundTripParams(req, len(w.extraParams) > 0 && w.matchesAuthorization(req), tokenReq, nil)
+}
+
+// tokenResponseObs is what a token request's log line reports about the
+// response: the status as the provider sent it, before any normalization, and
+// a read error met while the body was buffered for normalization.
+type tokenResponseObs struct {
+	status  int
+	bodyErr error
+}
+
+// roundTripParams injects the extra params, sends the request and normalizes
+// a token response. obs, when non-nil, receives what the log line reports.
+func (w *OAuthTransportWrapper) roundTripParams(req *http.Request, authz, tokenReq bool, obs *tokenResponseObs) (*http.Response, error) {
+	send := req
 	if len(w.extraParams) > 0 {
 		// Clone request to avoid modifying original
-		clonedReq := req.Clone(req.Context())
+		send = req.Clone(req.Context())
 
 		// Detect OAuth endpoint type and inject params appropriately
-		if w.matchesAuthorization(req) {
-			w.injectQueryParams(clonedReq)
+		if authz {
+			w.injectQueryParams(send)
 		} else if tokenReq {
-			w.injectFormParams(clonedReq)
+			w.injectFormParams(send)
 		}
-
-		resp, err := w.inner.RoundTrip(clonedReq)
-		if err != nil {
-			return resp, err
-		}
-
-		if tokenReq {
-			w.normalizeTokenResponse(req, resp)
-		}
-
-		return resp, nil
 	}
 
-	resp, err := w.inner.RoundTrip(req)
+	resp, err := w.inner.RoundTrip(send)
+	if obs != nil && resp != nil {
+		obs.status = resp.StatusCode
+	}
 	if err != nil {
 		return resp, err
 	}
 
 	if tokenReq {
-		w.normalizeTokenResponse(req, resp)
+		bodyErr := w.normalizeTokenResponse(req, resp)
+		if obs != nil {
+			obs.bodyErr = bodyErr
+		}
 	}
 
 	return resp, nil
@@ -227,7 +263,10 @@ const maxTokenResponseBodyBytes = 1 << 20
 //     "expires_at" into a time.Time and otherwise fails with
 //     "Time.UnmarshalJSON: input is not a JSON string"; see
 //     normalizeTokenResponseBody).
-func (w *OAuthTransportWrapper) normalizeTokenResponse(req *http.Request, resp *http.Response) {
+//
+// It returns the read error met while buffering the body, if any; mcp-go
+// still sees that error when it reads the body.
+func (w *OAuthTransportWrapper) normalizeTokenResponse(req *http.Request, resp *http.Response) error {
 	if resp.StatusCode == http.StatusCreated {
 		w.logger.Debug("Normalized token response status 201→200",
 			zap.String("url", logSafeURL(req.URL.String())))
@@ -236,11 +275,11 @@ func (w *OAuthTransportWrapper) normalizeTokenResponse(req *http.Request, resp *
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 || resp.Body == nil {
-		return
+		return nil
 	}
 	// A still-encoded body (the transport did not transparently decode it) cannot be parsed here.
 	if enc := resp.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
-		return
+		return nil
 	}
 
 	orig := resp.Body
@@ -252,14 +291,14 @@ func (w *OAuthTransportWrapper) normalizeTokenResponse(req *http.Request, resp *
 			Reader: io.MultiReader(bytes.NewReader(buf), orig),
 			Closer: orig,
 		}
-		return
+		return err
 	}
 	_ = orig.Close()
 
 	out, changed := normalizeTokenResponseBody(buf, time.Now())
 	resp.Body = io.NopCloser(bytes.NewReader(out))
 	if !changed {
-		return
+		return nil
 	}
 	resp.ContentLength = int64(len(out))
 	if resp.Header == nil {
@@ -268,6 +307,7 @@ func (w *OAuthTransportWrapper) normalizeTokenResponse(req *http.Request, resp *
 	resp.Header.Set("Content-Length", strconv.Itoa(len(out)))
 	w.logger.Debug("Normalized token response body: dropped non-RFC3339 expires_at",
 		zap.String("url", logSafeURL(req.URL.String())))
+	return nil
 }
 
 // prefixedReadCloser reads from Reader and closes Closer.
@@ -379,6 +419,105 @@ func isAllDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// peekTokenGrantType returns the request's grant_type as one of a closed set
+// of names, read from a copy of the body obtained through GetBody. The
+// request and its body are not touched, so how it is sent (retries, Expect:
+// 100-continue, streaming) does not change; a body without GetBody, or one
+// that is not a form, is "unknown". parsed reports that the form was read.
+func peekTokenGrantType(req *http.Request) (grant string, parsed bool) {
+	if req.Body == nil || req.Body == http.NoBody {
+		// An empty form: injectFormParams still sends the extra params.
+		return tokenRequestGrantType(""), true
+	}
+	// GetBody is set by http.NewRequest for in-memory bodies (what mcp-go and
+	// the stored-client refresh send), so reading the copy does not wait on
+	// I/O. A body without it is not peeked.
+	if req.GetBody == nil {
+		return tokenRequestGrantType(""), false
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return tokenRequestGrantType(""), false
+	}
+	defer body.Close()
+	bodyBytes, err := io.ReadAll(io.LimitReader(body, maxTokenRequestPeek+1))
+	if err != nil || len(bodyBytes) > maxTokenRequestPeek {
+		return tokenRequestGrantType(""), false
+	}
+	values, err := url.ParseQuery(string(bodyBytes))
+	if err != nil {
+		return tokenRequestGrantType(""), false
+	}
+	return tokenRequestGrantType(values.Get("grant_type")), true
+}
+
+// isJSONBody reports a JSON request body: a token request is form-encoded
+// (RFC 6749 §4.1.3, §6), while a client registration that matched the token
+// path pattern sends JSON and is not a token request.
+func isJSONBody(req *http.Request) bool {
+	mt, _, err := mime.ParseMediaType(req.Header.Get("Content-Type"))
+	if err != nil {
+		return false
+	}
+	return mt == "application/json" || strings.HasSuffix(mt, "+json")
+}
+
+// maxTokenRequestPeek bounds how much of a token request body is read to
+// learn its grant type; token requests are a few hundred bytes.
+const maxTokenRequestPeek = 64 << 10
+
+// tokenRequestGrantType maps a grant_type value to a name safe to log: the
+// standard grants by name, anything else as "other", none as "unknown".
+func tokenRequestGrantType(v string) string {
+	switch v {
+	case "":
+		return "unknown"
+	case "refresh_token", "authorization_code", "client_credentials",
+		"urn:ietf:params:oauth:grant-type:device_code",
+		"urn:ietf:params:oauth:grant-type:token-exchange",
+		"urn:ietf:params:oauth:grant-type:jwt-bearer":
+		return v
+	default:
+		return "other"
+	}
+}
+
+// LogTokenRequest records one finished token-endpoint request (GH #1827):
+// grant type, the refresh flight and trigger that sent it (from ctx; flight
+// 0 outside a refresh flight), the HTTP status, an outcome class and the
+// duration. outcome is "http_response" when a response arrived (its status
+// says what it was), "retired" when the instance was retired under it, or the
+// refresh error class of a transport failure. Redirects followed inside the
+// request are not logged separately. It
+// logs no URL, body, token, code or error text.
+func LogTokenRequest(ctx context.Context, logger *zap.Logger, grantType string, status int, err error, d time.Duration) {
+	if logger == nil {
+		return
+	}
+	info, _ := RefreshFlightInfoFrom(ctx)
+	outcome := "http_response"
+	switch {
+	case dialgate.IsRetired(err):
+		// The instance was retired: its gate refused the request or closed
+		// the connection under it, so whether the provider saw it is unknown.
+		outcome = "retired"
+	case err != nil:
+		cls, _ := ClassifyRefreshError(err)
+		outcome = string(cls)
+	}
+	trigger := string(info.Trigger)
+	if trigger == "" {
+		trigger = "none"
+	}
+	logger.Info("OAuth token request finished",
+		zap.String("grant_type", grantType),
+		zap.Uint64("flight", info.Flight),
+		zap.String("trigger", trigger),
+		zap.Int("http_status", status),
+		zap.String("outcome", outcome),
+		zap.Duration("duration", d))
 }
 
 // isAuthorizationRequest detects if this is an OAuth authorization request

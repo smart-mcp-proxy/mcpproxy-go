@@ -307,7 +307,7 @@ describe('Profile policy editor (Spec 108-i T091, FR-041, FR-005)', () => {
     expect(wrapper.get('[data-test="profile-save-status"]').text()).toBe('Unsaved changes')
   })
 
-  it('a refused save moves focus to the refusal and scrolls it clear of the sticky footer', async () => {
+  it('a refused save moves focus to the refusal and scrolls it into view', async () => {
     const scroll = vi.fn()
     ;(Element.prototype as any).scrollIntoView = scroll
     ;(api.updateProfile as any).mockRejectedValue(apiError(GUARD_REFUSAL.error, GUARD_REFUSAL))
@@ -318,7 +318,8 @@ describe('Profile policy editor (Spec 108-i T091, FR-041, FR-005)', () => {
     const refusal = wrapper.get('[data-test="guard-refusal"]').element
     expect(document.activeElement).toBe(refusal)
     expect(scroll).toHaveBeenCalledWith(expect.objectContaining({ block: 'center' }))
-    expect(wrapper.get('[data-test="guard-refusal"]').element.parentElement?.className).toContain('scroll-mb')
+    // Spec 134 FR-052: the action row is in normal flow now, nothing to clear.
+    expect(wrapper.get('[data-test="profile-editor-footer"]').element.className).not.toMatch(/\bsticky\b/)
     delete (Element.prototype as any).scrollIntoView
   })
 

@@ -22,6 +22,9 @@ function mountView() {
   return mount(Tools, { global: { plugins: [createPinia()], stubs: globalStubs } })
 }
 
+// Spec 134 PR 6: these cases read the flat table; the page opens grouped by default.
+window.localStorage.setItem('mcpproxy.tools.layout', 'flat')
+
 describe('Tools tier column/filter (Spec 109 FR-028)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())

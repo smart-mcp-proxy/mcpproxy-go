@@ -18,11 +18,11 @@ func captureOutputSchemaJSON(tool *mcp.Tool) string {
 		return hash.NormalizeJSON(string(tool.RawOutputSchema))
 	}
 
-	if tool.OutputSchema.Type == "" {
+	if tool.OutputSchema.Type == "" && len(tool.OutputSchema.Types) == 0 {
 		return ""
 	}
 
-	data, err := json.Marshal(tool.OutputSchema)
+	data, err := json.Marshal(legacySchema(mcp.ToolArgumentsSchema(tool.OutputSchema))) // v1.0.0 bytes, see legacySchema
 	if err != nil {
 		return ""
 	}
