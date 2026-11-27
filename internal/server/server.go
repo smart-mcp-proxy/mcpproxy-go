@@ -3623,7 +3623,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// Spec 107 T050: tag every MCP-mount request with {ClientIP, Mount: mcp}
 	// for the audit line (the mount is fixed here, never by a header).
 	tagMCP := httpapi.TagRequestMeta(reqcontext.MountMCP, s.trustedProxiesProvider())
-	mcpHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(streamableServer)))))
+	mcpHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(clientFacingEraGuard(streamableServer))))))
 	mux.Handle("/mcp", mcpHandler)
 	mux.Handle("/mcp/", mcpHandler) // Handle trailing slash
 
@@ -3632,21 +3632,21 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// /mcp/all → direct mode (all tools with serverName__toolName naming)
 	directStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeDirect),
 		clientFacingStreamableOptions(s.liveConfig)...)
-	directHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(directStreamable)))))
+	directHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(clientFacingEraGuard(directStreamable))))))
 	mux.Handle("/mcp/all", directHandler)
 	mux.Handle("/mcp/all/", directHandler)
 
 	// /mcp/code → code_execution mode (JS orchestration)
 	codeExecStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeCodeExecution),
 		clientFacingStreamableOptions(s.liveConfig)...)
-	codeExecHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(codeExecStreamable)))))
+	codeExecHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(clientFacingEraGuard(codeExecStreamable))))))
 	mux.Handle("/mcp/code", codeExecHandler)
 	mux.Handle("/mcp/code/", codeExecHandler)
 
 	// /mcp/call → retrieve_tools mode (focused: retrieve_tools + call_tool_read/write/destructive)
 	callToolStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools),
 		clientFacingStreamableOptions(s.liveConfig)...)
-	callToolHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(callToolStreamable)))))
+	callToolHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(clientFacingEraGuard(callToolStreamable))))))
 	mux.Handle("/mcp/call", callToolHandler)
 	mux.Handle("/mcp/call/", callToolHandler)
 
@@ -3655,7 +3655,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// so that agent-token scope can compose downstream with the profile scope.
 	profileStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools),
 		clientFacingStreamableOptions(s.liveConfig)...)
-	profileHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(s.profileMiddleware(loggingHandler(profileStreamable))))))
+	profileHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(s.profileMiddleware(loggingHandler(clientFacingEraGuard(profileStreamable)))))))
 	mux.Handle("/mcp/p/", profileHandler)
 	mux.Handle("/mcp/p", profileHandler)
 
@@ -3958,7 +3958,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux.Handle("/", rootHandler)
 	// Spec 132: opt-in browser login. Behaves exactly like the handlers above
 	// until mcp_oauth_enabled is switched on (or the feature has been used).
-	oauthMCPHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.oauthResourceAuth(loggingHandler(streamableServer)))))
+	oauthMCPHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.oauthResourceAuth(loggingHandler(clientFacingEraGuard(streamableServer))))))
 	s.registerOAuthLoginRoutes(mux, mcpHandler, rootHandler, oauthMCPHandler)
 	s.logger.Info("Registered Web UI endpoints", zap.Strings("ui_endpoints", []string{"/ui/", "/"}))
 
@@ -6098,5 +6098,7 @@ func (s *Server) serveSingleServer(w http.ResponseWriter, r *http.Request) {
 	if ep.native {
 		next = s.mcpProxy.nativeSkillsInterceptor(ep, next)
 	}
-	singleServerSessionGuard(name, ep.gen, next).ServeHTTP(w, r.WithContext(ctx))
+	// The era guard runs after admission and the session check, so an
+	// unknown or out-of-scope server still answers 404 (Spec 135 R1a).
+	singleServerSessionGuard(name, ep.gen, clientFacingEraGuard(next)).ServeHTTP(w, r.WithContext(ctx))
 }

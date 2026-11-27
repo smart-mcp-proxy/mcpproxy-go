@@ -121,6 +121,9 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if tok, ok := refreshProvenanceToken(ctx); ok {
+		return tok, nil // mcp-go's RefreshToken inside mcpproxy's own refresh
+	}
 
 	p.logger.Debug("🔍 Loading OAuth token from persistent storage",
 		zap.String("server_name", p.serverName),
@@ -458,6 +461,9 @@ type RefreshBinding struct {
 	Refresh RefreshFunc
 	// StaticClient is true when the client id comes from oauth.client_id.
 	StaticClient bool
+	// Logger receives the reactive flight's start and finish lines (GH
+	// #1827); nil uses the coordinator's logger.
+	Logger *zap.Logger
 }
 
 type refreshBindable interface {
@@ -557,7 +563,7 @@ func reactiveTokenOutcome(ctx context.Context, clock func() time.Time, t reactiv
 			newTok, newRev, _, err := DefaultRefreshCoordinator().DoServed(ctx, RefreshRequest{
 				Key: t.key, Binding: t.binding, ServerName: t.name, ObservedRefreshToken: rec.RefreshToken,
 				Trigger: RefreshTriggerReactive, Load: t.load, Refresh: b.Refresh,
-				StaticClient: b.StaticClient, ClearClientAt: t.clearAt,
+				StaticClient: b.StaticClient, ClearClientAt: t.clearAt, Logger: b.Logger,
 			})
 			if err != nil {
 				// The flight may have taken a while: judge "still valid" by
@@ -638,6 +644,12 @@ func (m *coordinatedMemoryTokenStore) record(tok *client.Token) *storage.OAuthTo
 
 // GetToken implements client.TokenStore.
 func (m *coordinatedMemoryTokenStore) GetToken(ctx context.Context) (*client.Token, error) {
+	if tok, ok := refreshProvenanceToken(ctx); ok {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return tok, nil // mcp-go's RefreshToken inside mcpproxy's own refresh
+	}
 	tok, err := m.inner.GetToken(ctx)
 	if err != nil {
 		return nil, err

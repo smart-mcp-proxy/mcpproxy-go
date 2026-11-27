@@ -174,7 +174,33 @@ type Options struct {
 	// Registration request, before the response is written. Tests use it to
 	// interleave a concurrent write with an in-flight registration.
 	OnRegister func()
+
+	// Spec 135 switches.
+	//
+	// AdvertiseIss publishes authorization_response_iss_parameter_supported:
+	// true in the authorization server metadata (RFC 9207 §3).
+	AdvertiseIss bool
+	// IssMode decides the iss parameter on the authorization response
+	// redirect (code and error alike). Default IssOmit sends none.
+	IssMode IssMode
+	// WrongIssuer is the iss value sent under IssWrong. Default
+	// "https://wrong-issuer.example".
+	WrongIssuer string
+	// RejectApplicationType refuses any registration request that carries
+	// application_type with 400 invalid_client_metadata.
+	RejectApplicationType bool
 }
+
+// IssMode is how the fake sends iss on the authorization response.
+type IssMode int
+
+const (
+	IssOmit    IssMode = iota // no iss parameter
+	IssCorrect                // iss = the server's issuer
+	IssEmpty                  // iss= (present, empty)
+	IssWrong                  // iss = Options.WrongIssuer
+	IssRepeat                 // iss twice, both the correct issuer
+)
 
 // ClientConfig defines a pre-registered OAuth client.
 type ClientConfig struct {

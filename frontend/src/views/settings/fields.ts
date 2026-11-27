@@ -526,7 +526,7 @@ export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
     id: 'code-execution',
     docs: '/features/code-execution',
     title: 'Code execution',
-    description: 'Limits for the sandboxed JavaScript tool (enable it in Security & Access).',
+    description: 'Limits for the sandboxed JavaScript tool (enable it in Access and keys).',
     fields: [
       { key: 'code_execution_timeout_ms', label: 'Max run time per execution (ms)', control: 'number', min: 1, max: 600000 },
       { key: 'code_execution_max_tool_calls', label: 'Max tool calls per execution', help: '0 = unlimited.', control: 'number', min: 0 },
@@ -541,7 +541,7 @@ export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
     id: 'docker-isolation',
     docs: '/features/docker-isolation',
     title: 'Docker isolation',
-    description: 'Defaults for containerised stdio servers (turn isolation on in Security & Access). The per-runtime image map and extra docker args are edited in the Raw JSON tab.',
+    description: 'Defaults for containerised stdio servers (turn isolation on in Access and keys). The per-runtime image map and extra docker args are edited in the Edit as JSON section.',
     fields: [
       { key: 'docker_isolation.network_mode', label: 'Container network', help: 'none = no network (most secure), bridge = NAT, host = share host network.', control: 'select', options: ['bridge', 'none', 'host'].map((v) => ({ value: v, label: v })) },
       { key: 'docker_isolation.memory_limit', label: 'Memory limit per container', control: 'text', placeholder: '512m', valueKind: 'bytesize', optional: true },
@@ -554,7 +554,7 @@ export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
     id: 'sensitive-data',
     docs: '/features/sensitive-data-detection',
     title: 'Secret detection',
-    description: 'Tuning for the secret scanner (turn it on in Security & Access). Per-category toggles and custom patterns are edited in the Raw JSON tab.',
+    description: 'Tuning for the secret scanner (turn it on in Access and keys). Per-category toggles and custom patterns are edited in the Edit as JSON section.',
     fields: [
       { key: 'sensitive_data_detection.scan_requests', label: 'Scan tool arguments', control: 'toggle' },
       { key: 'sensitive_data_detection.scan_responses', label: 'Scan tool responses', control: 'toggle' },
@@ -714,7 +714,7 @@ export function aliasServerEdition(cfg: any): any {
  *
  *  - `working` and `original` BOTH get the resolved defaults, so a field nobody
  *    touched never counts as an unsaved change.
- *  - `raw` is the untouched response. The Raw JSON tab must show server truth,
+ *  - `raw` is the untouched response. The Edit as JSON section must show server truth,
  *    and both helpers above MUTATE their argument, so the clones matter.
  */
 export function hydrateConfigState(

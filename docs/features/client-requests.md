@@ -3,7 +3,7 @@ id: client-requests
 title: Upstream Requests to the Client
 sidebar_label: Elicitation, Sampling & Roots
 description: How upstream servers ask the user, the client's model or the client's roots through MCPProxy
-keywords: [elicitation, sampling, roots, server-initiated requests, approval, enable_client_features, client_features, client_request]
+keywords: [elicitation, sampling, roots, progress, progressToken, server-initiated requests, approval, enable_client_features, client_features, client_request]
 ---
 
 # Upstream Requests to the Client
@@ -80,3 +80,13 @@ mcpproxy activity list --type client_request
 - The tool call's timeout (`call_tool_timeout`, default 2 minutes) bounds how long the user has to answer. A prompt left open past it stays on the client's screen; answering it then changes nothing.
 - For a request a streamable-HTTP upstream sends on the call's own response stream, the MCP library MCPProxy uses allows 30 seconds for the answer.
 - Sampling requests are not marked with the server's name: clients show MCPProxy as the requester.
+
+## Progress notifications
+
+When an MCP client sends a `progressToken` in a tool call's `_meta`, the upstream server's `notifications/progress` for that call are forwarded to that client, under the client's own token. Forwarding is best effort: an update is dropped when the client's session cannot take it at once, and a client connection that cannot receive notifications gets none. This needs no `client_features` entry and works on `call_tool_*`, the direct `server__tool` names and `/mcp/s/<server>`.
+
+- The upstream never sees the client's token. MCPProxy gives each upstream call a token of its own and maps it back to the calling client until the call returns, times out or the server disconnects. Two clients that use the same token each get only their own progress, and progress is never sent to any other client.
+- A call without a `progressToken` carries none upstream, and nothing is forwarded.
+- The `message` is text the upstream server wrote, and it is treated like the text of that tool's result under the [output sanitisation](./output-sanitisation.md) policy: under `block` a message with a critical secret is left out, `redact` and control-character stripping apply as they would to the result, the message is then cut to 512 bytes, and the spotlight frame is added for untrusted tools when it is on. A message longer than 4 KiB is left out. `progress` (and `total`, when the upstream sent one) is forwarded either way.
+- At most one notification per call is forwarded every 100 ms; ones that arrive sooner, or whose `progress` does not increase, are dropped. The first one that reaches `total` is not held back by the interval.
+- `code_execution` sub-calls do not forward progress.

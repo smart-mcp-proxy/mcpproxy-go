@@ -1,18 +1,18 @@
 <template>
   <div data-test="usage-error-rate-chart">
     <h3 class="font-semibold text-sm mb-2">Errors &amp; latency</h3>
-    <div v-if="tools.length === 0" class="text-sm opacity-60 py-8 text-center" data-test="usage-error-rate-empty">
+    <div v-if="tools.length === 0" class="text-sm text-base-content/60 py-8 text-center" data-test="usage-error-rate-empty">
       No tool calls in this window.
     </div>
     <template v-else>
       <!-- Error rate per tool. The bars and the table below measure DIFFERENT
            things; each says which (F22, #1046). -->
-      <p class="text-xs opacity-50 mb-1">Bars: share of calls that failed, per tool.</p>
+      <p class="text-xs text-base-content/60 mb-1">Bars: share of calls that failed, per tool.</p>
       <div class="relative mb-4" :style="{ height: chartHeight }">
         <Bar :data="chartData" :options="chartOptions" />
       </div>
       <!-- Per-tool p50/p95 latency (FR: tail-latency visibility, T019) -->
-      <p class="text-xs opacity-50 mb-1">
+      <p class="text-xs text-base-content/60 mb-1">
         Table: latency percentiles, read off a fixed histogram — each figure is
         the bucket bound the percentile falls in, not a measured duration.
       </p>
@@ -35,7 +35,7 @@
                 <span
                   v-if="neverCompleted(t)"
                   data-test="usage-latency-unresolved"
-                  class="opacity-50"
+                  class="text-base-content/60"
                   title="Never completed a call — no successful response was ever recorded for this name"
                 >
                   ·&nbsp;unresolved
@@ -43,7 +43,7 @@
               </td>
               <td class="text-right font-mono text-xs">{{ formatLatencyBound(t.p50_ms, t.p50_exceeds) }}</td>
               <td class="text-right font-mono text-xs">{{ formatLatencyBound(t.p95_ms, t.p95_exceeds) }}</td>
-              <td class="text-right font-mono text-xs" :class="t.error_rate > 0 ? 'text-error' : 'opacity-60'">
+              <td class="text-right font-mono text-xs" :class="t.error_rate > 0 ? 'text-error' : 'text-base-content/60'">
                 {{ (t.error_rate * 100).toFixed(1) }}%
               </td>
             </tr>
@@ -68,10 +68,12 @@ import {
 import type { ChartOptions } from 'chart.js'
 import type { UsageToolStat } from '@/types'
 import { formatNumber, formatLatencyBound, neverCompleted, toolLabel } from '@/utils/usageFormat'
+import { chartTextOptions, useChartColors } from '@/utils/chartColors'
 
 ChartJS.register(BarElement, CategoryScale, LinearScale, Tooltip, Legend)
 
 const props = defineProps<{ tools: UsageToolStat[] }>()
+const colors = useChartColors()
 
 const chartHeight = computed(() => `${Math.max(140, props.tools.length * 24 + 40)}px`)
 
@@ -86,7 +88,7 @@ const chartData = computed(() => ({
     {
       label: 'Error rate %',
       data: props.tools.map(t => +(t.error_rate * 100).toFixed(2)),
-      backgroundColor: props.tools.map(t => (t.error_rate > 0 ? '#ef4444' : '#22c55e')),
+      backgroundColor: props.tools.map(t => (t.error_rate > 0 ? colors.value.error : colors.value.ok)),
       borderWidth: 0,
       borderRadius: 3,
     },
@@ -115,10 +117,11 @@ const chartOptions = computed<ChartOptions<'bar'>>(() => ({
     x: {
       beginAtZero: true,
       max: 100,
-      title: { display: true, text: 'Error rate (% of calls)' },
-      ticks: { callback: (v) => `${v}%` },
+      title: { display: true, text: 'Error rate (% of calls)', color: colors.value.muted },
+      ...chartTextOptions(colors.value),
+      ticks: { callback: (v) => `${v}%`, color: colors.value.muted },
     },
-    y: { ticks: { autoSkip: false, font: { size: 11 } } },
+    y: { ...chartTextOptions(colors.value), ticks: { autoSkip: false, font: { size: 12 }, color: colors.value.muted } },
   },
 }))
 </script>

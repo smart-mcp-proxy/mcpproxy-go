@@ -9,7 +9,7 @@
 // Launcher: scripts/run-web-smoke.sh (docs/development/web-ui-verification.md).
 import { test, expect, Page } from '@playwright/test'
 import path from 'node:path'
-import { CLIENT_ID, RO_PROFILE, SERVER, api, cleanupProfiles, seedProfiles } from './profiles-seed'
+import { CLIENT_ID, RO_PROFILE, SERVER, api, cleanupProfiles, seedProfiles, openManagePanel } from './profiles-seed'
 
 const BASE = process.env.MCPPROXY_BASE_URL || 'http://127.0.0.1:18080'
 const KEY = process.env.MCPPROXY_API_KEY || ''
@@ -97,6 +97,7 @@ test('goal flow: create a profile, deny a tool, try it, mint a token, assign a c
 
   // On Clients, move the client to the new profile: the PUT is observed and the chip reads the source.
   await open(page, '/clients')
+  await openManagePanel(page)
   const chip = page.locator(`[data-test="client-profile-chip-${CLIENT_ID}"]`)
   await expect(chip).toBeVisible()
   await chip.click()
@@ -170,6 +171,7 @@ test('Explain access on a client shows the verdict and a fix that lands on the f
   const key = `${hidden!.server}:${hidden!.tool}`
 
   await open(page, `/clients?focus=${CLIENT_ID}`)
+  await expect(page.locator(`[data-test="client-manage-panel-${CLIENT_ID}"]`)).toBeVisible()
   await page.locator(`[data-test="client-explain-${CLIENT_ID}"]`).click()
   const explainer = page.locator('[data-test="access-explainer"]')
   await expect(explainer).toBeVisible()
@@ -201,7 +203,7 @@ test('the header has no Profile switcher and "View as" survives navigation and B
 
   // In-app links built with the link map carry the filter: the Clients row's Tools link.
   await open(page, `/clients?profile=${WORK}`)
-  await page.locator('tbody tr', { hasText: 'E2E laptop' }).first().click()
+  await openManagePanel(page)
   // Spec 109-l: the link reads "Tools it sees" (url-filter-contract.md link map).
   await page.locator(`[data-test="clients-row-link-tools-${CLIENT_ID}"]`).click()
   await expect(page).toHaveURL(new RegExp(`/ui/tools.*profile=${WORK}`))
@@ -287,6 +289,7 @@ test('a binding changed in the background updates the chip without a reload', as
   await open(page, '/clients')
   await stream
   await page.waitForTimeout(400)
+  await openManagePanel(page)
   const chip = page.locator(`[data-test="client-profile-chip-${CLIENT_ID}"]`)
   await expect(chip).toContainText('locked by credential')
   const reloads: string[] = []
