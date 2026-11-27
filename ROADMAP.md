@@ -1449,3 +1449,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [133-admin-action-audit](./specs/133-admin-action-audit/) | — | — |
 | [134-webui-simplify](./specs/134-webui-simplify/) | — | — |
 | [135-oauth-client-hardening](./specs/135-oauth-client-hardening/) | `in-flight` | 14/39 (36%) |
+| [137-tool-listing-fields](./specs/137-tool-listing-fields/) | — | — |
