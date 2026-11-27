@@ -107,8 +107,10 @@ func TestActivitySessions_FlagsMapToTheListDoor(t *testing.T) {
 		args []string
 		want url.Values
 	}{
-		{"failed", []string{"--failed"}, url.Values{"failed": {"true"}}},
-		{"failed without blocks", []string{"--failed", "--no-blocked"}, url.Values{"failed": {"true"}, "include_blocked": {"false"}}},
+		// User Story 4, scenario 1: the failed-only list is newest failure first.
+		{"failed", []string{"--failed"}, url.Values{"failed": {"true"}, "sort": {"last_failure"}}},
+		{"failed, sorted as asked", []string{"--failed", "--sort", "last_activity"}, url.Values{"failed": {"true"}, "sort": {"last_activity"}}},
+		{"failed without blocks", []string{"--failed", "--no-blocked"}, url.Values{"failed": {"true"}, "include_blocked": {"false"}, "sort": {"last_failure"}}},
 		{"token", []string{"--token", "ci bot"}, url.Values{"token": {"ci bot"}}},
 		{"client", []string{"--client", "cursor"}, url.Values{"client": {"cursor"}}},
 		{"profile", []string{"--profile", "work"}, url.Values{"profile": {"work"}}},
@@ -216,6 +218,43 @@ func TestActivitySessions_TableEscapesTerminalControls(t *testing.T) {
 	require.NotContains(t, out, "\x1b")
 	require.NotContains(t, out, "\u202e")
 	require.NotContains(t, out, "\x07")
+}
+
+// The Unicode line separators are neither control nor format characters, and
+// a terminal that honours them would break a row in two.
+func TestActivitySessions_TableEscapesLineSeparators(t *testing.T) {
+	newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/work-sessions": okResp(`{"sessions":[{"id":"ws-1","client_name":"cursor\u2028other","project_name":"a\u2029b","status":"ended","started_at":"2026-11-26T22:00:00Z","last_activity_at":"2026-11-26T22:00:01Z","duration_ms":1000,"attempts":1,"failures":1,"policy_blocks":0,"stored_failures":1,"last_failure":{"at":"2026-11-26T22:00:01Z","reason":"one\u2028two"}}],"total":1,"limit":25,"offset":0}`),
+	})
+	out, _, err := runCLI(t, workSessionsTestRoot, "table", "sessions")
+	require.NoError(t, err)
+	require.NotContains(t, out, "\u2028")
+	require.NotContains(t, out, "\u2029")
+	require.Contains(t, out, `cursor\u2028other`)
+}
+
+// An offset past the last session is not "nothing matches".
+func TestActivitySessions_OffsetPastTheEnd(t *testing.T) {
+	newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/work-sessions": okResp(`{"sessions":[],"total":10,"limit":25,"offset":10}`),
+	})
+	out, _, err := runCLI(t, workSessionsTestRoot, "table", "sessions", "--offset", "10")
+	require.NoError(t, err)
+	require.NotContains(t, out, "No work sessions found")
+	require.Contains(t, out, "No sessions at offset 10: 10 sessions match")
+}
+
+// A body that is not the daemon's JSON (a proxy's error page) is quoted as
+// text: nothing in it reaches the terminal as a control sequence.
+func TestActivitySessions_ForeignErrorBodyIsEscaped(t *testing.T) {
+	newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/work-sessions": refuse(http.StatusBadGateway, "bad gateway \x1b[2J\x1b[H"),
+	})
+	_, _, err := runCLI(t, workSessionsTestRoot, "table", "sessions")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "502")
+	require.NotContains(t, err.Error(), "\x1b")
+	require.Equal(t, ExitCodeGeneralError, classifyError(err))
 }
 
 // A refusal keeps the daemon's words and exits 1.

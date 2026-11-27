@@ -53,10 +53,12 @@ func (p WorkSessionListParams) query() url.Values {
 			q.Set(key, value)
 		}
 	}
-	if p.Limit > 0 {
+	// A value the door refuses is sent, not dropped: the refusal is the
+	// caller's answer, and a default page in its place would hide the mistake.
+	if p.Limit != 0 {
 		q.Set("limit", strconv.Itoa(p.Limit))
 	}
-	if p.Offset > 0 {
+	if p.Offset != 0 {
 		q.Set("offset", strconv.Itoa(p.Offset))
 	}
 	return q
@@ -91,9 +93,14 @@ func (p WorkSessionTimelineParams) query() url.Values {
 	return q
 }
 
+// workSessionBodyPreview caps how much of a body that is not the JSON
+// envelope is quoted in an error.
+const workSessionBodyPreview = 300
+
 // WorkSessionNotFoundError is the door's answer for an id that matches no
 // session the caller may read. The door gives the same answer for a session
-// that does not exist and for one that belongs to someone else.
+// that does not exist and for one that belongs to someone else. Another 404
+// (a reverse proxy's, or a daemon that has no such route) is not this error.
 type WorkSessionNotFoundError struct {
 	*APIError
 	ID string
@@ -139,10 +146,14 @@ func (c *Client) workSessionGet(ctx context.Context, path string, query url.Valu
 	jsonErr := json.Unmarshal(body, &env)
 	if resp.StatusCode != http.StatusOK || jsonErr != nil || !env.Success {
 		if jsonErr != nil || env.Error == "" {
-			return fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+			preview := string(body)
+			if len(preview) > workSessionBodyPreview {
+				preview = preview[:workSessionBodyPreview] + "..."
+			}
+			return fmt.Errorf("API returned status %d: %s", resp.StatusCode, preview)
 		}
 		apiErr := &APIError{Message: env.Error, RequestID: env.RequestID}
-		if resp.StatusCode == http.StatusNotFound && id != "" {
+		if resp.StatusCode == http.StatusNotFound && id != "" && env.Error == contracts.WorkSessionNotFoundMessage {
 			return &WorkSessionNotFoundError{APIError: apiErr, ID: id}
 		}
 		return apiErr

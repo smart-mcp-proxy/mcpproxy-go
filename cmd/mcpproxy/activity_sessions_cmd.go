@@ -34,6 +34,13 @@ const (
 	workSessionListLimitMax     = 100
 	workSessionContextDefault   = 20
 	workSessionContextMax       = 250
+	// workSessionPageMax is the most rows one timeline page holds, the
+	// positioned row included. The door shortens the forward context of a
+	// larger request without saying so, so a larger request is refused here.
+	workSessionPageMax = 500
+	// workSessionWalkAttempts bounds how often `session --failures` starts
+	// over when the stored failures change under it.
+	workSessionWalkAttempts = 3
 	// workSessionCallTimeout bounds one request to a door.
 	workSessionCallTimeout = 30 * time.Second
 	// workSessionReasonCell and workSessionDetailCell cap the free-text cells.
@@ -75,7 +82,7 @@ touched servers in its reach.
 
 Examples:
   # The morning after: which runs failed, newest failure first
-  mcpproxy activity sessions --failed --sort last_failure --since -24h
+  mcpproxy activity sessions --failed --since -24h
 
   # The same, without sessions whose only failures were policy blocks
   mcpproxy activity sessions --failed --no-blocked
@@ -103,6 +110,10 @@ Examples:
 			}
 			if noBlocked && !failed {
 				return newFlagValidationError("--no-blocked only changes what --failed counts: add --failed")
+			}
+			// User Story 4: the failed-only list is read newest failure first.
+			if failed && sortBy == "" {
+				sortBy = "last_failure"
 			}
 			now := time.Now()
 			sinceAt, err := resolveActivityTime(since, now)
@@ -135,7 +146,7 @@ Examples:
 	f.StringVar(&errorClass, "error-class", "", "Filter by the error class of the last failure: "+strings.Join(validErrorClasses, ", "))
 	f.StringVar(&since, "since", "", "Only sessions active at or after this time (RFC3339 or relative: -1h, -24h, -7d)")
 	f.StringVar(&until, "until", "", "Only sessions started at or before this time (RFC3339 or relative)")
-	f.StringVar(&sortBy, "sort", "", "Sort by last_activity (default) or last_failure, newest first")
+	f.StringVar(&sortBy, "sort", "", "Sort by last_activity or last_failure, newest first (default: last_activity; last_failure with --failed)")
 	f.IntVarP(&limit, "limit", "n", workSessionListLimitDefault, "Max sessions to return (1-100)")
 	f.IntVar(&offset, "offset", 0, "Pagination offset")
 	return cmd
@@ -175,7 +186,7 @@ Examples:
   # The third failure, with the bodies of the calls around it
   mcpproxy activity session ws-4f2a91c07b3d --at failure:3 --include-bodies
 
-  # The last rows of the session
+  # The last row of the session and the 50 before it
   mcpproxy activity session ws-4f2a91c07b3d --at end --before 50
 
 Find the id with: mcpproxy activity sessions --failed`,
@@ -190,6 +201,9 @@ Find the id with: mcpproxy activity sessions --failed`,
 				if value < 0 || value > workSessionContextMax {
 					return newFlagValidationError("invalid %s %d: use a number from 0 to %d", name, value, workSessionContextMax)
 				}
+			}
+			if before+after+1 > workSessionPageMax && (!failures || cmd.Flags().Changed("after")) {
+				return newFlagValidationError("--before %d and --after %d do not fit one page: together they can be at most %d", before, after, workSessionPageMax-1)
 			}
 			if err := validateTimelinePosition(at); err != nil {
 				return err
@@ -252,7 +266,24 @@ func workSessionError(err error) error {
 	if errors.As(err, &apiErr) {
 		return cliRefusalError{errors.New(termSafeText(apiErr.FormatWithRequestID()))}
 	}
-	return err
+	// Anything else can quote a body that was not the daemon's JSON (a
+	// proxy's error page): it is shown as text too.
+	return cliRefusalError{errors.New(termSafeText(err.Error()))}
+}
+
+// workSessionLineSeparators shows the Unicode line and paragraph separators
+// as text. sanitizeCell escapes control and format characters; these two are
+// neither, and a terminal that honours them would break a table row in two.
+var workSessionLineSeparators = strings.NewReplacer("\u2028", `\u2028`, "\u2029", `\u2029`)
+
+// wsCell makes a client- or upstream-supplied name safe for one table cell.
+func wsCell(s string, maxRunes int) string {
+	return sanitizeCell(workSessionLineSeparators.Replace(s), maxRunes)
+}
+
+// wsText is wsCell for free text: whitespace runs become one space first.
+func wsText(s string, maxRunes int) string {
+	return sanitizeDescriptionCell(workSessionLineSeparators.Replace(s), maxRunes)
 }
 
 func runActivitySessions(params cliclient.WorkSessionListParams) error {
@@ -273,6 +304,10 @@ func runActivitySessions(params cliclient.WorkSessionListParams) error {
 		return printJSONValue(list)
 	}
 	if len(list.Sessions) == 0 {
+		if list.Total > 0 {
+			fmt.Printf("No sessions at offset %d: %d sessions match. Lower --offset.\n", list.Offset, list.Total)
+			return nil
+		}
 		fmt.Println("No work sessions found")
 		return nil
 	}
@@ -325,17 +360,17 @@ func workSessionListTable(sessions []contracts.WorkSession) (headers []string, r
 		if ws.LastFailure != nil {
 			lastFailure = ws.LastFailure.At.UTC().Format(workSessionTimeLayout)
 			if ws.LastFailure.Reason != "" {
-				reason = sanitizeDescriptionCell(ws.LastFailure.Reason, workSessionReasonCell)
+				reason = wsText(ws.LastFailure.Reason, workSessionReasonCell)
 			}
 		}
 		row := []string{
-			sanitizeCell(ws.ID, 0),
-			dashIfEmpty(sanitizeCell(ws.TokenName, workSessionNameCell)),
+			wsCell(ws.ID, 0),
+			dashIfEmpty(wsCell(ws.TokenName, workSessionNameCell)),
 			workSessionClientCell(ws),
-			dashIfEmpty(sanitizeCell(ws.ProjectName, workSessionNameCell)),
+			dashIfEmpty(wsCell(ws.ProjectName, workSessionNameCell)),
 		}
 		if withRun {
-			row = append(row, dashIfEmpty(sanitizeCell(ws.RunName, workSessionNameCell)))
+			row = append(row, dashIfEmpty(wsCell(ws.RunName, workSessionNameCell)))
 		}
 		row = append(row, started, duration, strconv.Itoa(ws.Attempts), workSessionFailuresCell(ws), lastFailure, reason)
 		rows = append(rows, row)
@@ -356,11 +391,11 @@ func dashIfEmpty(s string) string {
 func workSessionClientCell(ws *contracts.WorkSession) string {
 	switch {
 	case ws.ClientID != "":
-		return sanitizeCell(ws.ClientID, workSessionNameCell)
+		return wsCell(ws.ClientID, workSessionNameCell)
 	case ws.ClientName != "":
-		return "~" + sanitizeCell(ws.ClientName, workSessionNameCell)
+		return "~" + wsCell(ws.ClientName, workSessionNameCell)
 	case ws.Surface != "":
-		return sanitizeCell(ws.Surface, workSessionNameCell)
+		return wsCell(ws.Surface, workSessionNameCell)
 	}
 	return "-"
 }
@@ -467,23 +502,23 @@ func shellQuoteIfNeeded(s string) string {
 
 // printWorkSessionHeader prints who ran the session and what it amounted to.
 func printWorkSessionHeader(ws *contracts.WorkSession) {
-	parts := []string{"Session " + sanitizeCell(ws.ID, 0)}
+	parts := []string{"Session " + wsCell(ws.ID, 0)}
 	if ws.TokenName != "" {
-		parts = append(parts, "token "+sanitizeCell(ws.TokenName, workSessionNameCell))
+		parts = append(parts, "token "+wsCell(ws.TokenName, workSessionNameCell))
 	}
 	if c := workSessionClientCell(ws); c != "-" {
 		parts = append(parts, "client "+c)
 	}
 	if ws.ProjectName != "" {
-		parts = append(parts, "project "+sanitizeCell(ws.ProjectName, workSessionNameCell))
+		parts = append(parts, "project "+wsCell(ws.ProjectName, workSessionNameCell))
 	}
 	if ws.RunName != "" {
-		parts = append(parts, "run "+sanitizeCell(ws.RunName, workSessionNameCell))
+		parts = append(parts, "run "+wsCell(ws.RunName, workSessionNameCell))
 	}
 	if ws.Profile != "" {
-		parts = append(parts, "profile "+sanitizeCell(ws.Profile, workSessionNameCell))
+		parts = append(parts, "profile "+wsCell(ws.Profile, workSessionNameCell))
 	}
-	parts = append(parts, sanitizeCell(ws.Status, workSessionNameCell))
+	parts = append(parts, wsCell(ws.Status, workSessionNameCell))
 	fmt.Println(strings.Join(parts, " · "))
 
 	calls := "calls"
@@ -554,15 +589,15 @@ func timelineTableRow(row *contracts.WorkSessionTimelineRow) []string {
 	}
 	act := row.Activity
 	if act == nil {
-		return []string{mark, index, at, sanitizeCell(row.Kind, workSessionNameCell), "-", "-", "-", "-", "-"}
+		return []string{mark, index, at, wsCell(row.Kind, workSessionNameCell), "-", "-", "-", "-", "-"}
 	}
 
 	if row.Kind == contracts.TimelineKindUpstreamEvent {
 		return []string{mark, index, at, "UPSTREAM EVENT",
-			dashIfEmpty(sanitizeCell(act.ServerName, 48)),
-			dashIfEmpty(sanitizeCell(act.Status, 16)),
+			dashIfEmpty(wsCell(act.ServerName, 48)),
+			dashIfEmpty(wsCell(act.Status, 16)),
 			"-",
-			sanitizeCell(act.ID, 0),
+			wsCell(act.ID, 0),
 			upstreamEventDetail(row, act),
 		}
 	}
@@ -591,12 +626,12 @@ func timelineTableRow(row *contracts.WorkSessionTimelineRow) []string {
 		detail = append(detail, reason)
 	}
 	return []string{mark, index, at,
-		sanitizeCell(row.Kind, workSessionNameCell),
-		dashIfEmpty(sanitizeCell(target, 64)),
-		dashIfEmpty(sanitizeCell(act.Status, 16)),
+		wsCell(row.Kind, workSessionNameCell),
+		dashIfEmpty(wsCell(target, 64)),
+		dashIfEmpty(wsCell(act.Status, 16)),
 		duration,
-		sanitizeCell(act.ID, 0),
-		dashIfEmpty(sanitizeDescriptionCell(strings.Join(detail, ": "), workSessionDetailCell)),
+		wsCell(act.ID, 0),
+		dashIfEmpty(wsText(strings.Join(detail, ": "), workSessionDetailCell)),
 	}
 }
 
@@ -622,7 +657,7 @@ func upstreamEventDetail(row *contracts.WorkSessionTimelineRow, act *contracts.A
 	if count, _ := act.Metadata["count"].(float64); count > 1 {
 		parts = append(parts, fmt.Sprintf("x%d", int(count)))
 	}
-	return dashIfEmpty(sanitizeDescriptionCell(strings.Join(parts, " · "), workSessionDetailCell))
+	return dashIfEmpty(wsText(strings.Join(parts, " · "), workSessionDetailCell))
 }
 
 // printTimelineBodies prints the argument and response bodies of the rows
@@ -644,18 +679,16 @@ func printTimelineBodies(rows []contracts.WorkSessionTimelineRow) {
 		}
 		if row.BodiesRemoved {
 			heading()
-			fmt.Printf("  #%d %s: bodies removed by retention\n", row.Index, sanitizeCell(act.ID, 0))
+			fmt.Printf("  #%d %s: bodies removed by retention\n", row.Index, wsCell(act.ID, 0))
 			continue
 		}
 		if len(act.Arguments) == 0 && act.Response == "" {
 			continue
 		}
 		heading()
-		fmt.Printf("  #%d %s\n", row.Index, sanitizeCell(act.ID, 0))
+		fmt.Printf("  #%d %s\n", row.Index, wsCell(act.ID, 0))
 		if len(act.Arguments) > 0 {
-			if raw, err := json.Marshal(act.Arguments); err == nil {
-				fmt.Printf("    arguments: %s\n", timelineBodyText(string(raw)))
-			}
+			fmt.Printf("    arguments: %s\n", timelineBodyText(act.Arguments))
 		}
 		if act.Response != "" {
 			fmt.Printf("    response:  %s\n", timelineBodyText(act.Response))
@@ -663,12 +696,20 @@ func printTimelineBodies(rows []contracts.WorkSessionTimelineRow) {
 	}
 }
 
-// timelineBodyText puts a body on one line: whitespace runs become one space,
-// every character a terminal would act on is shown escaped, and the result is
-// capped at workSessionBodyRunes. It does not go through sanitizeCell, whose
-// cap is the 200 runes of a table cell.
-func timelineBodyText(s string) string {
-	safe := termEscape(strings.Join(strings.Fields(s), " "), false)
+// timelineBodyText renders a body as one line of JSON: the arguments as their
+// object, the response as a quoted string. JSON keeps every character of the
+// value (a run of spaces in a file name stays a run of spaces, a line break is
+// \n) and puts it on one line. What a terminal would still act on is shown
+// escaped, and the line is capped at workSessionBodyRunes. It does not go
+// through sanitizeCell, whose cap is the 200 runes of a table cell.
+func timelineBodyText(v any) string {
+	var buf strings.Builder
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "(not printable: " + termEscape(err.Error(), false) + ")"
+	}
+	safe := termEscape(strings.TrimSuffix(buf.String(), "\n"), false)
 	if runes := []rune(safe); len(runes) > workSessionBodyRunes {
 		return string(runes[:workSessionBodyRunes]) + "..."
 	}
@@ -692,10 +733,14 @@ type workSessionFailuresView struct {
 	// Failures lists every failure that was walked.
 	Failures []workSessionFailureRef `json:"failures"`
 	// Before and After are the rows of context kept around each failure.
-	Before                   int  `json:"before"`
-	After                    int  `json:"after"`
-	TotalRows                int  `json:"total_rows"`
-	FailureTotal             int  `json:"failure_total"`
+	Before       int `json:"before"`
+	After        int `json:"after"`
+	TotalRows    int `json:"total_rows"`
+	FailureTotal int `json:"failure_total"`
+	// FailuresNotReturned counts stored failures whose row the door did not
+	// return: removed while the session was read, or not readable with the
+	// caller's credential.
+	FailuresNotReturned      int  `json:"failures_not_returned,omitempty"`
 	LifetimeFailures         int  `json:"lifetime_failures"`
 	EarlierFailuresNotStored bool `json:"earlier_failures_not_stored,omitempty"`
 }
@@ -703,8 +748,27 @@ type workSessionFailuresView struct {
 // timelineFetcher reads one page of the timeline positioned at `at`.
 type timelineFetcher func(at string, before, after int) (*contracts.WorkSessionTimelineResponse, error)
 
+// errWorkSessionChanged reports that the stored failures of a session moved
+// while they were being walked.
+var errWorkSessionChanged = errors.New("the stored failures of this session changed while they were being read (retention removed some of them). Run the command again")
+
 // walkSessionFailures reads every stored failure of a session with `before`
 // rows ahead of it and `after` rows behind it.
+//
+// Failures are addressed by their number among the stored ones, and that
+// number moves when retention removes an older failure in the middle of the
+// walk. A walk that sees it happen is thrown away and started over, so a
+// result never mixes two numberings.
+func walkSessionFailures(fetch timelineFetcher, before, after, lookahead int) (*workSessionFailuresView, error) {
+	for attempt := 1; ; attempt++ {
+		view, err := walkSessionFailuresOnce(fetch, before, after, lookahead)
+		if !errors.Is(err, errWorkSessionChanged) || attempt == workSessionWalkAttempts {
+			return view, err
+		}
+	}
+}
+
+// walkSessionFailuresOnce is one pass of the walk.
 //
 // A page is asked for with as much forward context as the door gives, so the
 // failures that follow closely arrive with it and need no request of their
@@ -714,7 +778,12 @@ type timelineFetcher func(at string, before, after int) (*contracts.WorkSessionT
 // far enough or the timeline ends there. The first failure that is not whole
 // on the page is the next position. lookahead is that forward reach; with
 // bodies it is `after`, so no body is fetched that will not be printed.
-func walkSessionFailures(fetch timelineFetcher, before, after, lookahead int) (*workSessionFailuresView, error) {
+func walkSessionFailuresOnce(fetch timelineFetcher, before, after, lookahead int) (*workSessionFailuresView, error) {
+	// One page holds workSessionPageMax rows; the door cuts the forward
+	// context of a larger request.
+	if room := workSessionPageMax - 1 - before; lookahead > room {
+		lookahead = room
+	}
 	if lookahead < after {
 		lookahead = after
 	}
@@ -731,6 +800,12 @@ func walkSessionFailures(fetch timelineFetcher, before, after, lookahead int) (*
 	if page.FailureTotal == 0 {
 		return view, nil
 	}
+	// Failures that are gone from the log: the lifetime count is exact, the
+	// stored count is what the door walked. Retention removes the oldest rows,
+	// so when this number grows every stored failure has moved down by as
+	// much. A failure recorded while the walk runs raises both counts and
+	// leaves it as it was.
+	removed := page.LifetimeFailures - page.FailureTotal
 
 	kept := map[int]contracts.WorkSessionTimelineRow{}
 	failureAt := map[int]int{} // row index -> failure number
@@ -753,14 +828,24 @@ func walkSessionFailures(fetch timelineFetcher, before, after, lookahead int) (*
 			number = requested
 		}
 		last := page.Position
-		if n := len(page.Rows); n > 0 && page.Rows[n-1].Index > last {
-			last = page.Rows[n-1].Index
+		anchored := false
+		for i := range page.Rows {
+			if idx := page.Rows[i].Index; idx > last {
+				last = idx
+			}
+			if page.Rows[i].Index == page.Position {
+				anchored = true
+			}
 		}
-		// The position is the failure that was asked for; the door gave it
-		// its context.
-		failureAt[page.Position] = number
-		keep(page, page.Position)
+		// The position is the failure that was asked for, and the door gave
+		// it its context. Its row can still be missing from the page: removed
+		// since the door found it, or not readable with this credential. Then
+		// there is nothing to show for it, and it is counted as not returned.
 		covered := 1
+		if anchored {
+			failureAt[page.Position] = number
+			keep(page, page.Position)
+		}
 		for i := range page.Rows {
 			row := &page.Rows[i]
 			if !row.Failed || row.Index <= page.Position {
@@ -787,6 +872,9 @@ func walkSessionFailures(fetch timelineFetcher, before, after, lookahead int) (*
 		if page, err = fetch("failure:"+strconv.Itoa(next), before, lookahead); err != nil {
 			return nil, err
 		}
+		if page.LifetimeFailures-page.FailureTotal != removed {
+			return nil, errWorkSessionChanged
+		}
 	}
 
 	indexes := make([]int, 0, len(kept))
@@ -804,6 +892,9 @@ func walkSessionFailures(fetch timelineFetcher, before, after, lookahead int) (*
 	sort.Ints(failureRows)
 	for _, idx := range failureRows {
 		view.Failures = append(view.Failures, workSessionFailureRef{Number: failureAt[idx], Index: idx})
+	}
+	if missing := view.FailureTotal - len(view.Failures); missing > 0 {
+		view.FailuresNotReturned = missing
 	}
 	return view, nil
 }
@@ -833,8 +924,14 @@ func runActivitySessionFailures(id string, before, after int, includeBodies bool
 
 	printWorkSessionHeader(&view.Session)
 	printStoredFailuresNote(view.LifetimeFailures, view.FailureTotal, view.EarlierFailuresNotStored)
+	if view.FailuresNotReturned > 0 {
+		fmt.Printf("Note: %d of the %d stored failures were not returned: their rows were removed while the session was read, or are not readable with this credential.\n",
+			view.FailuresNotReturned, view.FailureTotal)
+	}
 	if len(view.Failures) == 0 {
-		fmt.Println("\nNo stored failures in this session.")
+		if view.FailureTotal == 0 {
+			fmt.Println("\nNo stored failures in this session.")
+		}
 		return nil
 	}
 	for _, group := range groupFailureContexts(view) {

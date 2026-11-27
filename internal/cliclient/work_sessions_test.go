@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -138,4 +139,48 @@ func TestClient_WorkSessionNonJSONBody(t *testing.T) {
 	defer srv.Close()
 	_, err := NewClient(srv.URL, nil).ListWorkSessions(context.Background(), WorkSessionListParams{})
 	require.ErrorContains(t, err, "502")
+}
+
+// A 404 that is not the door's own (a reverse proxy without the route) is not
+// "this session does not exist": its text and request id are reported as they
+// came.
+func TestClient_WorkSessionForeign404IsNotASessionNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"success":false,"error":"Route not found","request_id":"gw-42"}`))
+	}))
+	defer srv.Close()
+	_, err := NewClient(srv.URL, nil).GetWorkSessionTimeline(context.Background(), "ws-1", WorkSessionTimelineParams{})
+	var notFound *WorkSessionNotFoundError
+	require.False(t, errors.As(err, &notFound))
+	var apiErr *APIError
+	require.True(t, errors.As(err, &apiErr), "got %T", err)
+	require.Equal(t, "Route not found", apiErr.Message)
+	require.Equal(t, "gw-42", apiErr.RequestID)
+}
+
+// A value the door refuses reaches the door; it is not replaced by a default.
+func TestClient_ListWorkSessions_SendsOutOfRangePaging(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"success":false,"error":"Invalid limit. Use a number from 1 to 100"}`))
+	}))
+	defer srv.Close()
+	_, err := NewClient(srv.URL, nil).ListWorkSessions(context.Background(), WorkSessionListParams{Limit: -1, Offset: -5})
+	require.ErrorContains(t, err, "Invalid limit")
+	require.Equal(t, "limit=-1&offset=-5", gotQuery)
+}
+
+// A long body that is not the envelope is quoted in part.
+func TestClient_WorkSessionNonJSONBodyIsCapped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(strings.Repeat("x", 5000)))
+	}))
+	defer srv.Close()
+	_, err := NewClient(srv.URL, nil).ListWorkSessions(context.Background(), WorkSessionListParams{})
+	require.Error(t, err)
+	require.Less(t, len(err.Error()), 400)
 }

@@ -262,7 +262,7 @@ func TestActivitySession_IncludeBodies(t *testing.T) {
 	body := `{"session": ` + timelineSessionJSON + `, "rows": [` +
 		timelineRow(7, "call", "2026-11-26T22:00:03Z", `"failed": true`,
 			callActivity("01CALL2", "2026-11-26T22:00:03Z", "github", "create_issue", "error",
-				`"arguments": {"title": "broken\u001b[31m build"}, "response": "line one\nline two `+strings.Repeat("word ", 120)+`the-end", "error_class": "network"`)) + `,` +
+				`"arguments": {"title": "broken\u001b[31m build", "path": "reports/April  2026 <a&b>.csv"}, "response": "line one\nline two `+strings.Repeat("word ", 120)+`the-end", "error_class": "network"`)) + `,` +
 		timelineRow(8, "call", "2026-11-26T22:00:04Z", `"bodies_removed": true`,
 			callActivity("01CALL3", "2026-11-26T22:00:04Z", "github", "list_issues", "success", "")) + `],
 	  "position": 7, "total_rows": 9, "failure_index": 1, "failure_total": 1, "lifetime_failures": 1, "has_before": true, "has_after": false}`
@@ -273,7 +273,10 @@ func TestActivitySession_IncludeBodies(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, out, `"title"`)
 	require.Contains(t, out, "broken")
-	require.Contains(t, out, "line one line two", "a body is put on one line")
+	// A body is printed as one line of JSON, so no character of it is lost: a
+	// line break is \n, and a run of spaces in a value stays a run of spaces.
+	require.Contains(t, out, `"line one\nline two word`)
+	require.Contains(t, out, `"path":"reports/April  2026 <a&b>.csv"`)
 	require.Contains(t, out, "the-end", "a body is capped at its own length, not at a table cell's")
 	require.NotContains(t, out, "\x1b", "a body is upstream text and is escaped like every other cell")
 	require.Contains(t, out, "bodies removed by retention")
@@ -436,4 +439,174 @@ func TestActivitySession_FailuresWalkAlwaysAdvances(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rec.all(), 4, "one request per failure at most")
 	require.Equal(t, 1, strings.Count(out, "01ROW004"))
+}
+
+// A 404 that is not the door's own answer is not "this session does not
+// exist": the daemon's (or the proxy's) words are reported as they came.
+func TestActivitySession_Foreign404IsNotASessionNotFound(t *testing.T) {
+	newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/work-sessions/ws-1/timeline": refuse(http.StatusNotFound, `{"success":false,"error":"Route not found","request_id":"gw-42"}`),
+	})
+	_, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-1")
+	require.ErrorContains(t, err, "Route not found")
+	require.ErrorContains(t, err, "gw-42")
+	require.NotContains(t, err.Error(), "mcpproxy activity sessions")
+}
+
+// One page holds 500 rows. The door cuts the forward context of a larger
+// request without saying so, so the CLI refuses it.
+func TestActivitySession_ContextMustFitOnePage(t *testing.T) {
+	for name, args := range map[string][]string{
+		"position":               {"ws-1", "--before", "250", "--after", "250"},
+		"failures with an after": {"ws-1", "--failures", "--before", "250", "--after", "250"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := newRESTRecorder(t, map[string]cannedResponse{})
+			_, _, err := runCLI(t, workSessionsTestRoot, "table", append([]string{"session"}, args...)...)
+			require.ErrorContains(t, err, "at most 499")
+			require.Empty(t, rec.all())
+		})
+	}
+	// --failures has no forward context unless asked, so the default --after
+	// does not count against the page; the look-ahead is what is left of it.
+	t.Run("failures without an after", func(t *testing.T) {
+		rec := newRESTRecorder(t, map[string]cannedResponse{
+			"GET /api/v1/work-sessions/ws-1/timeline": okResp(`{"session": ` + timelineSessionJSON + `, "rows": [], "position": 0, "total_rows": 0,
+			  "failure_index": 0, "failure_total": 0, "lifetime_failures": 0, "has_before": false, "has_after": false}`),
+		})
+		_, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-1", "--failures", "--before", "250")
+		require.NoError(t, err)
+		q, _ := url.ParseQuery(rec.only(t).RawQuery)
+		require.Equal(t, "250", q.Get("before"))
+		require.Equal(t, "249", q.Get("after"))
+	})
+}
+
+// With bodies the walk asks for no row it will not print.
+func TestActivitySession_FailuresWithBodiesAskForNoLookAhead(t *testing.T) {
+	rec := newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/work-sessions/ws-1/timeline": okResp(`{"session": ` + timelineSessionJSON + `, "rows": [], "position": 0, "total_rows": 0,
+		  "failure_index": 0, "failure_total": 0, "lifetime_failures": 0, "has_before": false, "has_after": false}`),
+	})
+	_, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-1", "--failures", "--include-bodies")
+	require.NoError(t, err)
+	q, _ := url.ParseQuery(rec.only(t).RawQuery)
+	require.Equal(t, "0", q.Get("after"))
+	require.Equal(t, "true", q.Get("include_bodies"))
+}
+
+// failuresPage builds a page of the --failures walk.
+func failuresPage(rows []string, position, failureIndex, failureTotal, lifetime int, hasAfter bool) string {
+	return fmt.Sprintf(`{"session": %s, "rows": [%s], "position": %d, "total_rows": 900,
+	  "failure_index": %d, "failure_total": %d, "lifetime_failures": %d, "earlier_failures_not_stored": %t,
+	  "has_before": true, "has_after": %t}`,
+		timelineSessionJSON, strings.Join(rows, ","), position, failureIndex, failureTotal, lifetime, lifetime > failureTotal, hasAfter)
+}
+
+func failuresRow(index int, failed bool) string {
+	id := fmt.Sprintf("01ROW%03d", index)
+	extra, status := "", "success"
+	if failed {
+		extra, status = `"failed": true`, "error"
+	}
+	return timelineRow(index, "call", "2026-11-26T22:00:00Z", extra, callActivity(id, "2026-11-26T22:00:00Z", "github", "t", status, ""))
+}
+
+// Failures are asked for by their number among the stored ones. When
+// retention removes an older failure in the middle of the walk, every number
+// moves, and "failure 2" is no longer the failure after the first one read.
+// The walk sees the stored count fall behind the lifetime count and starts
+// over, so no stored failure is skipped.
+func TestActivitySession_FailuresWalkRestartsWhenRetentionMovesTheNumbers(t *testing.T) {
+	rec := newSequencedRecorder(t, "GET /api/v1/work-sessions/ws-aaa/timeline", []cannedResponse{
+		// First pass: three stored failures, A at row 10.
+		okResp(failuresPage([]string{failuresRow(10, true)}, 10, 1, 3, 3, true)),
+		// A was removed: "failure 2" is now C, and one failure is gone.
+		okResp(failuresPage([]string{failuresRow(600, true)}, 600, 2, 2, 3, true)),
+		// Second pass: B and C, numbered 1 and 2.
+		okResp(failuresPage([]string{failuresRow(300, true)}, 300, 1, 2, 3, true)),
+		okResp(failuresPage([]string{failuresRow(600, true)}, 600, 2, 2, 3, true)),
+	})
+	out, _, err := runCLI(t, workSessionsTestRoot, "json", "session", "ws-aaa", "--failures", "--before", "0")
+	require.NoError(t, err)
+	requests := rec.all()
+	require.Len(t, requests, 4)
+	q, _ := url.ParseQuery(requests[2].RawQuery)
+	require.Equal(t, "first_failure", q.Get("at"), "the walk starts over")
+
+	var got struct {
+		Rows []struct {
+			Index int `json:"index"`
+		} `json:"rows"`
+		Failures []struct {
+			Number int `json:"number"`
+			Index  int `json:"index"`
+		} `json:"failures"`
+		FailureTotal int `json:"failure_total"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Len(t, got.Failures, 2)
+	require.Equal(t, 300, got.Failures[0].Index, "B is not skipped")
+	require.Equal(t, 1, got.Failures[0].Number)
+	require.Equal(t, 600, got.Failures[1].Index)
+	require.Len(t, got.Rows, 2)
+	require.Equal(t, 2, got.FailureTotal)
+}
+
+// A session that keeps changing is not walked forever, and a mixed result is
+// never printed as if it were whole.
+func TestActivitySession_FailuresWalkGivesUpWhenTheSessionKeepsChanging(t *testing.T) {
+	rec := newSequencedRecorder(t, "GET /api/v1/work-sessions/ws-aaa/timeline", []cannedResponse{
+		okResp(failuresPage([]string{failuresRow(10, true)}, 10, 1, 3, 3, true)),
+		okResp(failuresPage([]string{failuresRow(600, true)}, 600, 2, 2, 3, true)),
+		okResp(failuresPage([]string{failuresRow(10, true)}, 10, 1, 3, 3, true)),
+		okResp(failuresPage([]string{failuresRow(600, true)}, 600, 2, 2, 3, true)),
+		okResp(failuresPage([]string{failuresRow(10, true)}, 10, 1, 3, 3, true)),
+		okResp(failuresPage([]string{failuresRow(600, true)}, 600, 2, 2, 3, true)),
+	})
+	out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--failures", "--before", "0")
+	require.ErrorContains(t, err, "changed while they were being read")
+	require.Equal(t, ExitCodeGeneralError, classifyError(err))
+	require.Len(t, rec.all(), 6, "three passes")
+	require.NotContains(t, out, "01ROW")
+}
+
+// The door can name a failure and return no row for it: the row was removed
+// after the door found it, or is not readable with this credential. Nothing
+// is shown for such a failure, and the count that was not returned is said.
+func TestActivitySession_FailuresWithoutARowAreCountedNotShown(t *testing.T) {
+	pages := []cannedResponse{
+		// Failure 1 is at row 10; the page holds its neighbours only.
+		okResp(failuresPage([]string{failuresRow(9, false), failuresRow(11, false)}, 10, 1, 2, 2, true)),
+		okResp(failuresPage([]string{failuresRow(399, false), failuresRow(400, true)}, 400, 2, 2, 2, false)),
+	}
+	t.Run("table", func(t *testing.T) {
+		newSequencedRecorder(t, "GET /api/v1/work-sessions/ws-aaa/timeline", pages)
+		out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--failures", "--before", "1")
+		require.NoError(t, err)
+		require.Contains(t, out, "1 of the 2 stored failures were not returned")
+		require.NotContains(t, out, "Failure 1 of 2")
+		require.NotContains(t, out, "No results found")
+		require.NotContains(t, out, "01ROW009", "a row is context only of a failure that is shown")
+		require.Contains(t, out, "Failure 2 of 2")
+		require.Contains(t, out, "01ROW399")
+		require.Contains(t, out, "01ROW400")
+	})
+	t.Run("json", func(t *testing.T) {
+		newSequencedRecorder(t, "GET /api/v1/work-sessions/ws-aaa/timeline", pages)
+		out, _, err := runCLI(t, workSessionsTestRoot, "json", "session", "ws-aaa", "--failures", "--before", "1")
+		require.NoError(t, err)
+		var got struct {
+			Failures []struct {
+				Number int `json:"number"`
+				Index  int `json:"index"`
+			} `json:"failures"`
+			FailuresNotReturned int `json:"failures_not_returned"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+		require.Len(t, got.Failures, 1)
+		require.Equal(t, 2, got.Failures[0].Number)
+		require.Equal(t, 400, got.Failures[0].Index)
+		require.Equal(t, 1, got.FailuresNotReturned)
+	})
 }

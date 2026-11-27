@@ -565,7 +565,7 @@ mcpproxy activity sessions [flags]
 | `--error-class` | | Filter by the error class of the last failure: `network`, `timeout`, `http`, `jsonrpc`, `tool_error`, `session_terminated`, `auth`, `proxy_policy`, `proxy_internal`, `cancelled` |
 | `--since` | | Only sessions active at or after this time (RFC 3339, or relative: `-1h`, `-24h`, `-7d`) |
 | `--until` | | Only sessions started at or before this time (RFC 3339 or relative) |
-| `--sort` | `last_activity` | `last_activity` or `last_failure`, newest first |
+| `--sort` | `last_activity`; `last_failure` with `--failed` | `last_activity` or `last_failure`, newest first |
 | `--limit`, `-n` | 25 | Max sessions to return (1-100) |
 | `--offset` | 0 | Pagination offset |
 
@@ -574,8 +574,8 @@ A flag with a value the endpoint would refuse fails before any request is made.
 ### Examples
 
 ```bash
-# Which runs failed since yesterday, newest failure first
-mcpproxy activity sessions --failed --sort last_failure --since -24h
+# Which runs failed since yesterday (with --failed the newest failure is first)
+mcpproxy activity sessions --failed --since -24h
 
 # The same, without sessions whose only failures were policy blocks
 mcpproxy activity sessions --failed --no-blocked
@@ -607,10 +607,11 @@ Timeline of one session: mcpproxy activity session <id>
 - `DURATION` runs from the first to the last recorded call; a session that is still open is marked `(active)`.
 - `FAILURES` is the lifetime count. Policy blocks are part of it and are shown in brackets.
 - `REASON` is built from the error class, the diagnostic code and its fixed message. It never contains argument or response text.
+- With an `--offset` past the last session the command says how many sessions match, instead of reporting that none do.
 
 ### Output (JSON)
 
-`-o json` and `-o yaml` print the data object of `GET /api/v1/work-sessions` unchanged: `sessions`, `total`, `limit`, `offset`. See the [REST API reference](../api/rest-api.md#work-sessions) for the fields.
+`-o json` prints the data object of `GET /api/v1/work-sessions` with its values unchanged: `sessions`, `total`, `limit`, `offset`. `-o yaml` prints the same fields; in YAML a character a terminal would act on (a control character, a text-direction override) is shown as visible text such as `\u202e`, so use JSON when you need the exact text. See the [REST API reference](../api/rest-api.md#work-sessions) for the fields.
 
 ### Exit Codes
 
@@ -643,7 +644,7 @@ mcpproxy activity session <id> [flags]
 |------|---------|-------------|
 | `--at` | `first_failure` | Where the view opens: `first_failure`, `failure:<n>`, `row:<activity id>` or `end` |
 | `--before` | 20 | Rows before the position, or before each failure with `--failures` (0-250) |
-| `--after` | 20 | Rows after the position (0-250). With `--failures` the default is 0 |
+| `--after` | 20 | Rows after the position (0-250). With `--failures` the default is 0. One page holds 500 rows, so `--before` and `--after` together can be at most 499 |
 | `--failures` | `false` | Print every stored failure with the rows before it. Cannot be combined with `--at` |
 | `--include-bodies` | `false` | Include argument and response bodies |
 
@@ -661,7 +662,7 @@ mcpproxy activity session ws-4f2a91c07b3d55e1 --failures --before 5
 # The third failure, with the bodies of the calls around it
 mcpproxy activity session ws-4f2a91c07b3d55e1 --at failure:3 --include-bodies
 
-# The last 50 rows of the session
+# The last row of the session and the 50 before it
 mcpproxy activity session ws-4f2a91c07b3d55e1 --at end --before 50
 
 # Around one row from `activity list`
@@ -691,7 +692,7 @@ Every failure with its context: mcpproxy activity session ws-4f2a91c07b3d55e1 --
 - `#` is the row's index in the timeline. `ID` is the activity id, for `activity show <id>` and `--at row:<id>`.
 - Times are UTC, to the millisecond.
 - When retention removed the oldest rows, a note under the header says up to which time. When the session failed more often than the log still shows, a note gives both counts; failure numbers count the stored failures only.
-- With `--include-bodies` the argument and response bodies follow the table, each on one line and capped at 2,000 characters. Use `-o json` for the whole body. A row whose bodies were removed by retention says so.
+- With `--include-bodies` the argument and response bodies follow the table. Each is one line of JSON (the arguments as an object, the response as a quoted string, so a line break reads `\n`), capped at 2,000 characters. Use `-o json` for the whole body. A row whose bodies were removed by retention says so.
 
 ### All failures of a session
 
@@ -709,9 +710,15 @@ With `-o json` or `-o yaml` this view is one object:
 ```json
 {
   "session": { "id": "ws-4f2a91c07b3d55e1", "failures": 3 },
-  "rows": [ { "index": 37, "kind": "call", "at": "2026-11-26T22:41:07.112Z", "activity": { } } ],
+  "rows": [
+    { "index": 39, "kind": "upstream_event", "at": "2026-11-26T22:41:10.002Z", "activity": { "id": "01JFXYZ123ABC0000000000039" } },
+    { "index": 40, "kind": "call", "at": "2026-11-26T22:41:10.731Z", "failed": true, "activity": { "id": "01JFXYZ123ABC0000000000040" } },
+    { "index": 41, "kind": "call", "at": "2026-11-26T22:41:12.004Z", "failed": true, "activity": { "id": "01JFXYZ123ABC0000000000041" } },
+    { "index": 387, "kind": "call", "at": "2026-11-27T00:13:19.870Z", "activity": { "id": "01JFXYZ123ABC0000000000387" } },
+    { "index": 388, "kind": "call", "at": "2026-11-27T00:13:20.412Z", "failed": true, "activity": { "id": "01JFXYZ123ABC0000000000388" } }
+  ],
   "failures": [ { "number": 1, "index": 40 }, { "number": 2, "index": 41 }, { "number": 3, "index": 388 } ],
-  "before": 5,
+  "before": 1,
   "after": 0,
   "total_rows": 418,
   "failure_total": 3,
@@ -719,11 +726,13 @@ With `-o json` or `-o yaml` this view is one object:
 }
 ```
 
-`rows` holds every context row in timeline order, each once, in the shape of the timeline endpoint's rows. `failures` gives the number of each failure among the stored ones and the `index` of its row. `earlier_failures_not_stored` is present and `true` when retention removed earlier failures.
+This is the output of `--failures --before 1`, with `session` and each `activity` shortened here. `rows` holds every context row in timeline order, each once, in the shape of the timeline endpoint's rows; a failure's own row is part of it. `failures` gives the number of each failure among the stored ones and the `index` of its row. Two fields appear only when they apply: `earlier_failures_not_stored` is `true` when retention removed earlier failures, and `failures_not_returned` counts stored failures the server named without returning their row (removed while the session was read, or not readable with the caller's credential).
+
+Failures are read by their number among the stored ones. If retention removes an older failure while the command runs, the numbers move; the command then starts over, and after three attempts it exits 1 and asks you to run it again.
 
 ### Output (JSON)
 
-Without `--failures`, `-o json` and `-o yaml` print the data object of `GET /api/v1/work-sessions/{id}/timeline` unchanged: `session`, `rows`, `position`, `total_rows`, `failure_index`, `failure_total`, `lifetime_failures`, `has_before`, `has_after`. See the [REST API reference](../api/rest-api.md#work-sessions).
+Without `--failures`, `-o json` prints the data object of `GET /api/v1/work-sessions/{id}/timeline` with its values unchanged: `session`, `rows`, `position`, `total_rows`, `failure_index`, `failure_total`, `lifetime_failures`, `has_before`, `has_after`. `-o yaml` prints the same fields, with terminal control characters shown as visible text, as for `activity sessions`. See the [REST API reference](../api/rest-api.md#work-sessions).
 
 ### Exit Codes
 
@@ -738,7 +747,7 @@ An id that matches no session exits 1 with:
 Error: work session "ws-nope" not found: no session with this id is stored, or it is not yours to read. List sessions with: mcpproxy activity sessions
 ```
 
-The same answer is given for a session that belongs to another token.
+The same answer is given for a session that belongs to another token. A `404` that does not come from this endpoint (a reverse proxy without the route, for example) is reported with its own text.
 
 ---
 
@@ -750,15 +759,15 @@ Several agents ran overnight. Two commands reach the failure:
 
 ```bash
 # 1. The runs that failed, newest failure first
-mcpproxy activity sessions --failed --sort last_failure --since -24h
+mcpproxy activity sessions --failed --since -24h
 
 # 2. Open one at its first failure, with the 20 calls before it
 mcpproxy activity session ws-4f2a91c07b3d55e1
 ```
 
-The timeline shows the failed call, the reason, the upstream event that caused it when there was one, and what the same agent did before. To see every failure of the run, add `--failures`. To read what one call sent and received, pass its id to `mcpproxy activity show <id> --include-response`.
+The timeline shows the failed call, its reason, what the same agent did before, and the upstream events of the servers the session called (a lost connection, an exited process, a required login) at the time they happened. An event next to a failure is a likely cause when it is on the server the failed call went to; events of the session's other servers are listed too. To see every failure of the run, add `--failures`. To read what one call sent and received, pass its id to `mcpproxy activity show <id> --include-response`.
 
-Give each agent its own token (`mcpproxy token create --name <name>`), or have each script send an `X-MCPProxy-Run` header, so that each run is its own session. Over SSH on a headless machine the commands work as they do locally; add `-o json` to feed a script:
+Give each agent its own token (`mcpproxy token create --name <name> --profile <profile>`), or have each script send an `X-MCPProxy-Run` header, so that each run is its own session. Over SSH on a headless machine the commands work as they do locally; add `-o json` to feed a script:
 
 ```bash
 # Ids of the sessions that failed on a network error
@@ -831,10 +840,11 @@ mcpproxy activity export \
 ### Session Analysis
 
 ```bash
-# Every stored row of one work session, as the activity list shows them
-mcpproxy activity list --session <session-id> -o json | jq '.'
+# The newest rows of one work session, as the activity list shows them
+# (one page of up to 100; page with --offset)
+mcpproxy activity list --session <session-id> --limit 100 -o json | jq '.'
 
-# The same session as a timeline, with upstream events merged in
+# The end of the same session as a timeline, with upstream events merged in
 mcpproxy activity session <session-id> --at end --before 250
 ```
 

@@ -1234,6 +1234,9 @@ ws_call() {
 ws_call '{"tool_name":"call_tool_read","arguments":{"name":"everything:echo","args":{"message":"spec 124 first"}}}'
 ws_call '{"tool_name":"call_tool_read","arguments":{"name":"everything:echo","args":{"message":"spec 124 second"}}}'
 ws_call '{"tool_name":"call_tool_read","arguments":{"name":"everything:no_such_tool_spec_124","args":{}}}'
+# A second failure right after the first: their contexts overlap, which the
+# CLI's --failures check below relies on.
+ws_call '{"tool_name":"call_tool_read","arguments":{"name":"everything:no_such_tool_spec_124_again","args":{}}}'
 
 log_test "Work session: a named REST run is listed as failed"
 WS_ID=""
@@ -1426,7 +1429,7 @@ fi
 # REST section above, with the two commands an operator types over SSH. It
 # reads the session the REST section made under $WS_RUN.
 log_test "CLI: activity sessions --failed lists the named run"
-RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity sessions --failed --sort last_failure --run "$WS_RUN" -o json 2>&1)
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity sessions --failed --run "$WS_RUN" -o json 2>&1)
 CLI_WS_ID=$(echo "$RESPONSE" | jq -r '.sessions[0].id // empty' 2>/dev/null)
 if [ -n "$CLI_WS_ID" ] && [ "$CLI_WS_ID" = "$WS_ID" ] && echo "$RESPONSE" | jq -e --arg run "$WS_RUN" '
         .total == 1 and (.sessions[0] | .run_name == $run and .failures >= 1 and .last_failure != null)' >/dev/null 2>&1; then
@@ -1437,7 +1440,7 @@ else
 fi
 
 log_test "CLI: activity sessions prints the table"
-RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity sessions --failed --run "$WS_RUN" 2>&1)
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity sessions --failed --run "$WS_RUN" -o table 2>&1)
 if echo "$RESPONSE" | grep -q "LAST FAILURE" && echo "$RESPONSE" | grep -q "$WS_RUN" \
         && [ -n "$CLI_WS_ID" ] && echo "$RESPONSE" | grep -q "^$CLI_WS_ID"; then
     log_pass "CLI: activity sessions prints the table"
@@ -1460,7 +1463,7 @@ if [ -n "$CLI_WS_ID" ]; then
     fi
 
     log_test "CLI: activity session prints the timeline"
-    RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" 2>&1)
+    RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" -o table 2>&1)
     if echo "$RESPONSE" | grep -q "Session $CLI_WS_ID" && echo "$RESPONSE" | grep -q "Failure 1 of" \
             && echo "$RESPONSE" | grep -qE "^(FAIL|BLOCK) " && echo "$RESPONSE" | grep -q "SESSION START"; then
         log_pass "CLI: activity session prints the timeline"
@@ -1469,12 +1472,16 @@ if [ -n "$CLI_WS_ID" ]; then
         echo "Response: $RESPONSE"
     fi
 
-    # Every failure with the two rows before it, each row once.
+    # Every failure with the two rows before it. The run failed twice in a
+    # row, so the two contexts overlap: each row is printed once, the two rows
+    # before the first failure are there, and nothing outside a context is.
     log_test "CLI: activity session --failures walks the failures"
     RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" --failures --before 2 -o json 2>&1)
-    if echo "$RESPONSE" | jq -e '(.failures | length) >= 1 and (.failures | length) == .failure_total
-            and ([.rows[].index] | length == (unique | length))
-            and ([.failures[].index] - [.rows[] | select(.failed == true) | .index] | length == 0)' >/dev/null 2>&1; then
+    if echo "$RESPONSE" | jq -e '. as $d | ($d.failures | length) >= 2 and ($d.failures | length) == $d.failure_total
+            and ([$d.rows[].index] | length == (unique | length))
+            and (([$d.failures[].index] - [$d.rows[] | select(.failed == true) | .index]) | length == 0)
+            and ($d.rows | map(select(.index < $d.failures[0].index)) | length == 2)
+            and ($d.rows | all(.index as $i | any($d.failures[]; .index - 2 <= $i and $i <= .index)))' >/dev/null 2>&1; then
         log_pass "CLI: activity session --failures walks the failures"
     else
         log_fail "CLI: activity session --failures walks the failures"
@@ -1483,7 +1490,7 @@ if [ -n "$CLI_WS_ID" ]; then
 fi
 
 log_test "CLI: activity session with an unknown id fails and names the listing"
-RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session ws-does-not-exist 2>&1)
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session ws-does-not-exist -o table 2>&1)
 EXIT_CODE=$?
 if [ $EXIT_CODE -eq 1 ] && echo "$RESPONSE" | grep -q "not found" && echo "$RESPONSE" | grep -q "mcpproxy activity sessions" \
         && ! echo "$RESPONSE" | grep -q "Usage:"; then

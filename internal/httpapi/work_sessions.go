@@ -38,7 +38,7 @@ const (
 	// no activity for this long is over.
 	workSessionIdleWindow = 30 * time.Minute
 
-	workSessionNotFound = "Work session not found"
+	workSessionNotFound = contracts.WorkSessionNotFoundMessage
 )
 
 // workSessionController is the storage a work-session door reads. It is an
