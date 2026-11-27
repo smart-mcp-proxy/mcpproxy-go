@@ -800,6 +800,130 @@ export interface GetSessionDetailResponse {
   session: MCPSession
 }
 
+// Spec 124: work sessions and their failure timeline. Field for field the
+// shapes of internal/contracts/work_sessions.go.
+
+/** The last failure of a work session. */
+export interface WorkSessionFailure {
+  at: string  // RFC 3339
+  error_class?: string
+  error_code?: string
+  server?: string
+  tool?: string
+  /** At most 200 characters; never argument or response bodies. */
+  reason?: string
+  /** True when the failure was a refusal by MCPProxy itself. */
+  policy_block?: boolean
+}
+
+/** One agent's run of work, as the caller is allowed to see it. */
+export interface WorkSession {
+  id: string
+  token_name?: string
+  client_id?: string
+  client_name?: string
+  /** Basename of the client's workspace, when it disclosed one. */
+  project_name?: string
+  surface?: string
+  run_name?: string
+  /** Administrators only. */
+  profile?: string
+  profile_source?: ProfileSource
+  status: 'active' | 'ended'
+  started_at: string
+  last_activity_at: string
+  ended_at?: string
+  duration_ms: number
+  /** Lifetime counts. `policy_blocks` are included in `failures`. */
+  attempts: number
+  failures: number
+  policy_blocks: number
+  /** Failures whose rows are still in the log: what the timeline can navigate. */
+  stored_failures: number
+  first_failure_at?: string
+  last_failure?: WorkSessionFailure
+  /** Administrators only. */
+  connection_count?: number
+  truncated_start_at?: string
+  rebuilt?: boolean
+  ownerless?: boolean
+}
+
+export interface WorkSessionListResponse {
+  sessions: WorkSession[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export type WorkSessionTimelineKind =
+  | 'call'
+  | 'internal_call'
+  | 'policy_decision'
+  | 'prompt'
+  | 'upstream_event'
+  // Synthetic rows derived from the session: they carry `at` and no activity.
+  | 'session_start'
+  | 'session_end'
+  | 'other'
+
+export interface WorkSessionTimelineRow {
+  /** Position in the caller's view of the timeline. */
+  index: number
+  kind: WorkSessionTimelineKind
+  at: string
+  /** The counted row of a failed attempt. */
+  failed?: boolean
+  /** A refusal by MCPProxy itself. */
+  policy_block?: boolean
+  /** Retention removed the argument and response bodies to keep the row. */
+  bodies_removed?: boolean
+  /** An upstream event from before the session started, still unresolved then. */
+  precedes_session?: boolean
+  /** The stored row; absent on a session_start or session_end row. */
+  activity?: ActivityRecord
+}
+
+export interface WorkSessionTimelineResponse {
+  session: WorkSession
+  rows: WorkSessionTimelineRow[]
+  /** Index of the row the page is positioned at. */
+  position: number
+  total_rows: number
+  /** 1-based number of the failure at or before the position (0 when none). */
+  failure_index: number
+  failure_total: number
+  lifetime_failures: number
+  earlier_failures_not_stored?: boolean
+  has_before: boolean
+  has_after: boolean
+}
+
+/** Query of GET /api/v1/work-sessions. */
+export interface WorkSessionListParams {
+  failed?: boolean
+  include_blocked?: boolean
+  token?: string
+  client?: string
+  profile?: string
+  run?: string
+  error_class?: string
+  since?: string
+  until?: string
+  sort?: 'last_activity' | 'last_failure'
+  limit?: number
+  offset?: number
+}
+
+/** Query of GET /api/v1/work-sessions/{id}/timeline. */
+export interface WorkSessionTimelineParams {
+  /** `first_failure` (default), `failure:<n>`, `row:<activity id>` or `end`. */
+  at?: string
+  before?: number
+  after?: number
+  include_bodies?: boolean
+}
+
 // Configuration management types
 export interface ValidationError {
   field: string

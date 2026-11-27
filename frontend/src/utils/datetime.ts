@@ -86,6 +86,24 @@ export function formatDateTime(
   return `${formatDate(d)} ${formatTime(d)}`
 }
 
+/** `06:51:38.250` — local wall-clock time to the millisecond (Spec 124: a
+ * failure and its cause can be less than a second apart). */
+export function formatTimeMillis(value: string | number | Date | null | undefined, fallback = '-'): string {
+  const d = toDate(value)
+  if (!d) return fallback
+  return `${formatTime(d)}.${pad(d.getMilliseconds(), 3)}`
+}
+
+/** `2026-08-25 06:51:38.250`. */
+export function formatDateTimeMillis(
+  value: string | number | Date | null | undefined,
+  fallback = '-',
+): string {
+  const d = toDate(value)
+  if (!d) return fallback
+  return `${formatDate(d)} ${formatTimeMillis(d)}`
+}
+
 /** `just now` / `5m ago` / `3h ago` / `2d ago` — for the secondary line. */
 export function formatRelative(
   value: string | number | Date | null | undefined,

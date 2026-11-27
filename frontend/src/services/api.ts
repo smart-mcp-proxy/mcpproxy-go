@@ -1,5 +1,5 @@
 import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, StatusResponse, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, CatalogSearchResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivityRecord, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, AttentionResponse, ReviewQueueResponse, ServerReviewResponse } from '@/types'
-import type { ProfileConfig, ProfileList, ProfileView, ProfileWriteResult, ProfileRenameResult, ProfileDeleteResult, EffectiveToolsResult, TryProfileResponse, AccessExplanation, ExplainSubjectQuery, ClientView, ClientsResponse, BulkAssignResponse, CustomClientResponse, RotateResponse, UpgradePreview, UpgradeApplyResult, ForgetClientResponse, RevokeCredentialResponse, ConnectOptions, OAuthAuthorization, OAuthApprovalBody, OAuthPreview, OAuthDecision, SkillsListResponse, SkillContentResponse, SkillCopy, SkillsResponse } from '@/types/api'
+import type { ProfileConfig, ProfileList, ProfileView, ProfileWriteResult, ProfileRenameResult, ProfileDeleteResult, EffectiveToolsResult, TryProfileResponse, AccessExplanation, ExplainSubjectQuery, ClientView, ClientsResponse, BulkAssignResponse, CustomClientResponse, RotateResponse, UpgradePreview, UpgradeApplyResult, ForgetClientResponse, RevokeCredentialResponse, ConnectOptions, OAuthAuthorization, OAuthApprovalBody, OAuthPreview, OAuthDecision, SkillsListResponse, SkillContentResponse, SkillCopy, SkillsResponse, WorkSession, WorkSessionListParams, WorkSessionListResponse, WorkSessionTimelineParams, WorkSessionTimelineResponse } from '@/types/api'
 
 import { joinHoldEvidence, type HoldEvidenceSource } from '@/utils/holdEvidence'
 
@@ -879,6 +879,23 @@ class APIService {
 
   async getSessionDetail(sessionId: string): Promise<APIResponse<GetSessionDetailResponse>> {
     return this.request<GetSessionDetailResponse>(`/api/v1/sessions/${encodeURIComponent(sessionId)}`)
+  }
+
+  // Spec 124: work sessions and their failure timeline. These three throw an
+  // ApiError on failure, so a caller can tell "no such session" (404) from a
+  // bad position (400) and from a lost connection.
+  async getWorkSessions(params: WorkSessionListParams = {}): Promise<WorkSessionListResponse> {
+    return this.data<WorkSessionListResponse>(`/api/v1/work-sessions${queryString({ ...params })}`)
+  }
+
+  async getWorkSession(id: string): Promise<WorkSession> {
+    return this.data<WorkSession>(`/api/v1/work-sessions/${encodeURIComponent(id)}`)
+  }
+
+  async getWorkSessionTimeline(id: string, params: WorkSessionTimelineParams = {}): Promise<WorkSessionTimelineResponse> {
+    return this.data<WorkSessionTimelineResponse>(
+      `/api/v1/work-sessions/${encodeURIComponent(id)}/timeline${queryString({ ...params })}`,
+    )
   }
 
   // Configuration management endpoints

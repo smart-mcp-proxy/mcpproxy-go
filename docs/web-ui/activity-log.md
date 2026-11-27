@@ -76,6 +76,56 @@ Click any row to open the detail drawer showing:
 - Error message (for failed activities)
 - Intent declaration (if present)
 
+### Sessions and the failure timeline
+
+The **Sessions** tab (`/ui/activity?view=sessions`) lists [work sessions](../features/activity-log.md#work-sessions-and-the-failure-timeline): one row per agent run, read from `GET /api/v1/work-sessions`.
+
+| Cell | What it shows |
+|------|---------------|
+| Agent token | The token the run used, linked to the agent tokens list. A dash when the call used the API key or a client credential. |
+| Client · Project | The client (or the calling surface: `rest`, `cli`, `webui`, `tray`), the run name sent as `X-MCPProxy-Run`, and the project when the client disclosed one. "Start trimmed" marks a session whose first rows retention has removed. |
+| Started · Duration | Start time, duration, and whether the session is still active. |
+| Calls | The number of attempts. It is a link to the Tool calls view filtered by this session. |
+| Failures | The number of failures, with the policy blocks among them on a second line. |
+| Last failure · Reason | The short reason of the last failure, its error class and `server:tool`, and when it happened. |
+| Timeline | Opens the session's timeline. |
+
+Above the table:
+
+- **Failed only** keeps the sessions that have at least one failure. With it on, **Include blocked** decides whether a call MCPProxy itself refused (quarantine, a profile, a rate limit) counts as a failure. Switch it off to see only sessions where something else failed.
+- **Sort** orders by last activity or by last failure, newest first. With "Failed only" on, the list reads newest failure first unless you choose otherwise.
+- The filter, the order and the paging are applied by the server, so the list is exact however long the log is. The profile, client and token filters of the page ("View as", the Filters popover) narrow the list too. The page reads the list again every 30 seconds while Auto-refresh is on.
+
+The filter and the order are part of the address (`failed=true`, `include_blocked=false`, `sort=last_failure` or `sort=last_activity` when it is not the default), so a filtered list can be bookmarked. "Clear Filters" in the Filters popover switches "Failed only" off as well.
+
+A session that never failed opens at its most recent row. Below 640 px the last failure and its reason move under the client name.
+
+The table of MCP connections that this tab used to show (capabilities, token count, "Tools it sees", "View Activity") is in the **Client connections** section under the list. It is collapsed until you open it.
+
+**Timeline.** A row's Timeline button opens `/ui/activity?view=sessions&ws=<session id>&at=<position>`. The address names the session and the row the page is positioned at, so it can be shared and reloaded. Without `at` the page opens at the first failure, with the 20 rows before it and the 20 after.
+
+- A failed call has a red bar and background; a call MCPProxy refused is amber and says "Blocked". The row the page is positioned at has an outline.
+- An **upstream event** (connection lost, process exited, token refresh failed, login required, connection restored) is a row of its own with a plug icon, the server name, the fixed message and the `MCPX_*` code. This is the row that says why the call under it failed. Repeats within a minute are one row at the time of the first, with the count and the time of the last.
+- **Session started** and **Session ended** rows mark the two ends.
+- Times are printed to the millisecond; hover a time for the date.
+- **Previous failure** and **Next failure** step through the failures still in the log, and the label says "failure N of M". **Latest rows** jumps to the end of the session.
+- **Load earlier rows** and **Load later rows** widen the page around the same position. A step to another failure keeps that width.
+- **Refresh** reads the same page again, for a session that is still running.
+- The facts at the top repeat what the list row shows and add the first and the last failure to the millisecond. The profile, client and token filters of the page narrow the list of sessions; they do not change a timeline.
+- The arrow at the end of a row opens its details. The arguments and the response are fetched only then.
+- **Copy as CLI command** gives the `mcpproxy activity session <id> ...` command that prints the same view in a terminal.
+- The facts at the top repeat what the list row shows and add the first and the last failure to the millisecond. The profile, client and token filters of the page narrow the list of sessions; they do not change a timeline.
+- **Refresh** reads the same page again, for a session that is still running.
+- **Tool calls of this session** opens the Tool calls view filtered by the session. From there, a call's detail panel has **Open in session timeline**, which opens the timeline at that call.
+
+**What retention changes.** A session is listed for `session_retention_days` (7 by default). Its counts are lifetime facts and stay exact. When retention has removed rows, the timeline says so instead of showing a shorter history as if it were complete:
+
+- "The start of this session is no longer in the log" appears at the top when the first rows are gone, and the list row carries "Start trimmed".
+- "This session had N failures in all. M are still in the log" appears when failures were removed. The failure steps then count the M that are left.
+- A row that was kept without its arguments and response says so when you open its details.
+
+See [retention](../features/activity-log.md#configuration) for the settings. An address that names a session that does not exist, or one you may not see, shows "Session not found" with a link back to the list. An agent token sees only its own sessions, and only the part of each that touched servers in its reach; the profile, the connection count and the "start trimmed" marker are shown to administrators only.
+
 ### Pagination
 
 Navigate through large datasets with:
@@ -114,6 +164,8 @@ The Activity Log uses these REST API endpoints:
 | `GET /api/v1/activity/{id}` | Get activity details |
 | `GET /api/v1/activity/summary` | Get 24h statistics |
 | `GET /api/v1/activity/export` | Export activities (JSON/CSV) |
+| `GET /api/v1/work-sessions` | List work sessions (the Sessions tab) |
+| `GET /api/v1/work-sessions/{id}/timeline` | One page of a session's timeline |
 
 Query parameters for filtering:
 - `type`: Filter by activity type (comma-separated for multiple, e.g., `?type=tool_call,config_change`)

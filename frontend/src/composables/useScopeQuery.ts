@@ -285,6 +285,16 @@ function registerDefaultScopeParams(): void {
   })
   registerScopeParam({ name: 'view', pages: ['activity'], restPages: [] })
   registerScopeParam({ name: 'type', pages: ['activity'] })
+  // Spec 124 FR-063: the Sessions view. `ws` and `at` are the address of one
+  // session's timeline (/activity?view=sessions&ws=<id>&at=<position>);
+  // `failed`, `include_blocked` and `sort` are the list's filter and order.
+  // They are read by the Sessions view alone and go to the work-session doors,
+  // never to GET /activity, and no link carries them to another page.
+  registerScopeParam({ name: 'ws', pages: ['activity'], restPages: [], sticky: false })
+  registerScopeParam({ name: 'at', pages: ['activity'], restPages: [], sticky: false })
+  registerScopeParam({ name: 'failed', pages: ['activity'], restPages: [], sticky: false })
+  registerScopeParam({ name: 'include_blocked', pages: ['activity'], restPages: [], sticky: false })
+  registerScopeParam({ name: 'sort', pages: ['activity'], restPages: [], sticky: false })
   registerScopeParam({ name: 'tab', pages: ['server-detail', 'settings', 'clients', 'add-server'], restPages: [] })
   registerScopeParam({ name: 'q', pages: ['tools', 'servers', 'catalog'], restPages: ['catalog'] })
   // Spec 134 FR-023: the Servers chip (not-online | all | online | disabled), client-side only.

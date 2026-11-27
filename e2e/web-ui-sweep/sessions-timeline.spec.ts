@@ -1,0 +1,395 @@
+// Work-session list and failure timeline sweep (Spec 124 PR-3, FR-060..FR-065).
+//
+// Two kinds of test:
+//  - Live: a named REST run (X-MCPProxy-Run) is seeded with good calls and one
+//    refused call, then found in Activity -> Sessions with "Failed only" and
+//    opened at its first failure. These read the real doors
+//    (GET /api/v1/work-sessions and .../timeline). Needs the fixture upstream
+//    (SWEEP_SERVER_NAME).
+//  - Fixture: one timeline page is fulfilled from data, because an upstream
+//    event, a trimmed start and failures removed by retention cannot be
+//    produced on a throwaway instance on demand. The shell, router and the
+//    embedded bundle are real.
+//
+// Launcher: scripts/run-web-smoke.sh. SWEEP_SCREENSHOT_DIR keeps PNGs.
+import { test, expect, Page } from '@playwright/test'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+
+const BASE = process.env.MCPPROXY_BASE_URL || 'http://127.0.0.1:18080'
+const KEY = process.env.MCPPROXY_API_KEY || ''
+const SERVER = process.env.SWEEP_SERVER_NAME || ''
+const RUN = `sweep-124-${Date.now()}`
+const FIXTURE_WS = 'ws-fixture-124'
+
+let seeded = ''
+
+function url(route: string): string {
+  const sep = route.includes('?') ? '&' : '?'
+  return KEY ? `${BASE}/ui${route}${sep}apikey=${encodeURIComponent(KEY)}` : `${BASE}/ui${route}`
+}
+
+async function open(page: Page, route: string, theme?: string) {
+  if (theme) {
+    await page.goto(url('/'))
+    await page.evaluate((t) => window.localStorage.setItem('mcpproxy-theme', t), theme)
+  }
+  await page.goto(url(route))
+  await page.waitForLoadState('domcontentloaded')
+  const close = page.locator('[data-test="close-wizard"]')
+  if (await close.isVisible().catch(() => false)) await close.click()
+  await page.locator('main').first().waitFor({ state: 'visible' })
+  await page.waitForTimeout(600)
+}
+
+async function shot(page: Page, name: string) {
+  const file = test.info().outputPath(`${name}.png`)
+  await page.screenshot({ path: file, fullPage: false })
+  await test.info().attach(name, { path: file, contentType: 'image/png' })
+  const dir = process.env.SWEEP_SCREENSHOT_DIR
+  if (!dir) return
+  fs.mkdirSync(dir, { recursive: true })
+  fs.copyFileSync(file, path.join(dir, `${name}.png`))
+}
+
+const headers = (extra: Record<string, string> = {}): Record<string, string> => ({
+  'Content-Type': 'application/json',
+  ...(KEY ? { 'X-API-Key': KEY } : {}),
+  ...extra,
+})
+
+/** One tool call over REST under the run name: no MCP connection behind it. */
+async function restCall(tool: string, args: unknown) {
+  const r = await fetch(`${BASE}/api/v1/tools/call`, {
+    method: 'POST',
+    headers: headers({ 'X-MCPProxy-Run': RUN }),
+    body: JSON.stringify({ tool_name: 'call_tool_read', arguments: { name: tool, args } }),
+  })
+  await r.text()
+}
+
+/** Good calls, one call MCPProxy refuses (a tool the server does not have), one more good call. */
+async function seedRun(): Promise<string> {
+  for (let i = 1; i <= 4; i++) await restCall(`${SERVER}:echo`, { msg: `sweep 124 step ${i}` })
+  await restCall(`${SERVER}:no_such_tool_spec_124`, {})
+  await restCall(`${SERVER}:echo`, { msg: 'sweep 124 after the failure' })
+  for (let i = 0; i < 40; i++) {
+    const r = await fetch(`${BASE}/api/v1/work-sessions?run=${encodeURIComponent(RUN)}&failed=true`, { headers: headers() })
+    const body: any = await r.json()
+    const id = body?.data?.sessions?.[0]?.id
+    if (id) return id
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  throw new Error(`the seeded run ${RUN} never appeared as a failed work session`)
+}
+
+// ---- fixture page ------------------------------------------------------------
+
+const at = (ms: number) => new Date(Date.UTC(2026, 10, 26, 22, 40, 0, 0) + ms).toISOString()
+const call = (id: string, ms: number, extra: Record<string, unknown> = {}) => ({
+  id, type: 'tool_call', status: 'success', timestamp: at(ms), server_name: 'github', tool_name: 'list_issues', duration_ms: 42, request_id: `req-${id}`, ...extra,
+})
+
+function fixturePage(failureIndex: number) {
+  return {
+    session: {
+      id: FIXTURE_WS, token_name: 'nightly-bot', client_name: 'overnight-agent', project_name: 'payments', surface: 'mcp',
+      status: 'ended', started_at: at(-2_400_000), last_activity_at: at(65_000), ended_at: at(65_000), duration_ms: 2_465_000,
+      attempts: 120, failures: 7, policy_blocks: 1, stored_failures: 5, first_failure_at: at(-1_680_000),
+      last_failure: { at: at(1_000), error_class: 'proxy_policy', server: 'github', tool: 'delete_repo', reason: 'MCPProxy refused the call.', policy_block: true },
+      connection_count: 3, truncated_start_at: at(-1_800_000),
+    },
+    rows: [
+      { index: 40, kind: 'call', at: at(-4_200), activity: call('f40', -4_200) },
+      { index: 41, kind: 'call', at: at(-2_100), activity: call('f41', -2_100, { tool_name: 'get_issue' }) },
+      {
+        index: 42, kind: 'upstream_event', at: at(-350),
+        activity: {
+          id: 'f42', type: 'upstream_event', status: 'error', timestamp: at(-350), server_name: 'github',
+          error_message: "Refreshing the upstream server's OAuth token failed.",
+          metadata: { kind: 'oauth_refresh_failed', code: 'MCPX_OAUTH_REFRESH_FAILED', count: 1, first_at: at(-350), last_at: at(-350) },
+        },
+      },
+      {
+        index: 43, kind: 'call', at: at(250), failed: true,
+        activity: call('f43', 250, { status: 'error', error_class: 'auth', error_message: 'The upstream server needs a login.' }),
+      },
+      {
+        index: 44, kind: 'policy_decision', at: at(1_000), failed: true, policy_block: true, bodies_removed: true,
+        activity: call('f44', 1_000, { type: 'policy_decision', status: 'blocked', tool_name: 'delete_repo' }),
+      },
+      {
+        index: 45, kind: 'upstream_event', at: at(30_000),
+        activity: {
+          id: 'f45', type: 'upstream_event', status: 'success', timestamp: at(30_000), server_name: 'github',
+          metadata: { kind: 'connection_restored', count: 1, message: 'The connection to the upstream server was restored.' },
+        },
+      },
+      { index: 46, kind: 'call', at: at(31_000), activity: call('f46', 31_000) },
+      { index: 47, kind: 'session_end', at: at(65_000) },
+    ],
+    position: failureIndex === 3 ? 44 : 43,
+    total_rows: 48,
+    failure_index: failureIndex,
+    failure_total: 5,
+    lifetime_failures: 7,
+    earlier_failures_not_stored: true,
+    has_before: true,
+    has_after: false,
+  }
+}
+
+/** Fulfils the fixture session's timeline; records the `at` of every request. */
+async function mockTimeline(page: Page): Promise<string[]> {
+  const asked: string[] = []
+  await page.route(new RegExp(`/api/v1/work-sessions/${FIXTURE_WS}/timeline(\\?.*)?$`), async (route) => {
+    const position = new URL(route.request().url()).searchParams.get('at') || ''
+    asked.push(position)
+    const failureIndex = position === 'failure:3' ? 3 : 2
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: fixturePage(failureIndex) }) })
+  })
+  return asked
+}
+
+const sidewaysScroll = (page: Page) => page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+
+test.beforeAll(async () => {
+  if (SERVER) seeded = await seedRun()
+})
+
+test('two actions from the list to the first failure: "Failed only", then the row', async ({ page }) => {
+  test.skip(!SERVER, 'needs the fixture upstream (SWEEP_SERVER_NAME)')
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await open(page, '/activity?view=sessions')
+  await expect(page.locator('[data-test="work-sessions-table"]')).toBeVisible()
+
+  // Action 1: Failed only. The filter is the door's, and it lands in the address.
+  await page.locator('[data-test="work-sessions-failed-toggle"]').check()
+  await expect(page).toHaveURL(/[?&]failed=true/)
+  // Failed sessions read newest failure first.
+  await expect(page.locator('[data-test="work-sessions-sort"]')).toHaveValue('last_failure')
+  const row = page.locator(`[data-test="work-sessions-row"][data-session="${seeded}"]`)
+  await expect(row).toBeVisible()
+  await expect(row.locator('[data-test="ws-client"]')).toContainText(RUN)
+  await expect(row.locator('[data-test="ws-failures"]')).toContainText('1')
+  await expect(row.locator('[data-test="ws-last-failure"]')).toContainText(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/)
+  // Every row left has a failure.
+  const failures = await page.locator('[data-test="work-sessions-row"] [data-test="ws-failures"] .font-mono').allInnerTexts()
+  expect(failures.every((text) => Number(text) > 0), `failures column: ${failures.join(',')}`).toBe(true)
+
+  // 1280 px: no sideways scroll, on the page or inside the table (Spec 134 SC-006).
+  const wrap = await page.evaluate(() => {
+    const el = document.querySelector('[data-test="work-sessions-table"]')!.parentElement!
+    return el.scrollWidth - el.clientWidth
+  })
+  expect(wrap, 'table wrapper scrolls sideways').toBeLessThanOrEqual(0)
+  expect(await sidewaysScroll(page), 'page scrolls sideways').toBeLessThanOrEqual(0)
+  await shot(page, 'sessions-list-1280-light')
+
+  // Action 2: the row's Timeline link, by keyboard.
+  await row.locator(`[data-test="ws-open-${seeded}"]`).focus()
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(new RegExp(`[?&]ws=${seeded}`))
+  const positioned = page.locator('[data-test="timeline-row"][data-position="true"]')
+  await expect(positioned).toHaveAttribute('data-failed', 'true')
+  await expect(positioned).toContainText(`${SERVER}:no_such_tool_spec_124`)
+  await expect(positioned).toContainText('Blocked')
+  await expect(positioned.locator('[data-test="timeline-time"]')).toHaveText(/^\d{2}:\d{2}:\d{2}\.\d{3}$/)
+  await expect(page.locator('[data-test="timeline-failure-label"]')).toHaveText('failure 1 of 1')
+  // The calls before the failure are on the page, and the start of the session.
+  await expect(page.locator('[data-test="timeline-row"][data-kind="session_start"]')).toHaveCount(1)
+  await expect(page.locator('[data-test="timeline-row"][data-kind="call"]').first()).toContainText(`${SERVER}:echo`)
+  await expect(page.locator('[data-test="timeline-cli"]')).toHaveText(`mcpproxy activity session ${seeded}`)
+  expect(await sidewaysScroll(page), 'timeline: page scrolls sideways').toBeLessThanOrEqual(0)
+  await shot(page, 'timeline-1280-light')
+
+  // Bodies come only on request.
+  const firstCall = page.locator('[data-test="timeline-row"][data-kind="call"]').first()
+  const index = await firstCall.getAttribute('data-index')
+  await expect(page.locator('main')).not.toContainText('sweep 124 step')
+  const bodies = page.waitForRequest((request) => request.url().includes('/timeline') && request.url().includes('include_bodies=true'))
+  await firstCall.locator(`[data-test="timeline-expand-${index}"]`).click()
+  await bodies
+  await expect(page.locator(`[data-test="timeline-detail-${index}"]`)).toContainText('sweep 124 step')
+  await expect(page.locator('[data-test="timeline-cli"]')).toHaveText(`mcpproxy activity session ${seeded} --include-bodies`)
+
+  // The address is the state: a reload opens the same session at the same row.
+  await page.reload()
+  await page.waitForLoadState('domcontentloaded')
+  await expect(page.locator('[data-test="timeline-row"][data-position="true"]')).toHaveAttribute('data-failed', 'true')
+  await expect(page.locator('[data-test="timeline-session-id"]')).toHaveText(seeded)
+
+  // Back: the list, with the filter it was opened from.
+  await page.locator('[data-test="timeline-back"]').click()
+  await expect(page).not.toHaveURL(/[?&]ws=/)
+  await expect(page.locator('[data-test="work-sessions-failed-toggle"]')).toBeChecked()
+  await expect(page.locator(`[data-test="work-sessions-row"][data-session="${seeded}"]`)).toBeVisible()
+})
+
+test('a session row keeps its link to the Tool calls view filtered by the session (FR-065)', async ({ page }) => {
+  test.skip(!SERVER, 'needs the fixture upstream (SWEEP_SERVER_NAME)')
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await open(page, '/activity?view=sessions&failed=true')
+  const seen: string[] = []
+  page.on('request', (request) => {
+    if (/\/api\/v1\/activity\?/.test(request.url())) seen.push(request.url())
+  })
+  await page.locator(`[data-test="ws-calls-link-${seeded}"]`).click()
+  await expect(page).toHaveURL(new RegExp(`[?&]session=${seeded}`))
+  await expect(page).not.toHaveURL(/view=sessions/)
+  await expect(page.locator('[data-test="activity-row"]').first()).toBeVisible()
+  expect(seen.length, 'no activity request was issued').toBeGreaterThan(0)
+  for (const request of seen) expect(new URL(request).searchParams.get('work_session_id'), request).toBe(seeded)
+
+  // And the way back: a call's detail opens its session timeline at that row.
+  await page.locator('[data-test="activity-row"] button[data-test^="activity-open-"]').first().click()
+  await page.locator('[data-test="activity-open-timeline"]').click()
+  await expect(page).toHaveURL(new RegExp(`[?&]ws=${seeded}`))
+  await expect(page).toHaveURL(/[?&]at=row(:|%3A)/)
+  await expect(page.locator('[data-test="timeline-row"][data-position="true"]')).toHaveCount(1)
+})
+
+test('timeline rows: an upstream event above the failure it explains, retention notes, failure steps', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const asked = await mockTimeline(page)
+  await open(page, `/activity?view=sessions&ws=${FIXTURE_WS}&at=failure:2`)
+  expect(asked[0]).toBe('failure:2')
+
+  const row = (index: number) => page.locator(`[data-test="timeline-row"][data-index="${index}"]`)
+  await expect(row(43)).toHaveAttribute('data-position', 'true')
+  await expect(row(43)).toHaveAttribute('aria-current', 'true')
+  await expect(row(43)).toContainText('The upstream server needs a login.')
+
+  // The event sits one row above the failed call, 600 ms earlier, and says what happened.
+  await expect(row(42)).toHaveAttribute('data-kind', 'upstream_event')
+  await expect(row(42)).toContainText('Token refresh failed')
+  await expect(row(42)).toContainText('MCPX_OAUTH_REFRESH_FAILED')
+  const [eventTime, failureTime] = [await row(42).locator('[data-test="timeline-time"]').innerText(), await row(43).locator('[data-test="timeline-time"]').innerText()]
+  expect(eventTime.slice(-4)).toBe('.650')
+  expect(failureTime.slice(-4)).toBe('.250')
+
+  // Told apart by more than the words: a call, an event, a failed call, a
+  // block, a recovery and the end of the session each have their own surface.
+  const background = (index: number) => row(index).locator('td').first().evaluate((td) => getComputedStyle(td).backgroundColor)
+  const surfaces = { call: await background(41), event: await background(42), failed: await background(43), blocked: await background(44), recovery: await background(45), end: await background(47) }
+  expect(new Set([surfaces.call, surfaces.event, surfaces.failed, surfaces.recovery, surfaces.end]).size, JSON.stringify(surfaces)).toBe(5)
+  expect(surfaces.blocked).not.toBe(surfaces.call)
+  await expect(row(47)).toContainText('Session ended')
+  await expect(page.locator('[data-test="timeline-expand-47"]')).toHaveCount(0)
+
+  await expect(page.locator('[data-test="timeline-truncated-start"]')).toContainText('removed by retention')
+  await expect(page.locator('[data-test="timeline-earlier-failures"]')).toContainText('7 failures')
+  await expect(page.locator('[data-test="timeline-earlier-failures"]')).toContainText('5 are still in the log')
+  await expect(page.locator('[data-test="timeline-facts"]')).toContainText('nightly-bot')
+  await expect(page.locator('[data-test="timeline-facts"]')).toContainText('3 connections')
+
+  // A row whose bodies retention removed says so and asks for nothing.
+  const before = asked.length
+  await page.locator('[data-test="timeline-expand-44"]').click()
+  await expect(page.locator('[data-test="timeline-detail-44"]')).toContainText('removed by retention')
+  expect(asked.length).toBe(before)
+  await shot(page, 'timeline-fixture-1440-light')
+  await page.locator('[data-test="timeline-expand-44"]').click()
+
+  // Next failure: the address moves, the door is asked for that failure.
+  await expect(page.locator('[data-test="timeline-failure-label"]')).toHaveText('failure 2 of 5')
+  await page.locator('[data-test="timeline-next-failure"]').focus()
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(/[?&]at=failure(:|%3A)3/)
+  await expect(page.locator('[data-test="timeline-failure-label"]')).toHaveText('failure 3 of 5')
+  expect(asked.at(-1)).toBe('failure:3')
+  await expect(page.locator('[data-test="timeline-cli"]')).toHaveText(`mcpproxy activity session ${FIXTURE_WS} --at failure:3`)
+
+  // Load earlier rows: the same position, a wider page.
+  const wider = page.waitForRequest((request) => request.url().includes(`/work-sessions/${FIXTURE_WS}/timeline`) && request.url().includes('before=70'))
+  await page.locator('[data-test="timeline-load-earlier"]').click()
+  await wider
+  await expect(page.locator('[data-test="timeline-load-later"]')).toHaveCount(0)
+
+  // The Sessions tab leaves the timeline for the list.
+  await page.locator('[data-test="activity-view-tab-sessions"]').click()
+  await expect(page).not.toHaveURL(/[?&]ws=/)
+  await expect(page.locator('[data-test="work-sessions"]')).toBeVisible()
+})
+
+test('an unknown session shows "Session not found" and a way back', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await open(page, '/activity?view=sessions&ws=ws-does-not-exist&failed=true')
+  const state = page.locator('[data-test="timeline-not-found"]')
+  await expect(state).toContainText('Session not found')
+  await expect(page.locator('[data-test="timeline-row"]')).toHaveCount(0)
+  await state.locator('[data-test="timeline-back-to-list"]').click()
+  await expect(page).not.toHaveURL(/[?&]ws=/)
+  await expect(page).toHaveURL(/[?&]failed=true/)
+  await expect(page.locator('[data-test="work-sessions"]')).toBeVisible()
+})
+
+test('the connections table is still there, one level down', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await open(page, '/activity?view=sessions')
+  const section = page.locator('[data-test="sessions-connections"]')
+  await expect(section.locator('summary')).toContainText('Client connections')
+  await expect(section.locator('[data-test="sessions-table"], [data-test="sessions-empty"]')).toBeHidden()
+  await section.locator('summary').focus()
+  await page.keyboard.press('Enter')
+  await expect(section.locator('[data-test="sessions-table"], [data-test="sessions-empty"]')).toBeVisible()
+})
+
+test('390 px: list and timeline fit, controls are 44 px tall', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await mockTimeline(page)
+  const small = () => page.locator('[data-test="work-sessions"] button, [data-test="work-sessions"] a.btn, [data-test="work-sessions"] summary, [data-test="session-timeline"] button, [data-test="session-timeline"] a.btn').evaluateAll((els) =>
+    // What a closed <details> holds is not shown, though Chromium still gives it a box.
+    els.filter((el) => { const r = (el as HTMLElement).getBoundingClientRect(); const closed = el.tagName !== 'SUMMARY' && el.closest('details:not([open])'); return !closed && r.width > 0 && r.height > 0 && r.height < 43.5 }).map((el) => `${el.tagName}.${(el as HTMLElement).className}`.slice(0, 80)))
+
+  await open(page, '/activity?view=sessions')
+  await expect(page.locator('[data-test="work-sessions"]')).toBeVisible()
+  expect(await sidewaysScroll(page), 'list: page scrolls sideways').toBeLessThanOrEqual(0)
+  expect(await small(), 'list controls under 44 px').toEqual([])
+  // No cell is cut off: the table fits its wrapper and the Timeline button is whole.
+  const fit = await page.evaluate(() => {
+    const table = document.querySelector('[data-test="work-sessions-table"]')
+    if (!table) return null
+    const wrap = table.parentElement!
+    const button = table.querySelector('a[data-test^="ws-open-"]')!.getBoundingClientRect()
+    const heads = [...table.querySelectorAll('thead th')].filter((th) => (th as HTMLElement).offsetWidth > 0)
+    return {
+      wrap: wrap.scrollWidth - wrap.clientWidth,
+      buttonRight: button.right - wrap.getBoundingClientRect().right,
+      clippedHeads: heads.filter((th) => th.scrollWidth > (th as HTMLElement).clientWidth + 1).map((th) => th.textContent?.trim()),
+    }
+  })
+  if (fit) {
+    expect(fit.wrap, 'list table scrolls sideways at 390 px').toBeLessThanOrEqual(0)
+    expect(fit.buttonRight, 'Timeline button past the table edge').toBeLessThanOrEqual(0)
+    expect(fit.clippedHeads, 'clipped column headers').toEqual([])
+  }
+  await shot(page, 'sessions-list-390-light')
+
+  // The connections section, opened: its row buttons are 44 px tall too.
+  await page.locator('[data-test="sessions-connections"] summary').click()
+  expect(await small(), 'connections controls under 44 px').toEqual([])
+
+  await open(page, `/activity?view=sessions&ws=${FIXTURE_WS}&at=failure:2`)
+  await expect(page.locator('[data-test="timeline-row"][data-position="true"]')).toBeVisible()
+  expect(await sidewaysScroll(page), 'timeline: page scrolls sideways').toBeLessThanOrEqual(0)
+  expect(await small(), 'timeline controls under 44 px').toEqual([])
+  // The subject of a row keeps a readable width, and its result is printed in the same cell.
+  const subject = await page.locator('[data-test="timeline-row"][data-position="true"] td').nth(1).boundingBox()
+  expect(subject!.width, 'width of "What happened" at 390 px').toBeGreaterThanOrEqual(150)
+  await expect(page.locator('[data-test="timeline-row"][data-position="true"] [data-test="timeline-result-narrow"]')).toHaveText('Error')
+  await page.locator('[data-test="timeline-row"][data-position="true"]').scrollIntoViewIfNeeded()
+  await shot(page, 'timeline-fixture-390-light')
+})
+
+test('dark theme: list and timeline', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await mockTimeline(page)
+  await open(page, '/activity?view=sessions', 'dark')
+  await expect(page.locator('[data-test="work-sessions"]')).toBeVisible()
+  await shot(page, 'sessions-list-1440-dark')
+  await open(page, `/activity?view=sessions&ws=${FIXTURE_WS}&at=failure:2`)
+  await expect(page.locator('[data-test="timeline-row"][data-position="true"]')).toBeVisible()
+  await shot(page, 'timeline-fixture-1440-dark')
+  await page.evaluate(() => window.localStorage.removeItem('mcpproxy-theme'))
+})
