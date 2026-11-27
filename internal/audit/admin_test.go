@@ -240,6 +240,29 @@ func TestClassifier_SecretAndUnknownPaths(t *testing.T) {
 	}
 }
 
+// 128 entries with 64-rune four-byte segments exceed 16 KiB, so the byte
+// budget, not the entry cap, decides how many are kept.
+func TestNewAdminAction_ByteBudgetTrimsAfterTheEntryCap(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
+	in.Changes = nil
+	for i := 0; i < 128; i++ {
+		seg := strings.Repeat("\U0001D11E", 62) + string(rune('a'+i/26)) + string(rune('a'+i%26))
+		in.Changes = append(in.Changes, audit.Withheld(audit.Path("env", seg), audit.WithheldSecret))
+	}
+	line, obj := mustAdmin(t, in)
+	raw, _ := line.JSON()
+	if len(raw) > audit.MaxAdminLineBytes {
+		t.Fatalf("line exceeds the 16 KiB budget: %d", len(raw))
+	}
+	if n := len(obj["changes"].([]interface{})); n >= 128 || n == 0 {
+		t.Fatalf("the byte budget must drop entries below the 128 cap: kept %d", n)
+	}
+	if obj["changes_truncated"] != true || int(obj["changes_count"].(float64)) != 128 {
+		t.Fatalf("truncation is reported with the full count: %v %v", obj["changes_truncated"], obj["changes_count"])
+	}
+}
+
 func TestChange_PointerEscapes(t *testing.T) {
 	in := tokenRotateInput()
 	in.Action = audit.ActionTokenDelete

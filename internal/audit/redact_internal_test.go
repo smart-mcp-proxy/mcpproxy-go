@@ -73,12 +73,8 @@ func TestSink_RetryRepairsTheHeldTornFile(t *testing.T) {
 	}
 	s := newWriterSink(&scriptedWriter{})
 	s.torn = true
-	s.openRepair = func() error {
-		if err := writeNewline(f); err != nil {
-			return err
-		}
-		return f.Close()
-	}
+	s.openRepair = heldRepair(f) // the closure NewFileSink installs
+	s.closeRepair = f
 	renamed := dir + "/audit-old.jsonl"
 	if err := os.Rename(path, renamed); err != nil {
 		t.Fatal(err)

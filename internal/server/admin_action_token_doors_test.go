@@ -522,6 +522,7 @@ func TestAdminActionDoors_WebUISurface(t *testing.T) {
 		require.Equal(t, action, l["action"])
 		require.Equal(t, map[string]interface{}{"kind": "api_key"}, l["caller"], action)
 		require.Equal(t, "api", l["source"], action)
+		require.Equal(t, "local", l["origin"], action)
 		require.Equal(t, "web-bot", l["target"].(map[string]interface{})["name"], action)
 		require.Equal(t, rid, l["request_id"], action)
 		require.Equal(t, "web", l["client"].(map[string]interface{})["surface"], action)

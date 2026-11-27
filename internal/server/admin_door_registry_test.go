@@ -37,6 +37,14 @@ func TestAdminDoorRegistry_CoversEveryBuiltinTool(t *testing.T) {
 	for n := range single.ListTools() {
 		names[n] = true
 	}
+	// With skills on, the single-server surface registers the skills built-ins.
+	ssp, _, _ := newProfilesV3FixtureUpstreams(t, func(cfg *config.Config) { cfg.EnableSkills = true })
+	ssp.RefreshSkillsAvailability()
+	skilled := ssp.SingleServerMCP("github")
+	require.NotNil(t, skilled, "skills-enabled single-server surface must be constructible")
+	for n := range skilled.ListTools() {
+		names[n] = true
+	}
 	var doors []string
 	for n := range names {
 		doors = append(doors, "MCP "+n)

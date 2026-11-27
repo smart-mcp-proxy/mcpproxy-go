@@ -265,20 +265,26 @@ func NewFileSink(path string, maxSizeMB, maxBackups, maxAgeDays int, compress bo
 			_ = held.Close()
 			s.torn = false
 		} else {
-			f := held
-			s.openRepair = func() error {
-				if err := writeNewline(f); err != nil {
-					return err
-				}
-				_ = f.Close()
-				return nil
-			}
-			s.closeRepair = f
+			s.openRepair = heldRepair(held)
+			s.closeRepair = held
 		}
 	} else if held != nil {
 		_ = held.Close()
 	}
 	return s, nil
+}
+
+// heldRepair is the retry NewFileSink installs when the repair at open fails:
+// it appends the newline through the handle that read the torn tail, so the
+// file that was torn is the one repaired even after a rename.
+func heldRepair(f *os.File) func() error {
+	return func() error {
+		if err := writeNewline(f); err != nil {
+			return err
+		}
+		_ = f.Close()
+		return nil
+	}
 }
 
 // appendNewline appends one newline to the file at path.
