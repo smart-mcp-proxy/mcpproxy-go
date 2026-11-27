@@ -2,9 +2,9 @@
   <div data-test="usage-call-histogram">
     <div class="flex items-center justify-between mb-2">
       <h3 class="font-semibold text-sm">Calls per tool</h3>
-      <span class="text-xs opacity-60">{{ charted.length }} tool{{ charted.length === 1 ? '' : 's' }}</span>
+      <span class="text-xs text-base-content/60">{{ charted.length }} tool{{ charted.length === 1 ? '' : 's' }}</span>
     </div>
-    <div v-if="charted.length === 0" class="text-sm opacity-60 py-8 text-center" data-test="usage-call-histogram-empty">
+    <div v-if="charted.length === 0" class="text-sm text-base-content/60 py-8 text-center" data-test="usage-call-histogram-empty">
       No completed tool calls in this window.
     </div>
     <div v-else class="relative" :style="{ height: chartHeight }">
@@ -23,7 +23,7 @@
     <p
       v-if="unresolved.length > 0"
       data-test="usage-call-histogram-unresolved"
-      class="text-xs opacity-50 mt-2"
+      class="text-xs text-base-content/60 mt-2"
       :title="unresolvedLabels"
     >
       <span class="font-medium">Calls to unknown tools:</span>
@@ -46,11 +46,13 @@ import {
 } from 'chart.js'
 import type { ChartOptions } from 'chart.js'
 import type { UsageToolStat } from '@/types'
-import { formatNumber, partitionUsageTools, toolLabel, paletteColor } from '@/utils/usageFormat'
+import { formatNumber, partitionUsageTools, toolLabel } from '@/utils/usageFormat'
+import { chartTextOptions, useChartColors } from '@/utils/chartColors'
 
 ChartJS.register(BarElement, CategoryScale, LinearScale, Tooltip, Legend)
 
 const props = defineProps<{ tools: UsageToolStat[] }>()
+const colors = useChartColors()
 
 // Spec 109-k (activity-scope-filters), T119: link map "Usage chart bar (tool
 // x bucket)" -> the calls behind the bar. Chart.js bars are canvas-rendered,
@@ -80,7 +82,7 @@ const chartData = computed(() => ({
     {
       label: 'Calls',
       data: charted.value.map(t => t.calls),
-      backgroundColor: charted.value.map((_, i) => paletteColor(i)),
+      backgroundColor: colors.value.brand,
       borderWidth: 0,
       borderRadius: 3,
     },
@@ -117,12 +119,13 @@ const chartOptions = computed<ChartOptions<'bar'>>(() => ({
     // Say what the bars measure. An unlabelled axis is guesswork (F22, #1046).
     x: {
       beginAtZero: true,
-      title: { display: true, text: 'Calls (cumulative)' },
+      title: { display: true, text: 'Calls (cumulative)', color: colors.value.muted },
       // Spec 109 FR-074: a call count is never fractional — force integer
       // ticks rather than letting chart.js round a small max into 0.5/1.5s.
-      ticks: { precision: 0, callback: (v) => formatNumber(Number(v)) },
+      ...chartTextOptions(colors.value),
+      ticks: { precision: 0, callback: (v) => formatNumber(Number(v)), color: colors.value.muted },
     },
-    y: { ticks: { autoSkip: false, font: { size: 11 } } },
+    y: { ...chartTextOptions(colors.value), ticks: { autoSkip: false, font: { size: 12 }, color: colors.value.muted } },
   },
 }))
 </script>

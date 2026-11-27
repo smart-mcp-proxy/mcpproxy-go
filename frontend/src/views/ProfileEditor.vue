@@ -1,5 +1,5 @@
 <template>
-  <div class="space-y-4" data-test="profile-editor">
+  <div ref="rootEl" class="space-y-4" data-test="profile-editor">
     <router-link class="link text-sm" :to="{ name: 'profiles' }" data-test="profile-editor-back">&larr; All profiles</router-link>
 
     <div v-if="loading && !saved" class="space-y-3" aria-busy="true" data-test="profile-editor-skeleton">
@@ -41,7 +41,7 @@
 
       <div class="grid grid-cols-1 min-[1280px]:grid-cols-2 gap-6 items-start">
         <!-- Left: the form. -->
-        <form class="space-y-5" data-test="profile-form" @submit.prevent="save">
+        <form id="profile-edit-form" class="space-y-5" data-test="profile-form" @submit.prevent="save">
           <fieldset :disabled="!canEdit" class="space-y-5">
             <div class="form-control">
               <label class="label" for="profile-title"><span class="label-text font-medium">Title</span><span class="label-text-alt text-base-content/80">{{ draft.title.length }} / 80</span></label>
@@ -122,11 +122,11 @@
                 <label class="label cursor-pointer gap-2 py-0"><input v-model="draft.response_limit_mode" type="radio" class="radio radio-sm" value="custom" name="response-limit-mode" data-test="profile-response-limit-custom" /><span class="label-text">Custom</span></label>
               </div>
               <label v-if="draft.response_limit_mode === 'custom'" class="flex items-center gap-2 mt-1">
-                <input v-model.number="draft.response_limit" type="number" min="1" step="1" class="input input-bordered input-sm w-40" aria-label="Tool response limit in characters" data-test="profile-response-limit-value" />
+                <input v-model.number="draft.response_limit" type="number" min="1" step="1" class="input input-bordered input-sm w-40" aria-label="Tool response limit in characters" :aria-invalid="fieldErrors.tool_response_limit ? 'true' : undefined" :aria-describedby="fieldErrors.tool_response_limit ? 'profile-response-limit-error' : undefined" data-test="profile-response-limit-value" />
                 <span class="text-sm opacity-70">characters</span>
               </label>
               <span class="text-xs opacity-70 mt-1">Replaces the global limit for calls under this profile. Use "No limit" for scripts that parse whole results.</span>
-              <span v-if="fieldErrors.tool_response_limit" class="text-error text-xs mt-1">{{ fieldErrors.tool_response_limit }}</span>
+              <span v-if="fieldErrors.tool_response_limit" id="profile-response-limit-error" role="alert" class="text-error text-xs mt-1">{{ fieldErrors.tool_response_limit }}</span>
             </fieldset>
 
             <fieldset class="form-control" data-test="profile-switchable">
@@ -167,23 +167,11 @@
             <button v-if="canEdit" type="button" class="btn btn-sm btn-outline" data-test="profile-assign" @click="assignOpen = true">Assign to client&hellip;</button>
           </section>
 
-          <!-- scroll-mb keeps a revealed refusal clear of the sticky footer below. -->
-          <div ref="refusalEl" class="scroll-mb-28">
+          <div ref="refusalEl">
             <GuardRefusal v-if="guard" :refusal="guard" />
             <div v-else-if="saveError" role="alert" class="alert alert-error text-sm" tabindex="-1" data-test="profile-save-error">{{ saveError }}</div>
           </div>
 
-          <!-- The footer stays in view: Save and Discard are never below the fold. -->
-          <div v-if="canEdit" class="sticky bottom-0 -mx-1 px-3 py-3 bg-base-100 border-t border-base-300 flex items-center justify-between gap-2 z-10" data-test="profile-editor-footer">
-            <span class="text-sm" aria-live="polite" data-test="profile-save-status">{{ dirty ? 'Unsaved changes' : savedNote }}</span>
-            <div class="flex gap-2">
-              <button type="button" class="btn btn-ghost btn-sm" :disabled="!dirty || saving" data-test="profile-editor-discard" @click="discard">Discard</button>
-              <button type="submit" class="btn btn-primary btn-sm" :disabled="!dirty || saving" data-test="profile-editor-save">
-                <span v-if="saving" class="loading loading-spinner loading-xs" />
-                Save
-              </button>
-            </div>
-          </div>
         </form>
 
         <!-- Right: what the profile does to each tool, and Try it. -->
@@ -208,6 +196,20 @@
             @remove-classification="removeClassification"
           />
           <ProfileTryPanel v-if="canEdit" :draft="() => toConfig(draft)" :dirty="dirty" />
+        </div>
+      </div>
+
+      <!-- Spec 134 FR-052: one action row after BOTH the policy form and the tool
+           rules, in normal flow so it covers nothing. It stays a submit button of
+           the form (the `form` attribute), so Enter in a field still saves. -->
+      <div v-if="canEdit" class="border-t border-base-300 pt-4 flex flex-wrap items-center justify-between gap-2" data-test="profile-editor-footer">
+        <span class="text-sm" aria-live="polite" data-test="profile-save-status">{{ dirty ? 'Unsaved changes' : savedNote }}</span>
+        <div class="flex gap-2">
+          <button type="button" class="btn btn-ghost btn-sm" :disabled="!dirty || saving" data-test="profile-editor-discard" @click="discard">Discard</button>
+          <button type="submit" form="profile-edit-form" class="btn btn-primary btn-sm" :disabled="!dirty || saving" data-test="profile-editor-save">
+            <span v-if="saving" class="loading loading-spinner loading-xs" />
+            Save
+          </button>
         </div>
       </div>
 
@@ -343,6 +345,8 @@ const saveError = ref('')
 const savedNote = ref('')
 const guard = ref<ApiError | null>(null)
 const fieldErrors = reactive<Record<string, string>>({})
+// An edited limit is a new attempt: its old message (and aria-invalid) goes away.
+watch(() => [draft?.response_limit_mode, draft?.response_limit], () => { delete fieldErrors.tool_response_limit })
 const warnings = ref<string[]>([])
 const changedElsewhere = ref(false)
 const renameOpen = ref(false)
@@ -351,6 +355,9 @@ const assignOpen = ref(false)
 const assignError = ref('')
 const announcement = ref('')
 const refusalEl = ref<HTMLElement | null>(null)
+const rootEl = ref<HTMLElement | null>(null)
+// Set when this editor is left: a save that settles afterwards must not touch the page.
+let unmounted = false
 // True from the moment a rename is sent until the route carries the new name. The
 // events the rename emits must not reload the OLD name (a 404 per event).
 const renaming = ref(false)
@@ -478,6 +485,7 @@ async function save() {
   // means "no limit": refuse it here instead of widening the profile silently.
   if (draft.response_limit_mode === 'custom' && !validResponseLimit(draft.response_limit)) {
     fieldErrors.tool_response_limit = 'Enter a whole number of characters, 1 or more'
+    void revealRefusal()
     return
   }
   saving.value = true
@@ -486,6 +494,7 @@ async function save() {
   const name = props.name
   const body = toConfig(draft)
   const sent = draftSnapshot()
+  const focusAtSubmit = document.activeElement
   try {
     const result = await api.updateProfile(name, body)
     if (props.name !== name) return
@@ -504,18 +513,47 @@ async function save() {
     else if (refused.field) fieldErrors[refused.field] = refused.message
     else saveError.value = describeError(err, 'Failed to save the profile')
     // The draft stays: nothing was written. Bring the reason into view: it sits
-    // under the form, behind the sticky footer, and the footer alone only says
+    // under the form, away from the action row, and the row alone only says
     // "Unsaved changes".
-    void revealRefusal()
+    // An edit, or a move of focus, made while the save was in flight keeps the user's place.
+    void revealRefusal(draftSnapshot() === sent && focusStayed(focusAtSubmit))
   } finally {
     saving.value = false
   }
 }
 
-async function revealRefusal() {
+// Focus is "where it was" if it is still there or has only fallen to <body> (a
+// disabled Save button drops it there); anything else is a move by the user.
+function focusStayed(at: Element | null): boolean {
+  // A check that resumes after the editor was left has no focus of its own to judge.
+  if (unmounted) return false
+  const now = document.activeElement
+  return !now || now === document.body || now === at
+}
+
+async function revealRefusal(mayMoveFocusToField = true) {
   await nextTick()
+  if (unmounted) return
+  // A refusal block, else the first field message: the action row now sits
+  // after the tool rules, far from the field the message belongs to.
   const target = refusalEl.value?.querySelector<HTMLElement>('[data-test="guard-refusal"], [data-test="profile-save-error"]')
+    ?? rootEl.value?.querySelector<HTMLElement>('[data-test="profile-form"] .text-error')
   if (!target) return
+  // A field message: focus the field it belongs to, so the next Tab stays on it.
+  const input = target.matches('.text-error') && !refusalEl.value?.contains(target)
+    ? (() => {
+        const group = target.closest('.form-control')
+        return group?.querySelector<HTMLElement>('input[type="number"], input[type="text"], input:not([type]), textarea, select')
+          ?? group?.querySelector<HTMLElement>('input:checked')
+          ?? group?.querySelector<HTMLElement>('input')
+      })()
+    : null
+  if (input && !mayMoveFocusToField) return
+  if (input) {
+    input.focus({ preventScroll: true })
+    input.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
+    return
+  }
   target.setAttribute('tabindex', '-1')
   target.focus({ preventScroll: true })
   target.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
@@ -581,6 +619,7 @@ onMounted(() => {
   window.addEventListener(CREDENTIALS_CHANGED_EVENT, onChangedElsewhere)
 })
 onBeforeUnmount(() => {
+  unmounted = true
   window.removeEventListener(PROFILES_CHANGED_EVENT, onChangedElsewhere)
   window.removeEventListener(CLIENT_BINDING_CHANGED_EVENT, onChangedElsewhere)
   window.removeEventListener(CREDENTIALS_CHANGED_EVENT, onChangedElsewhere)

@@ -17,7 +17,7 @@
 import { test, expect, Page } from '@playwright/test'
 import fs from 'node:fs'
 import path from 'node:path'
-import { CLIENT_ID, RO_PROFILE, SERVER, api, cleanupProfiles, seedProfiles } from './profiles-seed'
+import { CLIENT_ID, RO_PROFILE, SERVER, api, cleanupProfiles, seedProfiles, openManagePanel } from './profiles-seed'
 
 const BASE = process.env.MCPPROXY_BASE_URL || 'http://127.0.0.1:18080'
 const KEY = process.env.MCPPROXY_API_KEY || ''
@@ -103,7 +103,7 @@ test('2. "View as" sets a profile and an in-app link carries it; Back restores',
   await page.keyboard.press('Escape')
   // Sticky: the Clients row's Usage link keeps the profile and adds the client.
   await open(page, `/clients?profile=${RO_PROFILE}`)
-  await page.locator('tbody tr', { hasText: 'E2E laptop' }).first().click()
+  await openManagePanel(page)
   await page.locator(`[data-test="clients-row-link-usage-${CLIENT_ID}"]`).click()
   await expect(page).toHaveURL(new RegExp(`/ui/usage\\?(?=.*profile=${RO_PROFILE})(?=.*client=${CLIENT_ID})`))
   await expect(page.locator('[data-test="viewing-profile"]')).toBeVisible()
@@ -114,7 +114,7 @@ test('2. "View as" sets a profile and an in-app link carries it; Back restores',
 
 test('3. a Clients row links Activity, Sessions, Tools it sees and Usage by client', async ({ page }) => {
   await open(page, '/clients')
-  await page.locator('tbody tr', { hasText: 'E2E laptop' }).first().click()
+  await openManagePanel(page)
   for (const label of ['activity', 'sessions', 'tools', 'usage']) {
     await expect(page.locator(`[data-test="clients-row-link-${label}-${CLIENT_ID}"]`)).toBeVisible()
   }
@@ -181,7 +181,7 @@ test('7. layout at 1440, 900 and 390: no page-level horizontal scroll', async ({
     await shot(page, `home-${width}`)
 
     await open(page, '/clients')
-    await page.locator('tbody tr', { hasText: 'E2E laptop' }).first().click()
+    await openManagePanel(page)
     await expect(page.locator(`[data-test="clients-row-link-sessions-${CLIENT_ID}"]`)).toBeVisible()
     await noHorizontalScroll(page, `Clients ${width}`)
     await shot(page, `clients-${width}`)
@@ -206,7 +206,8 @@ test('8. keyboard: Tab reaches the attention fix and each Clients-row link; Ente
 
   await open(page, `/clients?focus=${CLIENT_ID}`)
   await expect(page.locator(`[data-test="clients-row-link-activity-${CLIENT_ID}"]`)).toBeVisible()
-  await page.locator('main h1').first().click()
+  // Spec 134 FR-060: the focused client's panel is open and focus is on its title; the links follow.
+  await expect(page.locator('[data-test="client-manage-title"]')).toBeFocused()
   for (const label of ['activity', 'sessions', 'tools', 'usage']) {
     expect(await tabTo(page, `[data-test="clients-row-link-${label}-${CLIENT_ID}"]`), label).toBe(true)
   }

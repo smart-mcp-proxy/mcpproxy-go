@@ -50,7 +50,7 @@
             <p class="text-xs text-base-content/50 mt-1">
               The offline baseline scan is always on and needs no setup. Deep-scan failures are
               informational and never change the baseline verdict.
-              Also in <router-link to="/settings" class="link" data-test="deep-scan-settings-link">Settings → Security</router-link>.
+              Also in <router-link to="/settings?tab=security" class="link" data-test="deep-scan-settings-link">Settings → Access and keys</router-link>.
             </p>
             <div v-if="deepScanEnabled && overview && overview.docker_available === false" class="alert alert-warning mt-2 py-2 text-sm" data-test="deep-scan-docker-warning">
               Docker is not running — deep scanners cannot start until it is.

@@ -151,7 +151,7 @@ describe.each(MATRIX)('profiles un-hide: $name (Spec 109-l T151)', cell => {
     const { pinia, router } = await setup(cell, '/clients?client=cursor', Clients)
     const wrapper = mount(Clients, { global: { plugins: [pinia, router], stubs: { ClientConnectList: true, AgentTokens: true, ModeSwitcher: true } } })
     await flushPromises()
-    await wrapper.findAll('tbody tr')[0].trigger('click')
+    await wrapper.get('[data-test="client-manage-cursor"]').trigger('click')
     await flushPromises()
 
     const labels = ['activity', 'sessions', 'tools', 'usage']
