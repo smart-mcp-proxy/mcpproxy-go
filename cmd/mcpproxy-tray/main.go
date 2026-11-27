@@ -328,8 +328,9 @@ func main() {
 	// an installer's Restart Manager), WM_CLOSE (taskkill without /F) or macOS
 	// logout exit it directly. Run the Quit flow anyway so the core this tray
 	// started does not outlive it and keep the installed files locked. A no-op
-	// when Quit already ran.
-	shutdownFunc()
+	// when Quit already ran. Started in a goroutine: a second caller blocks until
+	// the first shutdown completes, which would bypass the timeout below.
+	go shutdownFunc()
 
 	// Wait for shutdown to complete (with timeout). The launcher may wait up to
 	// shutdown.Tray + 5s for the core to stop.
