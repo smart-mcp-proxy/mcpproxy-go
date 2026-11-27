@@ -2111,7 +2111,7 @@ func runUpstreamImport(_ *cobra.Command, args []string) error {
 		format := parseImportFormat(upstreamImportFormat)
 		if format == configimport.FormatUnknown {
 			return outputError(output.NewStructuredError(output.ErrCodeInvalidInput, fmt.Sprintf("unknown format: %s", upstreamImportFormat)).
-				WithGuidance("Valid formats: claude-desktop, claude-code, cursor, codex, gemini"), output.ErrCodeInvalidInput)
+				WithGuidance("Valid formats: claude-desktop, claude-code, cursor, codex, gemini, mcpproxy"), output.ErrCodeInvalidInput)
 		}
 		opts.FormatHint = format
 	}

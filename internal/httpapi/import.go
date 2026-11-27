@@ -481,7 +481,7 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 	if formatHint != "" {
 		format := parseFormat(formatHint)
 		if format == configimport.FormatUnknown {
-			return nil, fmt.Errorf("unknown format: %s. Valid formats: claude-desktop, claude-code, cursor, codex, gemini", formatHint)
+			return nil, fmt.Errorf("unknown format: %s. Valid formats: claude-desktop, claude-code, cursor, codex, gemini, mcpproxy", formatHint)
 		}
 		opts.FormatHint = format
 	}
