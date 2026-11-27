@@ -38,6 +38,10 @@ type OAuthTestServer struct {
 	// Request counters (see RegistrationCount / AuthorizeGETCount).
 	registrationCount atomic.Int64
 	authorizeGETCount atomic.Int64
+	tokenCount        atomic.Int64
+
+	// registrationRequests records every decoded DCR body (guarded by mu).
+	registrationRequests []ClientRegistrationRequest
 
 	// bogusKey signs id_tokens under IDTokenBadSignature; never published.
 	bogusKey *rsa.PrivateKey
@@ -491,6 +495,20 @@ func (s *OAuthTestServer) RegisterClient(cfg ClientConfig) (*Client, error) {
 // RegistrationCount reports how many POST /registration (DCR) requests the
 // server has received.
 func (s *OAuthTestServer) RegistrationCount() int64 { return s.registrationCount.Load() }
+
+// TokenRequestCount reports how many POST /token requests the server received.
+func (s *OAuthTestServer) TokenRequestCount() int64 { return s.tokenCount.Load() }
+
+// RegistrationRequests returns a copy of every decoded DCR request body.
+func (s *OAuthTestServer) RegistrationRequests() []ClientRegistrationRequest {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]ClientRegistrationRequest, len(s.registrationRequests))
+	for i, r := range s.registrationRequests {
+		out[i] = r.clone()
+	}
+	return out
+}
 
 // AuthorizeGETCount reports how many GET /authorize requests the server has
 // received.

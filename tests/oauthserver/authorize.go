@@ -290,6 +290,20 @@ func (s *OAuthTestServer) authorizeRedirect(w http.ResponseWriter, redirectURI, 
 			q.Set("error_description", errorDescription)
 		}
 	}
+	switch s.options.IssMode {
+	case IssCorrect:
+		q.Set("iss", s.issuerURL)
+	case IssEmpty:
+		q.Set("iss", "")
+	case IssWrong:
+		wrong := s.options.WrongIssuer
+		if wrong == "" {
+			wrong = "https://wrong-issuer.example"
+		}
+		q.Set("iss", wrong)
+	case IssRepeat:
+		q["iss"] = []string{s.issuerURL, s.issuerURL}
+	}
 	u.RawQuery = q.Encode()
 
 	w.Header().Set("Location", u.String())

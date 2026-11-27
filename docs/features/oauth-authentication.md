@@ -82,6 +82,48 @@ For OAuth providers that require additional parameters (like RFC 8707 resource i
 5. Exchanges code for access token
 6. Stores the tokens in `config.db` in the data directory (encrypted when [`oauth_token_encryption_key`](oauth-token-encryption.md) is set)
 
+#### What the callback accepts
+
+The provider sends you back to MCPProxy's callback address with the result of
+the sign-in in the query string. MCPProxy reads that query once and refuses it,
+before it exchanges a code or shows a result page, when:
+
+- `code`, `state`, `iss` or `error` appears more than once;
+- both `code` and `error` are present, or neither is;
+- `code` or `error` is present but empty;
+- `state` is missing or empty;
+- the query cannot be parsed (a bad `%` escape, `;` used as a separator).
+
+Nothing is signed in, and a refused response does not cancel the sign-in: if
+the provider then sends a correct response for the same sign-in, it still
+completes. What the browser shows depends on the callback:
+
+- the local callback shows **Authorization Failed** ("The sign-in response was
+  malformed (…)", naming the rule);
+- the callback behind a remote Web UI (`oauth.callback_base_url`) answers a
+  plain HTTP 400 `invalid OAuth callback`;
+- in the server edition, the brokered credential connect callback redirects
+  to the Web UI with `connect_failed`.
+
+An `iss` parameter (RFC 9207) is passed on to the sign-in unchanged. Checking
+it against the authorization server the sign-in started with is planned
+([#2044](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/2044)).
+
+#### Client registration type
+
+When MCPProxy registers itself with Dynamic Client Registration it sends
+`application_type` (OpenID Connect Dynamic Client Registration 1.0, section 2):
+
+| Redirect URI | `application_type` |
+|---|---|
+| `http://` on a loopback host: any `127.x.x.x` address, `[::1]` or `localhost` | `native` |
+| anything else, including `https://127.0.0.1` and a `oauth.callback_base_url` address | `web` |
+
+`native` tells an OpenID provider that a loopback redirect URI is expected; a
+provider that assumes `web` may refuse one. A provider that refuses the field
+gets no second registration without it; the sign-in fails with the provider's
+error.
+
 #### Reused client registrations
 
 When a server has no static `oauth.client_id`, MCPProxy registers a client with
@@ -336,6 +378,17 @@ turning off headless mode only attempts to open a browser on the proxy host.
 Without `callback_base_url`, loopback callbacks behave as before. A configured
 `redirect_uri` continues to pin the private loopback listener; the external
 callback takes precedence for provider registration and token exchange.
+
+### The browser says the sign-in response was malformed
+
+The local callback page reports **Authorization Failed** with "The sign-in
+response was malformed (…)" (a remote callback answers HTTP 400
+`invalid OAuth callback`) when the provider's redirect broke one of the rules in
+[What the callback accepts](#what-the-callback-accepts); the text in
+parentheses names the rule, for example `repeated iss parameter`. MCPProxy did
+not exchange anything. Start the login again; if the provider keeps sending
+such a response, report it to the provider, since a repeated or conflicting
+parameter is not a valid OAuth authorization response.
 
 ### The browser says the sign-in was invalidated
 

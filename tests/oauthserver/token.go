@@ -20,6 +20,7 @@ func (s *OAuthTestServer) handleToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	s.tokenCount.Add(1)
 
 	if err := r.ParseForm(); err != nil {
 		s.tokenError(w, http.StatusBadRequest, "invalid_request", "Failed to parse form")
