@@ -259,6 +259,17 @@ func TestActivitySessions_RefusalIsOneLine(t *testing.T) {
 	require.NotContains(t, err.Error(), "r\n1")
 }
 
+// The command the hint suggests names the request id that is shown, also when
+// the id is not a plain word.
+func TestActivitySessions_RequestIDInTheHintIsOneArgument(t *testing.T) {
+	newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/work-sessions": refuse(http.StatusBadRequest, `{"success":false,"error":"Request denied","request_id":"edge 42"}`),
+	})
+	_, _, err := runCLI(t, workSessionsTestRoot, "table", "sessions")
+	require.ErrorContains(t, err, "Request ID: edge 42")
+	require.ErrorContains(t, err, "--request-id 'edge 42'")
+}
+
 // A body that is not the daemon's JSON (a proxy's error page) is quoted as
 // text: nothing in it reaches the terminal as a control sequence.
 func TestActivitySessions_ForeignErrorBodyIsEscaped(t *testing.T) {

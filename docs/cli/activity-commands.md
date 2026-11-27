@@ -686,7 +686,7 @@ Failure 1 of 3 · rows 37-41 of 418
 FAIL   40  2026-11-26 22:41:10.731Z  call            github:create_issue  error    30.0s     01JFXYZ123ABC0000000000040  network: The upstream server could not be reached.
 FAIL   41  2026-11-26 22:41:12.004Z  call            github:list_issues   error    1ms       01JFXYZ123ABC0000000000041  network: The upstream server could not be reached.
 
-More rows are stored (earlier and later). Widen the page with --before / --after (each up to 250, together up to 499), or move it with --at failure:<n>, --at row:<id>, --at end.
+The timeline has more rows (earlier and later). Widen the page with --before / --after (each up to 250, together up to 499), or move it with --at failure:<n>, --at row:<id>, --at end.
 Every failure with its context: mcpproxy activity session ws-4f2a91c07b3d55e1 --failures
 ```
 
@@ -696,7 +696,7 @@ Every failure with its context: mcpproxy activity session ws-4f2a91c07b3d55e1 --
 - `#` is the row's index in the timeline. `ID` is the activity id, for `activity show <id>` and `--at row:<id>`.
 - Times are UTC, to the millisecond.
 - When retention removed the oldest rows, a note under the header says up to which time. When the session failed more often than the log still shows, a note gives both counts; failure numbers count the stored failures only.
-- With `--include-bodies` the argument and response bodies follow the table. Each is one line of JSON (the arguments as an object, the response as a quoted string, so a line break reads `\n`), capped at 2,000 characters. Use `-o json` for the whole body. A row whose bodies were removed by retention says so.
+- With `--include-bodies` the argument and response bodies follow the table. Each is one line of JSON (the arguments as an object, the response as a quoted string, so a line break reads `\n`), capped at 2,000 characters. `-o json` prints a body as it is stored; the activity log itself shortens a response over its size limit and marks the row `response_truncated`. A row whose bodies were removed by retention says so.
 
 ### All failures of a session
 

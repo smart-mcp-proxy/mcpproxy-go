@@ -282,7 +282,7 @@ func TestActivitySession_IncludeBodies(t *testing.T) {
 	require.Contains(t, out, "bodies removed by retention")
 	// More rows exist before this page: the operator is told how to reach
 	// them, with the bounds the two flags share.
-	require.Contains(t, out, "More rows are stored (earlier)")
+	require.Contains(t, out, "The timeline has more rows (earlier)")
 	require.Contains(t, out, "together up to 499")
 }
 

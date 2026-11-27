@@ -294,8 +294,10 @@ func workSessionError(err error) error {
 	if errors.As(err, &apiErr) {
 		msg := termEscape(apiErr.Message, false)
 		if apiErr.HasRequestID() {
+			// The id is quoted in the command when it is not a plain word,
+			// so that what is copied names the id that is shown.
 			id := termEscape(apiErr.RequestID, false)
-			msg += fmt.Sprintf("\n\nRequest ID: %s\nUse 'mcpproxy activity list --request-id %s' to find related logs.", id, id)
+			msg += fmt.Sprintf("\n\nRequest ID: %s\nFind related logs with: mcpproxy activity list --request-id %s", id, shellQuoteIfNeeded(apiErr.RequestID))
 		}
 		return cliRefusalError{errors.New(msg)}
 	}
@@ -531,7 +533,7 @@ func runActivitySession(id, at string, before, after int, includeBodies bool) er
 	if len(more) > 0 {
 		// The two flags share one page, so "raise it" is not always possible:
 		// the hint gives the bounds and the other way to get there.
-		fmt.Printf("\nMore rows are stored (%s). Widen the page with --before / --after (each up to %d, together up to %d), or move it with --at failure:<n>, --at row:<id>, --at end.\n",
+		fmt.Printf("\nThe timeline has more rows (%s). Widen the page with --before / --after (each up to %d, together up to %d), or move it with --at failure:<n>, --at row:<id>, --at end.\n",
 			strings.Join(more, " and "), workSessionContextMax, workSessionPageMax-1)
 	}
 	if page.FailureTotal > 1 {
@@ -565,7 +567,8 @@ func shellQuoteIfNeeded(s string) string {
 		plain := r == '-' || r == '_' || r == '.' || r == ':' ||
 			(r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 		if !plain {
-			return "'" + strings.ReplaceAll(termSafeText(s), "'", `'\''`) + "'"
+			// On one line, like everything else that is the server's text.
+			return "'" + strings.ReplaceAll(termEscape(s, false), "'", `'\''`) + "'"
 		}
 	}
 	return s
@@ -743,7 +746,7 @@ func printTimelineBodies(rows []contracts.WorkSessionTimelineRow) {
 	printed := false
 	heading := func() {
 		if !printed {
-			fmt.Println("\nBodies (capped; -o json has them whole):")
+			fmt.Println("\nBodies (capped here; -o json has them as they are stored):")
 			printed = true
 		}
 	}
