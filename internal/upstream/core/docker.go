@@ -201,6 +201,22 @@ func (c *Client) trackCidfileContainer(ctx context.Context, containerID string, 
 	}
 }
 
+// containerExitsWithin reports whether the container ends by itself within d. closed is the MCP
+// client's close: while the container id is unknown, or `docker wait` fails, its docker client
+// exiting is the only sign, and the caller must not stop the container before its stdin is closed.
+func (c *Client) containerExitsWithin(containerID string, d time.Duration, closed <-chan struct{}) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+	if containerID != "" && c.newDockerCmd(ctx, "wait", containerID).Run() == nil {
+		return true
+	}
+	select {
+	case <-closed:
+	case <-ctx.Done():
+	}
+	return false // the caller still looks for the container
+}
+
 // killDockerContainerWithContext stops (then kills) the tracked container
 // during disconnect. The id was adopted through trackCidfileContainer or the
 // name recovery, but ownership is re-established by stopOwnedContainer at

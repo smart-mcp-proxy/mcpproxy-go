@@ -19,7 +19,7 @@ frontend/
 ├── public/                 # Static assets
 ├── src/
 │   ├── components/        # Reusable Vue components
-│   │   ├── ServerCard.vue # Server status card
+│   │   ├── ServerRow.vue  # Servers table row (status, reason, action, more menu)
 │   │   └── ToastContainer.vue # Toast notifications
 │   ├── services/         # API service layer
 │   │   └── api.ts       # HTTP client for backend communication
@@ -113,7 +113,7 @@ make frontend-build    # Build frontend only
 
 ## 🎨 UI Components
 
-### ServerCard
+### ServerRow
 Displays server status with actions:
 - **Status indicators**: Connected, disconnected, quarantined
 - **Protocol badges**: HTTP, stdio, streamable-http
@@ -191,10 +191,10 @@ const eventSource = apiService.subscribeToEvents((event) => {
 ```typescript
 import { mount } from '@vue/test-utils'
 import { createPinia } from 'pinia'
-import ServerCard from '@/components/ServerCard.vue'
+import ServerRow from '@/components/ServerRow.vue'
 
 test('displays server info', () => {
-  const wrapper = mount(ServerCard, {
+  const wrapper = mount(ServerRow, {
     props: { server: mockServer },
     global: { plugins: [createPinia()] }
   })
@@ -240,7 +240,7 @@ interface Server {
 
 ### Component Props
 ```typescript
-interface ServerCardProps {
+interface ServerRowProps {
   server: Server
   showActions?: boolean
 }

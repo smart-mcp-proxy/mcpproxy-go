@@ -136,14 +136,25 @@ page disagree):
   sidebar and `+ Add`, the Viewing chip across pages, Clients-row and
   agent-token-row links, `/servers?profile=`, a Spec 108 warning surfacing as a
   needs-attention item, layout and keyboard order).
-- `zz-clients-tokens-usage-pr7.spec.ts`: Spec 134 PR 7: the Clients table (one row and
+- `clients-tokens-usage-pr7.spec.ts`: Spec 134 PR 7: the Clients table (one row and
   one button per client), the Manage side panel opened by keyboard with its four
   groups, `?focus=` opening it, the agent-tokens table at 1280 px (no horizontal
   scroll, no clipped cell) and 390 px, and the four Usage charts with data.
+- `shell-pr1.spec.ts`: the Spec 134 shell (skip link, palette never opens on Tab, phone menu, footer disclosure, header Add server, theme menu by keyboard, no sideways scroll at 390 px).
+- `home-pr4.spec.ts`: Spec 134 Home (section order, attention list visible without scrolling at 1440 and 390, See all, shortcuts and the collapsed topology by keyboard, 44 px buttons at 390).
+- `activity-pr5.spec.ts`: the Activity calls view (Spec 134 PR 5): five data columns, row detail, Sort control, filter popover over the results, chip overflow at 390 px, Group repeats default.
 - `demo-ux-fixes.spec.ts`: the layout findings of the live Web UI demo, measured
   at 1440 and 900 px: the token Profile chip is one line inside its cell, and
   radio labels sit next to their radios in the create-profile, custom-client and
   bulk-move dialogs.
+- `shell-pr1.spec.ts`: the Spec 134 shell: skip link and first Tab, the palette
+  never opening on Tab, the phone menu overlay, the footer disclosure, "Add
+  server" in the header, and "View as" in the page filter rows.
+- `servers-pr2.spec.ts`: the Spec 134 Servers table: 14 rows in the first screen
+  with a 34-server fleet and all unusable servers among them, a 300-server fleet
+  (first row within 2 s, a scripted scroll sees exactly the fleet's ids), filter
+  chips and legacy `?status=`, the keyboard path to a menu item, and the 390 px
+  layout.
 - `usertest-web-fixes.spec.ts`: the first-run user test findings, at 1440 and
   900 px: the header status pill names servers awaiting review, a secret-like
   Manual-add value is masked with a Show toggle, and profile Try it is readable
@@ -230,7 +241,7 @@ and compares every surface against the core's `GET /api/v1/servers`:
 |---------|-----------|-----------------|
 | CLI | `mcpproxy upstream list -o json --config <gate config>` (daemon client mode) | enabled, quarantined, connected, connection state, `health.level`, `health.admin_state`, `health.status`, `tool_count` |
 | MCP | `/mcp` `upstream_servers` `operation=list` — storage + upstream manager + runtime health, an independent projection | enabled, quarantined, connection state, `health.level`, `health.admin_state`, `health.status` (the row carries no tool count) |
-| Web UI | rendered server cards on `/ui/servers`, read by `e2e/web-ui-sweep/surface-snapshot.mjs` in one long-lived Chromium page | enabled (⋯ menu Enable/Disable), quarantined (⋯ Review), tool count, status chip colour and text — the expected chip is derived from the core row with `ServerCard.vue`'s rules, because the Web UI never prints `health.level` as text |
+| Web UI | rendered server rows on `/ui/servers`, read by `e2e/web-ui-sweep/surface-snapshot.mjs` in one long-lived Chromium page | enabled (more menu Enable/Disable), quarantined (more menu Review), tool count, status chip tone and text — the expected chip is derived from the core row with `ServerRow.vue`'s rules (the status pill when `health.status` is present), because the Web UI never prints `health.level` as text |
 | macOS tray | — | not compared; recorded as `not_compared` in the fragment (T3) |
 
 Connection state is compared only for enabled, non-quarantined servers (a

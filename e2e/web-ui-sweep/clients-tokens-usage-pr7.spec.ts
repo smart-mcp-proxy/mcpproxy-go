@@ -4,12 +4,6 @@
 // (SWEEP_SERVER_NAME) for the seed and the Usage data.
 //
 // Launcher: scripts/run-web-smoke.sh.
-//
-// The `zz-` prefix is deliberate: Playwright runs files alphabetically and the Usage test
-// seeds attributed activity (a client, a blocked call) that stays in the activity log. Run
-// earlier, those rows reach the Activity layout and contrast checks of other specs (the
-// 1024 px table overflowed by 27-30 px and a grouped run printed "· over 1m" at 3.0-3.45:1).
-// Keep this file last.
 import { test, expect, Page } from '@playwright/test'
 import path from 'node:path'
 import { CLIENT_ID, SERVER, api, cleanupProfiles, cleanupScopeActivity, openManagePanel, seedProfiles, seedScopeActivity } from './profiles-seed'

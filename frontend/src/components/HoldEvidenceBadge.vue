@@ -137,8 +137,9 @@ const verdictClass = computed(() => {
       return 'badge-error'
     case 'warning':
       return 'badge-warning'
+    // An outline badge in the neutral colour is invisible on a dark base; plain text colour is AA in both themes.
     default:
-      return 'badge-neutral'
+      return 'text-base-content'
   }
 })
 

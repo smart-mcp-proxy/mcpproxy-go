@@ -304,6 +304,15 @@ func registerWindowsJob(pid int, cmd *exec.Cmd, job *winjob.Job, logger *zap.Log
 	}
 }
 
+// requestProcessTreeExit is the SIGTERM step of the MCP stdio shutdown, which
+// mcp-go cannot do on Windows. Without a shared console it has no effect and
+// the tree is killed a moment later, as before.
+func requestProcessTreeExit(pgid int) { _ = winjob.RequestExit(pgid) }
+
+// holdProcessID keeps pid from going to another process until release, so
+// that requestProcessTreeExit cannot reach one after the close reaps the child.
+func holdProcessID(pid int) (release func(), held bool) { return winjob.HoldPID(pid) }
+
 // killProcessTreeNow is the retirement kill (Spec 116 PR4, FR-023a): it
 // terminates the process's Job Object (the whole tree) at once, or the
 // immediate process when no Job was recorded. Safe to call more than once.

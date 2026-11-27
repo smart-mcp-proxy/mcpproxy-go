@@ -2,9 +2,9 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createWebHistory } from 'vue-router'
-import ServerCard from '../ServerCard.vue'
+import ServerRow from '../ServerRow.vue'
 
-describe('ServerCard', () => {
+describe('ServerRow', () => {
   let router: any
   let pinia: any
 
@@ -30,7 +30,7 @@ describe('ServerCard', () => {
       tool_count: 5
     }
 
-    const wrapper = mount(ServerCard, {
+    const wrapper = mount(ServerRow, {
       props: { server },
       global: {
         plugins: [pinia, router]
@@ -51,7 +51,7 @@ describe('ServerCard', () => {
       tool_count: 0
     }
 
-    const wrapper = mount(ServerCard, {
+    const wrapper = mount(ServerRow, {
       props: { server },
       global: {
         plugins: [pinia, router]
@@ -73,7 +73,7 @@ describe('ServerCard', () => {
       quarantine: { pending_count: 3, changed_count: 0, blocked_count: 0 }
     }
 
-    const wrapper = mount(ServerCard, {
+    const wrapper = mount(ServerRow, {
       props: { server },
       global: { plugins: [pinia, router] }
     })
@@ -97,7 +97,7 @@ describe('ServerCard', () => {
       quarantine: { pending_count: 4, changed_count: 0, blocked_count: 0 }
     }
 
-    const wrapper = mount(ServerCard, {
+    const wrapper = mount(ServerRow, {
       props: { server },
       global: { plugins: [pinia, router] }
     })
@@ -116,7 +116,7 @@ describe('ServerCard', () => {
       quarantine: { pending_count: 0, changed_count: 2, blocked_count: 0 }
     }
 
-    const wrapper = mount(ServerCard, {
+    const wrapper = mount(ServerRow, {
       props: { server },
       global: { plugins: [pinia, router] }
     })
@@ -135,7 +135,7 @@ describe('ServerCard', () => {
       quarantine: { pending_count: 4, changed_count: 0, blocked_count: 0 }
     }
 
-    const wrapper = mount(ServerCard, {
+    const wrapper = mount(ServerRow, {
       props: { server },
       global: { plugins: [pinia, router] }
     })
@@ -155,7 +155,7 @@ describe('ServerCard', () => {
       quarantine: { pending_count: 2, changed_count: 0, blocked_count: 3 }
     }
 
-    const wrapper = mount(ServerCard, {
+    const wrapper = mount(ServerRow, {
       props: { server },
       global: { plugins: [pinia, router] }
     })

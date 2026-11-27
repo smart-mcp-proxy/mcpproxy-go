@@ -1743,29 +1743,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         NSLog("[MCPProxy] stopCore: ownership=%@", ownsCore ? "tray-managed" : "external-attached")
         appState.isStopped = true
 
-        // Kill the core process directly — most reliable method
-        let proc = ownsCore ? coreManager?.managedProcess : nil
-        NSLog("[MCPProxy] stopCore: managedProcess=%@, isRunning=%@",
-              proc != nil ? "exists" : "nil",
-              proc?.isRunning == true ? "yes" : "no")
-
-        if let process = proc, process.isRunning {
-            NSLog("[MCPProxy] stopCore: sending SIGTERM to PID %d", process.processIdentifier)
-            kill(process.processIdentifier, SIGTERM)
-
-            // Wait up to 5s then SIGKILL
-            DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
-                if process.isRunning {
-                    NSLog("[MCPProxy] stopCore: SIGKILL after 5s timeout")
-                    kill(process.processIdentifier, SIGKILL)
-                }
-            }
-        }
-
-        // Also call shutdown for cleanup (SSE, API client, etc.)
-        Task {
-            await coreManager?.shutdown()
+        // Signals the core once and waits for it. Signalling it here as well
+        // would be the second signal the core takes as "force quit".
+        let manager = coreManager
+        let earlierStop = stopTask
+        stopTask = Task {
+            await manager?.shutdown()
             await MainActor.run {
+                // "Start" during the stop put another manager in charge of this state.
+                guard coreManager === manager else { return }
                 appState.coreState = .idle
                 appState.servers = []
                 appState.connectedCount = 0
@@ -1780,8 +1766,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 updateStatusIcon()
                 rebuildMenu()
             }
+            await earlierStop?.value
         }
     }
+
+    /// The last "Stop Core", and those before it that are still running. "Start" replaces
+    /// `coreManager` without waiting for them.
+    private var stopTask: Task<Void, Never>?
 
     @objc private func startCoreAction() {
         Task {
@@ -2314,6 +2305,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         AppLifecycle.shared.note("user chose Quit in the tray menu")
         Task {
             await coreManager?.shutdown()
+            // Quitting now would lose the SIGKILL of a stop that is still running.
+            await stopTask?.value
             try? await Task.sleep(nanoseconds: 200_000_000)
             NSApplication.shared.terminate(nil)
         }

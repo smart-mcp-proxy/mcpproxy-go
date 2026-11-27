@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import ServerCard from '@/components/ServerCard.vue'
+import ServerRow from '@/components/ServerRow.vue'
+import ServerFacts from '@/components/ServerFacts.vue'
 import type { Server } from '@/types'
 
 vi.mock('@/services/api', () => ({
@@ -32,8 +33,13 @@ function makeServer(overrides: Partial<Server> = {}): Server {
   } as Server
 }
 
+// Spec 134: the verdict moved from the card to server detail (ServerFacts).
+function mountFacts(server: Server) {
+  return mount(ServerFacts, { props: { server } })
+}
+
 function mountCard(server: Server) {
-  return mount(ServerCard, {
+  return mount(ServerRow, {
     props: { server },
     global: {
       plugins: [createPinia()],
@@ -56,26 +62,26 @@ beforeEach(() => {
 // stats line (D15), so this now pins the same "never say settled while
 // quarantined" invariant against `[data-test="server-card-security-line"]`
 // instead of a standalone banner element.
-describe('ServerCard — one security headline per card (#1065)', () => {
+describe('ServerFacts — one security headline per server (#1065)', () => {
   const cleanScan = { status: 'clean' as const }
 
   it('shows the standalone scan verdict when the server is NOT quarantined', () => {
-    const wrapper = mountCard(makeServer({ security_scan: cleanScan } as Partial<Server>))
+    const wrapper = mountFacts(makeServer({ security_scan: cleanScan } as Partial<Server>))
 
-    const line = wrapper.find('[data-test="server-card-security-line"]')
+    const line = wrapper.find('[data-test="server-facts-security"]')
     expect(line.exists()).toBe(true)
     expect(line.text()).toContain('Clean')
     expect(line.text()).not.toContain('review')
   })
 
   it('subordinates a clean verdict to the review ask while quarantined', () => {
-    const wrapper = mountCard(
+    const wrapper = mountFacts(
       makeServer({ quarantined: true, security_scan: cleanScan } as Partial<Server>)
     )
 
-    const line = wrapper.find('[data-test="server-card-security-line"]')
+    const line = wrapper.find('[data-test="server-facts-security"]')
     expect(line.exists()).toBe(true)
-    expect(line.text()).toBe('· Last scan: clean — still needs review')
+    expect(line.text()).toBe('Scan Last scan: clean — still needs review')
   })
 
   it('never says a quarantined server is settled — every verdict still asks for review', () => {
@@ -88,22 +94,22 @@ describe('ServerCard — one security headline per card (#1065)', () => {
     ]
 
     for (const [scan, expected] of cases) {
-      const wrapper = mountCard(
+      const wrapper = mountFacts(
         makeServer({ quarantined: true, security_scan: scan } as unknown as Partial<Server>)
       )
-      const line = wrapper.find('[data-test="server-card-security-line"]')
+      const line = wrapper.find('[data-test="server-facts-security"]')
       expect(line.exists(), `status ${String(scan.status)} produced no line`).toBe(true)
-      expect(line.text()).toBe(`· ${expected}`)
+      expect(line.text()).toBe(`Scan ${expected}`)
       expect(line.text(), `status ${String(scan.status)} reads as settled`).toMatch(/review/)
     }
   })
 
   it('has nothing to report when there is no scan yet', () => {
     for (const scan of [undefined, { status: 'not_scanned' as const }]) {
-      const wrapper = mountCard(
+      const wrapper = mountFacts(
         makeServer({ quarantined: true, security_scan: scan } as unknown as Partial<Server>)
       )
-      expect(wrapper.find('[data-test="server-card-security-line"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="server-facts-security"]').exists()).toBe(false)
     }
   })
 

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import ServerCard from '@/components/ServerCard.vue'
+import ServerRow from '@/components/ServerRow.vue'
 import { canStartOAuthLogin, isOAuthTokenUndecryptable } from '@/utils/oauthActions'
 import { oauthSignInState } from '@/utils/health'
 import type { Server } from '@/types'
@@ -58,7 +58,7 @@ describe('OAuth sign-in for an undecryptable stored token', () => {
   })
 
   it('shows the configure action and no sign-in menu entry on the server card', () => {
-    const card = mount(ServerCard, { props: { server }, global: { stubs: { RouterLink: true } } })
+    const card = mount(ServerRow, { props: { server }, global: { stubs: { RouterLink: true } } })
     expect(card.find('[data-test="server-card-menu-login"]').exists()).toBe(false)
     expect(card.text()).toContain('cannot be decrypted')
     card.unmount()

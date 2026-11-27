@@ -166,6 +166,12 @@ func extractProcessGroupID(cmd *exec.Cmd, logger *zap.Logger, serverName string)
 // PID and disambiguated by the owning cmd).
 func releaseProcessGroup(_ int, _ *exec.Cmd, _ *zap.Logger, _ string) {}
 
+// requestProcessTreeExit does nothing on Unix: mcp-go sends SIGTERM itself.
+func requestProcessTreeExit(int) {}
+
+// holdProcessID does nothing on Unix, where requestProcessTreeExit signals nothing.
+func holdProcessID(int) (release func(), held bool) { return func() {}, true }
+
 // killProcessTreeNow is the retirement kill (Spec 116 PR4, FR-023a): SIGKILL
 // to the whole process group, at once and without waiting, so a retired
 // instance's child executes nothing further. Falls back to the immediate

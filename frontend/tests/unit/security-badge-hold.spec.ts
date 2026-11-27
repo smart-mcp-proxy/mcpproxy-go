@@ -2,9 +2,9 @@ import { describe, it, expect, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { Server } from '@/types'
-import ServerCard from '@/components/ServerCard.vue'
+import ServerFacts from '@/components/ServerFacts.vue'
 
-// ServerCard pulls in stores + the security-scanner composable (which fetches
+// ServerRow pulls in stores + the security-scanner composable (which fetches
 // the security overview). Stub the API so mounting stays offline.
 vi.mock('@/services/api', () => ({
   default: {
@@ -31,13 +31,8 @@ function makeServer(overrides: Partial<Server> = {}): Server {
 
 function mountCard(server: Server) {
   setActivePinia(createPinia())
-  return mount(ServerCard, {
-    props: { server },
-    global: {
-      plugins: [createPinia()],
-      stubs: { 'router-link': { template: '<a><slot /></a>' } },
-    },
-  })
+  // Spec 134: the verdict moved from the card to server detail (ServerFacts).
+  return mount(ServerFacts, { props: { server } })
 }
 
 // GH #938 finding 3: the card rendered a green shield reading "Clean" — the
@@ -45,7 +40,7 @@ function mountCard(server: Server) {
 // "1 tool changed since approval — re-review needed", while the tool-level gate
 // was holding that tool. The juxtaposition reads as reassurance next to a
 // warning. The badge must not claim all-clear while tools are held.
-describe('ServerCard security badge vs. held tools (#938)', () => {
+describe('ServerRow security badge vs. held tools (#938)', () => {
   const badge = '[data-test="security-scan-badge"]'
 
   it('does not read a plain green "Clean" while a tool is held', () => {

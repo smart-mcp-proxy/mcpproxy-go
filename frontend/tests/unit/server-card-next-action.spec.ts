@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import ServerCard from '@/components/ServerCard.vue'
+import ServerRow from '@/components/ServerRow.vue'
 import type { Server, HealthStatus } from '@/types'
 
 // Spec 109 (PR 109-e) T067, FR-013/FR-014: the server card shows exactly one
@@ -41,7 +41,7 @@ function makeServer(overrides: Partial<Server> = {}): Server {
 }
 
 function mountCard(server: Server) {
-  return mount(ServerCard, {
+  return mount(ServerRow, {
     props: { server },
     global: {
       plugins: [createPinia()],
@@ -76,7 +76,7 @@ const FIXTURES: Array<{
   { name: 'view_logs', actions: ['view_logs'], label: 'View logs', kind: 'navigate', hrefContains: 'tab=logs' },
 ]
 
-describe('ServerCard — one primary action, from actions[0] (Spec 109 FR-013/FR-014)', () => {
+describe('ServerRow — one primary action, from actions[0] (Spec 109 FR-013/FR-014)', () => {
   for (const fixture of FIXTURES) {
     it(`${fixture.name}: exactly ${fixture.kind === 'none' ? 'no' : 'one'} primary button`, () => {
       const wrapper = mountCard(
@@ -202,7 +202,7 @@ describe('ServerCard — one primary action, from actions[0] (Spec 109 FR-013/FR
   })
 })
 
-describe('ServerCard — ⋯ menu (Spec 109 FR-013)', () => {
+describe('ServerRow — ⋯ menu (Spec 109 FR-013)', () => {
   it('lists Enable/Disable, Scan, Restart, Logs, Edit, Trust mode and Delete, correctly labelled', () => {
     const wrapper = mountCard(makeServer({ enabled: true, trust_mode: 'auto' }))
     const menu = wrapper.find('[data-test="server-card-menu"]')
@@ -292,36 +292,10 @@ describe('ServerCard — ⋯ menu (Spec 109 FR-013)', () => {
   })
 })
 
-describe('ServerCard — trust mode shield icon + tooltip (Spec 109 FR-013)', () => {
-  it('renders an icon with a tooltip, not a text label', () => {
-    const wrapper = mountCard(makeServer({ trust_mode: 'auto' }))
-    const shield = wrapper.find('[data-test="server-trust-mode"]')
-    expect(shield.exists()).toBe(true)
-    expect(shield.find('svg').exists()).toBe(true)
-    expect(shield.attributes('data-tip')).toContain('Auto')
-  })
+// Spec 134 FR-020: the shield moved to the first screen of server detail
+// (ServerFacts); its tests live in servers-view-trust-badge.spec.ts.
 
-  // Review round 1 (109-e medium finding): the FR-013 icon-only rewrite left
-  // the shield with no accessible name at all outside the invalid-value edge
-  // case (the CSS `data-tip` tooltip is not read by a screen reader). Every
-  // card's trust mode, not just the invalid one, must have an accessible
-  // name.
-  it('has an accessible name naming the trust mode, for every mode — not only the invalid case', () => {
-    const wrapper = mountCard(makeServer({ trust_mode: 'auto' }))
-    const shield = wrapper.find('[data-test="server-trust-mode"]')
-    expect(shield.attributes('role')).toBe('img')
-    expect(shield.attributes('aria-label')).toContain('Auto')
-  })
-
-  it('still names the effective mode and the invalid marker for an unrecognized value', () => {
-    const wrapper = mountCard(makeServer({ trust_mode: 'bogus' }))
-    const shield = wrapper.find('[data-test="server-trust-mode"]')
-    expect(shield.attributes('aria-label')).toContain('not recognized')
-    expect(shield.attributes('aria-label')).toContain('bogus')
-  })
-})
-
-describe('ServerCard — stats line links to Activity (Spec 109 FR-013)', () => {
+describe('ServerRow — stats line links to Activity (Spec 109 FR-013)', () => {
   it('links to /activity scoped to this server and the last 24h', () => {
     const wrapper = mountCard(makeServer({ name: 'alpha' }))
     const stats = wrapper.find('[data-test="server-card-stats-line"]')
@@ -340,48 +314,25 @@ describe('ServerCard — stats line links to Activity (Spec 109 FR-013)', () => 
   })
 })
 
-// Review round 2 (109-e medium finding): `lastCallText`'s only reactive
-// dependency is `activityStats.last_call_at` — it read `Date.now()` but had
-// nothing that re-evaluates the computed on the passage of time alone, so an
-// idle server's "Xm ago" label froze at whatever it was on first render and
-// stayed wrong indefinitely while the tab stayed open.
-describe('ServerCard — last-call label keeps ticking (Spec 109 FR-013)', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-  })
-
-  afterEach(() => {
-    vi.useRealTimers()
-  })
-
-  it('updates "Xm ago" as time passes, without a prop or health change', () => {
-    const fixedNow = new Date('2026-01-01T12:00:00.000Z')
-    vi.setSystemTime(fixedNow)
-    const lastCallAt = new Date(fixedNow.getTime() - 5 * 60_000).toISOString() // 5m ago
-
-    const wrapper = mountCard(makeServer({ name: 'gamma' }))
-    wrapper.setProps({
-      activityStats: { name: 'gamma', calls: 1, errors: 0, last_call_at: lastCallAt },
+// Spec 134: the "last call" age is computed from a shared clock the page ticks
+// (`nowMs`), so 300 rows do not run 300 timers. The row must follow the prop.
+describe('ServerRow — last-call label follows the shared clock (Spec 109 FR-013)', () => {
+  it('updates "Xm ago" when nowMs advances, without a health change', async () => {
+    const fixedNow = new Date('2026-01-01T12:00:00.000Z').getTime()
+    const lastCallAt = new Date(fixedNow - 5 * 60_000).toISOString()
+    const wrapper = mount(ServerRow, {
+      props: { server: makeServer({ name: 'gamma' }), nowMs: fixedNow, activityStats: { name: 'gamma', calls: 1, errors: 0, last_call_at: lastCallAt } },
+      global: { plugins: [createPinia()], stubs: { RouterLink: RouterLinkStub, 'router-link': RouterLinkStub } },
     })
-
-    return wrapper.vm.$nextTick().then(async () => {
-      expect(wrapper.find('[data-test="server-card-stats-line"]').text()).toContain('last call 5m ago')
-
-      // Advance the clock by 3 hours with no prop change at all — only the
-      // ticking clock inside the component should move the label.
-      vi.setSystemTime(new Date(fixedNow.getTime() + 3 * 60 * 60_000))
-      vi.advanceTimersByTime(60_000) // let the component's own interval fire
-      await wrapper.vm.$nextTick()
-
-      expect(wrapper.find('[data-test="server-card-stats-line"]').text()).toContain('last call 3h ago')
-    })
+    expect(wrapper.find('[data-test="server-card-stats-line"]').text()).toContain('last call 5m ago')
+    await wrapper.setProps({ nowMs: fixedNow + 3 * 60 * 60_000 })
+    expect(wrapper.find('[data-test="server-card-stats-line"]').text()).toContain('last call 3h ago')
   })
 
-  it('clears its interval on unmount (no leaked timer)', () => {
-    const wrapper = mountCard(makeServer({ name: 'delta' }))
-    const clearSpy = vi.spyOn(global, 'clearInterval')
-    wrapper.unmount()
-    expect(clearSpy).toHaveBeenCalled()
-    clearSpy.mockRestore()
+  it('starts no timer of its own', () => {
+    const spy = vi.spyOn(global, 'setInterval')
+    mountCard(makeServer({ name: 'delta' }))
+    expect(spy).not.toHaveBeenCalled()
+    spy.mockRestore()
   })
 })

@@ -1,10 +1,16 @@
 <template>
-  <div v-if="hints.length > 0" class="hints-panel-wrapper">
+  <div v-if="hints.length > 0" ref="root" class="hints-panel-wrapper">
     <!-- Collapsed State: Single Line with Bulb Icon -->
     <div
       v-if="!isExpanded"
       @click="toggleExpanded"
+      @keydown.enter.prevent="toggleExpanded"
+      @keydown.space.prevent="toggleExpanded"
       class="hints-collapsed"
+      role="button"
+      tabindex="0"
+      aria-expanded="false"
+      data-test="hints-toggle"
     >
       <UiIcon name="lightbulb" class="w-4 h-4 bulb-icon" />
       <span class="hints-title">Hints: {{ getSummaryText() }}</span>
@@ -16,7 +22,16 @@
     <!-- Expanded State: Full Hints Content -->
     <div v-else class="hints-expanded">
       <!-- Header with Collapse Button -->
-      <div class="hints-header" @click="toggleExpanded">
+      <div
+        class="hints-header"
+        @click="toggleExpanded"
+        @keydown.enter.prevent="toggleExpanded"
+        @keydown.space.prevent="toggleExpanded"
+        role="button"
+        tabindex="0"
+        aria-expanded="true"
+        data-test="hints-toggle"
+      >
         <div class="hints-header-left">
           <UiIcon name="lightbulb" class="w-4 h-4 bulb-icon" />
           <span class="hints-title">Hints</span>
@@ -80,7 +95,7 @@
 <script setup lang="ts">
 import UiIcon from '@/components/UiIcon.vue'
 import type { UiIconName } from '@/utils/uiIcons'
-import { ref } from 'vue'
+import { nextTick, ref } from 'vue'
 
 export interface HintSection {
   title?: string
@@ -111,8 +126,17 @@ const props = withDefaults(defineProps<Props>(), {
 
 const isExpanded = ref(props.defaultExpanded)
 
+const root = ref<HTMLElement | null>(null)
+
+// The collapsed and expanded headers are different elements; after a toggle
+// (keyboard or assistive technology) focus would fall to <body>, so it returns
+// to the new header.
 const toggleExpanded = () => {
+  const hadFocus = !!root.value?.contains(document.activeElement)
   isExpanded.value = !isExpanded.value
+  if (hadFocus) {
+    void nextTick(() => root.value?.querySelector<HTMLElement>('[data-test="hints-toggle"]')?.focus())
+  }
 }
 
 const getSummaryText = () => {
@@ -334,6 +358,10 @@ const copyToClipboard = async (text: string) => {
   cursor: pointer;
   color: color-mix(in oklch, var(--color-base-content) 70%, transparent);
   transition: all 0.2s ease;
+}
+
+@media (max-width: 767px) {
+  .copy-button { min-height: 44px; min-width: 44px; }
 }
 
 .copy-button:hover {
