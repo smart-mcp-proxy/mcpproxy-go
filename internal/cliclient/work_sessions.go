@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
@@ -149,7 +150,9 @@ func (c *Client) workSessionGet(ctx context.Context, path string, query url.Valu
 		if jsonErr != nil || env.Error == "" {
 			preview := string(body)
 			if len(preview) > workSessionBodyPreview {
-				preview = preview[:workSessionBodyPreview] + "..."
+				// The cut is on a byte: what is left of a character that
+				// straddles it is dropped, not shown as a stray byte.
+				preview = strings.ToValidUTF8(preview[:workSessionBodyPreview], "") + "..."
 			}
 			return fmt.Errorf("API returned status %d: %s", resp.StatusCode, preview)
 		}

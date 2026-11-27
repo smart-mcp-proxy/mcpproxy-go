@@ -1434,8 +1434,9 @@ fi
 # document.
 log_test "CLI: activity sessions --failed lists the named run"
 RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity sessions --failed --run "$WS_RUN" -o json 2>/dev/null)
+EXIT_CODE=$?
 CLI_WS_ID=$(echo "$RESPONSE" | jq -r '.sessions[0].id // empty' 2>/dev/null)
-if [ -n "$CLI_WS_ID" ] && [ "$CLI_WS_ID" = "$WS_ID" ] && echo "$RESPONSE" | jq -e --arg run "$WS_RUN" '
+if [ $EXIT_CODE -eq 0 ] && [ -n "$CLI_WS_ID" ] && [ "$CLI_WS_ID" = "$WS_ID" ] && echo "$RESPONSE" | jq -e --arg run "$WS_RUN" '
         .total == 1 and (.sessions[0] | .run_name == $run and .failures >= 1 and .last_failure != null)' >/dev/null 2>&1; then
     log_pass "CLI: activity sessions --failed lists the named run"
 else
@@ -1445,7 +1446,8 @@ fi
 
 log_test "CLI: activity sessions prints the table"
 RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity sessions --failed --run "$WS_RUN" -o table 2>&1)
-if echo "$RESPONSE" | grep -q "LAST FAILURE" && echo "$RESPONSE" | grep -q "$WS_RUN" \
+EXIT_CODE=$?
+if [ $EXIT_CODE -eq 0 ] && echo "$RESPONSE" | grep -q "LAST FAILURE" && echo "$RESPONSE" | grep -q "$WS_RUN" \
         && [ -n "$CLI_WS_ID" ] && echo "$RESPONSE" | grep -q "^$CLI_WS_ID"; then
     log_pass "CLI: activity sessions prints the table"
 else
@@ -1457,7 +1459,8 @@ if [ -n "$CLI_WS_ID" ]; then
     # Opens at the first failure, with the calls that led to it before it.
     log_test "CLI: activity session opens at the first failure"
     RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" -o json 2>/dev/null)
-    if echo "$RESPONSE" | jq -e '. as $d | $d.failure_index == 1 and $d.failure_total >= 1
+    EXIT_CODE=$?
+    if [ $EXIT_CODE -eq 0 ] && echo "$RESPONSE" | jq -e '. as $d | $d.failure_index == 1 and $d.failure_total >= 1
             and ($d.rows | map(select(.index == $d.position)) | .[0].failed == true)
             and ($d.rows | map(select(.index < $d.position)) | length >= 2)' >/dev/null 2>&1; then
         log_pass "CLI: activity session opens at the first failure"
@@ -1468,7 +1471,8 @@ if [ -n "$CLI_WS_ID" ]; then
 
     log_test "CLI: activity session prints the timeline"
     RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" -o table 2>&1)
-    if echo "$RESPONSE" | grep -q "Session $CLI_WS_ID" && echo "$RESPONSE" | grep -q "Failure 1 of" \
+    EXIT_CODE=$?
+    if [ $EXIT_CODE -eq 0 ] && echo "$RESPONSE" | grep -q "Session $CLI_WS_ID" && echo "$RESPONSE" | grep -q "Failure 1 of" \
             && echo "$RESPONSE" | grep -qE "^(FAIL|BLOCK) " && echo "$RESPONSE" | grep -q "SESSION START"; then
         log_pass "CLI: activity session prints the timeline"
     else
@@ -1482,7 +1486,8 @@ if [ -n "$CLI_WS_ID" ]; then
     # failure to the last failure: each once, none missing, none outside.
     log_test "CLI: activity session --failures walks the failures"
     RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" --failures --before 2 -o json 2>/dev/null)
-    if echo "$RESPONSE" | jq -e '. as $d | ($d.failures | length) >= 2 and ($d.failures | length) == $d.failure_total
+    EXIT_CODE=$?
+    if [ $EXIT_CODE -eq 0 ] && echo "$RESPONSE" | jq -e '. as $d | ($d.failures | length) >= 2 and ($d.failures | length) == $d.failure_total
             and ([$d.rows[].index] | length == (unique | length))
             and ([$d.failures[].number] == [range(1; ($d.failures | length) + 1)])
             and ([$d.failures[].index] | length == (unique | length))

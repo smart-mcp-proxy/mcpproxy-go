@@ -150,7 +150,7 @@ Showing 3 of 150 records (page 1)
 
 **Source Indicators:**
 - `MCP` - AI agent call via MCP protocol
-- `CLI` - Direct CLI command (`mcpproxy call tool --tool-name <server:tool>`)
+- `CLI` - Direct CLI command (`mcpproxy call tool-read --tool-name <server:tool>` and its `tool-write` and `tool-destructive` siblings)
 - `API` - REST API call
 
 ### Output (JSON)
@@ -331,7 +331,7 @@ to see sub-calls`). When the record is one of those sub-calls, it prints a
 
 **Source Values:**
 - `MCP (AI agent via MCP protocol)` - Tool called by AI agent
-- `CLI (CLI command)` - Tool called via the `mcpproxy call tool --tool-name <server:tool>` CLI command
+- `CLI (CLI command)` - Tool called via a `mcpproxy call tool-read --tool-name <server:tool>` (or `tool-write`, `tool-destructive`) CLI command
 - `API (REST API)` - Tool called via REST API directly
 
 ### Failure classification
@@ -621,7 +621,7 @@ Timeline of one session: mcpproxy activity session <id>
 |------|---------|
 | 0 | Success (an empty list is a success) |
 | 1 | Invalid or unparsable flag value or argument, the daemon is not running, or the daemon refused the request |
-| 4 | The configuration file (`--config`) is not valid JSON (a file that does not exist exits 1) |
+| 1 or 4 | The configuration file given with `--config` cannot be loaded. The code is the one every `mcpproxy` command gives for that problem |
 
 ---
 
@@ -682,7 +682,7 @@ Failure 1 of 3 · rows 37-41 of 418
        #   TIME                      KIND            TARGET               STATUS   DURATION  ID                          DETAIL
        37  2026-11-26 22:41:07.112Z  call            github:list_issues   success  212ms     01JFXYZ123ABC0000000000037  -
        38  2026-11-26 22:41:09.480Z  call            github:get_issue     success  187ms     01JFXYZ123ABC0000000000038  -
-       39  2026-11-26 22:41:10.002Z  UPSTREAM EVENT  github               error    -         01JFXYZ123ABC0000000000039  connection_lost · MCPX_UPSTREAM_CONNECTION_LOST · The connection to the server was lost · x3
+       39  2026-11-26 22:41:10.002Z  UPSTREAM EVENT  github               error    -         01JFXYZ123ABC0000000000039  connection_lost x3 · MCPX_UPSTREAM_CONNECTION_LOST · The connection to the server was lost
 FAIL   40  2026-11-26 22:41:10.731Z  call            github:create_issue  error    30.0s     01JFXYZ123ABC0000000000040  network: The upstream server could not be reached.
 FAIL   41  2026-11-26 22:41:12.004Z  call            github:list_issues   error    1ms       01JFXYZ123ABC0000000000041  network: The upstream server could not be reached.
 
@@ -690,7 +690,7 @@ More rows are stored (earlier rows: raise --before; later rows: raise --after, u
 Every failure with its context: mcpproxy activity session ws-4f2a91c07b3d55e1 --failures
 ```
 
-- The line above the table says where the page is: `Failure 1 of 3` when the row it is positioned at is a failure, `After failure 2 of 3` when it is not (with `--at end`, for example).
+- The line above the table says where the page is: `Failure 1 of 3` when it is positioned at a failure; `After failure 2 of 3` or `Before the first of 3 failures` when the positioned row is not one (with `--at end` or `--at row:<id>`); `No stored failures` when the session has none.
 - The first column marks the counted row of a failed attempt: `FAIL`, or `BLOCK` when MCPProxy itself refused the call.
 - `KIND` is the row's kind as the endpoint names it (`call`, `internal_call`, `policy_decision`, `prompt`, `other`). Three kinds are not requests of the agent and are written in capitals so they stand apart: `UPSTREAM EVENT`, `SESSION START`, `SESSION END`. An upstream event from before the session started, shown because the server was already down, says so in `DETAIL`.
 - `#` is the row's index in the timeline. `ID` is the activity id, for `activity show <id>` and `--at row:<id>`.
@@ -746,7 +746,7 @@ Without `--failures`, `-o json` prints the data object of `GET /api/v1/work-sess
 |------|---------|
 | 0 | Success |
 | 1 | Invalid or unparsable flag value or argument, the daemon is not running, the session was not found, the daemon refused the request, or (`--failures`) the session kept changing through three attempts to read it |
-| 4 | The configuration file (`--config`) is not valid JSON (a file that does not exist exits 1) |
+| 1 or 4 | The configuration file given with `--config` cannot be loaded. The code is the one every `mcpproxy` command gives for that problem |
 
 An id that matches no session exits 1 with:
 

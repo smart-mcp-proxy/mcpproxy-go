@@ -103,10 +103,9 @@ func TestActivitySession_Table(t *testing.T) {
 
 	event := rowOf("UPSTREAM EVENT")
 	require.Contains(t, event, "github")
-	require.Contains(t, event, "connection_lost")
+	require.Contains(t, event, "connection_lost x3", "the repeat count goes with the kind")
 	require.Contains(t, event, "MCPX_UPSTREAM_CONNECTION_LOST")
 	require.Contains(t, event, "The connection to the server was lost")
-	require.Contains(t, event, "x3")
 
 	failed := rowOf("01CALL2")
 	require.True(t, strings.HasPrefix(failed, "FAIL"), failed)
@@ -928,4 +927,38 @@ func TestActivitySession_FailuresOfAnActiveSessionCarryANote(t *testing.T) {
 	require.Contains(t, out, "this session is still active")
 	require.Contains(t, out, "01ROW010")
 	require.Contains(t, out, "01ROW600")
+}
+
+// A position asked for as a failure is that failure, whether its row came
+// back or not. The heading says which failure it is and that the row is
+// missing; it does not call the position "after" it.
+func TestActivitySession_HeadingWhenTheFailureRowIsNotReturned(t *testing.T) {
+	newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/work-sessions/ws-aaa/timeline": okResp(`{"session": ` + timelineSessionJSON + `, "rows": [` +
+			failuresRow(39, false) + `,` + failuresRow(41, false) + `],
+		  "position": 40, "total_rows": 90, "failure_index": 1, "failure_total": 2, "lifetime_failures": 2, "has_before": true, "has_after": true}`),
+	})
+	out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--at", "failure:1", "--before", "1", "--after", "1")
+	require.NoError(t, err)
+	require.Contains(t, out, "Failure 1 of 2 (its row was not returned)")
+	require.NotContains(t, out, "After failure")
+}
+
+// The repeat count of a collapsed upstream event survives a long message: the
+// cell is cut at its end, and the count is not there.
+func TestActivitySession_UpstreamEventCountSurvivesALongMessage(t *testing.T) {
+	long := strings.Repeat("The server needs a new login before it can be used again. ", 4)
+	newRESTRecorder(t, map[string]cannedResponse{
+		"GET /api/v1/work-sessions/ws-aaa/timeline": okResp(`{"session": ` + timelineSessionJSON + `, "rows": [` +
+			timelineRow(3, "upstream_event", "2026-11-26T22:00:02Z", "",
+				`{"id": "01EVENT", "type": "upstream_event", "server_name": "github", "status": "error",
+				  "error_message": "`+long+`", "timestamp": "2026-11-26T22:00:02Z",
+				  "metadata": {"kind": "login_required", "code": "MCPX_OAUTH_LOGIN_REQUIRED", "count": 3},
+				  "has_sensitive_data": false}`) + `],
+		  "position": 3, "total_rows": 9, "failure_index": 0, "failure_total": 0, "lifetime_failures": 0, "has_before": true, "has_after": true}`),
+	})
+	out, _, err := runCLI(t, workSessionsTestRoot, "table", "session", "ws-aaa", "--at", "row:01EVENT")
+	require.NoError(t, err)
+	require.Contains(t, out, "login_required x3")
+	require.Contains(t, out, "MCPX_OAUTH_LOGIN_REQUIRED")
 }

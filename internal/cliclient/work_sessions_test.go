@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 )
@@ -217,4 +218,18 @@ func TestClient_WorkSessionDotIDsMakeNoRequest(t *testing.T) {
 		require.Equal(t, id, notFound.ID)
 	}
 	require.Zero(t, requests)
+}
+
+// The preview is cut on a byte. A character that straddles the cut is dropped
+// whole.
+func TestClient_WorkSessionBodyPreviewKeepsCharactersWhole(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(strings.Repeat("a", 299) + "\u00e9 and more"))
+	}))
+	defer srv.Close()
+	_, err := NewClient(srv.URL, nil).ListWorkSessions(context.Background(), WorkSessionListParams{})
+	require.Error(t, err)
+	require.True(t, utf8.ValidString(err.Error()), "%q", err.Error())
+	require.Contains(t, err.Error(), strings.Repeat("a", 299)+"...")
 }

@@ -502,6 +502,14 @@ func runActivitySession(id, at string, before, after int, includeBodies bool) er
 		fmt.Printf("No stored failures · rows %d-%d of %d\n", first, last, page.TotalRows)
 	case page.FailureIndex == 0:
 		fmt.Printf("Before the first of %d failures · rows %d-%d of %d\n", page.FailureTotal, first, last, page.TotalRows)
+	case at == "" || at == "first_failure" || strings.HasPrefix(at, "failure:"):
+		// The position was asked for as a failure and is one, whether the
+		// door returned its row or not.
+		missing := ""
+		if _, returned := timelinePositionRow(page); !returned {
+			missing = " (its row was not returned)"
+		}
+		fmt.Printf("Failure %d of %d%s · rows %d-%d of %d\n", page.FailureIndex, page.FailureTotal, missing, first, last, page.TotalRows)
 	case timelinePositionFailed(page):
 		fmt.Printf("Failure %d of %d · rows %d-%d of %d\n", page.FailureIndex, page.FailureTotal, first, last, page.TotalRows)
 	default:
@@ -530,15 +538,22 @@ func runActivitySession(id, at string, before, after int, includeBodies bool) er
 	return nil
 }
 
+// timelinePositionRow returns the row the page is positioned at, when the
+// door returned it.
+func timelinePositionRow(page *contracts.WorkSessionTimelineResponse) (*contracts.WorkSessionTimelineRow, bool) {
+	for i := range page.Rows {
+		if page.Rows[i].Index == page.Position {
+			return &page.Rows[i], true
+		}
+	}
+	return nil, false
+}
+
 // timelinePositionFailed reports whether the row the page is positioned at is
 // a failure.
 func timelinePositionFailed(page *contracts.WorkSessionTimelineResponse) bool {
-	for i := range page.Rows {
-		if page.Rows[i].Index == page.Position {
-			return page.Rows[i].Failed
-		}
-	}
-	return false
+	row, ok := timelinePositionRow(page)
+	return ok && row.Failed
 }
 
 // shellQuoteIfNeeded keeps a suggested command copyable when the id is not a
@@ -696,10 +711,18 @@ func upstreamEventDetail(row *contracts.WorkSessionTimelineRow, act *contracts.A
 	if row.PrecedesSession {
 		parts = append(parts, "(before the session started)")
 	}
-	for _, key := range []string{"kind", "code"} {
-		if v, _ := act.Metadata[key].(string); v != "" {
-			parts = append(parts, v)
-		}
+	// The repeat count of a collapsed row goes with the kind, ahead of the
+	// message: the cell is cut at its end, and "three times" must not be the
+	// part that is lost.
+	kind, _ := act.Metadata["kind"].(string)
+	if count, _ := act.Metadata["count"].(float64); count > 1 {
+		kind = strings.TrimSpace(fmt.Sprintf("%s x%d", kind, int(count)))
+	}
+	if kind != "" {
+		parts = append(parts, kind)
+	}
+	if code, _ := act.Metadata["code"].(string); code != "" {
+		parts = append(parts, code)
 	}
 	message := act.ErrorMessage
 	if message == "" {
@@ -707,9 +730,6 @@ func upstreamEventDetail(row *contracts.WorkSessionTimelineRow, act *contracts.A
 	}
 	if message != "" {
 		parts = append(parts, message)
-	}
-	if count, _ := act.Metadata["count"].(float64); count > 1 {
-		parts = append(parts, fmt.Sprintf("x%d", int(count)))
 	}
 	return dashIfEmpty(wsText(strings.Join(parts, " · "), workSessionDetailCell))
 }
