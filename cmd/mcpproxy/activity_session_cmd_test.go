@@ -156,17 +156,18 @@ func TestActivitySession_FlagsMapToTheTimelineDoor(t *testing.T) {
 
 func TestActivitySession_InvalidFlagsSendNothing(t *testing.T) {
 	for name, args := range map[string][]string{
-		"no id":                 {},
-		"two ids":               {"ws-1", "ws-2"},
-		"empty id":              {""},
-		"before too large":      {"ws-1", "--before", "251"},
-		"negative after":        {"ws-1", "--after", "-1"},
-		"unknown position":      {"ws-1", "--at", "sideways"},
-		"failure zero":          {"ws-1", "--at", "failure:0"},
-		"failure not a number":  {"ws-1", "--at", "failure:x"},
-		"row without an id":     {"ws-1", "--at", "row:"},
-		"failures with at":      {"ws-1", "--failures", "--at", "end"},
-		"failures with at same": {"ws-1", "--failures", "--at", "failure:2"},
+		"no id":                  {},
+		"two ids":                {"ws-1", "ws-2"},
+		"empty id":               {""},
+		"before too large":       {"ws-1", "--before", "251"},
+		"negative after":         {"ws-1", "--after", "-1"},
+		"unknown position":       {"ws-1", "--at", "sideways"},
+		"failure zero":           {"ws-1", "--at", "failure:0"},
+		"failure not a number":   {"ws-1", "--at", "failure:x"},
+		"row without an id":      {"ws-1", "--at", "row:"},
+		"failures with at":       {"ws-1", "--failures", "--at", "end"},
+		"failures with at same":  {"ws-1", "--failures", "--at", "failure:2"},
+		"failures with empty at": {"ws-1", "--failures", "--at="},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec := newRESTRecorder(t, map[string]cannedResponse{})
@@ -279,8 +280,10 @@ func TestActivitySession_IncludeBodies(t *testing.T) {
 	require.Contains(t, out, "the-end", "a body is capped at its own length, not at a table cell's")
 	require.NotContains(t, out, "\x1b", "a body is upstream text and is escaped like every other cell")
 	require.Contains(t, out, "bodies removed by retention")
-	// More rows exist before this page: the operator is told how to reach them.
-	require.Contains(t, out, "--before")
+	// More rows exist before this page: the operator is told how to reach
+	// them, with the bounds the two flags share.
+	require.Contains(t, out, "More rows are stored (earlier)")
+	require.Contains(t, out, "together up to 499")
 }
 
 // --failures walks every stored failure and prints overlapping context once.

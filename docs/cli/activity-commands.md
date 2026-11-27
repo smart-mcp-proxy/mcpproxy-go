@@ -563,7 +563,7 @@ mcpproxy activity sessions [flags]
 | `--profile` | | Filter by profile (administrators only) |
 | `--run` | | Filter by run name, the `X-MCPProxy-Run` label a caller sends |
 | `--error-class` | | Filter by the error class of the last failure: `network`, `timeout`, `http`, `jsonrpc`, `tool_error`, `session_terminated`, `auth`, `proxy_policy`, `proxy_internal`, `cancelled` |
-| `--since` | | Only sessions active at or after this time (RFC 3339, or relative: `-1h`, `-24h`, `-7d`) |
+| `--since` | | Only sessions whose last recorded activity is at or after this time (RFC 3339, or relative: `-1h`, `-24h`, `-7d`) |
 | `--until` | | Only sessions started at or before this time (RFC 3339 or relative) |
 | `--sort` | `last_activity`; `last_failure` with `--failed` | `last_activity` or `last_failure`, newest first |
 | `--limit`, `-n` | 25 | Max sessions to return (1-100) |
@@ -579,7 +579,7 @@ A flag with a value the endpoint would refuse fails before any request is made.
 mcpproxy activity sessions --failed --since -24h
 
 # The same, without sessions whose only failures were policy blocks
-mcpproxy activity sessions --failed --no-blocked
+mcpproxy activity sessions --failed --no-blocked --since -24h
 
 # The sessions of one agent token
 mcpproxy activity sessions --token ci-agent
@@ -605,11 +605,11 @@ Timeline of one session: mcpproxy activity session <id>
 
 - `CLIENT` is the client id when the session has a client binding, else the name the client reported with a `~` in front (a client can claim any name), else the surface the calls arrived on (`rest`, `cli`, `webui`, `tray`).
 - A `RUN` column appears when at least one listed session has a run name.
-- `--since` and `--until` select by when a session was active, not by when it failed: a session that failed 25 hours ago and was still running 23 hours ago is listed by `--failed --since -24h`.
-- `DURATION` runs from the first to the last recorded call; a session that is still open is marked `(active)`.
+- `--since` and `--until` select by a session's recorded activity (its last activity for `--since`, its start for `--until`), not by when it failed: a session that failed 25 hours ago and made its last call 23 hours ago is listed by `--failed --since -24h`.
+- `DURATION` runs from the session's start to its last recorded activity; a session that is still open is marked `(active)`.
 - `FAILURES` is the lifetime count. Policy blocks are part of it and are shown in brackets.
 - `REASON` is the short reason the server recorded for the last failure (`last_failure.reason`), or `-` when it recorded none. It is a fixed sentence for the kind of failure and never contains argument or response text.
-- With an `--offset` past the last session the command says how many sessions match, instead of reporting that none do.
+- When sessions match and `--offset` is past the last of them, the command says how many match, instead of reporting that none do.
 
 ### Output (JSON)
 
@@ -651,7 +651,7 @@ mcpproxy activity session <id> [flags]
 | `--failures` | `false` | Print every stored failure with the rows before it. Cannot be combined with `--at` |
 | `--include-bodies` | `false` | Include argument and response bodies |
 
-Without `--at` the view opens at the first failure that is still stored. A session with no stored failure opens at the start of its timeline, the `SESSION START` row.
+Without `--at` the view opens at the first failure that is still stored. A session with no stored failure opens at the first row of its timeline.
 
 ### Examples
 
@@ -686,7 +686,7 @@ Failure 1 of 3 · rows 37-41 of 418
 FAIL   40  2026-11-26 22:41:10.731Z  call            github:create_issue  error    30.0s     01JFXYZ123ABC0000000000040  network: The upstream server could not be reached.
 FAIL   41  2026-11-26 22:41:12.004Z  call            github:list_issues   error    1ms       01JFXYZ123ABC0000000000041  network: The upstream server could not be reached.
 
-More rows are stored (earlier rows: raise --before; later rows: raise --after, up to 250; or move with --at failure:<n>, --at row:<id>, --at end).
+More rows are stored (earlier and later). Widen the page with --before / --after (each up to 250, together up to 499), or move it with --at failure:<n>, --at row:<id>, --at end.
 Every failure with its context: mcpproxy activity session ws-4f2a91c07b3d55e1 --failures
 ```
 
@@ -734,7 +734,7 @@ This is the output of `--failures --before 1`, with `session` and each `activity
 
 Failures are read by their number among the stored ones, and rows by their index. If retention removes older rows of the session while the command runs, numbers and indexes move; the command notices and starts over. A second or third attempt that reads a stable session prints the result and exits 0. Only when all three attempts are interrupted does the command exit 1, say that the session changed and ask you to run it again (with the server's last answer, when a refusal is how the change showed).
 
-A session that is still active can also grow while it is read: a new call, or the upstream events of a server the session calls for the first time, add rows. Every row and every failure is still returned once, but the `index` of rows read before and after such a change may differ by the rows added ahead of them. The table output says so for an active session; for stable indexes, read the session after it has ended. Under a heading, a failure that was not returned is left out of the numbers (`Failures 1, 3 of 3`).
+A session that is still active can also grow while it is read: a new call, or the upstream events of a server the session calls for the first time, add rows. Every row and every failure is still returned once, but the `index` of rows read before and after such a change may differ by the rows added ahead of them. The table output says so when it read more than one failure of an active session; for stable indexes, read the session after it has ended. Under a heading, a failure that was not returned is left out of the numbers (`Failures 1, 3 of 3`).
 
 ### Output (JSON)
 

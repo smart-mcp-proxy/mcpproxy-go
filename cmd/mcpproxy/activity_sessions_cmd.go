@@ -87,7 +87,7 @@ Examples:
   mcpproxy activity sessions --failed --since -24h
 
   # The same, without sessions whose only failures were policy blocks
-  mcpproxy activity sessions --failed --no-blocked
+  mcpproxy activity sessions --failed --no-blocked --since -24h
 
   # The sessions of one agent token, or of one named REST run
   mcpproxy activity sessions --token ci-agent
@@ -147,7 +147,7 @@ Examples:
 	f.StringVar(&profile, "profile", "", "Filter by profile (administrators only)")
 	f.StringVar(&run, "run", "", "Filter by run name (the X-MCPProxy-Run label of a REST or MCP caller)")
 	f.StringVar(&errorClass, "error-class", "", "Filter by the error class of the last failure: "+strings.Join(validErrorClasses, ", "))
-	f.StringVar(&since, "since", "", "Only sessions active at or after this time (RFC3339 or relative: -1h, -24h, -7d)")
+	f.StringVar(&since, "since", "", "Only sessions whose last recorded activity is at or after this time (RFC3339 or relative: -1h, -24h, -7d)")
 	f.StringVar(&until, "until", "", "Only sessions started at or before this time (RFC3339 or relative)")
 	f.StringVar(&sortBy, "sort", "", "Sort by last_activity or last_failure, newest first (default: last_activity; last_failure with --failed)")
 	f.IntVarP(&limit, "limit", "n", workSessionListLimitDefault, "Max sessions to return (1-100)")
@@ -212,7 +212,7 @@ Find the id with: mcpproxy activity sessions --failed`,
 				return err
 			}
 			if failures {
-				if at != "" {
+				if cmd.Flags().Changed("at") {
 					return newFlagValidationError("--failures walks every stored failure: it cannot be combined with --at")
 				}
 				// The rows after a failure belong to the next one, so the
@@ -523,14 +523,16 @@ func runActivitySession(id, at string, before, after int, includeBodies bool) er
 
 	var more []string
 	if page.HasBefore {
-		more = append(more, "earlier rows: raise --before")
+		more = append(more, "earlier")
 	}
 	if page.HasAfter {
-		more = append(more, "later rows: raise --after")
+		more = append(more, "later")
 	}
 	if len(more) > 0 {
-		fmt.Printf("\nMore rows are stored (%s, up to %d; or move with --at failure:<n>, --at row:<id>, --at end).\n",
-			strings.Join(more, "; "), workSessionContextMax)
+		// The two flags share one page, so "raise it" is not always possible:
+		// the hint gives the bounds and the other way to get there.
+		fmt.Printf("\nMore rows are stored (%s). Widen the page with --before / --after (each up to %d, together up to %d), or move it with --at failure:<n>, --at row:<id>, --at end.\n",
+			strings.Join(more, " and "), workSessionContextMax, workSessionPageMax-1)
 	}
 	if page.FailureTotal > 1 {
 		fmt.Printf("Every failure with its context: mcpproxy activity session %s --failures\n", shellQuoteIfNeeded(id))
