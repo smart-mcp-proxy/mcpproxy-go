@@ -1422,6 +1422,77 @@ else
     echo "Response: $RESPONSE"
 fi
 
+# Work sessions through the CLI (Spec 124 PR-2): the morning-after case of the
+# REST section above, with the two commands an operator types over SSH. It
+# reads the session the REST section made under $WS_RUN.
+log_test "CLI: activity sessions --failed lists the named run"
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity sessions --failed --sort last_failure --run "$WS_RUN" -o json 2>&1)
+CLI_WS_ID=$(echo "$RESPONSE" | jq -r '.sessions[0].id // empty' 2>/dev/null)
+if [ -n "$CLI_WS_ID" ] && [ "$CLI_WS_ID" = "$WS_ID" ] && echo "$RESPONSE" | jq -e --arg run "$WS_RUN" '
+        .total == 1 and (.sessions[0] | .run_name == $run and .failures >= 1 and .last_failure != null)' >/dev/null 2>&1; then
+    log_pass "CLI: activity sessions --failed lists the named run"
+else
+    log_fail "CLI: activity sessions --failed lists the named run"
+    echo "Response: $RESPONSE"
+fi
+
+log_test "CLI: activity sessions prints the table"
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity sessions --failed --run "$WS_RUN" 2>&1)
+if echo "$RESPONSE" | grep -q "LAST FAILURE" && echo "$RESPONSE" | grep -q "$WS_RUN" \
+        && [ -n "$CLI_WS_ID" ] && echo "$RESPONSE" | grep -q "^$CLI_WS_ID"; then
+    log_pass "CLI: activity sessions prints the table"
+else
+    log_fail "CLI: activity sessions prints the table"
+    echo "Response: $RESPONSE"
+fi
+
+if [ -n "$CLI_WS_ID" ]; then
+    # Opens at the first failure, with the calls that led to it before it.
+    log_test "CLI: activity session opens at the first failure"
+    RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" -o json 2>&1)
+    if echo "$RESPONSE" | jq -e '. as $d | $d.failure_index == 1 and $d.failure_total >= 1
+            and ($d.rows | map(select(.index == $d.position)) | .[0].failed == true)
+            and ($d.rows | map(select(.index < $d.position)) | length >= 2)' >/dev/null 2>&1; then
+        log_pass "CLI: activity session opens at the first failure"
+    else
+        log_fail "CLI: activity session opens at the first failure"
+        echo "Response: $RESPONSE"
+    fi
+
+    log_test "CLI: activity session prints the timeline"
+    RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" 2>&1)
+    if echo "$RESPONSE" | grep -q "Session $CLI_WS_ID" && echo "$RESPONSE" | grep -q "Failure 1 of" \
+            && echo "$RESPONSE" | grep -qE "^(FAIL|BLOCK) " && echo "$RESPONSE" | grep -q "SESSION START"; then
+        log_pass "CLI: activity session prints the timeline"
+    else
+        log_fail "CLI: activity session prints the timeline"
+        echo "Response: $RESPONSE"
+    fi
+
+    # Every failure with the two rows before it, each row once.
+    log_test "CLI: activity session --failures walks the failures"
+    RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" --failures --before 2 -o json 2>&1)
+    if echo "$RESPONSE" | jq -e '(.failures | length) >= 1 and (.failures | length) == .failure_total
+            and ([.rows[].index] | length == (unique | length))
+            and ([.failures[].index] - [.rows[] | select(.failed == true) | .index] | length == 0)' >/dev/null 2>&1; then
+        log_pass "CLI: activity session --failures walks the failures"
+    else
+        log_fail "CLI: activity session --failures walks the failures"
+        echo "Response: $RESPONSE"
+    fi
+fi
+
+log_test "CLI: activity session with an unknown id fails and names the listing"
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session ws-does-not-exist 2>&1)
+EXIT_CODE=$?
+if [ $EXIT_CODE -eq 1 ] && echo "$RESPONSE" | grep -q "not found" && echo "$RESPONSE" | grep -q "mcpproxy activity sessions" \
+        && ! echo "$RESPONSE" | grep -q "Usage:"; then
+    log_pass "CLI: activity session with an unknown id fails and names the listing"
+else
+    log_fail "CLI: activity session with an unknown id fails and names the listing (exit $EXIT_CODE)"
+    echo "Response: $RESPONSE"
+fi
+
 # Test: activity help
 log_test "CLI: activity --help"
 RESPONSE=$($MCPPROXY_BINARY activity --help 2>&1)

@@ -19,7 +19,9 @@ mcpproxy activity
 ├── watch         Watch activity stream in real-time
 ├── show <id>     Show activity details
 ├── summary       Show activity statistics
-└── export        Export activity records
+├── export        Export activity records
+├── sessions      List work sessions with their failure facts
+└── session <id>  Show one work session's timeline around its failures
 ```
 
 ## Output Formats
@@ -148,7 +150,7 @@ Showing 3 of 150 records (page 1)
 
 **Source Indicators:**
 - `MCP` - AI agent call via MCP protocol
-- `CLI` - Direct CLI command (`mcpproxy call tool`)
+- `CLI` - Direct CLI command (`mcpproxy call tool --tool-name <server:tool>`)
 - `API` - REST API call
 
 ### Output (JSON)
@@ -329,7 +331,7 @@ to see sub-calls`). When the record is one of those sub-calls, it prints a
 
 **Source Values:**
 - `MCP (AI agent via MCP protocol)` - Tool called by AI agent
-- `CLI (CLI command)` - Tool called via `mcpproxy call tool` CLI command
+- `CLI (CLI command)` - Tool called via the `mcpproxy call tool --tool-name <server:tool>` CLI command
 - `API (REST API)` - Tool called via REST API directly
 
 ### Failure classification
@@ -538,7 +540,230 @@ id,type,source,server_name,tool_name,status,duration_ms,timestamp,error_message
 
 ---
 
+## activity sessions
+
+List work sessions. A work session is one agent's run of work: one credential, one client, one project, until it has been idle for 30 minutes (see [Work sessions and the failure timeline](../features/activity-log.md#work-sessions-and-the-failure-timeline)). Each row carries the session's calls, its failures and the reason of the last failure.
+
+An agent token sees only its own sessions, and only the part of each that touched servers in its reach.
+
+### Usage
+
+```bash
+mcpproxy activity sessions [flags]
+```
+
+### Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--failed` | `false` | Only sessions with at least one failure |
+| `--no-blocked` | `false` | With `--failed`: do not count a policy block (a refusal by MCPProxy itself) as a failure |
+| `--token` | | Filter by agent token name |
+| `--client` | | Filter by client id |
+| `--profile` | | Filter by profile (administrators only) |
+| `--run` | | Filter by run name, the `X-MCPProxy-Run` label a caller sends |
+| `--error-class` | | Filter by the error class of the last failure: `network`, `timeout`, `http`, `jsonrpc`, `tool_error`, `session_terminated`, `auth`, `proxy_policy`, `proxy_internal`, `cancelled` |
+| `--since` | | Only sessions active at or after this time (RFC 3339, or relative: `-1h`, `-24h`, `-7d`) |
+| `--until` | | Only sessions started at or before this time (RFC 3339 or relative) |
+| `--sort` | `last_activity` | `last_activity` or `last_failure`, newest first |
+| `--limit`, `-n` | 25 | Max sessions to return (1-100) |
+| `--offset` | 0 | Pagination offset |
+
+A flag with a value the endpoint would refuse fails before any request is made.
+
+### Examples
+
+```bash
+# Which runs failed since yesterday, newest failure first
+mcpproxy activity sessions --failed --sort last_failure --since -24h
+
+# The same, without sessions whose only failures were policy blocks
+mcpproxy activity sessions --failed --no-blocked
+
+# The sessions of one agent token
+mcpproxy activity sessions --token ci-agent
+
+# One named REST run
+mcpproxy activity sessions --run nightly-build-417
+
+# As JSON
+mcpproxy activity sessions --failed -o json
+```
+
+### Output (Table)
+
+```
+ID                   TOKEN     CLIENT       PROJECT  STARTED                DURATION  CALLS  FAILURES       LAST FAILURE          REASON
+ws-4f2a91c07b3d55e1  ci-agent  claude-code  shop     2026-11-26 22:00:04Z   2h13m     412    3 (1 blocked)  2026-11-27 00:13:20Z  The upstream server could not be reached.
+ws-07e9c4dd3185bb35  ci-agent  claude-code  billing  2026-11-26 22:00:09Z*  3h2m      1960   1              2026-11-26 23:41:07Z  The upstream server needs a login.
+
+* the start of this session is no longer stored (retention removed its oldest rows)
+Showing 2 of 2 sessions
+Timeline of one session: mcpproxy activity session <id>
+```
+
+- `CLIENT` is the client id when the session has a client binding, else the name the client reported with a `~` in front (a client can claim any name), else the surface the calls arrived on (`rest`, `cli`, `webui`, `tray`).
+- A `RUN` column appears when at least one listed session has a run name.
+- `DURATION` runs from the first to the last recorded call; a session that is still open is marked `(active)`.
+- `FAILURES` is the lifetime count. Policy blocks are part of it and are shown in brackets.
+- `REASON` is built from the error class, the diagnostic code and its fixed message. It never contains argument or response text.
+
+### Output (JSON)
+
+`-o json` and `-o yaml` print the data object of `GET /api/v1/work-sessions` unchanged: `sessions`, `total`, `limit`, `offset`. See the [REST API reference](../api/rest-api.md#work-sessions) for the fields.
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success (an empty list is a success) |
+| 1 | Invalid flag value, the daemon is not running, or the daemon refused the request |
+
+---
+
+## activity session
+
+Show the timeline of one work session: its calls, the refusals by MCPProxy itself, and the upstream events (a lost connection, an exited process, a login that is required) of the servers it called, in time order.
+
+### Usage
+
+```bash
+mcpproxy activity session <id> [flags]
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `id` | Work session id (`ws-...`), from `activity sessions` |
+
+### Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--at` | `first_failure` | Where the view opens: `first_failure`, `failure:<n>`, `row:<activity id>` or `end` |
+| `--before` | 20 | Rows before the position, or before each failure with `--failures` (0-250) |
+| `--after` | 20 | Rows after the position (0-250). With `--failures` the default is 0 |
+| `--failures` | `false` | Print every stored failure with the rows before it. Cannot be combined with `--at` |
+| `--include-bodies` | `false` | Include argument and response bodies |
+
+Without `--at` the view opens at the first failure that is still stored. A session with no stored failure opens at its earliest stored row.
+
+### Examples
+
+```bash
+# What went wrong first, and what the agent did before it
+mcpproxy activity session ws-4f2a91c07b3d55e1
+
+# Every failure of the run, each with the 5 rows before it
+mcpproxy activity session ws-4f2a91c07b3d55e1 --failures --before 5
+
+# The third failure, with the bodies of the calls around it
+mcpproxy activity session ws-4f2a91c07b3d55e1 --at failure:3 --include-bodies
+
+# The last 50 rows of the session
+mcpproxy activity session ws-4f2a91c07b3d55e1 --at end --before 50
+
+# Around one row from `activity list`
+mcpproxy activity session ws-4f2a91c07b3d55e1 --at row:01JFXYZ123ABC
+```
+
+### Output (Table)
+
+```
+Session ws-4f2a91c07b3d55e1 · token ci-agent · client claude-code · project shop · ended
+Started 2026-11-26 22:00:04Z · last activity 2026-11-27 00:13:20Z · 2h13m · 412 calls · 3 failures (1 blocked)
+
+Failure 1 of 3 · rows 37-41 of 418
+       #   TIME                      KIND            TARGET               STATUS   DURATION  ID                          DETAIL
+       37  2026-11-26 22:41:07.112Z  call            github:list_issues   success  212ms     01JFXYZ123ABC0000000000037  -
+       38  2026-11-26 22:41:09.480Z  call            github:get_issue     success  187ms     01JFXYZ123ABC0000000000038  -
+       39  2026-11-26 22:41:10.002Z  UPSTREAM EVENT  github               error    -         01JFXYZ123ABC0000000000039  connection_lost · MCPX_UPSTREAM_CONNECTION_LOST · The connection to the server was lost · x3
+FAIL   40  2026-11-26 22:41:10.731Z  call            github:create_issue  error    30.0s     01JFXYZ123ABC0000000000040  network: The upstream server could not be reached.
+       41  2026-11-26 22:41:12.004Z  call            github:list_issues   error    1ms       01JFXYZ123ABC0000000000041  network: The upstream server could not be reached.
+
+More rows are stored (earlier rows: raise --before; later rows: raise --after, up to 250; or move with --at failure:<n>, --at row:<id>, --at end).
+Every failure with its context: mcpproxy activity session ws-4f2a91c07b3d55e1 --failures
+```
+
+- The first column marks the counted row of a failed attempt: `FAIL`, or `BLOCK` when MCPProxy itself refused the call.
+- Rows that are not calls carry their kind in capitals: `UPSTREAM EVENT`, `SESSION START`, `SESSION END`. An upstream event from before the session started, shown because the server was already down, says so in `DETAIL`.
+- `#` is the row's index in the timeline. `ID` is the activity id, for `activity show <id>` and `--at row:<id>`.
+- Times are UTC, to the millisecond.
+- When retention removed the oldest rows, a note under the header says up to which time. When the session failed more often than the log still shows, a note gives both counts; failure numbers count the stored failures only.
+- With `--include-bodies` the argument and response bodies follow the table, each on one line and capped at 2,000 characters. Use `-o json` for the whole body. A row whose bodies were removed by retention says so.
+
+### All failures of a session
+
+`--failures` prints each stored failure with `--before` rows ahead of it (and `--after` rows behind it, when given). Rows that are context of more than one failure are printed once, under a heading that names the failures they belong to:
+
+```
+Failures 1-2 of 3
+...
+Failure 3 of 3
+...
+```
+
+With `-o json` or `-o yaml` this view is one object:
+
+```json
+{
+  "session": { "id": "ws-4f2a91c07b3d55e1", "failures": 3 },
+  "rows": [ { "index": 37, "kind": "call", "at": "2026-11-26T22:41:07.112Z", "activity": { } } ],
+  "failures": [ { "number": 1, "index": 40 }, { "number": 2, "index": 41 }, { "number": 3, "index": 388 } ],
+  "before": 5,
+  "after": 0,
+  "total_rows": 418,
+  "failure_total": 3,
+  "lifetime_failures": 3
+}
+```
+
+`rows` holds every context row in timeline order, each once, in the shape of the timeline endpoint's rows. `failures` gives the number of each failure among the stored ones and the `index` of its row. `earlier_failures_not_stored` is present and `true` when retention removed earlier failures.
+
+### Output (JSON)
+
+Without `--failures`, `-o json` and `-o yaml` print the data object of `GET /api/v1/work-sessions/{id}/timeline` unchanged: `session`, `rows`, `position`, `total_rows`, `failure_index`, `failure_total`, `lifetime_failures`, `has_before`, `has_after`. See the [REST API reference](../api/rest-api.md#work-sessions).
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Invalid flag value, the daemon is not running, the session was not found, or the daemon refused the request |
+
+An id that matches no session exits 1 with:
+
+```
+Error: work session "ws-nope" not found: no session with this id is stored, or it is not yours to read. List sessions with: mcpproxy activity sessions
+```
+
+The same answer is given for a session that belongs to another token.
+
+---
+
 ## Common Workflows
+
+### The morning after: which agent run failed, and why
+
+Several agents ran overnight. Two commands reach the failure:
+
+```bash
+# 1. The runs that failed, newest failure first
+mcpproxy activity sessions --failed --sort last_failure --since -24h
+
+# 2. Open one at its first failure, with the 20 calls before it
+mcpproxy activity session ws-4f2a91c07b3d55e1
+```
+
+The timeline shows the failed call, the reason, the upstream event that caused it when there was one, and what the same agent did before. To see every failure of the run, add `--failures`. To read what one call sent and received, pass its id to `mcpproxy activity show <id> --include-response`.
+
+Give each agent its own token (`mcpproxy token create --name <name>`), or have each script send an `X-MCPProxy-Run` header, so that each run is its own session. Over SSH on a headless machine the commands work as they do locally; add `-o json` to feed a script:
+
+```bash
+# Ids of the sessions that failed on a network error
+mcpproxy activity sessions --failed --error-class network -o json | jq -r '.sessions[].id'
+```
 
 ### Debug a Failed Tool Call
 
@@ -606,8 +831,11 @@ mcpproxy activity export \
 ### Session Analysis
 
 ```bash
-# Track all activity for a specific AI session
+# Every stored row of one work session, as the activity list shows them
 mcpproxy activity list --session <session-id> -o json | jq '.'
+
+# The same session as a timeline, with upstream events merged in
+mcpproxy activity session <session-id> --at end --before 250
 ```
 
 ### Quick Statistics
