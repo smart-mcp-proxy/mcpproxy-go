@@ -700,10 +700,22 @@ func TestRenderLabel_ControlCharactersReplaced(t *testing.T) {
 	if n := obj["client"].(map[string]interface{})["name"].(string); strings.ContainsRune(n, 0x0e) {
 		t.Fatalf("hex-escaped control characters are replaced: %q", n)
 	}
-	in.ClientName = "build\trunner"
-	_, obj = mustAdmin(t, in)
-	if n := obj["client"].(map[string]interface{})["name"]; n != "build\trunner" {
-		t.Fatalf("a tab in a chosen label is kept: %q", n)
+	for _, keep := range []string{"build\trunner", "build\x00runner", "\x0eplain-name"} {
+		in.ClientName = keep
+		_, obj = mustAdmin(t, in)
+		if n := obj["client"].(map[string]interface{})["name"]; n != keep {
+			t.Fatalf("a control character that joins no credential shape is kept: %q", n)
+		}
+	}
+}
+
+func TestRenderLabel_HyphenatedPrivateKeyHeaderWithheld(t *testing.T) {
+	in := tokenRotateInput()
+	in.ClientName = "-----BEGIN DEVICE-SIGNING PRIVATE KEY-----MIIEsecretbody"
+	line, obj := mustAdmin(t, in)
+	assertSentinelAbsent(t, line, "MIIEsecretbody")
+	if _, has := obj["client"].(map[string]interface{})["name"]; has {
+		t.Fatalf("a private-key label is omitted: %v", obj["client"])
 	}
 }
 

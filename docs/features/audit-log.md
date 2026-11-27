@@ -309,6 +309,10 @@ tokens, GitHub `ghp_…` and `github_pat_…`, `sk-…`, `AKIA…`, JWTs, `Beare
 secret with no recognisable shape (a 64-hex API key pasted into a token name or an
 `X-Request-Id`) reaches the audit file, as it already reaches the activity log and
 `authz` lines. Per-field mask hits are counted and surfaced by `mcpproxy doctor`.
+One narrow rewrite: a label holding a control character that JSON writes as a
+`\u00XX` escape keeps it, unless that escape would join the label into a
+credential shape when the line is read as text (`\u000e` followed by `yJ…` reads
+as `eyJ…`); only then are those characters written as `?`.
 
 **Crash window.** An `admin_action` line is written right after its effect
 commits. A process killed between the commit and the write keeps the change and

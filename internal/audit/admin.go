@@ -437,7 +437,7 @@ func containsPrivateKey(s string) bool {
 
 // privateKeyHeader is a PEM private-key block header (RSA, EC, OPENSSH,
 // ENCRYPTED, PKCS#8 …) or a PGP private-key block header.
-var privateKeyHeader = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----`)
+var privateKeyHeader = regexp.MustCompile(`-----BEGIN [A-Z0-9 -]*PRIVATE KEY( BLOCK)?-----`)
 
 // renderLabel applies the label order: private-key check on the original,
 // mask, then the 64-rune cap. ok=false means the label must not be
@@ -446,10 +446,9 @@ func renderLabel(s string) (string, bool) {
 	if s == "" || containsPrivateKey(s) {
 		return "", false
 	}
-	// Mask the original first (a tab in "Bearer\t…" is part of the match),
-	// then replace the characters JSON would escape (\u000e, \u2028): the
-	// whole-line sanitizer reads the escaped form and could otherwise match a
-	// credential shape across an escape and rewrite the label.
+	// Mask the original first (a tab in "Bearer\t…" is part of the match);
+	// then, only when a JSON hex escape would join the label into a
+	// credential shape for the whole-line sanitizer, replace those characters.
 	masked, hit := maskAllSpans(s)
 	if hit {
 		noteFieldMask()
@@ -636,17 +635,43 @@ func checkRenderedPrefixes(action string, f map[string]interface{}) error {
 	return fmt.Errorf("audit.NewAdminAction: %s lost its /token_prefix entry to the size caps", action)
 }
 
-// replaceHexEscaped replaces exactly the characters encoding/json writes as a
-// \u00XX escape: the C0 controls other than \b \t \n \f \r. A hex escape
-// can end in 'e' and join the label into a credential shape (\u000e +
-// "yJ…" reads as "eyJ…") for the whole-line sanitizer; the short escapes end
-// in letters no credential pattern starts with, so a tab or newline in a
-// chosen label is kept as chosen.
+// replaceHexEscaped replaces the characters encoding/json writes as a
+// \u00XX escape (the C0 controls other than \b \t \n \f \r) only when that
+// escape would let the whole-line sanitizer match a credential shape the
+// decoded label does not have: a hex escape can end in 'e' and join the label
+// into one (\u000e + "yJ…" reads as "eyJ…"). Any other label keeps its
+// control characters as chosen; the short escapes end in letters no
+// credential pattern starts with.
 func replaceHexEscaped(s string) string {
+	if !escapeJoinsCredential(s) {
+		return s
+	}
 	return strings.Map(func(r rune) rune {
 		if r < 0x20 && r != '\b' && r != '\t' && r != '\n' && r != '\f' && r != '\r' {
 			return '?'
 		}
 		return r
 	}, s)
+}
+
+// escapeJoinsCredential reports whether s, serialized as a JSON string the
+// way an admin_action line is, gives the credential mask a match that the
+// decoded string does not.
+func escapeJoinsCredential(s string) bool {
+	hasHex := false
+	for _, r := range s {
+		if r < 0x20 && r != '\b' && r != '\t' && r != '\n' && r != '\f' && r != '\r' {
+			hasHex = true
+			break
+		}
+	}
+	if !hasHex {
+		return false
+	}
+	enc, err := marshalNoHTMLEscape(s)
+	if err != nil {
+		return true
+	}
+	_, hit := maskAllSpans(string(enc))
+	return hit
 }
