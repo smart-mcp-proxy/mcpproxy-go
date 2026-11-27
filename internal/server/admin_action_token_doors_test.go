@@ -284,7 +284,14 @@ func TestAdminActionDoors_MCPCredentialsTool(t *testing.T) {
 	// synchronously. Wait for both.
 	require.Eventually(t, func() bool {
 		rows, _, err := sm.ListActivities(storage.ActivityFilter{RequestID: rid, Limit: 100})
-		return err == nil && len(rows) >= 2
+		if err != nil {
+			return false
+		}
+		types := map[string]int{}
+		for _, r := range rows {
+			types[string(r.Type)]++
+		}
+		return types[string(storage.ActivityTypeProfileChange)] == 1 && len(rows) >= 2
 	}, 10*time.Second, 50*time.Millisecond, "wrapper row and profile_change row share the line's request id")
 
 	require.Equal(t, "worker", l["target"].(map[string]interface{})["name"])
@@ -326,7 +333,14 @@ func TestAdminActionDoors_MCPCredentialsTool(t *testing.T) {
 	require.NotEqual(t, rid, revokeID, "each MCP call has its own request id")
 	require.Eventually(t, func() bool {
 		rows, _, err := sm.ListActivities(storage.ActivityFilter{RequestID: revokeID, Limit: 100})
-		return err == nil && len(rows) >= 2
+		if err != nil {
+			return false
+		}
+		types := map[string]int{}
+		for _, r := range rows {
+			types[string(r.Type)]++
+		}
+		return types[string(storage.ActivityTypeProfileChange)] == 1 && len(rows) >= 2
 	}, 10*time.Second, 50*time.Millisecond, "the revoke line joins its wrapper and profile_change rows")
 
 	// A refused operation (unknown token) writes nothing.

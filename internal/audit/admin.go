@@ -268,6 +268,11 @@ func NewAdminAction(in AdminActionInput) (Line, error) {
 	if needsTrigger != (in.Trigger != "") {
 		return Line{}, fmt.Errorf("audit.NewAdminAction: trigger is required iff caller.kind is none or internal (kind %q, trigger %q)", kind, in.Trigger)
 	}
+	if kind == "none" && in.Trigger != TriggerConfigFile {
+		// none means the proxy observed an external edit; anything the
+		// proxy decided is internal.
+		return Line{}, fmt.Errorf("audit.NewAdminAction: caller.kind none takes trigger config_file only")
+	}
 	if in.Trigger != "" && !adminTriggers[in.Trigger] {
 		return Line{}, fmt.Errorf("audit.NewAdminAction: invalid trigger %q", in.Trigger)
 	}
@@ -447,12 +452,7 @@ func renderLabel(s string) (string, bool) {
 	if hit {
 		noteFieldMask()
 	}
-	masked = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f || r == 0x2028 || r == 0x2029 {
-			return '?'
-		}
-		return r
-	}, masked)
+	masked = replaceHexEscaped(masked)
 	r := []rune(masked)
 	if len(r) > maxLabelRunes {
 		r = r[:maxLabelRunes]
@@ -632,4 +632,19 @@ func checkRenderedPrefixes(action string, f map[string]interface{}) error {
 		return nil
 	}
 	return fmt.Errorf("audit.NewAdminAction: %s lost its /token_prefix entry to the size caps", action)
+}
+
+// replaceHexEscaped replaces exactly the characters encoding/json writes as a
+// \u00XX escape: the C0 controls other than \b \t \n \f \r. A hex escape
+// can end in 'e' and join the label into a credential shape (\u000e +
+// "yJ…" reads as "eyJ…") for the whole-line sanitizer; the short escapes end
+// in letters no credential pattern starts with, so a tab or newline in a
+// chosen label is kept as chosen.
+func replaceHexEscaped(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 && r != '\b' && r != '\t' && r != '\n' && r != '\f' && r != '\r' {
+			return '?'
+		}
+		return r
+	}, s)
 }

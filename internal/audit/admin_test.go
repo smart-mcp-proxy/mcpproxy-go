@@ -698,7 +698,12 @@ func TestRenderLabel_ControlCharactersReplaced(t *testing.T) {
 		t.Fatalf("the sanitizer must not rewrite a label across a JSON escape: %s", raw)
 	}
 	if n := obj["client"].(map[string]interface{})["name"].(string); strings.ContainsRune(n, 0x0e) {
-		t.Fatalf("control characters are replaced: %q", n)
+		t.Fatalf("hex-escaped control characters are replaced: %q", n)
+	}
+	in.ClientName = "build\trunner"
+	_, obj = mustAdmin(t, in)
+	if n := obj["client"].(map[string]interface{})["name"]; n != "build\trunner" {
+		t.Fatalf("a tab in a chosen label is kept: %q", n)
 	}
 }
 
@@ -727,5 +732,30 @@ func TestAdminLine_NoHTMLEscapeNextToALabel(t *testing.T) {
 	}
 	if obj["client"].(map[string]interface{})["name"] != ">yJabc.eyJdef.signature" {
 		t.Fatalf("got %v", obj["client"])
+	}
+}
+
+func TestChange_PointerSegmentHexEscapedControl(t *testing.T) {
+	in := tokenRotateInput()
+	in.Action = audit.ActionTokenDelete
+	in.Changes = []audit.Change{audit.Withheld(audit.Path("env", "\x0eyJabc.eyJdef.signature"), audit.WithheldSecret)}
+	line, obj := mustAdmin(t, in)
+	raw, _ := line.JSON()
+	if out, hit := audit.SanitizeLine(raw); hit || string(out) != string(raw) {
+		t.Fatalf("no escape may join a pointer segment into a credential shape: %s", raw)
+	}
+	if obj["changes"].([]interface{})[0].(map[string]interface{})["field_masked"] != true {
+		t.Fatal("a replaced character marks the pointer field_masked")
+	}
+}
+
+func TestNewAdminAction_NoneTakesConfigFileOnly(t *testing.T) {
+	in := tokenRotateInput()
+	in.Caller = audit.Caller{Kind: "none"}
+	in.RequestID, in.ClientName, in.ClientSurface = "", "", ""
+	in.Origin, in.Source = "local", "internal"
+	in.Trigger, in.Policy = audit.TriggerPolicy, audit.PolicyRotationReconcile
+	if _, err := audit.NewAdminAction(in); err == nil {
+		t.Fatal("a policy decision is internal, never none")
 	}
 }

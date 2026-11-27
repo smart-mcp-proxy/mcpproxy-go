@@ -10,6 +10,9 @@ package audit
 // Enumeration tests in internal/httpapi, internal/server and cmd/mcpproxy
 // walk the production registrations and fail when a door is missing here or
 // an entry no longer exists, so a new door cannot merge without a record.
+// The shrink-only rule is a review rule: a PR that adds a pending row must
+// add its key to AdminDoorsFrozenPending in the same diff, where review sees
+// it (no test can stop a PR from editing both).
 // TestAdminDoorRegistry_PendingOnlyShrinks pins the pending set by identity
 // (AdminDoorsFrozenPending, admindoors_pending.go): a slice that ships lines
 // flips its rows to done and removes them from the frozen list; a new pending
@@ -155,7 +158,8 @@ var AdminDoors = []AdminDoor{
 	{Door: "CLI mcpproxy review approve", Branch: "unquarantined server", Status: DoorPending, Slice: "PR-2", Actions: []string{"tool.approve"}, Reason: "an unquarantined server: sends /tools/approve"},
 	{Door: "CLI mcpproxy review fetch", Status: DoorPending, Slice: "PR-2", Actions: []string{"tool.approve", "tool.hold", "server.baseline_set"}, Reason: "posts to the discovery door; recorded there"},
 	{Door: "CLI mcpproxy review list", Status: DoorExempt, Reason: "read-only: no committed effect"},
-	{Door: "CLI mcpproxy review reject", Status: DoorPending, Slice: "PR-2", Actions: []string{"server.baseline_clear", "tool.block"}, Reason: "approvals"},
+	{Door: "CLI mcpproxy review reject", Branch: "--tools", Status: DoorPending, Slice: "PR-2", Actions: []string{"tool.block"}, Reason: "with --tools: sends /tools/block"},
+	{Door: "CLI mcpproxy review reject", Branch: "security reject", Status: DoorPending, Slice: "PR-2", Actions: []string{"server.baseline_clear"}, Reason: "without --tools: sends /security/reject"},
 	{Door: "CLI mcpproxy review show", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "CLI mcpproxy search-servers", Status: DoorExempt, Reason: "read-only: no committed effect"},
 	{Door: "CLI mcpproxy secrets", Status: DoorExempt, Reason: "read-only: no committed effect"},

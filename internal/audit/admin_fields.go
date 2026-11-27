@@ -173,6 +173,10 @@ func (f FieldPath) render() (string, bool) {
 			seg = m
 			masked = true
 		}
+		if rep := replaceHexEscaped(seg); rep != seg {
+			seg = rep
+			masked = true
+		}
 		if r := []rune(seg); len(r) > maxPointerSegment {
 			seg = string(r[:maxPointerSegment])
 			masked = true
