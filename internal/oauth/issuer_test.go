@@ -130,6 +130,14 @@ func TestDecideIssuer_ProtectedNeedsVerifiedAndSecure(t *testing.T) {
 	assert.False(t, d.Protected, "insecure issuer")
 }
 
+// An empty iss is a mismatch even when the expected issuer is empty too.
+func TestDecideIssuer_EmptyIssAgainstEmptyIssuerRefused(t *testing.T) {
+	q := url.Values{"code": {"c"}, "state": {"s"}, "iss": {""}}
+	_, err := DecideAuthorizationResponseIssuer(q, ExpectedIssuer{Source: IssuerSourceDiscovered}, false)
+	var mm *IssuerMismatchError
+	require.True(t, errors.As(err, &mm))
+}
+
 // A flow with no recorded expectation is refused: nothing can be sent for a
 // response whose issuer was never decided.
 func TestDecideIssuer_NoExpectationRefused(t *testing.T) {

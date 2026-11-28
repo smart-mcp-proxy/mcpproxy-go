@@ -126,7 +126,7 @@ func DecideAuthorizationResponseIssuer(q url.Values, exp ExpectedIssuer, skip bo
 
 	var problem string
 	switch {
-	case present && iss != exp.Issuer:
+	case present && (iss == "" || iss != exp.Issuer):
 		problem = "the iss parameter names another issuer"
 	case !present && exp.IssSupported:
 		problem = "the authorization server advertises iss, but the response has none"

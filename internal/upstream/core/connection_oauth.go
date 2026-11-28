@@ -1770,7 +1770,7 @@ func (c *Client) armIssuerCheck(ctx context.Context, h *uptransport.OAuthHandler
 		return oauth.IssuerExpectation{}, fmt.Errorf("OAuth callback waiter for this sign-in is gone; start the login again")
 	}
 	if exp.Skip {
-		c.logger.Warn("OAuth issuer validation is disabled for this server (oauth.skip_issuer_validation); its logins are not mix-up protected",
+		c.logger.Warn("OAuth issuer validation is relaxed for this server (oauth.skip_issuer_validation): a wrong or missing iss is accepted, and a login that relies on that is not mix-up protected",
 			zap.String("server", c.config.Name))
 	}
 	return exp, nil
