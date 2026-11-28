@@ -1,25 +1,17 @@
 package connect
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 // The name localhost is an alias for the loopback address: a client entry that
 // differs from this instance's address only by that name points here.
-func TestEndpointURLMatches(t *testing.T) {
-	// What the entry finders accept: the exact address (or its legacy query
-	// form), else the localhost alias.
-	endpointURLMatches := func(u, baseURL string) bool {
-		return u == baseURL || strings.HasPrefix(u, baseURL+"?") || loopbackNameAlias(u, baseURL)
-	}
+func TestLoopbackNameAlias(t *testing.T) {
 	const base = "http://127.0.0.1:8080/mcp"
 	cases := []struct {
 		name, u, base string
 		want          bool
 	}{
-		{"exact", "http://127.0.0.1:8080/mcp", base, true},
-		{"exact with legacy query", "http://127.0.0.1:8080/mcp?apikey=k", base, true},
+		// The exact address is not an alias of itself: the finders match it first.
+		{"the address itself", "http://127.0.0.1:8080/mcp", base, false},
 		{"localhost alias", "http://localhost:8080/mcp", base, true},
 		{"localhost alias with query", "http://localhost:8080/mcp?apikey=k", base, true},
 		{"localhost any case", "http://LocalHost:8080/mcp", base, true},
@@ -56,8 +48,8 @@ func TestEndpointURLMatches(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := endpointURLMatches(tc.u, tc.base); got != tc.want {
-				t.Fatalf("endpointURLMatches(%q, %q) = %v, want %v", tc.u, tc.base, got, tc.want)
+			if got := loopbackNameAlias(tc.u, tc.base); got != tc.want {
+				t.Fatalf("loopbackNameAlias(%q, %q) = %v, want %v", tc.u, tc.base, got, tc.want)
 			}
 		})
 	}
@@ -69,10 +61,18 @@ func TestBridgeDestinationAlias(t *testing.T) {
 	args := func(a ...interface{}) map[string]interface{} {
 		return map[string]interface{}{"command": "npx", "args": a}
 	}
+	with := func(command string, a ...interface{}) map[string]interface{} {
+		return map[string]interface{}{"command": command, "args": a}
+	}
 	yes := []map[string]interface{}{
 		args("-y", "mcp-remote", "http://localhost:8080/mcp"),
 		args("mcp-remote", "http://localhost:8080/mcp"),
 		args("--yes", "mcp-remote@0.1.30", "http://localhost:8080/mcp", "--header", "X-API-Key: k"),
+		args("--yes", "--package", "mcp-remote", "--", "mcp-remote", "http://localhost:8080/mcp"),
+		args("-p", "mcp-remote@latest", "mcp-remote", "http://localhost:8080/mcp"),
+		with("/opt/homebrew/bin/npx", "-y", "mcp-remote", "http://localhost:8080/mcp"),
+		with(`C:\\Program Files\\nodejs\\npx.cmd`, "-y", "mcp-remote", "http://localhost:8080/mcp"),
+		with("bunx", "mcp-remote", "http://localhost:8080/mcp"),
 	}
 	for _, e := range yes {
 		if !bridgeDestinationIsAlias(e, base) {
@@ -85,6 +85,11 @@ func TestBridgeDestinationAlias(t *testing.T) {
 		args("-y", "mcp-remote", "--debug", "http://localhost:8080/mcp"),                               // not the destination position
 		args("-y", "mcp-remote-evil", "http://localhost:8080/mcp"),
 		args("-y", "mcp-remote"),
+		with("echo", "mcp-remote", "http://localhost:8080/mcp"),      // prints its arguments, starts no bridge
+		with("", "-y", "mcp-remote", "http://localhost:8080/mcp"),    // no command
+		with("node", "mcp-remote", "http://localhost:8080/mcp"),      // runs a file named mcp-remote, not the package
+		args("--package", "mcp-remote", "http://localhost:8080/mcp"), // the URL is the executable here, not a destination
+		args("--", "cowsay", "mcp-remote", "http://localhost:8080/mcp"),
 		args("some-server", "http://localhost:8080/mcp"),
 		args("-y", "mcp-remote", "http://localhost:9090/mcp"),
 		args(),
@@ -161,6 +166,20 @@ func TestGetStatus_ExactEntryWinsOverAlias(t *testing.T) {
 func TestGetStatus_AliasBeatsNameOnly(t *testing.T) {
 	svc, homeDir := testService(t)
 	writeClientConfig(t, homeDir, "cursor", `{"mcpServers":{"mcpproxy":{"url":"http://localhost:9090/mcp"},"mine":{"url":"http://localhost:8080/mcp"}}}`)
+	st, err := svc.GetStatus("cursor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ServerName != "mine" || st.EndpointMatch != EndpointMatchThis {
+		t.Fatalf("server_name = %q, endpoint_match = %q; want mine, %q", st.ServerName, st.EndpointMatch, EndpointMatchThis)
+	}
+}
+
+// The legacy ?apikey= form of the exact address is still recognised by the
+// finder itself (asserted through production code, not a comparison in the test).
+func TestGetStatus_LegacyQueryFormIsThisInstance(t *testing.T) {
+	svc, homeDir := testService(t)
+	writeClientConfig(t, homeDir, "cursor", `{"mcpServers":{"mine":{"url":"http://127.0.0.1:8080/mcp?apikey=k"}}}`)
 	st, err := svc.GetStatus("cursor")
 	if err != nil {
 		t.Fatal(err)

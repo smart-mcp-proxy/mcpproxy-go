@@ -1926,32 +1926,75 @@ func entryPointsToBridge(entry map[string]interface{}, baseURL string) bool {
 
 // bridgeDestinationIsAlias reports whether a stdio-bridge entry runs
 // mcp-remote against this instance written with the localhost alias. Unlike
-// the exact check above it reads the argument list as npx does: the first
-// argument that is not a flag is the package, it must be mcp-remote (a version
-// pin is allowed), and the argument right after it is the destination. A
-// loopback URL anywhere else (a header value, an argument of another package)
-// does not make the entry ours.
+// the exact check above it reads the entry as the launcher does:
+//
+//   - the command is a package runner (npx, bunx, pnpx; a path or a Windows
+//     .cmd/.exe suffix is allowed). "echo mcp-remote <url>" starts no bridge;
+//   - the executable is the argument after "--" when there is one, else the
+//     first argument that is not a flag or the value of --package / -p;
+//   - it must be mcp-remote (a version pin is allowed), and the argument right
+//     after it is the destination.
+//
+// A loopback URL anywhere else (a header value, an argument of another
+// package) does not make the entry ours.
 func bridgeDestinationIsAlias(entry map[string]interface{}, baseURL string) bool {
+	command, _ := entry["command"].(string)
+	if !isPackageRunner(command) {
+		return false
+	}
 	rawArgs, ok := entry["args"].([]interface{})
 	if !ok {
 		return false
 	}
-	for i, a := range rawArgs {
+	args := make([]string, 0, len(rawArgs))
+	for _, a := range rawArgs {
 		arg, ok := a.(string)
 		if !ok {
 			return false
 		}
-		if strings.HasPrefix(arg, "-") {
-			continue // npx flags before the package (-y, --yes)
+		args = append(args, arg)
+	}
+	exec := -1
+	for i, arg := range args {
+		if arg == "--" {
+			exec = i + 1
+			break
 		}
-		if arg != "mcp-remote" && !strings.HasPrefix(arg, "mcp-remote@") {
-			return false
+	}
+	if exec < 0 {
+		for i := 0; i < len(args); i++ {
+			if args[i] == "--package" || args[i] == "-p" {
+				i++ // its value is a package to install, not the executable
+				continue
+			}
+			if strings.HasPrefix(args[i], "-") {
+				continue
+			}
+			exec = i
+			break
 		}
-		if i+1 >= len(rawArgs) {
-			return false
-		}
-		dest, ok := rawArgs[i+1].(string)
-		return ok && loopbackNameAlias(dest, baseURL)
+	}
+	if exec < 0 || exec+1 >= len(args) {
+		return false
+	}
+	if args[exec] != "mcp-remote" && !strings.HasPrefix(args[exec], "mcp-remote@") {
+		return false
+	}
+	return loopbackNameAlias(args[exec+1], baseURL)
+}
+
+// isPackageRunner reports whether command is a launcher that runs the package
+// named in its arguments.
+func isPackageRunner(command string) bool {
+	base := command
+	if k := strings.LastIndexAny(base, `/\`); k >= 0 {
+		base = base[k+1:]
+	}
+	base = strings.ToLower(base)
+	base = strings.TrimSuffix(strings.TrimSuffix(base, ".cmd"), ".exe")
+	switch base {
+	case "npx", "bunx", "pnpx":
+		return true
 	}
 	return false
 }
