@@ -1121,7 +1121,9 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	if !exists {
 		return fmt.Errorf("callback server not found for %s", c.config.Name)
 	}
-	callbackCh := callbackServer.RegisterState(state)
+	// The waiter itself is registered together with its issuer expectation,
+	// once the authorization URL exists (armIssuerCheck below): a waiter
+	// that exists unarmed could take a callback without the issuer check.
 	defer callbackServer.UnregisterState(state)
 
 	// Check if OAuth credentials are available (either from config or persisted DCR)
@@ -1258,6 +1260,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 
 	// Spec 135 FR-002: record the expected issuer as soon as the URL exists,
 	// before it reaches anyone (the stale-client probe sends it too).
+	callbackCh := callbackServer.RegisterState(state)
 	issuerCheck, err := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
 	if err != nil {
 		return err
@@ -1492,7 +1495,9 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 	if !exists {
 		return result, fmt.Errorf("callback server not found for %s", c.config.Name)
 	}
-	callbackCh := callbackServer.RegisterState(state)
+	// The waiter itself is registered together with its issuer expectation,
+	// once the authorization URL exists (armIssuerCheck below): a waiter
+	// that exists unarmed could take a callback without the issuer check.
 	defer callbackServer.UnregisterState(state)
 
 	// Check for existing credentials or attempt DCR
@@ -1580,6 +1585,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 
 	// Spec 135 FR-002: record the expected issuer as soon as the URL exists,
 	// before it reaches anyone (the stale-client probe sends it too).
+	callbackCh := callbackServer.RegisterState(state)
 	issuerCheck, err := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
 	if err != nil {
 		return result, err

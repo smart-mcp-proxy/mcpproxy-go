@@ -211,7 +211,7 @@ func TestOAuthIssuerChecks_AllExchangePaths(t *testing.T) {
 			if call, ok := n.(*ast.CallExpr); ok {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					switch sel.Sel.Name {
-					case "armIssuerCheck", "applyExtraParamsToAuthURL", "recoverStaleDCRClient", "GetAuthorizationURL":
+					case "armIssuerCheck", "applyExtraParamsToAuthURL", "recoverStaleDCRClient", "GetAuthorizationURL", "RegisterState":
 						if first[fn.Name.Name] == nil {
 							first[fn.Name.Name] = map[string]token.Pos{}
 						}
@@ -231,6 +231,10 @@ func TestOAuthIssuerChecks_AllExchangePaths(t *testing.T) {
 		arm, ok := pos["armIssuerCheck"]
 		require.True(t, ok, "%s must arm the issuer check", fn)
 		assert.Greater(t, arm, pos["GetAuthorizationURL"], "%s arms after building the URL", fn)
+		// No waiter exists unarmed: it is registered only once the URL exists.
+		if reg, ok := pos["RegisterState"]; ok {
+			assert.Greater(t, reg, pos["GetAuthorizationURL"], "%s registers its waiter only with the armed check", fn)
+		}
 		for _, use := range []string{"applyExtraParamsToAuthURL", "recoverStaleDCRClient"} {
 			if p, ok := pos[use]; ok {
 				assert.Less(t, arm, p, "%s must arm before %s", fn, use)
