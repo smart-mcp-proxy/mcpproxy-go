@@ -217,32 +217,41 @@ func DiscoverAuthServerURL(serverURL string, timeout time.Duration) string {
 }
 
 // wellKnownPRMURL is the RFC 9728 §3.1 metadata URL of a resource: the
-// well-known path goes between the host and the resource's path.
+// well-known path goes between the host and the resource's path. A trailing
+// slash is dropped, as mcp-go does when it serves and requests this URL. So are
+// the query and userinfo: a query can carry a token, and a resource with one
+// never matches the document anyway.
 func wellKnownPRMURL(resourceURL string) string {
 	u, err := url.Parse(resourceURL)
 	if err != nil || u.Host == "" {
 		return ""
 	}
-	path := u.EscapedPath()
-	if path == "/" {
-		path = ""
-	}
-	return u.Scheme + "://" + u.Host + "/.well-known/oauth-protected-resource" + path
+	return u.Scheme + "://" + u.Host + "/.well-known/oauth-protected-resource" + strings.TrimSuffix(u.EscapedPath(), "/")
 }
 
 // wellKnownPRM reads a server's Protected Resource Metadata from its RFC 9728
 // well-known URL through the discovery cache, and returns it only when it names
-// the server URL as its resource (RFC 9728 §3.3). Unlike the 401 probes it sends
-// nothing to the MCP endpoint: servers that count failed logins (Home Assistant,
-// for one) report each probe and can ban the client's IP for them. The URL is
-// not recorded as advertised: no 401 named it.
-func wellKnownPRM(env Env, serverURL string, ov discoveryOverrides, timeout time.Duration) *ProtectedResourceMetadata {
+// the server URL as its resource (RFC 9728 §3.3, ignoring one trailing slash as
+// mcp-go does). Unlike the 401 probes it sends nothing to the MCP endpoint:
+// servers that count failed logins (Home Assistant, for one) report each probe
+// and can ban the client's IP for them.
+//
+// The URL is not recorded as advertised, since no 401 named it. So when this
+// document is used, a server that moves its advertised resource_metadata URL
+// is picked up when the cached results expire (up to an hour), not on the next build.
+func wellKnownPRM(env Env, serverURL string, ov discoveryOverrides, timeout time.Duration, logger *zap.Logger) *ProtectedResourceMetadata {
 	prmURL := wellKnownPRMURL(serverURL)
-	if prmURL == "" {
+	if prmURL == "" || env.ctx().Err() != nil {
 		return nil
 	}
 	metadata, err := cachedPRM(env, serverURL, ov, prmURL, timeout)
-	if err != nil || metadata.Resource != serverURL {
+	if err != nil {
+		return nil
+	}
+	if strings.TrimSuffix(metadata.Resource, "/") != strings.TrimSuffix(serverURL, "/") {
+		logger.Debug("Well-known Protected Resource Metadata names another resource, not using it (RFC 9728 §3.3)",
+			zap.String("server_url", logSafeURL(serverURL)),
+			zap.String("resource", logSafeURL(metadata.Resource)))
 		return nil
 	}
 	return metadata
@@ -664,7 +673,8 @@ func ValidateOAuthMetadataWithEnv(env Env, serverURL, serverName string, timeout
 	// Step 1: The well-known metadata first: the preflight POST below is a
 	// failed login to servers that count them, even when the user is signing in.
 	var metadataURL string
-	if wellKnownPRM(env, serverURL, discoveryOverrides{}, timeout) != nil {
+	protectedMetadata := wellKnownPRM(env, serverURL, discoveryOverrides{}, timeout, logger)
+	if protectedMetadata != nil {
 		metadataURL = wellKnownPRMURL(serverURL)
 	} else {
 		// Otherwise, make preflight request to get WWW-Authenticate header
@@ -721,18 +731,20 @@ func ValidateOAuthMetadataWithEnv(env Env, serverURL, serverName string, timeout
 
 	result.ProtectedResourceMetadataURL = metadataURL
 
-	// Step 3: Fetch protected resource metadata
-	protectedMetadata, err := discoverProtectedResourceMetadata(env, metadataURL, timeout)
-	if err != nil {
-		result.ProtectedResourceError = err
-		logger.Debug("Failed to fetch protected resource metadata",
-			zap.String("server", serverName),
-			zap.String("metadata_url", logSafeURL(metadataURL)),
-			logSafeErrorField(err))
-		// Don't return error yet - try to get auth server metadata for better error info
-	} else {
-		result.ProtectedResourceMetadata = protectedMetadata
+	// Step 3: Fetch protected resource metadata, unless step 1 already has it
+	if protectedMetadata == nil {
+		var err error
+		protectedMetadata, err = discoverProtectedResourceMetadata(env, metadataURL, timeout)
+		if err != nil {
+			result.ProtectedResourceError = err
+			logger.Debug("Failed to fetch protected resource metadata",
+				zap.String("server", serverName),
+				zap.String("metadata_url", logSafeURL(metadataURL)),
+				logSafeErrorField(err))
+			// Don't return error yet - try to get auth server metadata for better error info
+		}
 	}
+	result.ProtectedResourceMetadata = protectedMetadata
 
 	// Step 4: Extract authorization server URL and fetch its metadata
 	var authServerBaseURL string

@@ -715,7 +715,7 @@ func CreateOAuthConfigWithEnv(env Env, serverConfig *config.ServerConfig, storag
 	if _, hasResource := extraParams["resource"]; !hasResource {
 		// The well-known metadata first: autoDetectResource sends an
 		// unauthenticated POST, which some servers count as a failed login.
-		if metadata := wellKnownPRM(env, serverConfig.URL, overridesFromConfig(serverConfig), resourceDetectRequestTimeout); metadata != nil {
+		if metadata := wellKnownPRM(env, serverConfig.URL, overridesFromConfig(serverConfig), resourceDetectRequestTimeout, logger); metadata != nil {
 			extraParams["resource"] = metadata.Resource
 			logger.Info("Auto-detected resource parameter from well-known Protected Resource Metadata (RFC 9728)",
 				zap.String("server", serverConfig.Name),
@@ -2385,8 +2385,10 @@ func preflightMetadataURL(env Env, serverConfig *config.ServerConfig, ov discove
 		// The well-known metadata first: discoverAuthServerURL sends an
 		// unauthenticated POST, which some servers count as a failed login.
 		var authServerURL string
-		if prm := wellKnownPRM(env, serverConfig.URL, ov, 5*time.Second); prm != nil && len(prm.AuthorizationServers) > 0 {
-			authServerURL = prm.AuthorizationServers[0]
+		if prm := wellKnownPRM(env, serverConfig.URL, ov, 5*time.Second, logger); prm != nil {
+			if len(prm.AuthorizationServers) > 0 {
+				authServerURL = prm.AuthorizationServers[0]
+			}
 		} else {
 			authServerURL = discoverAuthServerURL(env, serverConfig.URL, 5*time.Second, func(prmURL string) (*ProtectedResourceMetadata, error) {
 				// Record the advertised PRM URL so a later 401 that advertises a

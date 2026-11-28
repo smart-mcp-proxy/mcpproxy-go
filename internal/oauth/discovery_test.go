@@ -1,10 +1,15 @@
 package oauth
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 func TestExtractResourceMetadataURL(t *testing.T) {
@@ -748,14 +753,43 @@ func containsSubstringHelper(s, substr string) bool {
 
 func TestWellKnownPRMURL(t *testing.T) {
 	for in, want := range map[string]string{
-		"https://h.example/api/mcp": "https://h.example/.well-known/oauth-protected-resource/api/mcp",
-		"https://h.example/mcp/":    "https://h.example/.well-known/oauth-protected-resource/mcp/",
-		"https://h.example/":        "https://h.example/.well-known/oauth-protected-resource",
-		"https://h.example":         "https://h.example/.well-known/oauth-protected-resource",
-		"not a url":                 "",
+		"https://h.example/api/mcp":          "https://h.example/.well-known/oauth-protected-resource/api/mcp",
+		"https://h.example/mcp/":             "https://h.example/.well-known/oauth-protected-resource/mcp",
+		"https://h.example/mcp?token=s3cr3t": "https://h.example/.well-known/oauth-protected-resource/mcp",
+		"https://h.example/":                 "https://h.example/.well-known/oauth-protected-resource",
+		"https://h.example":                  "https://h.example/.well-known/oauth-protected-resource",
+		"not a url":                          "",
 	} {
 		if got := wellKnownPRMURL(in); got != want {
 			t.Errorf("wellKnownPRMURL(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestWellKnownPRM(t *testing.T) {
+	var base string
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.URL.Path != "/.well-known/oauth-protected-resource/api/mcp" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		fmt.Fprintf(w, `{"resource": %q}`, base+"/api/mcp")
+	}))
+	defer srv.Close()
+	base = srv.URL
+
+	// mcp-go's §3.3 check ignores one trailing slash too.
+	if wellKnownPRM(Env{}, base+"/api/mcp/", discoveryOverrides{}, time.Second, zap.NewNop()) == nil {
+		t.Error("a server URL with a trailing slash must accept the document for the same resource")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	hits.Store(0)
+	InvalidateDiscovery(base + "/api/mcp")
+	if wellKnownPRM(Env{Ctx: ctx}, base+"/api/mcp", discoveryOverrides{}, time.Second, zap.NewNop()) != nil || hits.Load() != 0 {
+		t.Errorf("a cancelled context must send nothing, got %d requests", hits.Load())
 	}
 }
