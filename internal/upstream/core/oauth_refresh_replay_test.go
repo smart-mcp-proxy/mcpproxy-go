@@ -296,7 +296,7 @@ func TestRefreshReplay_LogsContainOnlyClosedFields(t *testing.T) {
 		require.NoError(t, err)
 		require.NotContains(t, string(raw), sentinel)
 		for key := range entry.ContextMap() {
-			require.Contains(t, []string{"attempt", "outcome", "transport_failure", "http_status", "duration"}, key)
+			require.Contains(t, []string{"flight", "trigger", "attempt", "outcome", "transport_failure", "http_status", "duration"}, key)
 		}
 	}
 }

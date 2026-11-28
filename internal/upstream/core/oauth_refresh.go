@@ -158,6 +158,7 @@ func (c *Client) refreshWithStoredCredentials(ctx context.Context, handler *tran
 		qahooks.ParkOAuthPersist(c.config.Name)
 	}
 	var savedRec *storage.OAuthTokenRecord
+	rtChanged := false
 	written, err := c.storage.UpdateOAuthTokenIfBound(serverKey, c.config.Name, binding, func(cur *storage.OAuthTokenRecord) error {
 		savedRec = cur
 		if inFlight && !oauth.GenerationMatches(cur, gen) {
@@ -165,6 +166,7 @@ func (c *Client) refreshWithStoredCredentials(ctx context.Context, handler *tran
 			return storage.ErrSkipOAuthTokenUpdate
 		}
 		cur.AccessToken = newToken.AccessToken
+		rtChanged = newToken.RefreshToken != "" && newToken.RefreshToken != cur.RefreshToken
 		if newToken.RefreshToken != "" {
 			cur.RefreshToken = newToken.RefreshToken
 		}
@@ -180,6 +182,7 @@ func (c *Client) refreshWithStoredCredentials(ctx context.Context, handler *tran
 		return nil
 	})
 	if err != nil {
+		oauth.LogTokenSave(ctx, c.oauthLogger(), c.config.Name, oauth.TokenSaveFailed, false)
 		return nil, fmt.Errorf("failed to save refreshed token for %s: %w", c.config.Name, err)
 	}
 
@@ -194,11 +197,13 @@ func (c *Client) refreshWithStoredCredentials(ctx context.Context, handler *tran
 		ExpiresAt:    newToken.ExpiresAt,
 	}
 	if discarded {
+		oauth.LogTokenSave(ctx, c.oauthLogger(), c.config.Name, oauth.TokenSaveSuperseded, false)
 		c.logger.Info("Discarded a refresh result superseded by a newer grant",
 			zap.String("server", c.config.Name))
 		return tok, nil
 	}
 	if !written {
+		oauth.LogTokenSave(ctx, c.oauthLogger(), c.config.Name, oauth.TokenSaveInstanceReplaced, false)
 		c.logger.Info("Discarded a refreshed OAuth token for a server instance that was removed, replaced or reconfigured",
 			zap.String("server", c.config.Name),
 			zap.String("binding", binding.String()))
@@ -212,6 +217,7 @@ func (c *Client) refreshWithStoredCredentials(ctx context.Context, handler *tran
 		oauth.NoteFlightSavedRevision(ctx, savedRec.Revision)
 	}
 	oauth.DefaultRefreshCoordinator().NoteTokenSavedFor(serverKey, binding)
+	oauth.LogTokenSave(ctx, c.oauthLogger(), c.config.Name, oauth.TokenSaveSaved, rtChanged)
 	oauth.GetTokenStoreManager().NotifyTokenSavedFor(c.config.Name, newToken.ExpiresAt, binding)
 	if hook := afterStoredDCRPersistHook; hook != nil {
 		hook(c.config.Name)

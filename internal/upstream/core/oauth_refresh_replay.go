@@ -41,7 +41,7 @@ func (c *Client) withRefreshReplay(refresh oauth.RefreshFunc, endpoint func(cont
 		if lookupErr != nil || target != tokenEndpoint {
 			// An unverified AS retains the original deadline and one-shot
 			// behavior, including the original metadata/error scrubbing path.
-			c.logRefreshReplaySkipped("token_endpoint_unverified")
+			c.logRefreshReplaySkipped(ctx, "token_endpoint_unverified")
 			return refresh(ctx, rec)
 		}
 		first, cancelFirst := context.WithTimeout(budget, refreshReplayFirstAttemptTimeout)
@@ -49,12 +49,12 @@ func (c *Client) withRefreshReplay(refresh oauth.RefreshFunc, endpoint func(cont
 		tok, err := refresh(first, rec)
 		cancelFirst()
 		firstFailedAt := time.Now()
-		c.logRefreshReplayAttempt(1, start, err)
+		c.logRefreshReplayAttempt(ctx, 1, start, err)
 		if err == nil {
 			return tok, nil
 		}
 		if !retryableRefreshReplayError(err) || budget.Err() != nil || c.Gate().Retired() {
-			c.logRefreshReplaySkipped("failure_not_retryable_or_deadline")
+			c.logRefreshReplaySkipped(ctx, "failure_not_retryable_or_deadline")
 			return nil, err
 		}
 
@@ -62,7 +62,7 @@ func (c *Client) withRefreshReplay(refresh oauth.RefreshFunc, endpoint func(cont
 		// Overrides/redirected discovery never opt another AS into replay.
 		target, lookupErr = endpoint(budget)
 		if lookupErr != nil || target != tokenEndpoint {
-			c.logRefreshReplaySkipped("token_endpoint_unverified")
+			c.logRefreshReplaySkipped(ctx, "token_endpoint_unverified")
 			return nil, err
 		}
 		current, loadErr := c.storage.GetOAuthTokenBound(
@@ -72,11 +72,11 @@ func (c *Client) withRefreshReplay(refresh oauth.RefreshFunc, endpoint func(cont
 			current.Revision != rec.Revision {
 			// A login, logout, same-binding write or retirement superseded the
 			// attempt. Let the existing coordinator reconcile it, never resend.
-			c.logRefreshReplaySkipped("stored_record_changed_or_unavailable")
+			c.logRefreshReplaySkipped(ctx, "stored_record_changed_or_unavailable")
 			return nil, err
 		}
 		if budget.Err() != nil || c.Gate().Retired() {
-			c.logRefreshReplaySkipped("deadline_or_retired")
+			c.logRefreshReplaySkipped(ctx, "deadline_or_retired")
 			return nil, err
 		}
 		// The record check above is a snapshot. A login that lands after it
@@ -89,7 +89,7 @@ func (c *Client) withRefreshReplay(refresh oauth.RefreshFunc, endpoint func(cont
 		oauth.ReportRefreshAttemptFailure(ctx, err, firstFailedAt)
 		start = time.Now()
 		tok, err = refresh(budget, current)
-		c.logRefreshReplayAttempt(2, start, err)
+		c.logRefreshReplayAttempt(ctx, 2, start, err)
 		return tok, err
 	}
 }
@@ -118,15 +118,20 @@ func retryableRefreshReplayError(err error) bool {
 	return errors.As(err, &opError)
 }
 
-func (c *Client) logRefreshReplayAttempt(attempt int, start time.Time, err error) {
-	if c.logger == nil {
+// logRefreshReplayAttempt writes to the server's OAuth logger (main log and
+// the server's own log) and names the flight (GH #1827), so the two requests
+// of one flight can be told from two flights.
+func (c *Client) logRefreshReplayAttempt(ctx context.Context, attempt int, start time.Time, err error) {
+	logger := c.oauthLogger()
+	if logger == nil {
 		return
 	}
 	class, status := oauth.ClassifyRefreshError(err)
-	c.logger.Info("OAuth refresh attempt finished",
+	fields := append(oauth.RefreshFlightLogFields(ctx),
 		zap.Int("attempt", attempt), zap.String("outcome", string(class)),
 		zap.String("transport_failure", refreshReplayTransportFailureKind(err)),
 		zap.Int("http_status", status), zap.Duration("duration", time.Since(start)))
+	logger.Info("OAuth refresh attempt finished", fields...)
 }
 
 func refreshReplayTransportFailureKind(err error) string {
@@ -150,8 +155,8 @@ func refreshReplayTransportFailureKind(err error) string {
 	return "none"
 }
 
-func (c *Client) logRefreshReplaySkipped(reason string) {
-	if c.logger != nil {
-		c.logger.Info("OAuth quick retry skipped", zap.String("reason", reason))
+func (c *Client) logRefreshReplaySkipped(ctx context.Context, reason string) {
+	if logger := c.oauthLogger(); logger != nil {
+		logger.Info("OAuth quick retry skipped", append(oauth.RefreshFlightLogFields(ctx), zap.String("reason", reason))...)
 	}
 }
