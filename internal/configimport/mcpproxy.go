@@ -119,7 +119,7 @@ func ParseNativeServer(raw []byte, checkTrustMode func(string) error) (*NativeSe
 var nativeOAuthKeys = []string{
 	"client_id", "client_secret", "redirect_uri", "callback_base_url", "pkce_enabled",
 	"refresh_replay_enabled", "extra_params", "authorization_endpoint", "token_endpoint",
-	"registration_endpoint", "auth_server_metadata_url",
+	"registration_endpoint", "auth_server_metadata_url", "skip_issuer_validation",
 }
 
 // nativeServerIndicator returns the key that marks server as mcpproxy's own
