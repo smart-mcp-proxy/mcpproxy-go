@@ -8,12 +8,26 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// acquireSingleInstance claims the named mutex Local\<id> for this logon
-// session and reports whether this process is the only one holding it. The
-// handle is never closed: Windows releases it when the process exits, however
-// it exits.
+// singleInstanceMutexName is Local\<id>-<user SID>: per logon session, and
+// per user within it, so a tray started with "Run as different user" in the
+// same session is not turned away by this user's tray.
+func singleInstanceMutexName(id string) (string, error) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return "", err
+	}
+	return `Local\` + id + "-" + user.User.Sid.String(), nil
+}
+
+// acquireSingleInstance claims the named mutex singleInstanceMutexName(id)
+// and reports whether this process is the only one holding it. The handle is
+// never closed: Windows releases it when the process exits, however it exits.
 func acquireSingleInstance(id string) (bool, error) {
-	name, err := windows.UTF16PtrFromString(`Local\` + id)
+	mutexName, err := singleInstanceMutexName(id)
+	if err != nil {
+		return false, err
+	}
+	name, err := windows.UTF16PtrFromString(mutexName)
 	if err != nil {
 		return false, err
 	}
