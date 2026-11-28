@@ -9,7 +9,7 @@
     <template v-else-if="!bindable">
       <button
         type="button"
-        class="btn btn-xs btn-outline"
+        class="btn btn-xs btn-outline max-sm:min-h-11"
         disabled
         :data-test="`client-profile-chip-${client.id}`"
         aria-haspopup="menu"
@@ -29,7 +29,7 @@
       <button
         v-if="showCredentialCta"
         type="button"
-        class="btn btn-xs btn-primary h-auto min-h-6 py-1 whitespace-normal"
+        class="btn btn-xs btn-primary h-auto min-h-6 max-sm:min-h-11 py-1 whitespace-normal"
         :data-test="`client-credential-cta-${client.id}`"
         @click="openConnect"
       >{{ credentialCta(client.credential_state) }}</button>
@@ -39,7 +39,7 @@
         <button
           ref="chipEl"
           type="button"
-          class="btn btn-xs btn-outline max-w-full min-w-0 h-auto min-h-6 py-1 text-left normal-case"
+          class="btn btn-xs btn-outline max-w-full min-w-0 h-auto min-h-6 max-sm:min-h-11 py-1 text-left normal-case"
           :class="missing && 'btn-error'"
           aria-haspopup="menu"
           :aria-expanded="open ? 'true' : 'false'"
@@ -48,14 +48,14 @@
           @click="toggleMenu"
           @keydown="onChipKeydown"
         >
-          <span v-if="locked" aria-hidden="true">&#128274;</span>
+          <UiIcon v-if="locked" name="lock" class="h-3.5 w-3.5 shrink-0" />
           <span v-if="locked" class="sr-only">Locked</span>
           <span class="whitespace-normal break-words">{{ label }}</span>
         </button>
         <button
           v-if="missing"
           type="button"
-          class="btn btn-xs btn-ghost text-error"
+          class="btn btn-xs btn-ghost text-error max-sm:min-h-11"
           :data-test="`client-profile-move-${client.id}`"
           @click="openMenu(true)"
         >Move&hellip;</button>
@@ -103,7 +103,7 @@
     </template>
 
     <div v-if="!noRecord" class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
-      <span class="badge badge-xs badge-outline h-auto min-h-4" :data-test="`client-credential-badge-${client.id}`">{{ credentialLabel(client.credential_state) }}</span>
+      <span class="badge badge-sm badge-outline h-auto min-h-4" :data-test="`client-credential-badge-${client.id}`">{{ credentialLabel(client.credential_state) }}</span>
       <router-link
         v-if="(client.blocked_24h ?? 0) > 0 && clientScopeAvailable"
         class="link"
@@ -111,13 +111,14 @@
         :to="scope.linkTo('activity', { client: client.id, status: 'blocked' })"
       >{{ client.blocked_24h }} blocked (24h)</router-link>
       <span v-else-if="(client.blocked_24h ?? 0) > 0">{{ client.blocked_24h }} blocked (24h)</span>
-      <span v-if="client.rotation_pending" class="badge badge-xs badge-info h-auto min-h-4" :data-test="`client-rotation-badge-${client.id}`">Rotation pending</span>
+      <span v-if="client.rotation_pending" class="badge badge-sm badge-info h-auto min-h-4" :data-test="`client-rotation-badge-${client.id}`">Rotation pending</span>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
+import UiIcon from '@/components/UiIcon.vue'
 import { useProfilesStore } from '@/stores/profiles'
 import { useClientBindingsStore } from '@/stores/clientBindings'
 import { CONNECT_CLIENT_EVENT } from '@/navigation/navModel'

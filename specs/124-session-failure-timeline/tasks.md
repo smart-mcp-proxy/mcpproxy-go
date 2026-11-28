@@ -136,14 +136,14 @@
 
 ### Tests first
 
-- [ ] T100 [P] [US4] `cmd/mcpproxy/activity_sessions_cmd_test.go`: flags `--failed`, `--no-blocked`, `--token`, `--client`, `--profile`, `--run`, `--error-class`, `--since`, `--until`, `--sort`, `--limit` map to the list door; table columns of User Story 4; `-o json|yaml` carries the REST fields; `--help-json`
-- [ ] T101 [P] [US4] `cmd/mcpproxy/activity_session_cmd_test.go`: `session <id>` with `--at`, `--before`, `--after`, `--include-bodies`; `--failures` walks every stored failure and prints overlapping context once; the truncated-start note and the lifetime failure count when earlier failures are gone
+- [x] T100 [P] [US4] `cmd/mcpproxy/activity_sessions_cmd_test.go`: flags `--failed`, `--no-blocked`, `--token`, `--client`, `--profile`, `--run`, `--error-class`, `--since`, `--until`, `--sort`, `--limit` map to the list door; table columns of User Story 4; `-o json|yaml` carries the REST fields; `--help-json`
+- [x] T101 [P] [US4] `cmd/mcpproxy/activity_session_cmd_test.go`: `session <id>` with `--at`, `--before`, `--after`, `--include-bodies`; `--failures` walks every stored failure and prints overlapping context once; the truncated-start note and the lifetime failure count when earlier failures are gone
 
 ### Implementation
 
-- [ ] T102 [US4] `internal/cliclient`: methods for the three doors
-- [ ] T103 [US4] `cmd/mcpproxy/activity_cmd.go`: both commands registered in `init()`, shared formatter, `argsOrHelpJSON` (makes T100, T101 pass)
-- [ ] T104 [P] [US4] `docs/cli/activity-commands.md` with the morning-after example; `scripts/test-api-e2e.sh` gains the same scenario through the CLI
+- [x] T102 [US4] `internal/cliclient`: methods for the three doors
+- [x] T103 [US4] `cmd/mcpproxy/activity_cmd.go`: both commands registered in `init()`, shared formatter, `argsOrHelpJSON` (makes T100, T101 pass)
+- [x] T104 [P] [US4] `docs/cli/activity-commands.md` with the morning-after example; `scripts/test-api-e2e.sh` gains the same scenario through the CLI
 
 ---
 

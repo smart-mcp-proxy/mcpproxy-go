@@ -126,6 +126,10 @@ page disagree):
 - `shell-pr1.spec.ts`: Spec 134 PR 1 shell: skip link, command palette keys,
   phone menu overlay and focus, footer disclosure, theme menu by keyboard, View as
   placement, carried scope chips, the 390 px header and no dead shell links.
+- `settings-pr8.spec.ts`: Spec 134 PR 8: Settings opens on General, sections as a
+  side list (a select at 390 px), full field help one activation away, Save and
+  Discard in flow under the last field, `?tab=` and `?focus=` links, and the
+  profile editor's action row after the tool rules.
 - `profiles-clients.spec.ts`: Spec 108 Profiles and Clients screens, the goal
   flow, the binding-guard refusal, the Viewing chip, dialogs and layout.
 - `profiles-scope.spec.ts`: Spec 108 profile scope on Tools, Activity, Sessions
@@ -139,6 +143,10 @@ page disagree):
   sidebar and `+ Add`, the Viewing chip across pages, Clients-row and
   agent-token-row links, `/servers?profile=`, a Spec 108 warning surfacing as a
   needs-attention item, layout and keyboard order).
+- `clients-tokens-usage-pr7.spec.ts`: Spec 134 PR 7: the Clients table (one row and
+  one button per client), the Manage side panel opened by keyboard with its four
+  groups, `?focus=` opening it, the agent-tokens table at 1280 px (no horizontal
+  scroll, no clipped cell) and 390 px, and the four Usage charts with data.
 - `shell-pr1.spec.ts`: the Spec 134 shell (skip link, palette never opens on Tab, phone menu, footer disclosure, header Add server, theme menu by keyboard, no sideways scroll at 390 px).
 - `home-pr4.spec.ts`: Spec 134 Home (section order, attention list visible without scrolling at 1440 and 390, See all, shortcuts and the collapsed topology by keyboard, 44 px buttons at 390).
 - `activity-pr5.spec.ts`: the Activity calls view (Spec 134 PR 5): five data columns, row detail, Sort control, filter popover over the results, chip overflow at 390 px, Group repeats default.
