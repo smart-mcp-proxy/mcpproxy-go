@@ -437,8 +437,12 @@ func discoverProtectedResourceMetadata(env Env, metadataURL string, timeout time
 		return nil, fmt.Errorf("metadata endpoint returned %d", resp.StatusCode)
 	}
 
+	raw, err := readBoundedDoc(resp.Body)
+	if err != nil {
+		return nil, err
+	}
 	var metadata ProtectedResourceMetadata
-	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+	if err := json.Unmarshal(raw, &metadata); err != nil {
 		logger.Debug("❌ Failed to parse JSON response",
 			zap.String("url", logSafeURL(metadataURL)),
 			logSafeErrorField(err))
@@ -664,11 +668,13 @@ func ValidateOAuthMetadata(serverURL, serverName string, timeout time.Duration) 
 
 // ValidateOAuthMetadataForServer is ValidateOAuthMetadataWithEnv for a
 // configured upstream, the pre-flight check a sign-in runs. It skips the check
-// (nil, nil) when the server's oauth block sets auth_server_metadata_url: the
-// sign-in reads that document instead of discovering one, so the discovery this
-// check performs says nothing about whether the sign-in can work.
+// (nil, nil) when the server's oauth block sets auth_server_metadata_url, or
+// both authorization_endpoint and token_endpoint: the sign-in then reads that
+// document, or serves one built from the endpoints, instead of relying on
+// discovery, so the discovery this check performs says nothing about whether
+// the sign-in can work.
 func ValidateOAuthMetadataForServer(env Env, serverConfig *config.ServerConfig, timeout time.Duration) (*OAuthMetadataValidationResult, error) {
-	if serverConfig.OAuth != nil && serverConfig.OAuth.AuthServerMetadataURL != "" {
+	if o := serverConfig.OAuth; o != nil && (o.AuthServerMetadataURL != "" || (o.AuthorizationEndpoint != "" && o.TokenEndpoint != "")) {
 		return nil, nil
 	}
 	return ValidateOAuthMetadataWithEnv(env, serverConfig.URL, serverConfig.Name, timeout)
@@ -688,7 +694,8 @@ func ValidateOAuthMetadataWithEnv(env Env, serverURL, serverName string, timeout
 	// failed login to servers that count them, even when the user is signing in.
 	var metadataURL string
 	protectedMetadata := wellKnownPRM(env, serverURL, discoveryOverrides{}, timeout, logger)
-	if protectedMetadata != nil {
+	fromWellKnown := protectedMetadata != nil
+	if fromWellKnown {
 		metadataURL = wellKnownPRMURL(serverURL)
 	} else {
 		// Otherwise, make preflight request to get WWW-Authenticate header
@@ -764,6 +771,11 @@ func ValidateOAuthMetadataWithEnv(env Env, serverURL, serverName string, timeout
 	var authServerBaseURL string
 	if protectedMetadata != nil && len(protectedMetadata.AuthorizationServers) > 0 {
 		authServerBaseURL = protectedMetadata.AuthorizationServers[0]
+	} else if fromWellKnown {
+		// The matching well-known document names no authorization server, so
+		// the MCP URL is one: try its RFC 8414 path-inserted URL as well as the
+		// origin, as the config build does.
+		authServerBaseURL = serverURL
 	} else {
 		// Fallback to base URL of server
 		baseURL, err := parseBaseURL(serverURL)
