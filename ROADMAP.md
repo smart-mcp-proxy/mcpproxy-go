@@ -1440,6 +1440,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [123-oauth-token-encryption](./specs/123-oauth-token-encryption/) | `drafted` | 0/56 (0%) |
 | [124-session-failure-timeline](./specs/124-session-failure-timeline/) | `in-flight` | 45/74 (61%) |
 | [125-skills-over-mcp](./specs/125-skills-over-mcp/) | `shipped` | 51/51 (100%) |
+| [126-day-two-activation](./specs/126-day-two-activation/) | `drafted` | 0/85 (0%) |
 | [127-profile-argument-rules](./specs/127-profile-argument-rules/) | — | — |
 | [128-server-list-outcomes](./specs/128-server-list-outcomes/) | — | — |
 | [129-per-user-upstream-credentials](./specs/129-per-user-upstream-credentials/) | — | — |
