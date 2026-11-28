@@ -47,13 +47,13 @@
 
 ## Phase 6: User Story 4 — Non-regression (P3)
 
-- [ ] T024 [US4] Golden snapshot test from T002 green on the finished branch (byte-identical tools/list across all three modes) (FR-015)
+- [x] T024 [US4] Golden snapshot test from T002 green on the finished branch (byte-identical tools/list across all three modes) (FR-015)
 - [ ] T025 [US4] E2E: run a `code_execution` script and a stored script (spec 097) against the isolated instance; assert unchanged behavior and that dispatch decisions for sabotaged tools agree with preflight verdicts on all four dispatch paths (no-skew live check)
 
 ## Phase 7: Sabotage E2E matrix (acceptance gate)
 
 - [x] T026 Committed scenario-keyed matrix (`internal/server/testdata/preflight_sabotage_matrix.json`: scenario → expected {reason, retryable, action}) + E2E `internal/server/preflight_e2e_test.go` driving ctl-server fixtures (DESC_FILE rug-pull): quarantine flip, tool-definition drift, tool block, config denial, server disable, SIGSTOP/kill, mid-indexing, missing/explicit annotation per each of the three filters, unknown ID, unknown server, hash mismatch + schema-version-bump variant, PendingAuth, profile out-of-scope at both tiers; independent assertions per row PLUS reflection check that every enum code appears in ≥1 row; after each cell, `activity list --request-id` lookup asserts the preflight record (FR-016, SC-005; review findings 23/22-activity)
-- [ ] T027 Scripted incident-diagnosis scenario (SC-006): tool quarantined between runs → preflight names `tool_changed`/`server_quarantined` in ≤1 step; committed as an E2E assertion
+- [x] T027 Scripted incident-diagnosis scenario (SC-006): tool quarantined between runs → preflight names `tool_changed`/`server_quarantined` in ≤1 step; committed as an E2E assertion
 
 ## Phase 8: Docs & Polish
 

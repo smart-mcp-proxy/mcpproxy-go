@@ -2,7 +2,7 @@
 
 **Feature Branch**: `116-config-commit-consistency`
 **Created**: 2026-10-11
-**Status**: Design (draft). Implementation is split into four PRs (see [plan.md](plan.md) §PR split)
+**Status**: Implemented in four PRs (PR1 #1558/#1560, PR2 #1559/#1562, PR2b #1607, PR3 #1563, PR4 #1564)
 **Input**: GitHub issues [#1558](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1558), [#1559](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1559), [#1560](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1560), [#1562](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1562), [#1563](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1563), [#1564](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1564). OpenCode Sol 6.1 found all six while cross-reviewing the oversized UX-01/UX-02 PRs (#1553, #1555). They were verified on `origin/main` and kept out of the minimal core PRs that landed as #1570 (create-only add) and #1571 (per-server tool-approval lock).
 
 **Related**: Spec 032 (tool-level quarantine), Spec 100 (prompt approvals), Spec 093 (per-server limits), Spec 113 (upstream resilience), Spec 115 (credentials service, for the facade pattern), issue #937 (admission gate), #1061 (quarantine index purge), #1176 (call-history GC). Issue #1569 (tray) is handled separately in #1572. This spec does not touch `native/`. **Spec 117** (#1565-#1567, review-bound approvals) is designed in parallel. [research.md](research.md) §6 fixes the integration points: server approval as `Commit` + `UnderApprovalLock`, the baseline marker in the purge set, one `Retire()`, and an acyclic lock-order union.

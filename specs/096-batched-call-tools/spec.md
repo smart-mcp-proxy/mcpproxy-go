@@ -2,7 +2,7 @@
 
 **Feature Branch**: `096-batched-call-tools`
 **Created**: 2026-08-14
-**Status**: Draft
+**Status**: Implemented in one PR (#989)
 **Input**: User description: "Batched call_tools() host primitive so independent upstream calls run in parallel inside the code-execution JS sandbox (GitHub issue #987)"
 
 ## User Scenarios & Testing *(mandatory)*

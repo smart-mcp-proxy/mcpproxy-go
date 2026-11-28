@@ -1413,7 +1413,7 @@ Spec: [130-skills-review-ux](./specs/130-skills-review-ux/) · PR: #1987 #1988
 | Token-efficiency benchmark: measured savings, published results | In progress | P1 | 62/64 (97%) | [103-token-bench](./specs/103-token-bench/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
-| MCP protocol upgrade to 2026-07-28 revision | In progress | P1 | 40/81 (49%) | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
+| MCP protocol upgrade to 2026-07-28 revision | In progress | P1 | 41/81 (51%) | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Spec 108 profiles v3: scoped profiles, client binding, scope-aware observability | In progress | P1 | 194/195 (99%) | [108-profiles-v3](./specs/108-profiles-v3/) |  |
 | Spec 109 navigation, scope filters and cross-surface UX consistency | In progress | P1 | 257/258 (100%) | [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/) |  |
 | Spec 124 work sessions and the failure timeline | In progress | P1 | 57/74 (77%) | [124-session-failure-timeline](./specs/124-session-failure-timeline/) |  |
@@ -1440,7 +1440,7 @@ Spec: [130-skills-review-ux](./specs/130-skills-review-ux/) · PR: #1987 #1988
 | SDK v1 migration | Todo (parked) | P3 | — |  |  |
 | Upgrade awareness & guided update | Done | P0 | — | [079-upgrade-nudge](./specs/079-upgrade-nudge/) |  |
 | Connect step trust: preview, visible backup, one-click undo | Done | P0 | — | [078-connect-trust-preview](./specs/078-connect-trust-preview/) |  |
-| Spec 116 config commit consistency: one commit section, atomic removal, upstream retirement | Done | P0 | 81/124 (65%) | [116-config-commit-consistency](./specs/116-config-commit-consistency/) | #1590 #1600 #1608 #1612 #1621 |
+| Spec 116 config commit consistency: one commit section, atomic removal, upstream retirement | Done | P0 | 119/124 (96%) | [116-config-commit-consistency](./specs/116-config-commit-consistency/) | #1590 #1600 #1608 #1612 #1621 |
 | Spec 117 review-bound approvals: durable baselines, hash-bound approvals, ordered tool inventories | Done | P0 | 46/50 (92%) | [117-review-bound-approvals](./specs/117-review-bound-approvals/) | #1604 #1605 #1609 |
 | Spec 118 profile pin as the visibility boundary for agent tokens on every REST/SSE read door | Done | P0 | — | [118-pin-visibility-boundary](./specs/118-pin-visibility-boundary/) | #1684 #1688 #1821 |
 | Spec 119 scan is the default trust mode; a clean-scanned contract change auto-approves | Done | P0 | — | [119-scan-default-trust](./specs/119-scan-default-trust/) | #1740 |
@@ -1452,7 +1452,7 @@ Spec: [130-skills-review-ux](./specs/130-skills-review-ux/) · PR: #1987 #1988
 | Scanner simplification (deterministic default, opt-in deep scan) | Done | P1 | 38/42 (90%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
 | Deferred-schema serialization for the direct tools/list surface (spec 102) | Done | P1 | 89/89 (100%) | [102-schema-deferred](./specs/102-schema-deferred/) | #1063 |
 | Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) | Done | P1 | 111/113 (98%) | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) |  |
-| Spec 113 upstream resilience: OAuth refresh, discovery, call-error taxonomy, session re-init | Done | P1 | 0/100 (0%) | [113-upstream-resilience](./specs/113-upstream-resilience/) | #1495 #1498 #1499 #1501 #1502 #1504 #1510 #1650 |
+| Spec 113 upstream resilience: OAuth refresh, discovery, call-error taxonomy, session re-init | Done | P1 | 78/100 (78%) | [113-upstream-resilience](./specs/113-upstream-resilience/) | #1495 #1498 #1499 #1501 #1502 #1504 #1510 #1650 |
 | Spec 115 admin MCP credentials tool: client credentials + agent token lifecycle | Done | P1 | 86/87 (99%) | [115-mcp-credential-lifecycle](./specs/115-mcp-credential-lifecycle/) | #1557 |
 | Quarantine/approval testing pilot: independent policy model, scenario inventory, mutation gate | Done | P1 | — |  | #1619 #1631 #1634 |
 | Spec 118 automatic rescan after a tool-definition change (clean verdict recorded as hold evidence) | Done | P1 | — | [118-auto-rescan-on-change](./specs/118-auto-rescan-on-change/) | #1689 |
@@ -1541,7 +1541,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [055-frontend-major-upgrades](./specs/055-frontend-major-upgrades/) | `shipped` | 23/24 (96%) |
 | [056-output-schema-validation](./specs/056-output-schema-validation/) | `in-flight` | 22/24 (92%) |
 | [057-in-proxy-profiles](./specs/057-in-proxy-profiles/) | `in-flight` | 20/25 (80%) |
-| [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) | `in-flight` | 40/81 (49%) |
+| [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) | `in-flight` | 41/81 (51%) |
 | [059-output-sanitisation](./specs/059-output-sanitisation/) | `shipped` | 24/25 (96%) |
 | [060-settings-page](./specs/060-settings-page/) | `shipped` | 16/16 (100%) |
 | [064-glass-cockpit](./specs/064-glass-cockpit/) | — | — |
@@ -1574,7 +1574,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [095-update-failure-ux](./specs/095-update-failure-ux/) | `shipped` | 28/28 (100%) |
 | [096-batched-call-tools](./specs/096-batched-call-tools/) | `in-flight` | 15/16 (94%) |
 | [097-stored-scripts](./specs/097-stored-scripts/) | `in-flight` | 13/14 (93%) |
-| [098-tools-preflight](./specs/098-tools-preflight/) | `in-flight` | 28/33 (85%) |
+| [098-tools-preflight](./specs/098-tools-preflight/) | `in-flight` | 30/33 (91%) |
 | [099-describe-check-mode](./specs/099-describe-check-mode/) | `in-flight` | 9/10 (90%) |
 | [100-prompt-rugpull-baseline](./specs/100-prompt-rugpull-baseline/) | — | — |
 | [101-tpa-db](./specs/101-tpa-db/) | `shipped` | 117/117 (100%) |
@@ -1589,9 +1589,9 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [110-catalog-popularity](./specs/110-catalog-popularity/) | `in-flight` | 20/23 (87%) |
 | [111-personal-docker-image](./specs/111-personal-docker-image/) | — | — |
 | [112-client-header-forwarding](./specs/112-client-header-forwarding/) | `shipped` | 38/40 (95%) |
-| [113-upstream-resilience](./specs/113-upstream-resilience/) | `drafted` | 0/100 (0%) |
+| [113-upstream-resilience](./specs/113-upstream-resilience/) | `in-flight` | 78/100 (78%) |
 | [115-mcp-credential-lifecycle](./specs/115-mcp-credential-lifecycle/) | `shipped` | 86/87 (99%) |
-| [116-config-commit-consistency](./specs/116-config-commit-consistency/) | `in-flight` | 81/124 (65%) |
+| [116-config-commit-consistency](./specs/116-config-commit-consistency/) | `shipped` | 119/124 (96%) |
 | [117-review-bound-approvals](./specs/117-review-bound-approvals/) | `in-flight` | 46/50 (92%) |
 | [118-auto-rescan-on-change](./specs/118-auto-rescan-on-change/) | — | — |
 | [118-pin-visibility-boundary](./specs/118-pin-visibility-boundary/) | — | — |
