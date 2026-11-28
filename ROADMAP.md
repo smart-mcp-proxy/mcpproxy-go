@@ -1420,7 +1420,7 @@ Spec: [130-skills-review-ux](./specs/130-skills-review-ux/) · PR: #1987 #1988
 | Spec 132 browser login for MCP clients: MCPProxy as an OAuth 2.1 authorization server | In progress | P1 | 65/72 (90%) | [132-client-oauth-login](./specs/132-client-oauth-login/) |  |
 | Spec 133 admin_action audit events: who changed the rules, on the JSONL audit line | In progress | P1 | — | [133-admin-action-audit](./specs/133-admin-action-audit/) |  |
 | Spec 134 Web UI simplification: problems first, no function lost | In progress | P1 | — | [134-webui-simplify](./specs/134-webui-simplify/) |  |
-| Spec 135 OAuth client hardening: issuer checks on upstream sign-in (mix-up defence) | In progress | P1 | 14/39 (36%) | [135-oauth-client-hardening](./specs/135-oauth-client-hardening/) |  |
+| Spec 135 OAuth client hardening: issuer checks on upstream sign-in (mix-up defence) | In progress | P1 | 18/39 (46%) | [135-oauth-client-hardening](./specs/135-oauth-client-hardening/) |  |
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 | Spec 114 typed pending-call outcome + call correlation for long-running stdio tool calls | In review | P2 | — |  | #1536 |
