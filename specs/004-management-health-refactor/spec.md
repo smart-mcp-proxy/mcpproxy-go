@@ -2,7 +2,7 @@
 
 **Feature Branch**: `004-management-health-refactor`
 **Created**: 2025-11-23
-**Status**: Draft
+**Status**: Implemented
 **Input**: User description: "Need to refactor mcpproxy core service part responsible to upstream servers lifecycle management and health diagnostics read details in @docs/shared-management-health-plan.md \ Need to do refactoring but keep current cmd options, subcommands the same - don't break this cmd interface. Important addition I want to have openapi spec .yaml file actual for each mcpproxy release. Research best way to generate this file from source code. We can reuse `make build` command to regenerate file."
 
 ## User Scenarios & Testing *(mandatory)*

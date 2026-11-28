@@ -58,7 +58,7 @@ This is a Go project with the following structure:
 > **NOTE: Write these tests FIRST, ensure they FAIL before implementation**
 
 - [ ] T007 [P] [US1] Unit test: Verify OnNotification handler is registered after Start() in `internal/upstream/core/notification_test.go`
-- [ ] T008 [P] [US1] Unit test: Verify callback is invoked when tools/list_changed notification received in `internal/upstream/core/notification_test.go`
+- [x] T008 [P] [US1] Unit test: Verify callback is invoked when tools/list_changed notification received in `internal/upstream/core/notification_test.go`
 - [ ] T009 [P] [US1] Unit test: Verify only tools/list_changed triggers callback (filter other notifications) in `internal/upstream/core/notification_test.go`
 - [ ] T010 [P] [US1] Unit test: Verify managed client forwards notification to discovery callback in `internal/upstream/managed/notification_test.go`
 
