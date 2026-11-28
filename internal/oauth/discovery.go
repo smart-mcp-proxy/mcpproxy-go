@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // ProtectedResourceMetadata represents RFC 9728 Protected Resource Metadata
@@ -658,6 +660,18 @@ type OAuthMetadataValidationResult struct {
 //   - error: Structured OAuthFlowError if validation fails
 func ValidateOAuthMetadata(serverURL, serverName string, timeout time.Duration) (*OAuthMetadataValidationResult, error) {
 	return ValidateOAuthMetadataWithEnv(defaultEnv(), serverURL, serverName, timeout)
+}
+
+// ValidateOAuthMetadataForServer is ValidateOAuthMetadataWithEnv for a
+// configured upstream, the pre-flight check a sign-in runs. It skips the check
+// (nil, nil) when the server's oauth block sets auth_server_metadata_url: the
+// sign-in reads that document instead of discovering one, so the discovery this
+// check performs says nothing about whether the sign-in can work.
+func ValidateOAuthMetadataForServer(env Env, serverConfig *config.ServerConfig, timeout time.Duration) (*OAuthMetadataValidationResult, error) {
+	if serverConfig.OAuth != nil && serverConfig.OAuth.AuthServerMetadataURL != "" {
+		return nil, nil
+	}
+	return ValidateOAuthMetadataWithEnv(env, serverConfig.URL, serverConfig.Name, timeout)
 }
 
 // ValidateOAuthMetadataWithEnv is ValidateOAuthMetadata on an upstream

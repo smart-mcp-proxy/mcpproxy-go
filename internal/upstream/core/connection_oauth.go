@@ -1037,7 +1037,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	// Phase 2 (Spec 020): Pre-flight OAuth metadata validation
 	// Validate metadata BEFORE starting the full OAuth flow to fail fast with clear errors
 	if c.config.URL != "" {
-		_, validationErr := oauth.ValidateOAuthMetadataWithEnv(c.oauthEnv(ctx), c.config.URL, c.config.Name, 5*time.Second)
+		_, validationErr := oauth.ValidateOAuthMetadataForServer(c.oauthEnv(ctx), c.config, 5*time.Second)
 		if validationErr != nil {
 			// Convert OAuthMetadataError to OAuthFlowError for consistent error handling
 			if metadataErr, ok := validationErr.(*oauth.OAuthMetadataError); ok {
@@ -1426,7 +1426,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 
 	// Phase 2 (Spec 020): Pre-flight OAuth metadata validation
 	if c.config.URL != "" {
-		_, validationErr := oauth.ValidateOAuthMetadataWithEnv(c.oauthEnv(ctx), c.config.URL, c.config.Name, 5*time.Second)
+		_, validationErr := oauth.ValidateOAuthMetadataForServer(c.oauthEnv(ctx), c.config, 5*time.Second)
 		if validationErr != nil {
 			if metadataErr, ok := validationErr.(*oauth.OAuthMetadataError); ok {
 				c.logger.Warn("⚠️ OAuth metadata validation failed",
@@ -2019,7 +2019,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 
 	// Phase 2 (Spec 020): Pre-flight OAuth metadata validation
 	if c.config.URL != "" {
-		_, validationErr := oauth.ValidateOAuthMetadataWithEnv(c.oauthEnv(ctx), c.config.URL, c.config.Name, 5*time.Second)
+		_, validationErr := oauth.ValidateOAuthMetadataForServer(c.oauthEnv(ctx), c.config, 5*time.Second)
 		if validationErr != nil {
 			if metadataErr, ok := validationErr.(*oauth.OAuthMetadataError); ok {
 				c.logger.Warn("⚠️ OAuth metadata validation failed",
