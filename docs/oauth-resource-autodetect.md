@@ -4,8 +4,8 @@ MCPProxy automatically detects and injects the RFC 8707 `resource` parameter for
 
 ## How It Works
 
-1. MCPProxy sends a preflight POST request to the MCP server URL
-2. If server returns 401 with `WWW-Authenticate` header containing `resource_metadata` URL, MCPProxy fetches the Protected Resource Metadata
+1. MCPProxy fetches the Protected Resource Metadata from its RFC 9728 well-known URL (for `https://host/api/mcp`, that's `https://host/.well-known/oauth-protected-resource/api/mcp`) and uses it if its `resource` is the server URL. This sends nothing to the MCP endpoint itself.
+2. Otherwise MCPProxy sends a preflight POST request to the MCP server URL. If the server returns 401 with a `WWW-Authenticate` header containing a `resource_metadata` URL, MCPProxy fetches the Protected Resource Metadata from there. Some servers (Home Assistant, for one) count this unauthenticated request as a failed login.
 3. The `resource` field from metadata is automatically injected into OAuth authorization URL and token requests
 4. If metadata doesn't contain `resource`, MCPProxy falls back to using the server URL
 

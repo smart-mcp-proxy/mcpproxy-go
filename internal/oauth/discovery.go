@@ -216,6 +216,38 @@ func DiscoverAuthServerURL(serverURL string, timeout time.Duration) string {
 	})
 }
 
+// wellKnownPRMURL is the RFC 9728 §3.1 metadata URL of a resource: the
+// well-known path goes between the host and the resource's path.
+func wellKnownPRMURL(resourceURL string) string {
+	u, err := url.Parse(resourceURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	path := u.EscapedPath()
+	if path == "/" {
+		path = ""
+	}
+	return u.Scheme + "://" + u.Host + "/.well-known/oauth-protected-resource" + path
+}
+
+// wellKnownPRM reads a server's Protected Resource Metadata from its RFC 9728
+// well-known URL through the discovery cache, and returns it only when it names
+// the server URL as its resource (RFC 9728 §3.3). Unlike the 401 probes it sends
+// nothing to the MCP endpoint: servers that count failed logins (Home Assistant,
+// for one) report each probe and can ban the client's IP for them. The URL is
+// not recorded as advertised: no 401 named it.
+func wellKnownPRM(env Env, serverURL string, ov discoveryOverrides, timeout time.Duration) *ProtectedResourceMetadata {
+	prmURL := wellKnownPRMURL(serverURL)
+	if prmURL == "" {
+		return nil
+	}
+	metadata, err := cachedPRM(env, serverURL, ov, prmURL, timeout)
+	if err != nil || metadata.Resource != serverURL {
+		return nil
+	}
+	return metadata
+}
+
 // discoverAuthServerURL is DiscoverAuthServerURL with an injectable Protected
 // Resource Metadata fetcher, so the preflight can read PRM through the discovery cache.
 func discoverAuthServerURL(env Env, serverURL string, timeout time.Duration, fetchPRM func(prmURL string) (*ProtectedResourceMetadata, error)) string {
@@ -244,16 +276,8 @@ func discoverAuthServerURL(env Env, serverURL string, timeout time.Duration, fet
 	metadataURL := ExtractResourceMetadataURL(wwwAuth)
 	if metadataURL == "" {
 		// Try constructing PRM URL using RFC 9728 pattern
-		u, err := url.Parse(serverURL)
-		if err != nil {
+		if metadataURL = wellKnownPRMURL(serverURL); metadataURL == "" {
 			return ""
-		}
-		path := strings.TrimSuffix(u.Path, "/")
-		baseURL := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
-		if path != "" {
-			metadataURL = baseURL + "/.well-known/oauth-protected-resource" + path
-		} else {
-			metadataURL = baseURL + "/.well-known/oauth-protected-resource"
 		}
 		logger.Debug("Constructed PRM URL from server URL",
 			zap.String("server_url", logSafeURL(serverURL)),

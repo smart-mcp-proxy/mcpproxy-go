@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -415,6 +416,51 @@ func TestCreateOAuthConfig_AutoDetectsResource(t *testing.T) {
 	resource, hasResource := extraParams["resource"]
 	assert.True(t, hasResource, "extraParams should contain 'resource' key")
 	assert.Equal(t, "https://api.example.com/mcp/v1", resource, "Resource should be auto-detected from metadata")
+}
+
+// A server that publishes its RFC 9728 metadata at the well-known URL gets no
+// unauthenticated POST on its MCP endpoint. Home Assistant (modelled here)
+// treats each such 401 as a failed login: it notifies about the client's IP
+// and can ban it. Each reconnect builds the OAuth config again.
+func TestCreateOAuthConfig_WellKnownPRMSkipsUnauthenticatedProbe(t *testing.T) {
+	var serverURL string
+	var unauthenticatedPOSTs atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/.well-known/oauth-protected-resource/api/mcp":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"resource": %q, "authorization_servers": [%q]}`, serverURL+"/api/mcp", serverURL)
+		case r.URL.Path == "/api/mcp" && r.Method == http.MethodHead:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		case r.URL.Path == "/api/mcp" && r.Header.Get("Authorization") == "":
+			if r.Method == http.MethodPost {
+				unauthenticatedPOSTs.Add(1)
+			}
+			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource/api/mcp"`, serverURL))
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	serverURL = srv.URL
+
+	db := setupTestStorage(t)
+	serverConfig := &config.ServerConfig{Name: "test-wellknown-prm", URL: serverURL + "/api/mcp"}
+	store := NewPersistentTokenStore(serverConfig.Name, serverConfig.URL, db)
+	require.NoError(t, store.SaveToken(context.Background(), &client.Token{
+		AccessToken: "at", RefreshToken: "rt", TokenType: "Bearer", ExpiresAt: time.Now().Add(time.Hour),
+	}))
+
+	for _, attempt := range []string{"connect", "reconnect"} {
+		// A reconnect after the discovery cache expired (e.g. after a wake).
+		InvalidateDiscovery(serverConfig.URL)
+		oauthConfig, extraParams, err := CreateOAuthConfigWithEnv(Env{Ctx: context.Background()}, serverConfig, db, zap.NewNop())
+		require.NoError(t, err, attempt)
+		require.NotNil(t, oauthConfig, attempt)
+		assert.Equal(t, serverConfig.URL, extraParams["resource"], attempt)
+	}
+	assert.Zero(t, unauthenticatedPOSTs.Load(), "the MCP endpoint must get no unauthenticated POST")
 }
 
 // T022: Test that manual extra_params.resource overrides auto-detected value

@@ -745,3 +745,17 @@ func containsSubstringHelper(s, substr string) bool {
 	}
 	return false
 }
+
+func TestWellKnownPRMURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://h.example/api/mcp": "https://h.example/.well-known/oauth-protected-resource/api/mcp",
+		"https://h.example/mcp/":    "https://h.example/.well-known/oauth-protected-resource/mcp/",
+		"https://h.example/":        "https://h.example/.well-known/oauth-protected-resource",
+		"https://h.example":         "https://h.example/.well-known/oauth-protected-resource",
+		"not a url":                 "",
+	} {
+		if got := wellKnownPRMURL(in); got != want {
+			t.Errorf("wellKnownPRMURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

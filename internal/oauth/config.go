@@ -713,8 +713,14 @@ func CreateOAuthConfigWithEnv(env Env, serverConfig *config.ServerConfig, storag
 
 	// Priority 2 & 3: Auto-detect resource if not manually specified
 	if _, hasResource := extraParams["resource"]; !hasResource {
-		detectedResource := autoDetectResource(env, serverConfig, logger)
-		if detectedResource != "" {
+		// The well-known metadata first: autoDetectResource sends an
+		// unauthenticated POST, which some servers count as a failed login.
+		if metadata := wellKnownPRM(env, serverConfig.URL, overridesFromConfig(serverConfig), resourceDetectRequestTimeout); metadata != nil {
+			extraParams["resource"] = metadata.Resource
+			logger.Info("Auto-detected resource parameter from well-known Protected Resource Metadata (RFC 9728)",
+				zap.String("server", serverConfig.Name),
+				zap.String("resource", logSafeURL(metadata.Resource)))
+		} else if detectedResource := autoDetectResource(env, serverConfig, logger); detectedResource != "" {
 			extraParams["resource"] = detectedResource
 		}
 	}
@@ -2376,12 +2382,19 @@ func preflightMetadataURL(env Env, serverConfig *config.ServerConfig, ov discove
 	v, err := globalDiscoveryCache.doWith(key, serverConfig.URL, func() (any, time.Duration, []discoverySeed, error) {
 		// First, try to discover the auth server URL from Protected Resource Metadata
 		// This is necessary for servers like Smithery that use separate domains
-		authServerURL := discoverAuthServerURL(env, serverConfig.URL, 5*time.Second, func(prmURL string) (*ProtectedResourceMetadata, error) {
-			// Record the advertised PRM URL so a later 401 that advertises a
-			// different one invalidates this result (FR-026).
-			globalDiscoveryCache.noteResourceMetadataURL(serverConfig.URL, prmURL)
-			return cachedPRM(env, serverConfig.URL, ov, prmURL, 5*time.Second)
-		})
+		// The well-known metadata first: discoverAuthServerURL sends an
+		// unauthenticated POST, which some servers count as a failed login.
+		var authServerURL string
+		if prm := wellKnownPRM(env, serverConfig.URL, ov, 5*time.Second); prm != nil && len(prm.AuthorizationServers) > 0 {
+			authServerURL = prm.AuthorizationServers[0]
+		} else {
+			authServerURL = discoverAuthServerURL(env, serverConfig.URL, 5*time.Second, func(prmURL string) (*ProtectedResourceMetadata, error) {
+				// Record the advertised PRM URL so a later 401 that advertises a
+				// different one invalidates this result (FR-026).
+				globalDiscoveryCache.noteResourceMetadataURL(serverConfig.URL, prmURL)
+				return cachedPRM(env, serverConfig.URL, ov, prmURL, 5*time.Second)
+			})
+		}
 		urlToUse := serverConfig.URL
 		if authServerURL != "" {
 			urlToUse = authServerURL
