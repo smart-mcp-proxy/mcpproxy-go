@@ -1416,7 +1416,7 @@ Spec: [130-skills-review-ux](./specs/130-skills-review-ux/) · PR: #1987 #1988
 | MCP protocol upgrade to 2026-07-28 revision | In progress | P1 | 40/81 (49%) | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Spec 108 profiles v3: scoped profiles, client binding, scope-aware observability | In progress | P1 | 194/195 (99%) | [108-profiles-v3](./specs/108-profiles-v3/) |  |
 | Spec 109 navigation, scope filters and cross-surface UX consistency | In progress | P1 | 257/258 (100%) | [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/) |  |
-| Spec 124 work sessions and the failure timeline | In progress | P1 | 45/74 (61%) | [124-session-failure-timeline](./specs/124-session-failure-timeline/) |  |
+| Spec 124 work sessions and the failure timeline | In progress | P1 | 57/74 (77%) | [124-session-failure-timeline](./specs/124-session-failure-timeline/) |  |
 | Spec 132 browser login for MCP clients: MCPProxy as an OAuth 2.1 authorization server | In progress | P1 | 65/72 (90%) | [132-client-oauth-login](./specs/132-client-oauth-login/) |  |
 | Spec 133 admin_action audit events: who changed the rules, on the JSONL audit line | In progress | P1 | — | [133-admin-action-audit](./specs/133-admin-action-audit/) |  |
 | Spec 134 Web UI simplification: problems first, no function lost | In progress | P1 | — | [134-webui-simplify](./specs/134-webui-simplify/) |  |
@@ -1500,11 +1500,11 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [014-cli-output-formatting](./specs/014-cli-output-formatting/) | `shipped` | 63/66 (95%) |
 | [015-server-management-cli](./specs/015-server-management-cli/) | `shipped` | 50/50 (100%) |
 | [016-activity-log-backend](./specs/016-activity-log-backend/) | `in-flight` | 44/50 (88%) |
-| [017-activity-cli-commands](./specs/017-activity-cli-commands/) | `in-flight` | 51/60 (85%) |
+| [017-activity-cli-commands](./specs/017-activity-cli-commands/) | `in-flight` | 53/60 (88%) |
 | [018-intent-declaration](./specs/018-intent-declaration/) | `shipped` | 69/69 (100%) |
 | [019-activity-webui](./specs/019-activity-webui/) | `shipped` | 72/73 (99%) |
 | [020-oauth-login-feedback](./specs/020-oauth-login-feedback/) | — | — |
-| [021-request-id-logging](./specs/021-request-id-logging/) | `in-flight` | 35/42 (83%) |
+| [021-request-id-logging](./specs/021-request-id-logging/) | `in-flight` | 37/42 (88%) |
 | [022-oauth-redirect-uri-persistence](./specs/022-oauth-redirect-uri-persistence/) | `shipped` | 24/25 (96%) |
 | [023-oauth-state-persistence](./specs/023-oauth-state-persistence/) | `shipped` | 38/39 (97%) |
 | [023-smart-config-patch](./specs/023-smart-config-patch/) | `shipped` | 52/53 (98%) |
@@ -1523,7 +1523,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [039-security-scanner-plugins](./specs/039-security-scanner-plugins/) | — | — |
 | [040-server-ux](./specs/040-server-ux/) | `in-flight` | 28/35 (80%) |
 | [041-quarantine-invariants](./specs/041-quarantine-invariants/) | — | — |
-| [042-telemetry-tier2](./specs/042-telemetry-tier2/) | `in-flight` | 65/91 (71%) |
+| [042-telemetry-tier2](./specs/042-telemetry-tier2/) | `in-flight` | 70/91 (77%) |
 | [043-linux-package-repos](./specs/043-linux-package-repos/) | `shipped` | 41/41 (100%) |
 | [044-diagnostics-taxonomy](./specs/044-diagnostics-taxonomy/) | `in-flight` | 61/106 (58%) |
 | [044-retention-telemetry-v3](./specs/044-retention-telemetry-v3/) | `in-flight` | 55/70 (79%) |
@@ -1531,7 +1531,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [046-local-first-onboarding](./specs/046-local-first-onboarding/) | — | — |
 | [046-local-launcher-for-http-sse](./specs/046-local-launcher-for-http-sse/) | — | — |
 | [047-cpu-hotpath-fix](./specs/047-cpu-hotpath-fix/) | `in-flight` | 26/46 (57%) |
-| [048-tray-refetch-elimination](./specs/048-tray-refetch-elimination/) | `in-flight` | 18/31 (58%) |
+| [048-tray-refetch-elimination](./specs/048-tray-refetch-elimination/) | `in-flight` | 19/31 (61%) |
 | [049-agent-discoverable-disabled-tools](./specs/049-agent-discoverable-disabled-tools/) | `shipped` | 18/18 (100%) |
 | [050-global-tools-page](./specs/050-global-tools-page/) | `in-flight` | 24/26 (92%) |
 | [051-readme-hero-demo](./specs/051-readme-hero-demo/) | — | — |
@@ -1559,7 +1559,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) | — | — |
 | [081-release-qa-gate](./specs/081-release-qa-gate/) | `shipped` | 4/4 (100%) |
 | [082-work-sessions](./specs/082-work-sessions/) | — | — |
-| [083-discovery-profiler](./specs/083-discovery-profiler/) | `in-flight` | 4/41 (10%) |
+| [083-discovery-profiler](./specs/083-discovery-profiler/) | `shipped` | 39/41 (95%) |
 | [084-toon-output](./specs/084-toon-output/) | `in-flight` | 40/43 (93%) |
 | [085-compact-router](./specs/085-compact-router/) | `shipped` | 44/46 (96%) |
 | [086-tpa-scanner-approval](./specs/086-tpa-scanner-approval/) | — | — |
@@ -1599,7 +1599,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [120-scan-structural-gate](./specs/120-scan-structural-gate/) | — | — |
 | [122-scanner-skillspector-checks](./specs/122-scanner-skillspector-checks/) | `shipped` | 31/31 (100%) |
 | [123-oauth-token-encryption](./specs/123-oauth-token-encryption/) | `in-flight` | 49/56 (88%) |
-| [124-session-failure-timeline](./specs/124-session-failure-timeline/) | `in-flight` | 45/74 (61%) |
+| [124-session-failure-timeline](./specs/124-session-failure-timeline/) | `in-flight` | 57/74 (77%) |
 | [125-skills-over-mcp](./specs/125-skills-over-mcp/) | `shipped` | 51/51 (100%) |
 | [127-profile-argument-rules](./specs/127-profile-argument-rules/) | — | — |
 | [128-server-list-outcomes](./specs/128-server-list-outcomes/) | — | — |
