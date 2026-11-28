@@ -78,7 +78,7 @@ Click any row to open the detail drawer showing:
 
 ### Sessions and the failure timeline
 
-The **Sessions** tab (`/ui/activity?view=sessions`) lists [work sessions](../features/activity-log.md#work-sessions-and-the-failure-timeline): one row per agent run, read from `GET /api/v1/work-sessions`. A run is told apart by its credential, its client and its project: two scripts that use the same API key over REST within 30 minutes of each other are one session, unless each sends its own `X-MCPProxy-Run` name. The run name is stored and shown as it was sent, to everyone who can see the session: do not put a secret or a signed URL in it.
+The **Sessions** tab (`/ui/activity?view=sessions`) lists [work sessions](../features/activity-log.md#work-sessions-and-the-failure-timeline): one row per agent run, read from `GET /api/v1/work-sessions`. A run is told apart by its credential, its client and its project: two scripts that use the same API key over REST within 30 minutes of each other are one session, unless each sends its own `X-MCPProxy-Run` name (1 to 128 printable characters; a name outside that is ignored and the call joins the unnamed session). The run name is stored and shown as it was sent, to everyone who can see the session: do not put a secret or a signed URL in it.
 
 | Cell | What it shows |
 |------|---------------|
@@ -98,7 +98,7 @@ Above the table:
 
 The filter and the order are part of the address (`failed=true`, `include_blocked=false`, `sort=last_failure` or `sort=last_activity` when it is not the default), so a filtered list can be bookmarked. "Clear Filters" in the Filters popover switches "Failed only" off as well.
 
-A session that never failed opens at its most recent row. Below 640 px the last failure and its reason move under the client name.
+A session that never failed opens at its most recent row. Below 1280 px the last failure and its reason move under the client name, and below 1536 px the agent token is the first line of that cell.
 
 The table of MCP connections that this tab used to show (capabilities, token count, "Tools it sees", "View Activity") is in the **Client connections** section under the list. It is collapsed until you open it.
 

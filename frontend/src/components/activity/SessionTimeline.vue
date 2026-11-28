@@ -59,8 +59,9 @@
       </div>
     </div>
 
-    <div v-else-if="!page" class="flex justify-center py-12" data-test="timeline-loading">
-      <span class="loading loading-spinner loading-lg"></span>
+    <div v-else-if="!page" class="flex justify-center py-12" role="status" data-test="timeline-loading">
+      <span class="loading loading-spinner loading-lg" aria-hidden="true"></span>
+      <span class="sr-only">Loading the timeline</span>
     </div>
 
     <template v-else>
@@ -545,12 +546,13 @@ function loadEarlier(): void {
 
 /**
  * Reads the wider page. `end` moves while a session is running, so a page
- * opened there is widened around the row it shows: the rows the operator is
+ * opened there in an active session is widened around the row it shows: the rows the operator is
  * reading stay, whatever has arrived since.
  */
 function loadAround(): void {
   const current = page.value
-  if (shown.value.at === 'end' && current) {
+  // The end of a session that has ended does not move: nothing to anchor.
+  if (shown.value.at === 'end' && current && current.session.status === 'active') {
     const positioned = current.rows.find(row => row.index === current.position)
     const anchor = positioned?.activity?.id ? `row:${positioned.activity.id}` : edgeRowAt('last')
     if (anchor) {

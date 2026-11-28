@@ -229,6 +229,56 @@ describe('Activity Sessions view (Spec 124)', () => {
     wrapper.unmount()
   })
 
+  it('the Tool calls link of a second session reads that session\'s calls', async () => {
+    const { wrapper, api } = await mountAt('/activity?view=sessions')
+    const sessionOf = (call: any[]) => call[0].work_session_id ?? call[0].session_id
+    await wrapper.get(`[data-test="ws-calls-link-${WS_FAILED.id}"]`).trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(sessionOf(api.getActivities.mock.calls.at(-1))).toBe(WS_FAILED.id)
+    await wrapper.get('[data-test="activity-view-tab-sessions"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    await wrapper.get(`[data-test="ws-calls-link-${WS_OK.id}"]`).trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(sessionOf(api.getActivities.mock.calls.at(-1))).toBe(WS_OK.id)
+    wrapper.unmount()
+  })
+
+  it('a timeline opened from a call and its Tool calls link back keep the filters of that session\'s calls', async () => {
+    const { wrapper } = await mountAt(`/activity?session=${WS_FAILED.id}`)
+    await wrapper.get('[data-test="activity-filters-toggle"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('select[aria-label="Filter by sensitive data"]').setValue('false')
+    await flushPromises()
+    await wrapper.get('[data-test="activity-open-act-1"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="activity-open-timeline"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    await wrapper.get('[data-test="timeline-calls-link"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    if (!wrapper.find('select[aria-label="Filter by sensitive data"]').exists()) {
+      await wrapper.get('[data-test="activity-filters-toggle"]').trigger('click')
+      await flushPromises()
+    }
+    expect((wrapper.get('select[aria-label="Filter by sensitive data"]').element as HTMLSelectElement).value).toBe('false')
+    wrapper.unmount()
+  })
+
+  it('a click that opens the timeline in another tab leaves the call\'s details open here', async () => {
+    const { wrapper } = await mountAt('/activity')
+    await wrapper.get('[data-test="activity-open-act-1"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="activity-open-timeline"]').trigger('click', { ctrlKey: true })
+    await flushPromises()
+    expect(wrapper.find('[data-test="activity-detail-panel"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="activity-open-timeline"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it('Back from a timeline to the calls of its session keeps the filters set there', async () => {
     const { wrapper, router } = await mountAt(`/activity?session=${WS_FAILED.id}`)
     await wrapper.get('[data-test="activity-filters-toggle"]').trigger('click')

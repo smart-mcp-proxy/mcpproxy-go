@@ -303,6 +303,12 @@ test('two actions from the list to the first failure: "Failed only", then the ro
   expect(shownIndices).toEqual(door.rows.map((r: any) => r.index))
   expect(Number(await positioned.getAttribute('data-index'))).toBe(door.position)
   expect(shownIndices.filter((index) => index < door.position).length, 'rows before the first failure').toBe(20)
+  // And the rows after it: the page asked for 20 on each side, and the call
+  // made between the two failures is on it.
+  const firstAsked = new URL(firstResponse.url()).searchParams
+  expect([firstAsked.get('before'), firstAsked.get('after')]).toEqual(['20', '20'])
+  expect(shownIndices.filter((index) => index > door.position).length, 'rows after the first failure').toBeGreaterThanOrEqual(4)
+  await expect(page.locator('[data-test="timeline-row"]').filter({ hasText: `${SERVER}:${SECOND_FAILURE}` })).toHaveCount(1)
   expect(door.rows.find((r: any) => r.index === door.position).activity.tool_name).toBe(FIRST_FAILURE)
   // The calls before the failure are on the page, and the start of the session.
   await expect(page.locator('[data-test="timeline-row"][data-kind="call"]').first()).toContainText(`${SERVER}:echo`)
@@ -597,6 +603,15 @@ test('390 px: list and timeline fit, controls are 44 px tall', async ({ page }) 
   const subject = await page.locator('[data-test="timeline-row"][data-position="true"] td').nth(1).boundingBox()
   expect(subject!.width, 'width of "What happened" at 390 px').toBeGreaterThanOrEqual(150)
   await expect(page.locator('[data-test="timeline-row"][data-position="true"] [data-test="timeline-result-narrow"]')).toHaveText('Error')
+  // The table fits its own scroll container too, and the row's details button is whole on screen.
+  const tableFit = await page.locator('[data-test="timeline-row"][data-position="true"]').evaluate((tr) => {
+    const wrap = tr.closest('table')!.parentElement!
+    const button = tr.querySelector('button[data-test^="timeline-expand-"]')!.getBoundingClientRect()
+    return { wrap: wrap.scrollWidth - wrap.clientWidth, buttonLeft: button.left, buttonRight: button.right - window.innerWidth }
+  })
+  expect(tableFit.wrap, 'timeline table scrolls sideways at 390 px').toBeLessThanOrEqual(0)
+  expect(tableFit.buttonLeft, 'details button starts on screen').toBeGreaterThanOrEqual(0)
+  expect(tableFit.buttonRight, 'details button past the screen edge').toBeLessThanOrEqual(0)
   await page.locator('[data-test="timeline-row"][data-position="true"]').scrollIntoViewIfNeeded()
   await shot(page, 'timeline-fixture-390-light')
 })

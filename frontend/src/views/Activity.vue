@@ -1178,7 +1178,7 @@
                   data-test="activity-open-timeline"
                   class="btn btn-xs max-sm:min-h-11 btn-outline"
                   :to="timelineLinkFor(selectedActivity)"
-                  @click="closeDetailDrawer()"
+                  @click="onOpenTimelineClick"
                 >
                   Open in session timeline
                 </router-link>
@@ -1836,9 +1836,12 @@ function dateTimeLocalToISO(value: string): string | undefined {
 // converge rather than loop: re-applying the query re-sets refs to the
 // values they already have as soon as a round trip settles, which triggers
 // nothing further.
+/** The session the calls views showed last (the Sessions view has its own address). */
+let lastCallsSession = ''
 function applyRouteFilters(): void {
   const q = route.query
   const str = (v: unknown): string => (typeof v === 'string' ? v : '')
+  if (str(q.view) !== 'sessions') lastCallsSession = str(q.session)
 
   filterSession.value = str(q.session)
   filterStatus.value = str(q.status)
@@ -2199,9 +2202,16 @@ const getSessionLabel = (sessionId: string): string => {
  * that session's calls unseen. Only the link does this, and only for a session
  * other than the one the calls view already shows: the tabs, Back, a bookmark
  * and the way back to the same session leave the filters as the user set them.
+ * "The same session" is the one the calls views showed last: a timeline opened
+ * from a call's details has no `session` in its address.
  */
+/** The details close when the timeline replaces this view, not when it opens in another tab. */
+function onOpenTimelineClick(event: MouseEvent): void {
+  if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) closeDetailDrawer()
+}
+
 function resetUnaddressedCallFilters(session: string): void {
-  if (session === filterSession.value) return
+  if (session === lastCallsSession) return
   filterParentId.value = ''
   filterSensitiveData.value = ''
   filterSeverity.value = ''
@@ -3281,7 +3291,9 @@ watch([effectiveTypes, filterServer, filterTool, filterStatus, filterSensitiveDa
 // `scopeConflict` is a source too: a conflict that resolves without any other
 // filter ref changing (a URL edit, or "Clear filters" setting everything in one
 // tick) must refetch, and a callback runs once per flush so it never doubles up.
-watch([effectiveTypes, filterServer, filterTool, filterStatus, filterStartDate, filterEndDate, scopeConflict], () => {
+// `filterSession` is one too (Spec 124): two sessions' Tool calls links carry
+// the same explicit `type`, so nothing else changes between them.
+watch([effectiveTypes, filterServer, filterTool, filterStatus, filterSession, filterStartDate, filterEndDate, scopeConflict], () => {
   void loadActivities()
 }, { deep: true })
 

@@ -54,6 +54,7 @@ async function mountTimeline(path = `/activity?view=sessions&ws=${WS_FAILED.id}&
   return { wrapper, router, api }
 }
 
+const WS_OK_ID = 'ws-loading-check'
 const rowAt = (wrapper: any, index: number) => wrapper.get(`[data-test="timeline-row"][data-index="${index}"]`)
 
 describe('Session timeline (Spec 124 FR-062)', () => {
@@ -219,13 +220,33 @@ describe('Session timeline (Spec 124 FR-062)', () => {
 
   it('a page opened at the end is widened around the row it shows, not around an end that moves', async () => {
     // The session is still running: "end" a moment later is another row.
-    door.page = timelinePage({ position: 15, failure_index: 3, has_before: true })
+    door.page = timelinePage({ session: { ...WS_FAILED, status: 'active' }, position: 15, failure_index: 3, has_before: true })
     const { wrapper, router, api } = await mountTimeline(`/activity?view=sessions&ws=${WS_FAILED.id}&at=end`)
     expect(api.getWorkSessionTimeline).toHaveBeenLastCalledWith(WS_FAILED.id, { at: 'end', before: 20, after: 20 })
     await wrapper.get('[data-test="timeline-load-earlier"]').trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.query.at).toBe('row:a15')
     expect(api.getWorkSessionTimeline).toHaveBeenLastCalledWith(WS_FAILED.id, { at: 'row:a15', before: 70, after: 20 })
+  })
+
+  it('a page at the end of a session that has ended stays at the end when it is widened', async () => {
+    // WS_FAILED has ended: its end does not move, and the selection must not either.
+    door.page = timelinePage({ position: 16, failure_index: 5, has_before: true })
+    const { wrapper, router, api } = await mountTimeline(`/activity?view=sessions&ws=${WS_FAILED.id}&at=end`)
+    await wrapper.get('[data-test="timeline-load-earlier"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query.at).toBe('end')
+    expect(api.getWorkSessionTimeline).toHaveBeenLastCalledWith(WS_FAILED.id, { at: 'end', before: 70, after: 20 })
+  })
+
+  it('says that the timeline is loading', async () => {
+    const { api } = await mountTimeline()
+    api.getWorkSessionTimeline.mockImplementation(() => new Promise(() => {}))
+    const second = await mountTimeline(`/activity?view=sessions&ws=${WS_OK_ID}`)
+    const loading = second.wrapper.get('[data-test="timeline-loading"]')
+    expect(loading.attributes('role')).toBe('status')
+    expect(loading.text()).toContain('Loading')
+    second.wrapper.unmount()
   })
 
   it('shows the rows a wider page brings, and keeps them after a step to another failure', async () => {
