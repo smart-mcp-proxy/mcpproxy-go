@@ -1364,7 +1364,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [041-quarantine-invariants](./specs/041-quarantine-invariants/) | — | — |
 | [042-telemetry-tier2](./specs/042-telemetry-tier2/) | `in-flight` | 65/91 (71%) |
 | [043-linux-package-repos](./specs/043-linux-package-repos/) | `shipped` | 41/41 (100%) |
-| [044-diagnostics-taxonomy](./specs/044-diagnostics-taxonomy/) | `in-flight` | 60/106 (57%) |
+| [044-diagnostics-taxonomy](./specs/044-diagnostics-taxonomy/) | `in-flight` | 61/106 (58%) |
 | [044-retention-telemetry-v3](./specs/044-retention-telemetry-v3/) | `in-flight` | 55/70 (79%) |
 | [045-paperclip-cockpit](./specs/045-paperclip-cockpit/) | `in-flight` | 40/47 (85%) |
 | [046-local-first-onboarding](./specs/046-local-first-onboarding/) | — | — |
