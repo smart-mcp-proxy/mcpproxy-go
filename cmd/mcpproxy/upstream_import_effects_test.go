@@ -392,3 +392,65 @@ func TestApplyImportedServersDaemonModeContinuesAfterFailure(t *testing.T) {
 	require.Equal(t, "bad", failed[0].Name)
 	require.True(t, strings.Contains(failed[0].Details, "already exists"))
 }
+
+// GH #2060: a pack in mcpproxy's own shape keeps its oauth block, as written,
+// in both standalone and daemon mode.
+const nativeImportPack = `{"mcpServers":{
+	"local": {"command":"echo","args":["hi"]},
+	"ha": {
+		"url":"https://ha.example.com/api/mcp",
+		"oauth":{"client_id":"http://127.0.0.1:8765/","client_secret":"pack-secret","redirect_uri":"http://127.0.0.1:8765/oauth/callback","scopes":["read","write"]}
+	}
+}}`
+
+func requireNativePackOAuth(t *testing.T, got *config.OAuthConfig) {
+	t.Helper()
+	require.NotNil(t, got, "the oauth block must be stored")
+	require.Equal(t, &config.OAuthConfig{
+		ClientID:     "http://127.0.0.1:8765/",
+		ClientSecret: "pack-secret",
+		RedirectURI:  "http://127.0.0.1:8765/oauth/callback",
+		Scopes:       []string{"read", "write"},
+	}, got)
+}
+
+func TestUpstreamImportNativeFormatStandaloneKeepsOauth(t *testing.T) {
+	setOutputGlobals(t, "json", false)
+	configPath, sourcePath := importScratch(t, nativeImportPack)
+	_, err := captureImport(t, sourcePath)
+	require.NoError(t, err)
+	cfg, err := config.LoadFromFile(configPath)
+	require.NoError(t, err)
+	require.Len(t, cfg.Servers, 2)
+	for _, s := range cfg.Servers {
+		if s.Name == "local" {
+			require.Nil(t, s.OAuth)
+		} else {
+			require.Equal(t, "ha", s.Name)
+			requireNativePackOAuth(t, s.OAuth)
+		}
+	}
+}
+
+func TestUpstreamImportNativeFormatDaemonModeKeepsOauth(t *testing.T) {
+	got := map[string]*config.OAuthConfig{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req cliclient.AddServerRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		got[req.Name] = req.OAuth
+		_, _ = w.Write([]byte(`{"success":true,"data":{}}`))
+	}))
+	defer server.Close()
+
+	result, err := configimport.Import([]byte(nativeImportPack), &configimport.ImportOptions{})
+	require.NoError(t, err)
+	require.Equal(t, configimport.FormatMCPProxy, result.Format)
+	client := cliclient.NewClientWithAPIKey(server.URL, "scratch-key", nil)
+	applied, failed, err := applyImportedServersDaemonMode(context.Background(), client, result.Imported)
+	require.NoError(t, err)
+	require.Empty(t, failed)
+	require.Len(t, applied, 2)
+	require.Contains(t, got, "local")
+	require.Nil(t, got["local"])
+	requireNativePackOAuth(t, got["ha"])
+}

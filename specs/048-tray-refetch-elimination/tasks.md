@@ -76,7 +76,7 @@ Each ships value alone; the visible reactivity guarantee depends on spec 047 alr
 
 **Independent test**: Invoke `menuWillOpen(menu)` directly with a `CountingAPIClient` connected. Assert counter == 0 immediately (synchronous return — no Task spawned).
 
-- [ ] T014 [P] [US5] Add failing XCTest `testMenuWillOpenDoesNotRefetch` in `native/macos/MCPProxy/MCPProxyTests/SSEHandlerTests.swift`.
+- [x] T014 [P] [US5] Add failing XCTest `testMenuWillOpenDoesNotRefetch` in `native/macos/MCPProxy/MCPProxyTests/SSEHandlerTests.swift`.
 - [x] T015 [US5] In `native/macos/MCPProxy/MCPProxy/MCPProxyApp.swift` `menuWillOpen(_:)` (currently lines 168-181), remove the inner `if let client = appState.apiClient { Task { … } }` block. Keep the synchronous `rebuildMenu()` call below it.
 - [ ] T016 [US5] Run `swift test --filter SSEHandlerTests/testMenuWillOpenDoesNotRefetch` and confirm green.
 

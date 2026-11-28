@@ -328,7 +328,7 @@ func (s *Server) handleImportFromPath(w http.ResponseWriter, r *http.Request) {
 // @Security ApiKeyQuery
 // @Param file formData file true "Configuration file to import"
 // @Param preview query bool false "If true, return preview without importing"
-// @Param format query string false "Force format (claude-desktop, claude-code, cursor, codex, gemini)"
+// @Param format query string false "Force format (claude-desktop, claude-code, cursor, codex, gemini, mcpproxy)"
 // @Param server_names query string false "Comma-separated list of server names to import"
 // @Success 200 {object} ImportResponse "Import result"
 // @Failure 400 {object} contracts.ErrorResponse "Bad request - invalid file or format"
@@ -481,7 +481,7 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 	if formatHint != "" {
 		format := parseFormat(formatHint)
 		if format == configimport.FormatUnknown {
-			return nil, fmt.Errorf("unknown format: %s. Valid formats: claude-desktop, claude-code, cursor, codex, gemini", formatHint)
+			return nil, fmt.Errorf("unknown format: %s. Valid formats: claude-desktop, claude-code, cursor, codex, gemini, mcpproxy", formatHint)
 		}
 		opts.FormatHint = format
 	}
@@ -736,6 +736,8 @@ func parseFormat(format string) configimport.ConfigFormat {
 		return configimport.FormatCodex
 	case "gemini":
 		return configimport.FormatGemini
+	case "mcpproxy":
+		return configimport.FormatMCPProxy
 	case "url":
 		return configimport.FormatURL
 	case "command":

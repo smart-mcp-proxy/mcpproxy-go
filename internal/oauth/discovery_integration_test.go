@@ -32,6 +32,7 @@ type discoveryFixture struct {
 	hits map[string]int
 
 	prmScopes   string // JSON array literal
+	prmResource string // "" = the MCP URL
 	asScopes    string // JSON array literal
 	grantTypes  string // "" = field absent, else JSON array literal
 	asPath      string // path the AS metadata is served on
@@ -57,7 +58,11 @@ func newDiscoveryFixture(t *testing.T) *discoveryFixture {
 			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource/mcp"`, base))
 			w.WriteHeader(http.StatusUnauthorized)
 		case r.URL.Path == "/.well-known/oauth-protected-resource/mcp":
-			_, _ = fmt.Fprintf(w, `{"resource":"%s/mcp","authorization_servers":["%s/as"],"scopes_supported":%s}`, base, base, f.prmScopes)
+			resource := f.prmResource
+			if resource == "" {
+				resource = base + "/mcp"
+			}
+			_, _ = fmt.Fprintf(w, `{"resource":"%s","authorization_servers":["%s/as"],"scopes_supported":%s}`, resource, base, f.prmScopes)
 		case (r.URL.Path == f.asPath || r.URL.Path == "/.well-known/oauth-authorization-server") && f.asAvailable:
 			grant := ""
 			if f.grantTypes != "" {
@@ -99,7 +104,7 @@ func TestCreateOAuthConfig_DiscoveryIsCached(t *testing.T) {
 	assert.Equal(t, 1, f.count("GET /.well-known/oauth-protected-resource/mcp"), "PRM fetched once")
 	assert.Equal(t, 1, f.count("GET "+f.asPath), "AS metadata fetched once")
 	assert.Equal(t, 1, f.count("HEAD /mcp"), "preflight HEAD once")
-	assert.Equal(t, 1, f.count("POST /mcp"), "preflight POST once")
+	assert.Zero(t, f.count("POST /mcp"), "the well-known PRM makes the POST preflight unnecessary")
 }
 
 func TestCreateOAuthConfig_DifferentOverridesUseSeparateCacheEntries(t *testing.T) {
@@ -205,6 +210,9 @@ func TestWarnIfNoRefreshGrant(t *testing.T) {
 func TestCreateOAuthConfig_ExplicitScopesStillInvalidatedByNewPRMURL(t *testing.T) {
 	resetDiscoveryStateForTest(t)
 	f := newDiscoveryFixture(t)
+	// A well-known document for another resource is not used (RFC 9728 §3.3),
+	// so the POST preflight runs.
+	f.prmResource = "https://other.example/mcp"
 	name := "prm-inval-srv"
 	stopCallbackServer(t, name)
 	store := setupTestStorage(t)

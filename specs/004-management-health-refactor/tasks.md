@@ -137,7 +137,7 @@ This is a Go backend refactoring project with CLI interface:
 
 - [ ] T050 [P] [US3] Validation test for generated OpenAPI spec in internal/httpapi/swagger_test.go (run swag init, validate schema)
 - [ ] T051 [P] [US3] Integration test for Swagger UI endpoint in internal/httpapi/swagger_test.go (verify /swagger/ returns HTML)
-- [ ] T052 [P] [US3] Build test in Makefile validation (verify `make build` regenerates spec successfully)
+- [x] T052 [P] [US3] Build test in Makefile validation (verify `make build` regenerates spec successfully)
 
 ### Implementation for User Story 3
 

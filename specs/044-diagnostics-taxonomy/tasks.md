@@ -118,7 +118,7 @@ Commit: `feat(diagnostics): STDIO domain with classifier + REST surfacing (US1)`
 
 ### Tests for US2
 
-- [ ] T050 [P] [US2] Vue component test `frontend/src/components/diagnostics/ErrorPanel.test.ts`: renders code, message, fix steps; buttons call the right action
+- [x] T050 [P] [US2] Vue component test `frontend/src/components/diagnostics/ErrorPanel.test.ts`: renders code, message, fix steps; buttons call the right action
 - [ ] T051 [P] [US2] Swift test in `native/macos/MCPProxy/Tests/StatusBarControllerTests.swift`: badge colour selection given severity mix
 - [ ] T052 [US2] Browser verification script (manual, via `claude-in-chrome`): screenshot ErrorPanel, assert DOM contains code + fix button
 - [ ] T053 [US2] Tray verification script (manual, via `mcpproxy-ui-test`): `screenshot_status_bar_menu` + `list_menu_items` show "Fix Issues" group

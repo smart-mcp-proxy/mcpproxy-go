@@ -35,7 +35,7 @@
 
 ## Phase 5 — Display (PR B, stacked)
 
-- [ ] T020 [P] [US4] Web UI: `formatPopularity` util + vitest (`frontend/tests/unit/`) + badge in `CatalogSearch.vue` result row
+- [x] T020 [P] [US4] Web UI: `formatPopularity` util + vitest (`frontend/tests/unit/`) + badge in `CatalogSearch.vue` result row
 - [ ] T021 [P] [US4] macOS: badge in `CatalogView` row + `CatalogTests` formatting test
 - [ ] T022 [P] [US4] CLI: `catalog search` table shows a POPULARITY column
 - [ ] T023 [US4] Playwright web-ui sweep of the catalog landing with a seeded stub

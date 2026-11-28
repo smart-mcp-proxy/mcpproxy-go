@@ -111,6 +111,17 @@ func main() {
 
 	logger.Info("Starting mcpproxy-tray", zap.String("version", version))
 
+	// One tray per user: a second one would add a second icon and fight the
+	// first over the core. A lock that cannot be taken for another reason
+	// must not keep the tray from starting.
+	if only, lockErr := acquireSingleInstance("mcpproxy-tray"); lockErr != nil {
+		logger.Warn("Cannot check for another running tray - starting anyway", zap.Error(lockErr))
+	} else if !only {
+		logger.Info("Another mcpproxy-tray is already running - exiting")
+		_ = logger.Sync()
+		os.Exit(0)
+	}
+
 	// Pick up a --listen flag from the tray's own command line (launchers
 	// commonly invoke `mcpproxy-tray serve --listen <addr>`, mirroring the
 	// core's serve command). It must be forwarded to the spawned core.
@@ -324,11 +335,20 @@ func main() {
 		logger.Error("Tray application error", zap.Error(err))
 	}
 
-	// Wait for shutdown to complete (with timeout)
+	// The event loop also ends without Quit: Windows' end-session message (logoff,
+	// an installer's Restart Manager), WM_CLOSE (taskkill without /F) or macOS
+	// logout exit it directly. Run the Quit flow anyway so the core this tray
+	// started does not outlive it and keep the installed files locked. A no-op
+	// when Quit already ran. Started in a goroutine: a second caller blocks until
+	// the first shutdown completes, which would bypass the timeout below.
+	go shutdownFunc()
+
+	// Wait for shutdown to complete (with timeout). The launcher may wait up to
+	// shutdown.Tray + 5s for the core to stop.
 	select {
 	case <-shutdownComplete:
 		logger.Info("Shutdown completed successfully")
-	case <-time.After(5 * time.Second):
+	case <-time.After(shutdown.Tray + 10*time.Second):
 		logger.Warn("Shutdown timeout - forcing exit")
 	}
 

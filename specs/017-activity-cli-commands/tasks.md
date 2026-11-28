@@ -126,7 +126,7 @@ scripts/
 - [x] T032 [US3] Implement detailed table output (key-value pairs with Arguments/Response sections) in cmd/mcpproxy/activity_cmd.go
 - [x] T033 [US3] Implement JSON/YAML output for show in cmd/mcpproxy/activity_cmd.go
 - [x] T034 [US3] Add --include-response flag support in cmd/mcpproxy/activity_cmd.go
-- [ ] T035 [US3] Add error handling for not found and invalid ID format in cmd/mcpproxy/activity_cmd.go
+- [x] T035 [US3] Add error handling for not found and invalid ID format in cmd/mcpproxy/activity_cmd.go
 
 **Checkpoint**: `mcpproxy activity show <id>` displays full activity details
 
@@ -141,7 +141,7 @@ scripts/
 ### Backend Extension (Required)
 
 - [x] T036 [US4] Add ActivitySummary struct to internal/contracts/activity.go
-- [ ] T037 [US4] Add GetActivitySummary() storage method to internal/storage/activity.go
+- [x] T037 [US4] Add GetActivitySummary() storage method to internal/storage/activity.go
 - [x] T038 [US4] Add handleActivitySummary() endpoint (GET /api/v1/activity/summary) to internal/httpapi/activity.go
 - [x] T039 [US4] Add GetActivitySummary() client method to internal/cliclient/client.go
 

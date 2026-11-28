@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -432,7 +431,7 @@ func init() {
 
 	// Import command flags
 	upstreamImportCmd.Flags().StringVarP(&upstreamImportServer, "server", "s", "", "Import only a specific server by name")
-	upstreamImportCmd.Flags().StringVar(&upstreamImportFormat, "format", "", "Force format (claude-desktop, claude-code, cursor, codex, gemini)")
+	upstreamImportCmd.Flags().StringVar(&upstreamImportFormat, "format", "", "Force format (claude-desktop, claude-code, cursor, codex, gemini, mcpproxy)")
 	upstreamImportCmd.Flags().BoolVar(&upstreamImportDryRun, "dry-run", false, "Preview import without making changes")
 	upstreamImportCmd.Flags().BoolVar(&upstreamImportNoQuarantine, "no-quarantine", false, "Don't quarantine imported servers (use with caution)")
 }
@@ -1978,84 +1977,21 @@ func parseAddJSONRequest(serverName, jsonStr string) (*cliclient.AddServerReques
 // parseAddJSON is parseAddJSONRequest plus the sorted top-level keys it did not
 // apply, so the caller can warn about them.
 func parseAddJSON(serverName, jsonStr string) (*cliclient.AddServerRequest, []string, error) {
-	var keys map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(jsonStr), &keys); err != nil {
-		return nil, nil, fmt.Errorf("invalid JSON: %w", err)
-	}
-	var unknown []string
-	for k := range keys {
-		if !slices.Contains(addJSONKeys, k) {
-			unknown = append(unknown, k)
-			delete(keys, k) // reported, not decoded: the strict decode below is for oauth
-		}
-	}
-	sort.Strings(unknown)
-	known, err := json.Marshal(keys)
+	s, unknown, err := configimport.ParseNativeServer([]byte(jsonStr), validateTrustModeFlag)
 	if err != nil {
-		return nil, nil, fmt.Errorf("invalid JSON: %w", err)
-	}
-	jsonStr = string(known)
-
-	var jsonConfig struct {
-		URL        string              `json:"url"`
-		Command    string              `json:"command"`
-		Args       []string            `json:"args"`
-		Env        map[string]string   `json:"env"`
-		Headers    map[string]string   `json:"headers"`
-		WorkingDir string              `json:"working_dir"`
-		Protocol   string              `json:"protocol"`
-		Type       string              `json:"type"`
-		TrustMode  string              `json:"trust_mode"`
-		OAuth      *config.OAuthConfig `json:"oauth"`
-	}
-	dec := json.NewDecoder(strings.NewReader(jsonStr))
-	dec.DisallowUnknownFields() // catches a misspelled key inside oauth
-	if err := dec.Decode(&jsonConfig); err != nil {
-		return nil, nil, fmt.Errorf("invalid JSON: %w", err)
-	}
-
-	protocol := jsonConfig.Protocol
-	if jsonConfig.Type != "" {
-		if protocol != "" && protocol != jsonConfig.Type {
-			return nil, nil, fmt.Errorf("conflicting protocol %q and type %q: set only one", protocol, jsonConfig.Type)
-		}
-		protocol = jsonConfig.Type
-	}
-
-	// Auto-detect protocol
-	if protocol == "" {
-		if jsonConfig.Command != "" {
-			protocol = "stdio"
-		} else if jsonConfig.URL != "" {
-			protocol = "streamable-http"
-		}
-	}
-
-	// Validate
-	if jsonConfig.URL == "" && jsonConfig.Command == "" {
-		return nil, nil, fmt.Errorf("JSON must contain either 'url' or 'command'")
-	}
-	if err := validateTrustModeFlag(jsonConfig.TrustMode); err != nil {
 		return nil, nil, err
 	}
-	if err := jsonConfig.OAuth.Validate(); err != nil {
-		return nil, nil, err
-	}
-	if err := jsonConfig.OAuth.ValidateRefreshReplay(); err != nil {
-		return nil, nil, err
-	}
-
 	return &cliclient.AddServerRequest{
 		Name:       serverName,
-		URL:        jsonConfig.URL,
-		Command:    jsonConfig.Command,
-		Args:       jsonConfig.Args,
-		Headers:    jsonConfig.Headers,
-		Env:        jsonConfig.Env,
-		WorkingDir: jsonConfig.WorkingDir,
-		Protocol:   protocol,
-		TrustMode:  jsonConfig.TrustMode,
-		OAuth:      jsonConfig.OAuth,
+		URL:        s.URL,
+		Command:    s.Command,
+		Args:       s.Args,
+		Headers:    s.Headers,
+		Env:        s.Env,
+		WorkingDir: s.WorkingDir,
+		Protocol:   s.Protocol,
+		TrustMode:  s.TrustMode,
+		OAuth:      s.OAuth,
 	}, unknown, nil
 }
 
@@ -2071,7 +2007,7 @@ func addJSONUnknownKeysWarning(unknown []string) string {
 }
 
 // addJSONKeys are the top-level keys `upstream add-json` understands.
-var addJSONKeys = []string{"args", "command", "env", "headers", "oauth", "protocol", "trust_mode", "type", "url", "working_dir"}
+var addJSONKeys = configimport.NativeServerKeys
 
 // runUpstreamAddJSON handles the 'upstream add-json' command
 func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
@@ -2172,7 +2108,7 @@ func runUpstreamImport(_ *cobra.Command, args []string) error {
 		format := parseImportFormat(upstreamImportFormat)
 		if format == configimport.FormatUnknown {
 			return outputError(output.NewStructuredError(output.ErrCodeInvalidInput, fmt.Sprintf("unknown format: %s", upstreamImportFormat)).
-				WithGuidance("Valid formats: claude-desktop, claude-code, cursor, codex, gemini"), output.ErrCodeInvalidInput)
+				WithGuidance("Valid formats: claude-desktop, claude-code, cursor, codex, gemini, mcpproxy"), output.ErrCodeInvalidInput)
 		}
 		opts.FormatHint = format
 	}
@@ -2288,6 +2224,8 @@ func parseImportFormat(format string) configimport.ConfigFormat {
 		return configimport.FormatCodex
 	case "gemini":
 		return configimport.FormatGemini
+	case "mcpproxy":
+		return configimport.FormatMCPProxy
 	default:
 		return configimport.FormatUnknown
 	}

@@ -2,7 +2,7 @@
 
 **Feature Branch**: `097-stored-scripts`
 **Created**: 2026-08-14
-**Status**: Draft
+**Status**: Implemented in one PR (#990)
 **Input**: User description: "Server-side stored scripts for code execution so long workflows need not be re-sent inline on every call (GitHub issue #986)"
 
 ## User Scenarios & Testing *(mandatory)*

@@ -81,6 +81,11 @@ func MapToServerConfig(parsed *ParsedServer, now time.Time) (*config.ServerConfi
 			server.OAuth = oauth
 			warnings = append(warnings, "OAuth credentials imported; you may need to reconfigure")
 		}
+	case FormatMCPProxy:
+		// Already validated by ParseNativeServer: stored as written.
+		if oauth, ok := parsed.Fields["oauth"].(*config.OAuthConfig); ok {
+			server.OAuth = oauth
+		}
 	case FormatClaudeCode:
 		oauth, oauthWarnings := mapClaudeCodeOAuth(parsed.Fields)
 		warnings = append(warnings, oauthWarnings...)
@@ -189,6 +194,11 @@ func getSkippedFields(parsed *ParsedServer) []string {
 		}
 		if _, ok := parsed.Fields["disabled_tools"]; ok {
 			skipped = append(skipped, "disabled_tools")
+		}
+
+	case FormatMCPProxy:
+		if keys, ok := parsed.Fields["skipped"].([]string); ok {
+			skipped = append(skipped, keys...)
 		}
 
 	case FormatGemini:

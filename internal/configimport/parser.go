@@ -22,6 +22,8 @@ func GetParser(format ConfigFormat) Parser {
 		return &CodexParser{}
 	case FormatGemini:
 		return &GeminiParser{}
+	case FormatMCPProxy:
+		return &MCPProxyParser{}
 	case FormatURL:
 		return &URLParser{}
 	case FormatCommand:
