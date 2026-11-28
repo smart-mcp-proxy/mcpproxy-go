@@ -123,9 +123,9 @@ Single Go module project. All Go source under `internal/` and `cmd/`. New tests 
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T040 [P] [US3] Write failing test `internal/httpapi/middleware_test.go::TestRESTEndpointMiddlewareTemplatedKey` — invoke a request that matches `POST /api/v1/servers/{name}/enable`, assert the snapshot has the templated key and not the raw path.
-- [ ] T041 [P] [US3] Write failing test `internal/httpapi/middleware_test.go::TestRESTEndpointMiddlewareUnmatched` — invoke a request to `/api/v1/does-not-exist`, assert the counter under `UNMATCHED.4xx` is 1 and the raw path does not appear in the snapshot.
-- [ ] T042 [P] [US3] Write failing test `internal/httpapi/middleware_test.go::TestStatusClassDerivation` — table test of status codes 200, 204, 301, 404, 500 → `2xx`, `2xx`, `3xx`, `4xx`, `5xx`.
+- [x] T040 [P] [US3] Write failing test `internal/httpapi/middleware_test.go::TestRESTEndpointMiddlewareTemplatedKey` — invoke a request that matches `POST /api/v1/servers/{name}/enable`, assert the snapshot has the templated key and not the raw path.
+- [x] T041 [P] [US3] Write failing test `internal/httpapi/middleware_test.go::TestRESTEndpointMiddlewareUnmatched` — invoke a request to `/api/v1/does-not-exist`, assert the counter under `UNMATCHED.4xx` is 1 and the raw path does not appear in the snapshot.
+- [x] T042 [P] [US3] Write failing test `internal/httpapi/middleware_test.go::TestStatusClassDerivation` — table test of status codes 200, 204, 301, 404, 500 → `2xx`, `2xx`, `3xx`, `4xx`, `5xx`.
 
 ### Implementation for User Story 3
 
@@ -191,7 +191,7 @@ Single Go module project. All Go source under `internal/` and `cmd/`. New tests 
 
 ### Implementation for User Story 6
 
-- [ ] T057 [US6] Add a registry getter accessor (or constructor injection) on the OAuth coordinator so it can call `RecordError`. Wire `ErrCatOAuthRefreshFailed` and `ErrCatOAuthTokenExpired` at the appropriate sites in `internal/oauth/coordinator.go`. Test T054 should pass.
+- [x] T057 [US6] Add a registry getter accessor (or constructor injection) on the OAuth coordinator so it can call `RecordError`. Wire `ErrCatOAuthRefreshFailed` and `ErrCatOAuthTokenExpired` at the appropriate sites in `internal/oauth/coordinator.go`. Test T054 should pass.
 - [x] T058 [US6] Wire `ErrCatUpstreamConnectTimeout` and `ErrCatUpstreamConnectRefused` at the connect-failure sites in `internal/upstream/managed/`. Test T055 should pass.
 - [x] T059 [US6] Wire `ErrCatToolQuarantineBlocked` in `internal/runtime/tool_quarantine.go` at the block site. Test T056 should pass.
 - [x] T060 [US6] Render the error category map into the heartbeat payload in `telemetry.go`. Categories with zero counts MUST be omitted via `omitempty` semantics on the marshal path (use a custom marshal helper if needed).
@@ -290,7 +290,7 @@ Single Go module project. All Go source under `internal/` and `cmd/`. New tests 
 **Purpose**: Privacy assertion, documentation, edition build verification, and the e2e smoke run.
 
 - [x] T082 [P] Create `internal/telemetry/payload_privacy_test.go::TestPayloadHasNoForbiddenSubstrings` — populate every counter, every flag, every error category, every doctor entry; render `Snapshot()`; marshal to JSON; assert the JSON contains none of `localhost`, `127.0.0.1`, `192.168.`, `10.0.`, `/Users/`, `/home/`, `C:\\`, `Bearer `, `apikey=`, `password`, `secret`, `error: `, `failed: `, `Error:`, plus a canary upstream tool name fixture set in the test setup.
-- [ ] T083 [P] Update `docs/features/telemetry.md` with: new payload schema (link to `contracts/heartbeat-v2.schema.json`), `DO_NOT_TRACK` and `CI` env var docs, `mcpproxy telemetry show-payload` command, first-run notice text, ID rotation policy.
+- [x] T083 [P] Update `docs/features/telemetry.md` with: new payload schema (link to `contracts/heartbeat-v2.schema.json`), `DO_NOT_TRACK` and `CI` env var docs, `mcpproxy telemetry show-payload` command, first-run notice text, ID rotation policy.
 - [ ] T084 [P] Update `CLAUDE.md` Telemetry CLI section to mention `show-payload` and the env var precedence chain.
 - [ ] T085 Run `gofmt -w ./internal/telemetry ./internal/httpapi ./internal/server ./cmd/mcpproxy ./internal/cliclient` and `goimports -w` on all touched files.
 - [ ] T086 Run `./scripts/run-linter.sh` and fix any issues.

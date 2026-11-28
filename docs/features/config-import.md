@@ -20,6 +20,7 @@ MCPProxy can import MCP server configurations from popular AI tools, making it e
 | Cursor IDE | JSON | `~/.cursor/mcp.json` (all platforms) |
 | Codex CLI | TOML | `~/.codex/config.toml` (all platforms) |
 | Gemini CLI | JSON | `~/.gemini/settings.json` (all platforms) |
+| MCPProxy | JSON | Any file whose `mcpServers` map uses the `upstream add-json` server shape (e.g. a shared server pack) |
 
 ## Web UI Import
 
@@ -217,6 +218,11 @@ MCPProxy auto-detects the configuration format by analyzing:
    - Top-level `mcpServers` with `env` at server level → Claude Code
    - Root-level server definitions → Cursor IDE
    - `mcpServers` in `tools` section → Gemini CLI
+   - A server with `protocol`, `working_dir`, `isolation`, or a snake_case `oauth` key (`client_id`, `client_secret`, `redirect_uri`, ...) → MCPProxy
+
+An MCPProxy file is read with the same rules as `upstream add-json`: the same server keys, the same validation, and an unknown key inside `oauth` is refused. One invalid server fails the whole file. The `oauth` block is stored as written; other unsupported keys are reported as skipped. `trust_mode` is never imported: imported servers start quarantined at the default review tier.
+
+Detection only fires on keys no other client uses, and a top-level `globalShortcut` still selects Claude Desktop first. A file in mcpproxy's shape whose servers carry none of those keys (for example an `oauth` block with only a `scopes` array), or that also has `globalShortcut`, is read by another client's parser and may lose its `oauth` block; pass `--format mcpproxy` for such a file.
 
 You can override auto-detection with the `format` parameter:
 - `claude-desktop`
@@ -224,6 +230,7 @@ You can override auto-detection with the `format` parameter:
 - `cursor`
 - `codex`
 - `gemini`
+- `mcpproxy`
 
 ## Handling Duplicates
 

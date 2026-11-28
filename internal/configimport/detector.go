@@ -11,7 +11,7 @@ import (
 )
 
 // ErrUnknownFormat is returned when the configuration format cannot be detected.
-var ErrUnknownFormat = fmt.Errorf("unable to detect configuration format: supported formats are Claude Desktop, Claude Code, Cursor IDE, Codex CLI, Gemini CLI, a pasted URL, or a pasted command line")
+var ErrUnknownFormat = fmt.Errorf("unable to detect configuration format: supported formats are Claude Desktop, Claude Code, Cursor IDE, Codex CLI, Gemini CLI, MCPProxy, a pasted URL, or a pasted command line")
 
 // DetectFormat identifies the configuration format from content.
 // It tries TOML first (for Codex), then JSON (for all other formats), then
@@ -154,6 +154,19 @@ func tryDetectJSON(content []byte) *DetectionResult {
 			Format:     FormatClaudeDesktop,
 			Confidence: "high",
 			Indicators: []string{"json_format", "mcpServers_key", "globalShortcut_key"},
+		}
+	}
+
+	// mcpproxy's own shape, only on keys no other client's dialect uses.
+	for _, server := range serversMap {
+		if serverMap, ok := server.(map[string]interface{}); ok {
+			if key := nativeServerIndicator(serverMap); key != "" {
+				return &DetectionResult{
+					Format:     FormatMCPProxy,
+					Confidence: "high",
+					Indicators: []string{"json_format", "mcpServers_key", key + "_field"},
+				}
+			}
 		}
 	}
 

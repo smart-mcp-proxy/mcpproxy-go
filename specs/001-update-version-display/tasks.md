@@ -130,7 +130,7 @@
 
 ### Tests for User Story 4
 
-- [ ] T035 [P] [US4] Write component test for UpdateBanner.vue (if Playwright/Vitest configured)
+- [x] T035 [P] [US4] Write component test for UpdateBanner.vue (if Playwright/Vitest configured)
 
 ### Implementation for User Story 4
 

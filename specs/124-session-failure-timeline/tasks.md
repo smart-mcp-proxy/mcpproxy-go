@@ -40,7 +40,7 @@
 - [x] T020 [P] [US2] `internal/runtime/worksession_test.go`, injected `now`: the principal carries the token prefix for agent tokens and for client credentials; a client credential rotated inside the idle window gets a new session; run name is its own key field after the principal and never joins two principals; `Touch(id)` moves the idle clock and reinstates a reaped entry; the 1,001st named session of a principal in one day ignores its name
 - [x] T021 [P] [US2] `internal/auth/agent_token_test.go` and `internal/storage/client_credentials_test.go`: during a staged client rotation a pending-hash match builds an auth context whose `TokenPrefix` is `PendingPrefix`; the stored record is unchanged; after finalization the prefix is the same value
 - [x] T022 [US2] `internal/server/worksession_resolution_test.go`: resolution for the four surfaces (legacy MCP connection, modern MCP request, REST with each `X-MCPProxy-Client` surface, CLI); two tokens on one legacy connection get two sessions; old and pending secret during a staged rotation get two sessions and the pending one keeps its session after finalization; `code_execution` sub-calls inherit the parent's session (FR-005); a legacy connection keeps the id it had (FR-006); no connection record is written for a modern request (Spec 058 US3)
-- [ ] T023 [P] [US2] `internal/server/run_header_test.go`: `X-MCPProxy-Run` accepted at 1 to 128 printable characters on REST and MCP over HTTP; an invalid value does not fail the call and is logged once per principal per process (FR-004); the header never reaches an upstream
+- [x] T023 [P] [US2] `internal/server/run_header_test.go`: `X-MCPProxy-Run` accepted at 1 to 128 printable characters on REST and MCP over HTTP; an invalid value does not fail the call and is logged once per principal per process (FR-004); the header never reaches an upstream
 
 ### Implementation
 
@@ -54,23 +54,23 @@
 
 ### Tests first
 
-- [ ] T030 [P] [US1] `internal/storage/work_session_summary_test.go`: `SaveActivity` writes the row, the `work_session_rows` entry (flag byte, server) and the summary in one transaction; per-server partition arithmetic (attempts, failures, blocks, stored counters, first and last activity and failure, last failure class, code, tool, reason of at most 200 characters with no body text); index key order equals time order; a row without a work-session id writes no index entry
-- [ ] T031 [P] [US3] `internal/storage/work_session_backfill_test.go`: the pass is idempotent and safe with concurrent writes (a row written during it is counted once, FR-018); old completion and blocked-decision pairs count once in both orders and across a batch boundary; two old sheds sharing a request id count twice; a session with more than one credential identity is ownerless; the completion marker stops a second run
-- [ ] T032 [P] [US3] `internal/storage/work_session_repair_test.go`: with a summary deleted and index entries kept, start rebuilds the same counts, ownership, attribution and last-failure facts from the retained rows using the stored roles, marks it `rebuilt`, and never lowers an existing summary (FR-013)
+- [x] T030 [P] [US1] `internal/storage/work_session_summary_test.go`: `SaveActivity` writes the row, the `work_session_rows` entry (flag byte, server) and the summary in one transaction; per-server partition arithmetic (attempts, failures, blocks, stored counters, first and last activity and failure, last failure class, code, tool, reason of at most 200 characters with no body text); index key order equals time order; a row without a work-session id writes no index entry
+- [x] T031 [P] [US3] `internal/storage/work_session_backfill_test.go`: the pass is idempotent and safe with concurrent writes (a row written during it is counted once, FR-018); old completion and blocked-decision pairs count once in both orders and across a batch boundary; two old sheds sharing a request id count twice; a session with more than one credential identity is ownerless; the completion marker stops a second run
+- [x] T032 [P] [US3] `internal/storage/work_session_repair_test.go`: with a summary deleted and index entries kept, start rebuilds the same counts, ownership, attribution and last-failure facts from the retained rows using the stored roles, marks it `rebuilt`, and never lowers an existing summary (FR-013)
 
 ### Implementation
 
 - [x] T033 [US1] `internal/storage/work_sessions.go` (new): buckets `work_sessions`, `work_session_rows`, `upstream_events_by_server`; summary and partition types per plan Data Model; `internal/storage/activity.go` (`SaveActivity`, `:55`): index entry and summary update in the same transaction (makes T030 pass)
 - [x] T034 [US3] `internal/storage/work_session_backfill.go` (new): batches of 1,000 keys per transaction, role pairing with a five-second window carried across batches, metadata marker; started from `internal/runtime` as a goroutine joined in `Runtime.Close` (makes T031 pass)
-- [ ] T035 [US3] `internal/storage/work_session_repair.go` (new): startup walk of distinct work-session ids in the index (one seek per session); `internal/runtime`: at start, a summary with no end gets its last activity time as its end; the cleanup pass and shutdown set `ended_at` once the idle window has closed (FR-015) (makes T032 pass)
+- [x] T035 [US3] `internal/storage/work_session_repair.go` (new): startup walk of distinct work-session ids in the index (one seek per session); `internal/runtime`: at start, a summary with no end gets its last activity time as its end; the cleanup pass and shutdown set `ended_at` once the idle window has closed (FR-015) (makes T032 pass)
 - [x] T036 [US3] `internal/storage/manager.go:1607`: `sessionRetentionLimit = 100` no longer applies to work-session summaries (FR-030); the connection-session store keeps its own limit
 
 ## Phase 5: retention and pruning (plan D4; FR-030..039, FR-070)
 
 ### Tests first
 
-- [ ] T040 [P] [US3] `internal/storage/activity_prune_test.go`, small caps: session window deletes summaries and index entries and keeps rows (FR-036); the age cap removes index entries, sets `truncated_start`, lowers only stored counters; size pass order 3a bodies (every non-body field kept, `BodiesRemoved` set, progress key honoured), 3b rows outside the window, 3c whole sessions oldest last-activity first, 3d trim of the last session; at most 1,000 rows per transaction; the activity bucket and the three new buckets together end at or below the byte budget
-- [ ] T041 [P] [US3] `internal/runtime/activity_retention_test.go`: the shortfall record holds time, cause (`age_cap`, `record_cap`, `size_cap`) and the start of the oldest complete session; it is cleared only when the last in-window removal is older than the window, not by a quiet pass
+- [x] T040 [P] [US3] `internal/storage/activity_prune_test.go`, small caps: session window deletes summaries and index entries and keeps rows (FR-036); the age cap removes index entries, sets `truncated_start`, lowers only stored counters; size pass order 3a bodies (every non-body field kept, `BodiesRemoved` set, progress key honoured), 3b rows outside the window, 3c whole sessions oldest last-activity first, 3d trim of the last session; at most 1,000 rows per transaction; the activity bucket and the three new buckets together end at or below the byte budget
+- [x] T041 [P] [US3] `internal/runtime/activity_retention_test.go`: the shortfall record holds time, cause (`age_cap`, `record_cap`, `size_cap`) and the start of the oldest complete session; it is cleared only when the last in-window removal is older than the window, not by a quiet pass
 - [x] T042 [P] [US3] `internal/config/effective_bounds_test.go`: `session_retention_days` default 7 through its `Effective*` reader; `activity_max_records` default 400,000; an explicit `100000` in the file is kept
 - [x] T043 [P] [US3] `frontend/tests/unit/settings-session-retention.spec.ts`: the field loads, edits and saves beside its siblings
 
@@ -85,11 +85,11 @@
 
 ### Tests first
 
-- [ ] T050 [US1] `internal/upstream/types/transition_capture_test.go`: every state mutation appends a record under the lock with old state, new state, time and a copy of the last error; one goroutine delivers them in mutation order; a full queue merges the oldest unsent records of one kind and always delivers the final Ready; run with `-race`
+- [x] T050 [US1] `internal/upstream/types/transition_capture_test.go`: every state mutation appends a record under the lock with old state, new state, time and a copy of the last error; one goroutine delivers them in mutation order; a full queue merges the oldest unsent records of one kind and always delivers the final Ready; run with `-race`
 - [ ] T051 [US1] `internal/runtime/upstream_event_source_test.go`: kill a stdio fixture, refuse a connection, expire an OAuth login; record the states and `MCPX_*` codes the observer receives. Correct the kind table in plan D5 from this output before T056
 - [x] T052 [P] [US1] `internal/oauth/refresh_coordinator_test.go`: the audit observer reports once per executed failed refresh: transient reactive and proactive failures report; several waiters on one flight give one report; a cancelled caller, a latched terminal outcome, a cooldown and a retired instance (`dialgate.IsRetired`) give none
 - [x] T053 [P] [US1] `internal/oauth/refresh_manager_test.go`: one per-server notification number taken under the lock for every schedule install and every accepted failure; the token-saved and failure events carry it
-- [ ] T054 [P] [US1] `internal/runtime/upstream_event_collapser_test.go`, injected clock: repeats within one minute rewrite one row with a count and first and last times; 120 rows per server per hour, then merge into the latest row of that kind; collapse per owner, never across owners; SC-007 storm of one failure per second for 24 hours gives at most 2,880 rows; one open `login_required` per server and owner; a stale failure does not open the mark and a stale save does not clear it; a failure delivered before the save that installed its schedule leaves the mark open; a successful login clears it
+- [x] T054 [P] [US1] `internal/runtime/upstream_event_collapser_test.go`, injected clock: repeats within one minute rewrite one row with a count and first and last times; 120 rows per server per hour, then merge into the latest row of that kind; collapse per owner, never across owners; SC-007 storm of one failure per second for 24 hours gives at most 2,880 rows; one open `login_required` per server and owner; a stale failure does not open the mark and a stale save does not clear it; a failure delivered before the save that installed its schedule leaves the mark open; a successful login clears it
 - [ ] T055 [P] [US5] `internal/httpapi/activity_event_owner_test.go` (`-tags server` for the two-user cases): a foreign user's credential event is absent from the activity list, summary, export and SSE frames, and its detail takes the ordinary not-found exit; counts and paging are computed after the predicate
 
 ### Implementation
@@ -104,7 +104,7 @@
 
 ### Tests first
 
-- [ ] T070 [P] [US5] `internal/httpapi/work_sessions_authz_test.go`: authorization table for the three doors with admin, two agent tokens, a pinned token and, under `-tags server`, two users; a foreign id and a missing id give the same not found; activity on a hidden server changes nothing a scoped caller reads (start, end, status, counts, failure facts, sort order); connection count, profile and the truncated-start marker are omitted for a scoped caller; a scoped token sees a shared upstream event of a server in reach
+- [x] T070 [P] [US5] `internal/httpapi/work_sessions_authz_test.go`: authorization table for the three doors with admin, two agent tokens, a pinned token and, under `-tags server`, two users; a foreign id and a missing id give the same not found; activity on a hidden server changes nothing a scoped caller reads (start, end, status, counts, failure facts, sort order); connection count, profile and the truncated-start marker are omitted for a scoped caller; a scoped token sees a shared upstream event of a server in reach
 - [x] T071 [P] [US1] `internal/httpapi/work_sessions_test.go`: list filters `failed`, `include_blocked`, `token`, `client`, `profile`, `run`, `error_class`, `since`, `until`, sort by `last_failure` and `last_activity`, `limit` at most 100; timeline `at=first_failure|failure:<n>|row:<id>|end` with `before` and `after` at most 250 and default 20; current failure index and total over stored failures in reach; with pruned failures the response gives the lifetime count and says earlier failures are no longer stored; bodies omitted unless `include_bodies`; upstream events merged in time order inside the span (SC-005)
 - [x] T072 [P] [US5] `internal/httpapi/scope_route_table_guard_test.go`: the three routes classified `scopeFiltered` in `getRouteScopes`; `/api/v1/sessions` stays admin-only (FR-045)
 - [x] T073 [P] [US1] `internal/storage/work_sessions_bench_test.go`: list of 1,000 summaries and one timeline page of a 50,000-row session, each against logs of two sizes; the cost does not follow the log size (SC-006)
@@ -114,7 +114,7 @@
 - [x] T074 [US1] `internal/storage/work_sessions.go`: list all summaries, timeline page by index range, failure navigation over index keys, event range join per server
 - [ ] T075 [US5] `internal/httpapi/work_sessions_scope.go` (new): summary projection for the caller and the row-ownership predicate (agent: name and prefix; server user: stored `UserID`), event rows by their own rule
 - [x] T076 [US1] `internal/httpapi/work_sessions.go` (new) and route registration in `internal/httpapi/server.go`: `GET /api/v1/work-sessions`, `/work-sessions/{id}`, `/work-sessions/{id}/timeline`; `internal/contracts` types; `redactForeignIdentity` on loaded rows (makes T070 to T072 pass)
-- [ ] T077 [US1] `make swagger`: regenerate `oas/swagger.yaml` and `oas/docs.go` (FR-047)
+- [x] T077 [US1] `make swagger`: regenerate `oas/swagger.yaml` and `oas/docs.go` (FR-047)
 
 ## Phase 8: doctor (plan D7; FR-035)
 
@@ -125,7 +125,7 @@
 
 - [x] T090 [US1] `scripts/test-api-e2e.sh`: the morning-after scenario of User Story 1 through REST: an agent token makes calls over REST with `X-MCPProxy-Run`, one fails, the list shows the session as failed and the timeline opens at the failure with the rows before it
 - [ ] T091 [P] [US1] Docs: `docs/features/activity-log.md` (work sessions, upstream events, retention order, shortfall), `docs/api/rest-api.md` (three doors, the header), `docs/configuration.md` (`session_retention_days`, the new `activity_max_records` default), `docs/features/agent-tokens.md` (one token per agent, run name, FR-007)
-- [ ] T092 [P] `CLAUDE.md` "Recent Changes": one entry for PR-1, written by hand
+- [x] T092 [P] `CLAUDE.md` "Recent Changes": one entry for PR-1, written by hand
 - [ ] T093 Playwright sweep per `docs/development/web-ui-verification.md` (this PR touches `frontend/src/`)
 
 ---

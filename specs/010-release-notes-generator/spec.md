@@ -2,7 +2,7 @@
 
 **Feature Branch**: `010-release-notes-generator`
 **Created**: 2025-12-08
-**Status**: Draft
+**Status**: Implemented
 **Input**: User description: "Add release notes generator into release CI workflow. Generator must fetch commit messages (diffs) starting from previous git tag and generate using LLM concise release notes, it must be placed on top of release page in github. If possible commit file with notes and include in dmg installer and windows installer. Requires research on how to use Claude SDK for notes generation with subscription API key."
 
 ## User Scenarios & Testing *(mandatory)*

@@ -2,7 +2,7 @@
 
 **Feature Branch**: `012-docusaurus-docs-site`
 **Created**: 2025-12-14
-**Status**: Draft
+**Status**: Implemented
 **Input**: User description: "Build Docusaurus documentation site at docs.mcpproxy.app with automatic CI deployment, addressing GitHub issue #189 about CLAUDE.md size optimization"
 
 ## User Scenarios & Testing *(mandatory)*

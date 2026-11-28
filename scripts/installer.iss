@@ -58,6 +58,13 @@ MinVersion=10.0.19044
 PrivilegesRequired=admin
 ChangesEnvironment=yes
 
+; PrepareToInstall below quits the trays first, and each tray stops the core it
+; started. What still holds the files after that (a core orphaned by an older
+; tray, which exited without stopping it, or a core started by hand) has no
+; window, so Restart Manager cannot ask it to close and would only report it as
+; in use, even with /VERYSILENT. Force closes it instead.
+CloseApplications=force
+
 ; UI configuration
 WizardStyle=modern
 DisableWelcomePage=no
@@ -173,14 +180,80 @@ begin
   end;
 end;
 
-// Process detection (optional - check if mcpproxy apps are running)
-function InitializeSetup(): Boolean;
+function GetTickCount: Cardinal;
+  external 'GetTickCount@kernel32.dll stdcall';
+
+// The mcpproxy-tray.exe processes started from this install directory, so a
+// portable or development tray elsewhere is left alone. False when WMI cannot be
+// asked; Restart Manager (CloseApplications) still handles whatever is open then.
+// Pids is their taskkill arguments, "/PID <n> /PID <m>".
+function QueryInstalledTrays(var Count: Integer; var Pids: String): Boolean;
+var
+  Locator, Service, Trays: Variant;
+  Path: String;
+  I, Pid: Integer;
 begin
-  Result := True;
-  // Future enhancement: Check for running processes
-  // if IsAppRunning('mcpproxy.exe') or IsAppRunning('mcpproxy-tray.exe') then
-  //   MsgBox('MCPProxy is currently running. Please close it before installing.', mbError, MB_OK);
-  //   Result := False;
+  // WQL string literal: backslashes and quotes are escaped.
+  Path := ExpandConstant('{app}\mcpproxy-tray.exe');
+  StringChangeEx(Path, '\', '\\', True);
+  StringChangeEx(Path, '''', '\''', True);
+  try
+    Locator := CreateOleObject('WbemScripting.SWbemLocator');
+    Service := Locator.ConnectServer('.', 'root\CIMV2');
+    Trays := Service.ExecQuery('SELECT ProcessId FROM Win32_Process WHERE Name = ''mcpproxy-tray.exe'' AND ExecutablePath = ''' + Path + '''');
+    Count := Trays.Count;
+    Pids := '';
+    for I := 0 to Count - 1 do
+    begin
+      Pid := Trays.ItemIndex(I).ProcessId;
+      Pids := Pids + Format(' /PID %d', [Pid]);
+    end;
+    Pids := Trim(Pids);
+    Result := True;
+  except
+    Log('Cannot list running trays: ' + GetExceptionMessage);
+    Count := 0;
+    Pids := '';
+    Result := False;
+  end;
+end;
+
+// Quit running trays the way the Quit menu does before any file is replaced, so
+// each one stops the core it started gracefully. taskkill without /F only sends
+// WM_CLOSE. Restart Manager alone would end the tray but not the windowless core.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Count, ResultCode: Integer;
+  Pids: String;
+  Listed: Boolean;
+  Started, Waited: Cardinal;
+begin
+  Result := '';
+  Listed := QueryInstalledTrays(Count, Pids);
+  if (not Listed) or (Count = 0) then
+    exit;
+  Log('Asking running MCPProxy trays to quit: ' + Pids);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), Pids, '', SW_HIDE,
+    ewWaitUntilTerminated, ResultCode);
+  // A tray waits for its core to stop, which can take up to the core's 60s
+  // shutdown limit; a tray that will not go is left to CloseApplications. A
+  // failed poll counts as still running, so Restart Manager is not let loose on
+  // a core that is still cleaning up. The limit is wall-clock time, WMI calls
+  // included.
+  Started := GetTickCount;
+  Waited := 0;
+  while Waited < 75000 do
+  begin
+    Listed := QueryInstalledTrays(Count, Pids);
+    if Listed and (Count = 0) then
+      break;
+    Sleep(500);
+    Waited := GetTickCount - Started;
+  end;
+  if Listed then
+    Log('Trays still running after ' + IntToStr(Waited) + ' ms: ' + IntToStr(Count))
+  else
+    Log('Trays could not be listed after ' + IntToStr(Waited) + ' ms');
 end;
 
 // Custom uninstall preservation of user data
