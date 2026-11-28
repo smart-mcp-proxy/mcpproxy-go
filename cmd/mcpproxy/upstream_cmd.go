@@ -1977,11 +1977,8 @@ func parseAddJSONRequest(serverName, jsonStr string) (*cliclient.AddServerReques
 // parseAddJSON is parseAddJSONRequest plus the sorted top-level keys it did not
 // apply, so the caller can warn about them.
 func parseAddJSON(serverName, jsonStr string) (*cliclient.AddServerRequest, []string, error) {
-	s, unknown, err := configimport.ParseNativeServer([]byte(jsonStr))
+	s, unknown, err := configimport.ParseNativeServer([]byte(jsonStr), validateTrustModeFlag)
 	if err != nil {
-		return nil, nil, err
-	}
-	if err := validateTrustModeFlag(s.TrustMode); err != nil {
 		return nil, nil, err
 	}
 	return &cliclient.AddServerRequest{

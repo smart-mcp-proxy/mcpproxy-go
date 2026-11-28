@@ -31,8 +31,10 @@ type NativeServer struct {
 // shape. Top-level keys outside NativeServerKeys are returned sorted (callers
 // report them; they are not applied), while an unknown key inside oauth is an
 // error. "type" (the Claude Desktop / VS Code spelling) is an alias for
-// protocol.
-func ParseNativeServer(raw []byte) (*NativeServer, []string, error) {
+// protocol. checkTrustMode, when non-nil, runs where add-json has always
+// checked trust_mode (after url-or-command, before oauth), so add-json reports
+// the same first error it always has.
+func ParseNativeServer(raw []byte, checkTrustMode func(string) error) (*NativeServer, []string, error) {
 	var keys map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &keys); err != nil {
 		return nil, nil, fmt.Errorf("invalid JSON: %w", err)
@@ -85,6 +87,11 @@ func ParseNativeServer(raw []byte) (*NativeServer, []string, error) {
 
 	if in.URL == "" && in.Command == "" {
 		return nil, nil, fmt.Errorf("JSON must contain either 'url' or 'command'")
+	}
+	if checkTrustMode != nil {
+		if err := checkTrustMode(in.TrustMode); err != nil {
+			return nil, nil, err
+		}
 	}
 	if err := in.OAuth.Validate(); err != nil {
 		return nil, nil, err
@@ -157,7 +164,7 @@ func (p *MCPProxyParser) Parse(content []byte) ([]*ParsedServer, error) {
 
 	servers := make([]*ParsedServer, 0, len(cfg.MCPServers))
 	for name, raw := range cfg.MCPServers {
-		s, unknown, err := ParseNativeServer(raw)
+		s, unknown, err := ParseNativeServer(raw, nil)
 		if err != nil {
 			return nil, &ImportError{Type: "parse_error", Message: fmt.Sprintf("server %q: %v", name, err)}
 		}
