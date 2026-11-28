@@ -6,18 +6,21 @@ import (
 	"strings"
 )
 
-// endpointURLMatches reports whether u, a URL found in a client config,
-// addresses the MCP endpoint baseURL of this instance: the endpoint itself,
-// with or without a query (the legacy ?apikey= shape), or the same endpoint
-// written with the name localhost instead of the loopback address (or the
-// other way round).
+// loopbackNameAlias reports whether u, a URL found in a client config,
+// addresses the MCP endpoint baseURL of this instance written with the name
+// localhost instead of the loopback address (or the other way round). The
+// exact address and its legacy ?apikey= form are matched by the callers.
 //
 // An entry a user (or another tool) wrote as http://localhost:8080/mcp is this
 // instance's entry when the instance is on http://127.0.0.1:8080/mcp. Without
 // this the status row reads "connected to another instance".
 //
 // The alias rule is deliberately narrow, because an entry recognised here can
-// be removed by Disconnect:
+// be removed by Disconnect. Callers that scan a whole file (the entry finders)
+// also prefer an exact match anywhere in the file over an alias. One ambiguity
+// remains and is accepted: on a machine where another program listens on the
+// same port of the OTHER loopback family, the name localhost can reach that
+// program instead of this instance.
 //
 //   - one side is the name localhost and the other is localhost, 127.0.0.1 or
 //     ::1. Two different loopback addresses (127.0.0.1 and 127.0.0.2, or
@@ -26,15 +29,6 @@ import (
 //   - no userinfo, no fragment, and a bracketed host must be an IPv6 literal.
 //
 // Anything else is somebody else's endpoint.
-func endpointURLMatches(u, baseURL string) bool {
-	if u == baseURL || strings.HasPrefix(u, baseURL+"?") {
-		return true
-	}
-	return loopbackNameAlias(u, baseURL)
-}
-
-// loopbackNameAlias is the alias half of endpointURLMatches, without the exact
-// match.
 func loopbackNameAlias(u, baseURL string) bool {
 	got, err := url.Parse(u)
 	if err != nil {
@@ -81,10 +75,13 @@ func isCanonicalLoopback(host string) bool {
 
 // wellFormedHost rejects an authority a client's URL parser would refuse but
 // url.Parse accepts: brackets around anything that is not an IPv6 literal
-// ("[localhost]:8080", "[127.0.0.1]:8080").
+// ("[localhost]:8080", "[127.0.0.1]:8080") and an IPv6 literal without
+// brackets ("::1:8080").
 func wellFormedHost(hostport string) bool {
 	if !strings.HasPrefix(hostport, "[") {
-		return true
+		// Without brackets there is at most one colon, the one before the port:
+		// "::1:8080" is not an authority a client can dial.
+		return strings.Count(hostport, ":") <= 1
 	}
 	end := strings.IndexByte(hostport, ']')
 	if end < 0 {

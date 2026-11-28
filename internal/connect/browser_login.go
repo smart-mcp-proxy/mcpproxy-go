@@ -166,7 +166,7 @@ func (s *Service) entryParamsFor(clientID string, oauth bool, credential string)
 // instance for clientID: the MCP endpoint itself (with or without a legacy
 // ?apikey= query) or exactly that client's browser login address.
 func (s *Service) urlPointsHere(u, baseURL, clientID string) bool {
-	if endpointURLMatches(u, baseURL) {
+	if u == baseURL || strings.HasPrefix(u, baseURL+"?") {
 		return true
 	}
 	return s.isOAuthURL(u, clientID)

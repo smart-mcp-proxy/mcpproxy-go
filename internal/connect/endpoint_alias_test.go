@@ -1,10 +1,18 @@
 package connect
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
-// localhost, 127.0.0.1 and [::1] name the same machine: a client entry that
-// differs from this instance's address only by a loopback alias points here.
+// The name localhost is an alias for the loopback address: a client entry that
+// differs from this instance's address only by that name points here.
 func TestEndpointURLMatches(t *testing.T) {
+	// What the entry finders accept: the exact address (or its legacy query
+	// form), else the localhost alias.
+	endpointURLMatches := func(u, baseURL string) bool {
+		return u == baseURL || strings.HasPrefix(u, baseURL+"?") || loopbackNameAlias(u, baseURL)
+	}
 	const base = "http://127.0.0.1:8080/mcp"
 	cases := []struct {
 		name, u, base string
@@ -26,6 +34,7 @@ func TestEndpointURLMatches(t *testing.T) {
 		{"bracketed name", "http://[localhost]:8080/mcp", base, false},
 		{"bracketed ipv4", "http://[127.0.0.1]:8080/mcp", "http://localhost:8080/mcp", false},
 		{"port with a leading zero", "http://localhost:08080/mcp", base, false},
+		{"ipv6 without brackets", "http://::1:8080/mcp", "http://localhost:8080/mcp", false},
 		{"trailing dot", "http://localhost.:8080/mcp", base, false},
 		{"backslash authority", "http://localhost:8080\\@evil.example/mcp", base, false},
 
@@ -54,30 +63,40 @@ func TestEndpointURLMatches(t *testing.T) {
 	}
 }
 
-// Every place that decides "this entry points at this instance" accepts the alias.
-func TestLoopbackAliasIsRecognisedEverywhere(t *testing.T) {
+// The bridge form: npx runs mcp-remote against the alias.
+func TestBridgeDestinationAlias(t *testing.T) {
 	const base = "http://127.0.0.1:8080/mcp"
-	s := NewService("127.0.0.1:8080", "k")
-	if !s.urlPointsHere("http://localhost:8080/mcp", base, "gemini") {
-		t.Error("urlPointsHere: localhost entry not recognised")
+	args := func(a ...interface{}) map[string]interface{} {
+		return map[string]interface{}{"command": "npx", "args": a}
 	}
-	bridge := map[string]interface{}{"command": "npx", "args": []interface{}{"-y", "mcp-remote", "http://localhost:8080/mcp"}}
-	if !entryPointsToBridge(bridge, base) {
-		t.Error("entryPointsToBridge: localhost bridge not recognised")
+	yes := []map[string]interface{}{
+		args("-y", "mcp-remote", "http://localhost:8080/mcp"),
+		args("mcp-remote", "http://localhost:8080/mcp"),
+		args("--yes", "mcp-remote@0.1.30", "http://localhost:8080/mcp", "--header", "X-API-Key: k"),
 	}
-}
-
-// The alias counts only for the bridge's destination. A bridge bound elsewhere
-// that merely carries a loopback URL in a later argument is not ours.
-func TestBridgeAliasIsTheDestinationOnly(t *testing.T) {
-	const base = "http://127.0.0.1:8080/mcp"
-	other := map[string]interface{}{"command": "npx", "args": []interface{}{"-y", "mcp-remote", "https://other.example/mcp", "--header", "http://localhost:8080/mcp"}}
-	if entryPointsToBridge(other, base) {
-		t.Error("a bridge to another host was recognised because of a later argument")
+	for _, e := range yes {
+		if !bridgeDestinationIsAlias(e, base) {
+			t.Errorf("not recognised: %v", e["args"])
+		}
 	}
-	noBridge := map[string]interface{}{"command": "npx", "args": []interface{}{"some-server", "http://localhost:8080/mcp"}}
-	if entryPointsToBridge(noBridge, base) {
-		t.Error("an entry without mcp-remote was recognised")
+	no := []map[string]interface{}{
+		args("-y", "cowsay", "mcp-remote", "http://localhost:8080/mcp"),                                // another package runs
+		args("-y", "mcp-remote", "https://other.example/mcp", "--header", "http://localhost:8080/mcp"), // bound elsewhere
+		args("-y", "mcp-remote", "--debug", "http://localhost:8080/mcp"),                               // not the destination position
+		args("-y", "mcp-remote-evil", "http://localhost:8080/mcp"),
+		args("-y", "mcp-remote"),
+		args("some-server", "http://localhost:8080/mcp"),
+		args("-y", "mcp-remote", "http://localhost:9090/mcp"),
+		args(),
+	}
+	for _, e := range no {
+		if bridgeDestinationIsAlias(e, base) {
+			t.Errorf("recognised: %v", e["args"])
+		}
+	}
+	// The exact matcher is what it was: it does not accept the alias at all.
+	if entryPointsToBridge(args("-y", "mcp-remote", "http://localhost:8080/mcp"), base) {
+		t.Error("entryPointsToBridge accepted the alias")
 	}
 }
 
@@ -119,5 +138,34 @@ func TestGetStatus_LoopbackAliasIsThisInstance(t *testing.T) {
 	}
 	if st.EndpointMatch != EndpointMatchOther {
 		t.Fatalf("endpoint_match = %q, want %q", st.EndpointMatch, EndpointMatchOther)
+	}
+}
+
+// An exact entry anywhere in the file wins over an alias, even one under the
+// default name that the scan visits first: status, the credential it reads and
+// Disconnect all keep pointing at the entry they pointed at before.
+func TestGetStatus_ExactEntryWinsOverAlias(t *testing.T) {
+	svc, homeDir := testService(t)
+	writeClientConfig(t, homeDir, "cursor", `{"mcpServers":{"mcpproxy":{"url":"http://localhost:8080/mcp"},"z-current":{"url":"http://127.0.0.1:8080/mcp"}}}`)
+	st, err := svc.GetStatus("cursor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ServerName != "z-current" || st.EndpointMatch != EndpointMatchThis {
+		t.Fatalf("server_name = %q, endpoint_match = %q; want z-current, %q", st.ServerName, st.EndpointMatch, EndpointMatchThis)
+	}
+}
+
+// With no exact entry, an alias under a custom name beats a default-named
+// entry that points somewhere else.
+func TestGetStatus_AliasBeatsNameOnly(t *testing.T) {
+	svc, homeDir := testService(t)
+	writeClientConfig(t, homeDir, "cursor", `{"mcpServers":{"mcpproxy":{"url":"http://localhost:9090/mcp"},"mine":{"url":"http://localhost:8080/mcp"}}}`)
+	st, err := svc.GetStatus("cursor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ServerName != "mine" || st.EndpointMatch != EndpointMatchThis {
+		t.Fatalf("server_name = %q, endpoint_match = %q; want mine, %q", st.ServerName, st.EndpointMatch, EndpointMatchThis)
 	}
 }
