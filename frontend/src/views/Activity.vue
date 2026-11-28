@@ -62,7 +62,7 @@
 
     <!-- Spec 124: the work-session list, or one session's failure timeline
          when the address names one (`ws`, `at`). -->
-    <SessionsPanel v-if="activeView === 'sessions'" :sessions="sessionsRaw" :auto-refresh="autoRefresh" />
+    <SessionsPanel v-if="activeView === 'sessions'" :sessions="sessionsRaw" :auto-refresh="autoRefresh" @open-calls="resetUnaddressedCallFilters" />
 
     <!-- Rule 5 (zcode review round 1, F4): from/to/server/tool/status/type/
          auth_type are "not applicable here" in Sessions — shown as disabled
@@ -1836,27 +1836,9 @@ function dateTimeLocalToISO(value: string): string | undefined {
 // converge rather than loop: re-applying the query re-sets refs to the
 // values they already have as soon as a round trip settles, which triggers
 // nothing further.
-// The view and the session the address named last, to tell a link out of
-// Sessions that names another session from a look at the tab and back.
-let lastRouteView = ''
-let lastRouteSession = ''
 function applyRouteFilters(): void {
   const q = route.query
   const str = (v: unknown): string => (typeof v === 'string' ? v : '')
-
-  // Spec 124: a session link out of the Sessions view shows that session's
-  // calls. "Sensitive data" and "View sub-calls" are not in the address and
-  // have no chip in Sessions, so one left from earlier would narrow the
-  // session's calls unseen. A tab round trip keeps the session it had, and
-  // with it the filters the user set on its calls.
-  const view = str(q.view)
-  const session = str(q.session)
-  if (lastRouteView === 'sessions' && view !== 'sessions' && session && session !== lastRouteSession) {
-    filterParentId.value = ''
-    filterSensitiveData.value = ''
-  }
-  lastRouteView = view
-  lastRouteSession = session
 
   filterSession.value = str(q.session)
   filterStatus.value = str(q.status)
@@ -2210,6 +2192,21 @@ const getSessionLabel = (sessionId: string): string => {
 
 /** Spec 124: the Sessions list's own filter. It is in the address, so the
  * Filters count and "Clear Filters" account for it in that view. */
+/**
+ * Spec 124: a session's "Tool calls" link was followed from the Sessions view.
+ * "Sensitive data" (with its severity) and "View sub-calls" are not in the
+ * address and have no chip in Sessions, so one left from earlier would narrow
+ * that session's calls unseen. Only the link does this, and only for a session
+ * other than the one the calls view already shows: the tabs, Back, a bookmark
+ * and the way back to the same session leave the filters as the user set them.
+ */
+function resetUnaddressedCallFilters(session: string): void {
+  if (session === filterSession.value) return
+  filterParentId.value = ''
+  filterSensitiveData.value = ''
+  filterSeverity.value = ''
+}
+
 // Read as the panel reads them: the first value of a repeated parameter.
 const sessionsFailedOnly = computed(() => activeView.value === 'sessions' && scopeQuery.state.failed === 'true')
 // One session's timeline is open (the Sessions view with `ws` in the address).

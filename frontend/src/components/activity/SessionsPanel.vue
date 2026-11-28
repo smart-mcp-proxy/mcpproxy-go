@@ -12,7 +12,7 @@
   The parent still fetches that list and passes it in.
 -->
 <template>
-  <SessionTimeline v-if="timelineId" :key="timelineId" />
+  <SessionTimeline v-if="timelineId" :key="timelineId" @open-calls="emit('open-calls', $event)" />
 
   <div v-else class="space-y-4" data-test="work-sessions">
     <div class="card bg-base-100 shadow-sm">
@@ -192,6 +192,7 @@
                 <td class="text-right">
                   <router-link
                     :to="callsLink(ws.id)"
+                    @click="onCallsClick($event, ws.id)"
                     class="link font-mono max-sm:inline-flex max-sm:min-h-11 max-sm:min-w-11 max-sm:items-center max-sm:justify-end"
                     :title="`Tool calls of this session`"
                     :aria-label="`${ws.attempts} calls: open the Tool calls of session ${sessionName(ws)}`"
@@ -255,7 +256,8 @@
 
         <p class="text-xs text-base-content/70" data-test="work-sessions-note">
           A work session is one agent's run of work: one credential, one client, one project, until it has been idle for 30 minutes.
-          Counts are lifetime facts and stay exact after retention has removed rows, except for a session marked "Rebuilt from rows".
+          Counts cover the whole session and are not reduced when retention removes rows. A session marked "Rebuilt from rows", or one that
+          resumed after it had left this list, counts only what happened in the rows it still knows of.
         </p>
       </div>
     </div>
@@ -286,6 +288,13 @@ import SessionConnections from '@/components/activity/SessionConnections.vue'
 import SessionTimeline from '@/components/activity/SessionTimeline.vue'
 import StateTag from '@/components/StateTag.vue'
 import UiIcon from '@/components/UiIcon.vue'
+
+/** `open-calls`: the Tool calls link of that session was followed in this tab. */
+const emit = defineEmits<{ (e: 'open-calls', session: string): void }>()
+function onCallsClick(event: MouseEvent, session: string): void {
+  // A click that opens another tab or window leaves this page as it is.
+  if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) emit('open-calls', session)
+}
 
 const props = withDefaults(defineProps<{
   /** MCP connections (GET /sessions), fetched by the parent. */

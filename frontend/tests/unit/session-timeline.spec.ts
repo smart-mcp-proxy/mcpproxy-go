@@ -217,6 +217,17 @@ describe('Session timeline (Spec 124 FR-062)', () => {
     expect(api.getWorkSessionTimeline).toHaveBeenLastCalledWith(WS_FAILED.id, { at: 'failure:2', before: 70, after: 70 })
   })
 
+  it('a page opened at the end is widened around the row it shows, not around an end that moves', async () => {
+    // The session is still running: "end" a moment later is another row.
+    door.page = timelinePage({ position: 15, failure_index: 3, has_before: true })
+    const { wrapper, router, api } = await mountTimeline(`/activity?view=sessions&ws=${WS_FAILED.id}&at=end`)
+    expect(api.getWorkSessionTimeline).toHaveBeenLastCalledWith(WS_FAILED.id, { at: 'end', before: 20, after: 20 })
+    await wrapper.get('[data-test="timeline-load-earlier"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query.at).toBe('row:a15')
+    expect(api.getWorkSessionTimeline).toHaveBeenLastCalledWith(WS_FAILED.id, { at: 'row:a15', before: 70, after: 20 })
+  })
+
   it('shows the rows a wider page brings, and keeps them after a step to another failure', async () => {
     const later = { index: 16, kind: 'call', at: '2026-11-26T22:40:30.000Z', activity: { id: 'a16', type: 'tool_call', status: 'success', timestamp: '2026-11-26T22:40:30.000Z', server_name: 'github', tool_name: 'later_call' } }
     const wide = (overrides: Record<string, unknown> = {}) => {
@@ -747,6 +758,12 @@ describe('Session timeline (Spec 124 FR-062)', () => {
     expect(wrapper.find('[data-test="timeline-truncated-start"]').exists()).toBe(false)
     expect(wrapper.get('[data-test="timeline-facts"]').text()).not.toContain('connection')
     expect(wrapper.get('[data-test="timeline-facts"]').text()).not.toContain('Profile')
+  })
+
+  it('announces "session not found": it arrives after the focus moved to the heading', async () => {
+    door.fail = Object.assign(new Error('not found'), { status: 404 })
+    const { wrapper } = await mountTimeline()
+    expect(wrapper.get('[data-test="timeline-not-found"]').attributes('role')).toBe('alert')
   })
 
   it('a 404 shows "session not found" with a way back to the list', async () => {

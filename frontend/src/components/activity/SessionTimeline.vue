@@ -32,7 +32,7 @@
 
     <!-- A session that is not there, is not the caller's, or has nothing in
          the caller's reach: the door answers the same 404 for all three. -->
-    <div v-if="notFound" class="card bg-base-100 shadow-sm" data-test="timeline-not-found">
+    <div v-if="notFound" class="card bg-base-100 shadow-sm" role="alert" data-test="timeline-not-found">
       <div class="card-body items-center text-center py-10">
         <p class="text-lg">Session not found</p>
         <p class="text-sm text-base-content/70">
@@ -88,6 +88,7 @@
               :to="callsLink"
               class="btn btn-sm btn-outline max-sm:min-h-11 border-[var(--ds-border)]"
               data-test="timeline-calls-link"
+              @click="onCallsClick"
             >Tool calls of this session</router-link>
           </div>
 
@@ -394,6 +395,12 @@ import {
 import StateTag from '@/components/StateTag.vue'
 import UiIcon from '@/components/UiIcon.vue'
 
+/** `open-calls`: the session's Tool calls link was followed in this tab. */
+const emit = defineEmits<{ (e: 'open-calls', session: string): void }>()
+function onCallsClick(event: MouseEvent): void {
+  if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) emit('open-calls', sessionId.value)
+}
+
 const route = useRoute()
 const scopeQuery = useScopeQuery('activity')
 const profiles = useProfilesStore()
@@ -533,6 +540,24 @@ function loadEarlier(): void {
     return
   }
   before.value = Math.min(before.value + TIMELINE_CONTEXT_STEP, TIMELINE_CONTEXT_MAX)
+  loadAround()
+}
+
+/**
+ * Reads the wider page. `end` moves while a session is running, so a page
+ * opened there is widened around the row it shows: the rows the operator is
+ * reading stay, whatever has arrived since.
+ */
+function loadAround(): void {
+  const current = page.value
+  if (shown.value.at === 'end' && current) {
+    const positioned = current.rows.find(row => row.index === current.position)
+    const anchor = positioned?.activity?.id ? `row:${positioned.activity.id}` : edgeRowAt('last')
+    if (anchor) {
+      goTo(anchor)
+      return
+    }
+  }
   void load()
 }
 
@@ -546,7 +571,7 @@ function loadLater(): void {
     return
   }
   after.value = Math.min(after.value + TIMELINE_CONTEXT_STEP, TIMELINE_CONTEXT_MAX)
-  void load()
+  loadAround()
 }
 
 const session = computed<WorkSession>(() => page.value!.session)
