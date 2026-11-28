@@ -97,6 +97,22 @@ func TestCallback_DecisionBeforePage(t *testing.T) {
 	}
 }
 
+// RegisterArmedState creates the waiter and its check in one step.
+func TestCallback_RegisterArmedState(t *testing.T) {
+	serverName := "iss-register-armed"
+	manager := GetGlobalCallbackManager()
+	cs, err := manager.StartCallbackServer(serverName, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.StopCallbackServer(serverName) })
+	e := IssuerExpectation{Expected: ExpectedIssuer{Issuer: "https://a.example", Source: IssuerSourceDiscovered}}
+	ch := cs.RegisterArmedState("s1", e)
+	require.True(t, cs.HasState("s1"))
+	got, exp, ok := cs.take("s1")
+	require.True(t, ok)
+	assert.Equal(t, e, exp)
+	assert.Equal(t, (<-chan CallbackResult)(got), ch)
+}
+
 // Arming needs a registered waiter: an expectation for an unknown state is
 // not stored, so it cannot later attach to a flow that registers it.
 func TestCallback_ArmUnknownStateRefused(t *testing.T) {

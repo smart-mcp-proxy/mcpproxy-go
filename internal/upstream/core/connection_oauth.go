@@ -1260,8 +1260,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 
 	// Spec 135 FR-002: record the expected issuer as soon as the URL exists,
 	// before it reaches anyone (the stale-client probe sends it too).
-	callbackCh := callbackServer.RegisterState(state)
-	issuerCheck, err := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
+	issuerCheck, callbackCh, err := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
 	if err != nil {
 		return err
 	}
@@ -1585,8 +1584,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 
 	// Spec 135 FR-002: record the expected issuer as soon as the URL exists,
 	// before it reaches anyone (the stale-client probe sends it too).
-	callbackCh := callbackServer.RegisterState(state)
-	issuerCheck, err := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
+	issuerCheck, callbackCh, err := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
 	if err != nil {
 		return result, err
 	}
@@ -1749,14 +1747,15 @@ func (c *Client) exchangeAuthorizationCode(ctx context.Context, h *uptransport.O
 }
 
 // armIssuerCheck records the flow's expected issuer (Spec 135 FR-002) from
-// the metadata the handler built the authorization URL with, and arms the
-// callback check for state on cb (FR-003). Call it after the final
-// GetAuthorizationURL and before the URL leaves the flow. The returned
-// expectation is what the code exchange checks again.
-func (c *Client) armIssuerCheck(ctx context.Context, h *uptransport.OAuthHandler, oauthConfig *client.OAuthConfig, cb *oauth.CallbackServer, state string) (oauth.IssuerExpectation, error) {
+// the metadata the handler built the authorization URL with, and registers
+// the callback waiter for state on cb together with that check, atomically
+// (FR-003). Call it right after GetAuthorizationURL, before the URL is used.
+// It returns the expectation the code exchange checks again and the waiter
+// channel.
+func (c *Client) armIssuerCheck(ctx context.Context, h *uptransport.OAuthHandler, oauthConfig *client.OAuthConfig, cb *oauth.CallbackServer, state string) (oauth.IssuerExpectation, <-chan oauth.CallbackResult, error) {
 	meta, err := h.GetServerMetadata(ctx)
 	if err != nil {
-		return oauth.IssuerExpectation{}, fmt.Errorf("authorization server metadata unavailable for the issuer check: %w", err)
+		return oauth.IssuerExpectation{}, nil, fmt.Errorf("authorization server metadata unavailable for the issuer check: %w", err)
 	}
 	source := oauth.IssuerSourceDiscovered
 	configuredURL := ""
@@ -1772,14 +1771,15 @@ func (c *Client) armIssuerCheck(ctx context.Context, h *uptransport.OAuthHandler
 			configuredURL, meta.AuthorizationEndpoint, meta.TokenEndpoint, meta.RegistrationEndpoint),
 		Skip: c.config.OAuth != nil && c.config.OAuth.SkipIssuerValidation != nil && *c.config.OAuth.SkipIssuerValidation,
 	}
-	if cb != nil && !cb.ArmIssuerCheck(state, exp) {
-		return oauth.IssuerExpectation{}, fmt.Errorf("OAuth callback waiter for this sign-in is gone; start the login again")
+	var ch <-chan oauth.CallbackResult
+	if cb != nil {
+		ch = cb.RegisterArmedState(state, exp)
 	}
 	if exp.Skip {
 		c.logger.Warn("OAuth issuer validation is relaxed for this server (oauth.skip_issuer_validation): a wrong or missing iss is accepted, and a login that relies on that is not mix-up protected",
 			zap.String("server", c.config.Name))
 	}
-	return exp, nil
+	return exp, ch, nil
 }
 
 // isOAuthInProgress checks if OAuth is in progress
@@ -2361,13 +2361,11 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 	// the registration, so a failed flow leaves no dangling waiter behind.
 	var waiter *callbackWaiter
 	if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
-		waiter = &callbackWaiter{server: callbackServer, ch: callbackServer.RegisterState(state)}
-		issuerCheck, armErr := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
+		issuerCheck, ch, armErr := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
 		if armErr != nil {
-			callbackServer.UnregisterState(state)
 			return "", nil, "", "", nil, armErr
 		}
-		waiter.issuer = issuerCheck
+		waiter = &callbackWaiter{server: callbackServer, ch: ch, issuer: issuerCheck}
 	}
 	dropWaiter := func() {
 		if waiter != nil {

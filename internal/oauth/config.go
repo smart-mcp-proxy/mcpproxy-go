@@ -1867,6 +1867,26 @@ func (c *CallbackServer) UnregisterState(state string) {
 	}
 }
 
+// RegisterArmedState registers the waiter for state and records its issuer
+// expectation in one step under one lock (Spec 135 FR-002), so no callback can
+// take the waiter before the issuer check exists. Registering a state that
+// already has a waiter returns that waiter and replaces its expectation.
+func (c *CallbackServer) RegisterArmedState(state string, e IssuerExpectation) <-chan CallbackResult {
+	c.waitersMu.Lock()
+	defer c.waitersMu.Unlock()
+	ch, exists := c.waiters[state]
+	if !exists {
+		ch = make(chan CallbackResult, 1)
+		c.waiters[state] = ch
+	}
+	if c.issuerChecks == nil {
+		c.issuerChecks = make(map[string]IssuerExpectation)
+	}
+	c.issuerChecks[state] = e
+	c.logger.Debug("Registered OAuth callback waiter with its issuer check", zap.String("state", StateFingerprint(state)))
+	return ch
+}
+
 // ArmIssuerCheck records the issuer expectation of the flow that registered
 // state (Spec 135 FR-002). The flow calls it after its authorization URL is
 // built and before the URL leaves it, so the callback handler decides the
