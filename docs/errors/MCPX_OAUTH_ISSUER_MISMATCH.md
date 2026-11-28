@@ -35,8 +35,6 @@ sent the response controls it.
 
 ## Common causes
 
-- Another sign-in, in another tab or for another server, finished in the same
-  browser while this one was open.
 - The provider's sign-in page handed the browser to a different
   authorization server, for example after a tenant or region switch.
 - The provider sends an `iss` value that differs from the `issuer` in its own
@@ -47,7 +45,7 @@ sent the response controls it.
 
 ### Sign in again
 
-Start the login again from mcpproxy, and finish it in a single browser tab:
+Start the login again from mcpproxy:
 
 ```bash
 mcpproxy auth login --server=<server-name>
@@ -70,8 +68,9 @@ check off for that one server:
 }
 ```
 
-With `skip_issuer_validation` on, a wrong or missing `iss` is accepted and
-logged as a warning, and the login is not protected against mix-up. The
+With `skip_issuer_validation` on, a wrong `iss`, or a missing one the
+metadata advertises, is accepted and logged as a warning, and the login is
+not protected against mix-up. The
 strict parse of the response is still applied. Turn it off again once the
 provider is fixed.
 

@@ -73,7 +73,9 @@ func classifyOAuth(err error, _ ClassifierHints) Code {
 		return OAuthTokenUndecryptable
 	// Spec 135: a refused authorization response. Matched before the
 	// login-required text, which the refusal's advice would otherwise hit.
-	case strings.Contains(msg, "mcpx_oauth_issuer_mismatch"):
+	// The producer's own sentence, not the bare code, so a provider text that
+	// merely mentions the code is not taken for the refusal.
+	case strings.Contains(msg, "mcpx_oauth_issuer_mismatch: the sign-in response could not be confirmed"):
 		return OAuthIssuerMismatch
 	// Re-auth (a previously-working stored token broke) is matched BEFORE the
 	// login-required backstop because "re-login available" contains the

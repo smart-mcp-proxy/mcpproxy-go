@@ -46,4 +46,8 @@ func TestOAuthIssuerMismatch_CatalogAndDocs(t *testing.T) {
 	if got := Classify(errors.New(msg), ClassifierHints{}); got != code {
 		t.Errorf("Classify = %q, want %q", got, code)
 	}
+	// A provider text that only mentions the code is not the refusal.
+	if got := Classify(errors.New("OAuth authorization failed: redirect URI mismatch (reference MCPX_OAUTH_ISSUER_MISMATCH)"), ClassifierHints{}); got == code {
+		t.Errorf("a bare mention of the code classified as the refusal")
+	}
 }

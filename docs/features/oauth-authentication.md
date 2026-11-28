@@ -113,7 +113,9 @@ authorization server metadata that URL came from, and whether that metadata
 says the server always sends `iss`
 (`authorization_response_iss_parameter_supported`). When the browser comes
 back, the callback compares the response's `iss` with that record before the
-page is chosen and before anything is exchanged:
+page is chosen and before anything is exchanged. This covers the local and the
+remote (`oauth.callback_base_url`) callback; the server edition's brokered
+credential connect callback does not check `iss` yet:
 
 | Response | Result |
 |---|---|
@@ -148,8 +150,8 @@ then omit it, the check can be turned off for that one server:
 }
 ```
 
-With it on, a wrong or missing `iss` is accepted with a warning, and the
-sign-in is not protected against mix-up. The strict parse above is still
+With it on, a wrong `iss`, or a missing one the metadata advertises, is
+accepted with a warning, and the sign-in is not protected against mix-up. The strict parse above is still
 applied. Changing the setting does not sign the server out.
 
 The issuer of metadata that mcpproxy discovers is not yet checked against the
@@ -444,8 +446,8 @@ The callback page reports **Authorization Failed** with "The sign-in response
 could not be confirmed as coming from the expected authorization server" when
 the response's `iss` did not match the authorization server the sign-in
 started with (see [Which authorization server answered](#which-authorization-server-answered-rfc-9207-iss)).
-Nothing was exchanged or stored. Start the sign-in again and finish it in one
-browser tab. If it fails every time, see
+Nothing was exchanged or stored. Start the sign-in again. If it fails every
+time, see
 [`MCPX_OAUTH_ISSUER_MISMATCH`](../errors/MCPX_OAUTH_ISSUER_MISMATCH.md).
 
 ### The browser says the sign-in was invalidated
