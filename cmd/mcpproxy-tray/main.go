@@ -324,11 +324,20 @@ func main() {
 		logger.Error("Tray application error", zap.Error(err))
 	}
 
-	// Wait for shutdown to complete (with timeout)
+	// The event loop also ends without Quit: Windows' end-session message (logoff,
+	// an installer's Restart Manager), WM_CLOSE (taskkill without /F) or macOS
+	// logout exit it directly. Run the Quit flow anyway so the core this tray
+	// started does not outlive it and keep the installed files locked. A no-op
+	// when Quit already ran. Started in a goroutine: a second caller blocks until
+	// the first shutdown completes, which would bypass the timeout below.
+	go shutdownFunc()
+
+	// Wait for shutdown to complete (with timeout). The launcher may wait up to
+	// shutdown.Tray + 5s for the core to stop.
 	select {
 	case <-shutdownComplete:
 		logger.Info("Shutdown completed successfully")
-	case <-time.After(5 * time.Second):
+	case <-time.After(shutdown.Tray + 10*time.Second):
 		logger.Warn("Shutdown timeout - forcing exit")
 	}
 
