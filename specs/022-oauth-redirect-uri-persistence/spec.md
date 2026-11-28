@@ -1,7 +1,7 @@
 # Spec 022: OAuth Redirect URI Port Persistence
 
 ## Status
-Draft
+Implemented
 
 ## Problem Statement
 

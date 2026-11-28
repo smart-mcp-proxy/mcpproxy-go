@@ -1417,7 +1417,7 @@ Spec: [130-skills-review-ux](./specs/130-skills-review-ux/) · PR: #1987 #1988
 | Spec 108 profiles v3: scoped profiles, client binding, scope-aware observability | In progress | P1 | 194/195 (99%) | [108-profiles-v3](./specs/108-profiles-v3/) |  |
 | Spec 109 navigation, scope filters and cross-surface UX consistency | In progress | P1 | 257/258 (100%) | [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/) |  |
 | Spec 124 work sessions and the failure timeline | In progress | P1 | 45/74 (61%) | [124-session-failure-timeline](./specs/124-session-failure-timeline/) |  |
-| Spec 132 browser login for MCP clients: MCPProxy as an OAuth 2.1 authorization server | In progress | P1 | 8/72 (11%) | [132-client-oauth-login](./specs/132-client-oauth-login/) |  |
+| Spec 132 browser login for MCP clients: MCPProxy as an OAuth 2.1 authorization server | In progress | P1 | 65/72 (90%) | [132-client-oauth-login](./specs/132-client-oauth-login/) |  |
 | Spec 133 admin_action audit events: who changed the rules, on the JSONL audit line | In progress | P1 | — | [133-admin-action-audit](./specs/133-admin-action-audit/) |  |
 | Spec 134 Web UI simplification: problems first, no function lost | In progress | P1 | — | [134-webui-simplify](./specs/134-webui-simplify/) |  |
 | Spec 135 OAuth client hardening: issuer checks on upstream sign-in (mix-up defence) | In progress | P1 | 14/39 (36%) | [135-oauth-client-hardening](./specs/135-oauth-client-hardening/) |  |
@@ -1457,7 +1457,7 @@ Spec: [130-skills-review-ux](./specs/130-skills-review-ux/) · PR: #1987 #1988
 | Quarantine/approval testing pilot: independent policy model, scenario inventory, mutation gate | Done | P1 | — |  | #1619 #1631 #1634 |
 | Spec 118 automatic rescan after a tool-definition change (clean verdict recorded as hold evidence) | Done | P1 | — | [118-auto-rescan-on-change](./specs/118-auto-rescan-on-change/) | #1689 |
 | Spec 122 SkillSpector-informed checks for the built-in tool scanner | Done | P1 | 31/31 (100%) | [122-scanner-skillspector-checks](./specs/122-scanner-skillspector-checks/) | #1818 |
-| Spec 123 encrypt upstream OAuth tokens at rest (opt-in key, doctor section, auth tokens commands) | Done | P1 | 0/56 (0%) | [123-oauth-token-encryption](./specs/123-oauth-token-encryption/) | #1886 #1887 #1888 #1891 |
+| Spec 123 encrypt upstream OAuth tokens at rest (opt-in key, doctor section, auth tokens commands) | Done | P1 | 49/56 (88%) | [123-oauth-token-encryption](./specs/123-oauth-token-encryption/) | #1886 #1887 #1888 #1891 |
 | Spec 125 Skills over MCP: catalog, approval gate, read-only agent tools | Done | P1 | 51/51 (100%) | [125-skills-over-mcp](./specs/125-skills-over-mcp/) |  |
 | Tray↔core decoupling: socket/REST API only, no config-file reads | Done | P2 | — |  |  |
 | Spec 107 server edition SSO front door hardened for real IdPs | Done | P2 | 126/126 (100%) | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) |  |
@@ -1488,7 +1488,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [004-management-health-refactor](./specs/004-management-health-refactor/) | `in-flight` | 75/101 (74%) |
 | [005-rest-management-integration](./specs/005-rest-management-integration/) | `shipped` | 45/45 (100%) |
 | [006-oauth-extra-params](./specs/006-oauth-extra-params/) | `in-flight` | 44/65 (68%) |
-| [007-oauth-e2e-testing](./specs/007-oauth-e2e-testing/) | `in-flight` | 94/103 (91%) |
+| [007-oauth-e2e-testing](./specs/007-oauth-e2e-testing/) | `in-flight` | 95/103 (92%) |
 | [008-oauth-token-refresh](./specs/008-oauth-token-refresh/) | `in-flight` | 57/64 (89%) |
 | [009-proactive-oauth-refresh](./specs/009-proactive-oauth-refresh/) | `in-flight` | 49/87 (56%) |
 | [010-release-notes-generator](./specs/010-release-notes-generator/) | `in-flight` | 25/36 (69%) |
@@ -1505,7 +1505,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [019-activity-webui](./specs/019-activity-webui/) | `shipped` | 72/73 (99%) |
 | [020-oauth-login-feedback](./specs/020-oauth-login-feedback/) | — | — |
 | [021-request-id-logging](./specs/021-request-id-logging/) | `in-flight` | 35/42 (83%) |
-| [022-oauth-redirect-uri-persistence](./specs/022-oauth-redirect-uri-persistence/) | `in-flight` | 23/25 (92%) |
+| [022-oauth-redirect-uri-persistence](./specs/022-oauth-redirect-uri-persistence/) | `shipped` | 24/25 (96%) |
 | [023-oauth-state-persistence](./specs/023-oauth-state-persistence/) | `shipped` | 38/39 (97%) |
 | [023-smart-config-patch](./specs/023-smart-config-patch/) | `shipped` | 52/53 (98%) |
 | [024-expand-activity-log](./specs/024-expand-activity-log/) | `shipped` | 63/66 (95%) |
@@ -1598,7 +1598,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [119-scan-default-trust](./specs/119-scan-default-trust/) | — | — |
 | [120-scan-structural-gate](./specs/120-scan-structural-gate/) | — | — |
 | [122-scanner-skillspector-checks](./specs/122-scanner-skillspector-checks/) | `shipped` | 31/31 (100%) |
-| [123-oauth-token-encryption](./specs/123-oauth-token-encryption/) | `drafted` | 0/56 (0%) |
+| [123-oauth-token-encryption](./specs/123-oauth-token-encryption/) | `in-flight` | 49/56 (88%) |
 | [124-session-failure-timeline](./specs/124-session-failure-timeline/) | `in-flight` | 45/74 (61%) |
 | [125-skills-over-mcp](./specs/125-skills-over-mcp/) | `shipped` | 51/51 (100%) |
 | [127-profile-argument-rules](./specs/127-profile-argument-rules/) | — | — |
@@ -1606,7 +1606,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [129-per-user-upstream-credentials](./specs/129-per-user-upstream-credentials/) | — | — |
 | [130-skills-review-ux](./specs/130-skills-review-ux/) | `shipped` | 9/9 (100%) |
 | [131-skills-card-ux](./specs/131-skills-card-ux/) | `shipped` | 7/7 (100%) |
-| [132-client-oauth-login](./specs/132-client-oauth-login/) | `in-flight` | 8/72 (11%) |
+| [132-client-oauth-login](./specs/132-client-oauth-login/) | `in-flight` | 65/72 (90%) |
 | [133-admin-action-audit](./specs/133-admin-action-audit/) | — | — |
 | [134-webui-simplify](./specs/134-webui-simplify/) | — | — |
 | [135-oauth-client-hardening](./specs/135-oauth-client-hardening/) | `in-flight` | 14/39 (36%) |
