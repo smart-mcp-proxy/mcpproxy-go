@@ -399,6 +399,17 @@ jobs:
           echo "Skipping notarization for PR build - this is a development build"
           echo "Production builds go through full notarization in release workflow"
 
+      # Same script and pinned Inno Setup as the release workflow, so the
+      # installer can be tried (or shared, e.g. via nightly.link) before a release.
+      - name: Install Inno Setup (Windows)
+        if: matrix.goos == 'windows'
+        uses: ./.github/actions/install-inno-setup
+
+      - name: Create Windows installer (Windows)
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: ./scripts/build-windows-installer.ps1 -Version $env:VERSION -Arch "${{ matrix.goarch }}"
+
       - name: Upload archive artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
@@ -414,6 +425,15 @@ jobs:
           path: mcpproxy-*-darwin-${{ matrix.goarch }}-installer.dmg
           retention-days: 14
           if-no-files-found: warn
+
+      - name: Upload Windows installer
+        if: matrix.goos == 'windows'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: installer-windows-${{ matrix.goarch }}
+          path: dist/mcpproxy-setup-*-${{ matrix.goarch }}.exe
+          retention-days: 14
+          if-no-files-found: error
 
   # The release workflow's `release` job now depends on `build-docker`, so a
   # Dockerfile that no longer builds blocks a whole release at tag time. Build

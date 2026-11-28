@@ -201,7 +201,7 @@ Based on plan.md:
 - [x] T071 [US7] Implement unsupported_grant_type error injection in `tests/oauthserver/token.go`
 - [x] T072 [US7] Implement SetErrorMode() runtime update API in `tests/oauthserver/server.go`
 - [x] T073 [US7] Write unit tests for each error type in `tests/oauthserver/server_test.go` (TestErrorInjection_*)
-- [ ] T074 [US7] Write integration test verifying mcpproxy error handling in `tests/oauthserver/integration_test.go`
+- [x] T074 [US7] Write integration test verifying mcpproxy error handling in `tests/oauthserver/integration_test.go`
 
 **Checkpoint**: User Story 7 complete - Error injection works
 
