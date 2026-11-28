@@ -12,7 +12,7 @@ import (
 
 // singleInstanceLock keeps the locked file open (and out of the GC's reach,
 // whose finalizer would close it) for the life of the process.
-var singleInstanceLock *os.File
+var singleInstanceLock *os.File //nolint:unused // written only: holding the reference is the point
 
 // acquireSingleInstance takes an exclusive flock on ~/.mcpproxy/<id>.lock and
 // reports whether this process is the only one holding it. The kernel drops the
