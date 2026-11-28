@@ -1346,7 +1346,8 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	select {
 	case params := <-callbackCh:
 		if params.Err != nil {
-			c.reportOAuthFailure(fmt.Errorf("OAuth authorization for %s was refused: %w", c.config.Name, params.Err))
+			// Connect path: the returned error is recorded by the managed
+			// client's state transition, so it is not recorded here too.
 			return fmt.Errorf("OAuth authorization response refused: %w", params.Err)
 		}
 		waitDuration := time.Since(waitStartTime)
@@ -1632,6 +1633,8 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 	select {
 	case params := <-callbackCh:
 		if params.Err != nil {
+			// A forced login's caller only logs its error, so the refusal is
+			// recorded on the server status here.
 			c.reportOAuthFailure(fmt.Errorf("OAuth authorization for %s was refused: %w", c.config.Name, params.Err))
 			return result, fmt.Errorf("OAuth authorization response refused: %w", params.Err)
 		}

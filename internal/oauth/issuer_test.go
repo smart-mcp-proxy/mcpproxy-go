@@ -71,13 +71,16 @@ func TestDecideIssuer_Matrix(t *testing.T) {
 		{IssuerSourceSynthetic, false, "wrong", false, unprotected},
 		{IssuerSourceSynthetic, false, "correct", false, unprotected},
 		{IssuerSourceSynthetic, false, "repeated", false, refused},
-		// opt-out: wrong or absent accepted, never protected (FR-014);
+		// opt-out: wrong or absent accepted and not protected, a match that
+		// waived nothing protected as in strict mode (FR-014);
 		// a repeated iss is still refused (FR-001 is never skipped).
 		{IssuerSourceDiscovered, true, "wrong", true, unprotected},
 		{IssuerSourceDiscovered, true, "absent", true, unprotected},
 		{IssuerSourceDiscovered, true, "empty", true, unprotected},
 		{IssuerSourceFallback, false, "wrong", true, unprotected},
 		{IssuerSourceDiscovered, true, "repeated", true, refused},
+		{IssuerSourceDiscovered, true, "correct", true, protected},
+		{IssuerSourceDiscovered, false, "absent", true, unprotected},
 	}
 	for _, tc := range cases {
 		name := string(tc.source) + "/" + tc.iss

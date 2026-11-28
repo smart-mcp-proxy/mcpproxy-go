@@ -94,7 +94,8 @@ func (e *IssuerMismatchError) Code() diagnostics.Code { return diagnostics.OAuth
 //     and accepted (not protected) otherwise.
 //   - synthetic: the operator's overrides are the trust anchor; any iss is
 //     accepted, never protected.
-//   - skip: a wrong or absent iss is accepted, never protected.
+//   - skip: a wrong iss, or an absent one that was advertised, is accepted
+//     and not protected; a match that waived nothing is decided as strict.
 //
 // A zero expectation (Source == "") is refused: nothing may be exchanged
 // for a response whose issuer was never decided.
@@ -136,9 +137,12 @@ func DecideAuthorizationResponseIssuer(q url.Values, exp ExpectedIssuer, skip bo
 		}
 		return refuse(problem)
 	}
-	if !present || skip {
+	if !present {
 		return IssuerDecision{}, nil
 	}
+	// Under skip, a match whose checks all passed is protected as in strict
+	// mode: only a check actually waived downgrades the login (contract
+	// config-skip-issuer-validation.md "Protection result").
 	eligible := exp.Source == IssuerSourceDiscovered || (exp.Source == IssuerSourceConfigured && exp.Verified)
 	return IssuerDecision{Protected: eligible && !exp.Insecure}, nil
 }

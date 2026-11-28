@@ -2130,7 +2130,7 @@ func (c *CallbackServer) handleParsedCallback(w http.ResponseWriter, query url.V
 				zap.String("expected_issuer", logSafeURL(issuerCheck.Expected.Issuer)),
 				zap.String("issuer_source", string(issuerCheck.Expected.Source)),
 				zap.Bool("iss_present", issPresent),
-				zap.String("iss", ScrubUpstreamText(params.Get("iss"))))
+				zap.String("iss", logSafeURL(params.Get("iss"))))
 			// Not recorded here: the flow that owns this state receives the
 			// refusal and records it once, on the loopback and the remote
 			// callback alike, under its own retirement rules.
@@ -2147,13 +2147,13 @@ func (c *CallbackServer) handleParsedCallback(w http.ResponseWriter, query url.V
 				zap.String("state", StateFingerprint(state)),
 				zap.String("expected_issuer", logSafeURL(issuerCheck.Expected.Issuer)),
 				zap.Bool("iss_present", issPresent),
-				zap.String("iss", ScrubUpstreamText(params.Get("iss"))))
+				zap.String("iss", logSafeURL(params.Get("iss"))))
 		case issPresent && issuerCheck.Expected.Source == IssuerSourceSynthetic:
 			// FR-004: a present iss on a synthetic flow is logged, never kept.
 			c.logger.Info("OAuth callback carries an iss for an endpoint-override (synthetic) issuer; not used as provenance",
 				zap.String("state", StateFingerprint(state)),
 				zap.String("expected_issuer", logSafeURL(issuerCheck.Expected.Issuer)),
-				zap.String("iss", ScrubUpstreamText(params.Get("iss"))))
+				zap.String("iss", logSafeURL(params.Get("iss"))))
 		}
 	}
 	c.send(state, ch, CallbackResult{Query: query})
