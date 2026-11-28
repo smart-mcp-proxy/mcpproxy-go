@@ -150,3 +150,12 @@ func TestMaskSpan_BearerPaddingDoesNotCount(t *testing.T) {
 		t.Fatalf("a long bearer body keeps its tail: %q", got)
 	}
 }
+
+// Round 26: a decoded label is not JSON; a literal backslash is not an
+// escape, so a short bearer after it is still masked whole.
+func TestMaskCredential_LiteralBackslashIsNotAnEscape(t *testing.T) {
+	got, _ := maskAllSpans(`\Bearer          AB`)
+	if strings.HasSuffix(got, "AB") {
+		t.Fatalf("a short bearer body after a literal backslash keeps no tail: %q", got)
+	}
+}

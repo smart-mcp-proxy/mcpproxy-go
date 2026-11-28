@@ -315,6 +315,8 @@ func TestAdminActionSchema_PositiveAndNegative(t *testing.T) {
 	ok := []map[string]interface{}{
 		baseAdminFixture(nil),
 		baseAdminFixture(map[string]interface{}{"request_id": nil, "source": "internal", "caller": map[string]interface{}{"kind": "internal"}, "trigger": "policy", "policy": "rotation_reconcile"}),
+		// The masked-flag fixture below minus its flag: valid, so the flag
+		// alone is what it is rejected for (round 26).
 		baseAdminFixture(map[string]interface{}{"request_id": nil, "source": "internal", "caller": map[string]interface{}{"kind": "cli_offline"}}),
 		baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "agent_token", "token_prefix": "mcp_agt_ab12", "token_name_withheld": true, "ref": "cli_abcdefgh"}}),
 		baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "session_user", "user_id": "u1", "role": "user", "provider": "oidc"}}),
@@ -351,7 +353,7 @@ func TestAdminActionSchema_PositiveAndNegative(t *testing.T) {
 		"agent both shapes":               baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "agent_token", "token_prefix": "mcp_agt_ab12", "token_name": "t", "token_name_withheld": true, "ref": "cli_abcdefgh"}}),
 		"user_id without provider":        baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "session_admin", "user_id": "u1", "role": "admin"}}),
 		"session caller with profile_pin": baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "session_admin", "user_id": "u1", "role": "admin", "provider": "oidc", "profile_pin": "ro"}}),
-		"masked flag without id":          baseAdminFixture(map[string]interface{}{"request_id": nil, "request_id_masked": true, "caller": map[string]interface{}{"kind": "cli_offline"}}),
+		"masked flag without id":          baseAdminFixture(map[string]interface{}{"request_id": nil, "source": "internal", "request_id_masked": true, "caller": map[string]interface{}{"kind": "cli_offline"}}),
 		"changes_count alone":             baseAdminFixture(map[string]interface{}{"changes_count": 3}),
 		"change with value and withheld":  baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "/enabled", "before": true, "withheld": "value"})}),
 		"change with object value":        baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "/args", "after": map[string]interface{}{"x": 1}})}),

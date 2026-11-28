@@ -152,6 +152,13 @@ func isHex(c byte) bool {
 // pattern needed (a classic gh*_ token running into github_pat_, a proxy
 // token running into a JWT), leaving the second secret's tail in the line.
 func applyMasking(s string) (masked string, hit bool) {
+	return applyMaskingTo(s, false)
+}
+
+// applyMaskingTo is applyMasking; jsonLine says s is a serialized line, whose
+// JSON escapes a mask must not split (round 26: a decoded label is not JSON,
+// and a literal backslash in it is not an escape).
+func applyMaskingTo(s string, jsonLine bool) (masked string, hit bool) {
 	// FR-004: a string that matches none of the Spec 133 patterns is masked
 	// exactly as before (pattern by pattern, legacy order), so a legacy line
 	// stays byte-identical.
@@ -165,7 +172,7 @@ func applyMasking(s string) (masked string, hit bool) {
 	if !newShape {
 		return applyLegacyMasking(s)
 	}
-	return maskAllSpans(s)
+	return maskSpans(s, jsonLine)
 }
 
 // applyLegacyMasking is the Spec 107 pass: pattern by pattern, legacy order.
@@ -204,6 +211,13 @@ func credentialRunEnd(s string, i int) int {
 const maxOverlapRescans = 32
 
 func maskAllSpans(s string) (masked string, hit bool) {
+	return maskSpans(s, false)
+}
+
+// maskSpans is maskAllSpans; with jsonLine a span that starts inside a JSON
+// escape starts after it instead and is written whole as "***" (what is left
+// of it lost its recognisable prefix), and one the escape covers is dropped.
+func maskSpans(s string, jsonLine bool) (masked string, hit bool) {
 	// Every pattern is matched against the ORIGINAL string, at
 	// every start position (FindAll returns only non-overlapping matches, so
 	// two back-to-back tokens of one shape would hide the second), and the
@@ -242,17 +256,26 @@ func maskAllSpans(s string) (masked string, hit bool) {
 	if len(spans) == 0 {
 		return s, false
 	}
-	// A span that starts inside a JSON escape starts after it instead; one
-	// that the escape covers whole is dropped (it is still reported as a hit).
-	kept := spans[:0]
-	for _, sp := range spans {
-		if start := escapeEnd(s, sp[0]); start < sp[1] {
+	// On a serialized line a span that starts inside a JSON escape starts
+	// after it instead; one that the escape covers whole is dropped (it is
+	// still reported as a hit).
+	clamped := map[int]bool{}
+	if jsonLine {
+		kept := spans[:0]
+		for _, sp := range spans {
+			start := escapeEnd(s, sp[0])
+			if start >= sp[1] {
+				continue
+			}
+			if start != sp[0] {
+				clamped[start] = true
+			}
 			kept = append(kept, [2]int{start, sp[1]})
 		}
-	}
-	spans = kept
-	if len(spans) == 0 {
-		return s, true
+		spans = kept
+		if len(spans) == 0 {
+			return s, true
+		}
 	}
 	sort.Slice(spans, func(i, j int) bool { return spans[i][0] < spans[j][0] })
 	merged := spans[:1]
@@ -270,7 +293,11 @@ func maskAllSpans(s string) (masked string, hit bool) {
 	prev := 0
 	for _, sp := range merged {
 		b.WriteString(s[prev:sp[0]])
-		b.WriteString(maskSpan(s[sp[0]:sp[1]]))
+		if clamped[sp[0]] {
+			b.WriteString("***")
+		} else {
+			b.WriteString(maskSpan(s[sp[0]:sp[1]]))
+		}
 		prev = sp[1]
 	}
 	b.WriteString(s[prev:])
@@ -317,6 +344,6 @@ func BuildFailures() uint64 { return buildFailures.Load() }
 // fires on a builder bug. Returns the (possibly masked) line and whether
 // any pattern hit.
 func SanitizeLine(raw []byte) ([]byte, bool) {
-	masked, hit := applyMasking(string(raw))
+	masked, hit := applyMaskingTo(string(raw), true)
 	return []byte(masked), hit
 }

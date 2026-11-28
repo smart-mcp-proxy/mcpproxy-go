@@ -526,3 +526,52 @@ func TestNewFileSink_ReplacedBeforeTheWriterOpensIsRechecked(t *testing.T) {
 		t.Fatalf("want the record on its own line after the fragment, got %q", raw)
 	}
 }
+
+// Round 26: an over-limit torn copy restored before the writer opens is not
+// rotated away unchecked: every file the sink leaves ends at a boundary.
+func TestNewFileSink_OverLimitReplacementIsNotRotatedUnchecked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not rename a file another handle holds open")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	if err := os.WriteFile(path, []byte("{\"seq\":0}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	once := false
+	afterTailCheck = func() {
+		if once {
+			return
+		}
+		once = true
+		if err := os.Rename(path, path+".old"); err != nil {
+			t.Fatal(err)
+		}
+		big := append(bytes.Repeat([]byte("{\"pad\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}\n"), 30000), []byte(`{"seq":"torn`)...)
+		if err := os.WriteFile(path, big, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer func() { afterTailCheck = nil }()
+	s, err := NewFileSink(path, 1, 5, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Write([]byte(`{"seq":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, en := range entries {
+		raw, err := os.ReadFile(filepath.Join(dir, en.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(raw) > 0 && raw[len(raw)-1] != '\n' {
+			t.Fatalf("%s ends mid-record", en.Name())
+		}
+	}
+}

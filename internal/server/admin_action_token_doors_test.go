@@ -382,11 +382,23 @@ func TestAdminActionDoors_SaturatedBus(t *testing.T) {
 	rt := e.env.proxyServer.runtime
 	// Subscribe and never read: the subscriber's buffer fills and the bus
 	// drops for it, exactly as a stuck consumer would.
-	_ = rt.SubscribeEvents()
+	stuck := rt.SubscribeEvents()
 	cs := rt.CredentialsService()
 	ctx := adminTestContext()
-	seen := len(e.sink.snapshot())
 	a := runtime.Actor{Kind: "api_key", Surface: profile.SurfaceAPI}
+	// Fill the stuck subscriber's buffer first, so every counted revocation
+	// below runs against an already saturated bus (round 26).
+	for i := 0; len(stuck) < cap(stuck); i++ {
+		require.Less(t, i, 4*cap(stuck), "the stuck subscriber's buffer fills")
+		name := fmt.Sprintf("warm-%d", i)
+		_, err := cs.IssueToken(ctx, a, runtime.IssueTokenRequest{Name: name, ExpiresIn: "1h", Expiry: runtime.ExpiryTokenDefault})
+		require.NoError(t, err)
+		_, err = cs.Revoke(ctx, a, runtime.CredentialRef{Token: name}, true)
+		require.NoError(t, err)
+		_, err = cs.DeleteToken(ctx, a, name)
+		require.NoError(t, err)
+	}
+	seen := len(e.sink.snapshot())
 	// The token cap (auth.MaxTokens) bounds how many exist at once, so the
 	// revocations are create → revoke → delete cycles. 300 cycles publish
 	// 900 credentials.changed events into a 256-slot subscriber buffer that
@@ -400,6 +412,7 @@ func TestAdminActionDoors_SaturatedBus(t *testing.T) {
 		_, err := cs.IssueToken(ctx, a, runtime.IssueTokenRequest{Name: name, ExpiresIn: "1h", Expiry: runtime.ExpiryTokenDefault})
 		require.NoError(t, err)
 		before := len(e.sink.snapshot())
+		require.Equal(t, cap(stuck), len(stuck), "revoke %d runs with the bus saturated", i)
 		_, err = cs.Revoke(ctx, a, runtime.CredentialRef{Token: name}, true)
 		require.NoError(t, err)
 		// FR-018: the line is on the sink when Revoke returns — written

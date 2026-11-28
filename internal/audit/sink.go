@@ -271,7 +271,13 @@ func NewFileSink(path string, maxSizeMB, maxBackups, maxAgeDays int, compress bo
 		if afterTailCheck != nil {
 			afterTailCheck()
 		}
-		if _, err := lj.Write(nil); err != nil {
+		// The open must not rotate (round 26): an over-limit file it would
+		// rotate may be a replacement this check has not seen. The size limit
+		// is lifted for the open only; the first record rotates a checked file.
+		lj.MaxSize = openNoRotateMB
+		_, err = lj.Write(nil)
+		lj.MaxSize = maxSizeMB
+		if err != nil {
 			_ = held.Close()
 			return nil, fmt.Errorf("audit: cannot open %s: %w", path, err)
 		}
@@ -298,6 +304,10 @@ func NewFileSink(path string, maxSizeMB, maxBackups, maxAgeDays int, compress bo
 	}
 	return s, nil
 }
+
+// openNoRotateMB is the size limit NewFileSink sets while the writer opens
+// the file, so the open never rotates (1 TiB).
+const openNoRotateMB = 1 << 20
 
 // maxOpenAttempts bounds how often NewFileSink re-checks a file that was
 // replaced while it was opened.
