@@ -881,9 +881,17 @@ test('server detail: Review and scans parts, first-screen facts and keyboard [sp
   await expect(page.locator('[data-test="scans-part"]')).toBeFocused()
   await expect(page.locator('[data-test="scan-button"]')).toBeVisible()
   // The complete diagnostic opens from the first screen, on a tab other than Tools, and Escape returns focus.
-  await page.locator('[data-test="open-diagnostic"]').focus()
-  await page.keyboard.press('Enter')
-  await expect(page.locator('[data-test="diagnostic-dialog"][open]')).toHaveCount(1)
-  await page.keyboard.press('Escape')
-  await expect(page.locator('[data-test="open-diagnostic"]')).toBeFocused()
+  // The button is offered only when the diagnostic holds more than the summary line the header already shows:
+  // a healthy fixture has none. Which branch runs is asserted, so neither passes by accident.
+  const diagnostic = page.locator('[data-test="open-diagnostic"]')
+  const healthy = (await page.locator('[data-test="server-facts"]').getAttribute('data-has-diagnostic')) === 'false'
+  if (healthy) {
+    await expect(diagnostic).toHaveCount(0)
+  } else {
+    await diagnostic.focus()
+    await page.keyboard.press('Enter')
+    await expect(page.locator('[data-test="diagnostic-dialog"][open]')).toHaveCount(1)
+    await page.keyboard.press('Escape')
+    await expect(diagnostic).toBeFocused()
+  }
 })

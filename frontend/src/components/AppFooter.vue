@@ -57,7 +57,8 @@ const displayVersion = computed(() => {
   if (!v) return ''
   return v.startsWith('v') ? v : `v${v}`
 })
-// Phone summary: the release part only ("v0.69.1"); the full build string is
+// Phone summary: the release part only ("v0.69.1", "v0.76.0-rc.1"); the full build string is
 // inside the disclosure (Spec 134 FR-014).
-const shortVersion = computed(() => displayVersion.value.split(/[-+]/)[0])
+// A prerelease tag ("-rc.1") is part of the release name and stays; a pseudo-version or build suffix does not.
+const shortVersion = computed(() => displayVersion.value.match(/^[^-+]*(?:-(?:rc|beta|alpha)\.\d+)?(?=$|[-+])/)?.[0] ?? displayVersion.value.split(/[-+]/)[0])
 </script>

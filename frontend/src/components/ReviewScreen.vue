@@ -52,7 +52,7 @@
       </div>
       <p v-if="fetchOutcome" class="text-sm" :class="fetchOutcome.kind === 'ok' ? 'text-success' : 'text-warning'" role="status" data-test="review-fetch-outcome">{{ fetchOutcome.text }}</p>
 
-      <p v-if="review.server.quarantined && review.server.definitions_captured && review.tools.length > 0" class="text-sm text-base-content/70" data-test="review-selection-hint">{{ REVIEW_SELECTION_HINT }}</p>
+      <p v-if="review.server.quarantined && review.server.definitions_captured && review.tools.length > 0" class="text-sm text-base-content/70" data-test="review-selection-hint">{{ selectionHint(review.tools) }}</p>
 
       <div v-if="review.tools.length > 0" class="space-y-2" data-test="review-toolbar">
         <div class="flex flex-wrap items-end gap-2">
@@ -72,6 +72,11 @@
             <option value="allowed">Allowed only</option>
             <option value="blocked">Blocked only</option>
           </select>
+          <label class="flex items-center gap-1 text-sm"><span class="text-base-content/70">Sort</span>
+            <select v-model="sortOrder" class="select select-bordered select-sm" aria-label="Sort tools" data-test="review-sort">
+              <option v-for="option in REVIEW_SORT_OPTIONS" :key="option.value" :value="option.value">{{ option.label }}</option>
+            </select>
+          </label>
           <button v-if="filtersActive" type="button" class="btn btn-ghost btn-sm" data-test="review-clear-filters" @click="clearFilters">Clear filters</button>
         </div>
         <div v-if="review.server.quarantined && review.server.definitions_captured" class="flex flex-wrap items-center gap-2">
@@ -132,6 +137,7 @@
       <div v-if="review.server.quarantined" class="sticky bottom-0 z-10 -mx-4 sm:-mx-6 border-t border-base-300 bg-base-100 px-4 sm:px-6 py-2 space-y-2" data-test="review-decision-bar">
         <p class="text-sm" data-test="review-decision-summary" aria-live="polite"><span class="font-medium" data-test="review-allowed-count">Allowed {{ allowedTools.length }}</span> · <span class="font-medium" data-test="review-blocked-count">Blocked {{ blockedCount }}</span> of {{ review.tools.length }}</p>
         <p v-if="notice" class="text-sm text-warning" role="status" data-test="review-stale-force-notice">{{ notice }}</p>
+        <p v-if="approveNotice" class="text-sm text-warning w-full" role="alert" data-test="review-approve-notice">{{ approveNotice }}</p>
         <div class="flex flex-wrap gap-2">
           <button class="btn btn-sm sm:btn-md min-h-11" :class="review.server.definitions_captured ? 'btn-primary' : 'btn-outline'" :disabled="approving || refreshing" data-test="review-approve-server" @click="requestApprove(false)">{{ primaryLabel }}</button>
           <button v-if="showApproveAll" class="btn btn-outline btn-sm sm:btn-md" :disabled="approving || refreshing" :title="APPROVE_ALL_HINT" data-test="review-approve-all" @click="requestApprove(true)">{{ approveAllLabel(review.tools.length) }}</button>
@@ -159,7 +165,7 @@ import type { ReviewTool, ServerReviewResponse } from '@/types'
 import ToolDefinitionText from '@/components/ToolDefinitionText.vue'
 import ScanHistory from '@/components/ScanHistory.vue'
 import { scanReportPath } from '@/utils/serverRoute'
-import { HELD_CHANGE_DOCS, HELD_CHANGE_HINT, approveUpdateLabel, changedToolNames, summarizeToolChange, APPROVE_ALL_HINT, REVIEW_PAGE_SIZES, REVIEW_SELECTION_HINT, approveAllLabel, approveLabel, clampPage, expectedHashes, filterReviewTools, formatLaunchCommand, hasActiveFilters, isStaleReviewError, mergeSelection, reviewHeadline, scanBanner, toolState, type SelectionChoice } from '@/utils/reviewPresentation'
+import { HELD_CHANGE_DOCS, HELD_CHANGE_HINT, approveUpdateLabel, changedToolNames, summarizeToolChange, APPROVE_ALL_HINT, REVIEW_PAGE_SIZES, selectionHint, sortReviewTools, REVIEW_SORT_OPTIONS, type ReviewSortOrder, REVIEW_SELECTION_HINT, approveAllLabel, approveLabel, clampPage, expectedHashes, filterReviewTools, formatLaunchCommand, hasActiveFilters, isStaleReviewError, mergeSelection, reviewHeadline, scanBanner, toolState, type SelectionChoice } from '@/utils/reviewPresentation'
 
 const props = defineProps<{ serverName: string; change?: string }>()
 const emit = defineEmits<{ approved: []; refreshed: [] }>()
@@ -168,12 +174,28 @@ const review = ref<ServerReviewResponse | null>(null)
 // block list is the complement of what is on screen, so approval waits for the newest load to settle.
 const STALE_FORCE_NOTICE = 'The review changed after the approval attempt. Review the updated list and approve again.'
 const notice = ref('')
+// An approval the core refused for a reason the operator can fix on this screen. It sits beside the approve
+// button; the review stays where it is.
+const approveNotice = ref('')
+const NO_SCAN_NOTICE = 'This server has not been scanned yet, so it cannot be approved. Run the scan above, then approve.'
 // A failed per-tool approve or reject (e.g. 409 server_replaced). Rendered above
 // the tool list on every server, quarantined or not: `notice` lives in the
 // decision bar, which only a quarantined server shows.
 const toolNotice = ref('')
 const loading = ref(false); const refreshing = ref(false); const scanning = ref(false); const approving = ref(false); const error = ref('')
-const fetchOutcome = ref<{ kind: 'ok' | 'none' | 'failed'; text: string } | null>(null)
+// The last fetch attempt of this visit. Its sentence is derived from the review on screen, not frozen at the
+// moment the attempt returned: the core may capture the definitions a moment after the call answers, and the
+// reload that shows them must not leave "no tool definitions were captured" standing above the tool list.
+const fetchAttempt = ref<{ failure: string } | null>(null)
+const fetchOutcome = computed<{ kind: 'ok' | 'none' | 'failed'; text: string } | null>(() => {
+  const attempt = fetchAttempt.value; const current = review.value
+  if (!attempt || !current) return null
+  const captured = current.server.definitions_captured
+  if (attempt.failure) return { kind: 'failed', text: `The fetch attempt failed: ${attempt.failure}.${captured ? ' The definitions are captured now: review them before approving.' : ' Nothing was enabled or approved.'}` }
+  if (captured) return { kind: 'ok', text: 'Tool definitions were captured. Review them before approving.' }
+  if (current.server.enabled === false) return { kind: 'none', text: 'The server is disabled, so its tools could not be fetched. Nothing was enabled or approved.' }
+  return { kind: 'none', text: 'The attempt finished but no tool definitions were captured. Nothing was enabled or approved.' }
+})
 const rescanning = ref(false); const requarantining = ref(false); const requarantineDialog = ref<HTMLDialogElement | null>(null)
 const allowedTools = ref<string[]>([]); const choices = new Map<string, SelectionChoice>(); const lastBlock = ref<string[] | null>(null); const confirmDialog = ref<HTMLDialogElement | null>(null); const forceDialog = ref<HTMLDialogElement | null>(null); const confirmOpen = ref(false)
 // The review binding (Spec 117 PR-2) of the attempt the force retry belongs to: the retry re-sends it with lastBlock.
@@ -200,7 +222,9 @@ const page = ref(1); const pageSize = ref<number>(REVIEW_PAGE_SIZES[0])
 const filters = computed(() => ({ query: searchQuery.value, tier: tierFilter.value, state: stateFilter.value, selection: selectionFilter.value }))
 const filtersActive = computed(() => hasActiveFilters(filters.value))
 const allowedSet = computed(() => new Set(allowedTools.value))
-const filteredTools = computed(() => filterReviewTools(review.value?.tools ?? [], filters.value, allowedSet.value))
+// Sorting is not a filter: it never changes which tools the bulk actions touch or whether "Clear filters" shows.
+const sortOrder = ref<ReviewSortOrder>('review')
+const filteredTools = computed(() => sortReviewTools(filterReviewTools(review.value?.tools ?? [], filters.value, allowedSet.value), sortOrder.value))
 const totalPages = computed(() => Math.max(1, Math.ceil(filteredTools.value.length / pageSize.value)))
 const currentPage = computed(() => clampPage(page.value, filteredTools.value.length, pageSize.value))
 const pagedTools = computed(() => filteredTools.value.slice((currentPage.value - 1) * pageSize.value, currentPage.value * pageSize.value))
@@ -255,7 +279,7 @@ function bulkSet(allow: boolean) {
   allowedTools.value = review.value.tools.filter(t => names.has(t.name)).map(t => t.name)
 }
 watch(() => props.change, c => { stateFilter.value = initialStateFilter(c) })
-watch([searchQuery, tierFilter, stateFilter, selectionFilter, pageSize], () => { page.value = 1 })
+watch([searchQuery, tierFilter, stateFilter, selectionFilter, pageSize, sortOrder], () => { page.value = 1 })
 const primaryLabel = computed(() => approveLabel(allowedTools.value.length, review.value?.tools.length ?? 0, review.value?.server.definitions_captured ?? false))
 const showApproveAll = computed(() => !!review.value && review.value.server.quarantined && review.value.server.definitions_captured && review.value.tools.length > 0 && allowedTools.value.length < review.value.tools.length)
 const tierCounts = computed(() => Object.fromEntries(tiers.map(t => [t, (review.value?.tools ?? []).filter(x => x.tier === t).length])))
@@ -305,7 +329,7 @@ async function load() { if (typeof api.getServerReview !== 'function') return; r
 async function rescan() {
   const server = props.serverName
   const visit = visitGeneration
-  rescanning.value = true
+  rescanning.value = true; approveNotice.value = ''
   const res = await api.startScan(server)
   if (!isCurrent(server, visit)) return // late response for a server the screen no longer shows
   if (!res.success) { rescanning.value = false; error.value = res.error || 'Failed to start scan' }
@@ -326,7 +350,7 @@ async function requarantine() {
 let fetchSeq = 0
 async function fetchDefinitions() {
   const server = props.serverName; const visit = visitGeneration; const attempt = ++fetchSeq
-  scanning.value = true; fetchOutcome.value = null
+  scanning.value = true; fetchAttempt.value = null
   const res = await api.discoverServerTools(server)
   if (!isCurrent(server, visit)) return
   scanning.value = false
@@ -339,11 +363,7 @@ async function fetchDefinitions() {
   // The attempt's outcome is reported on its own line. It never replaces the review (a failed attempt leaves
   // the screen in the state the last successful load put it in) and it never decides the branch: only the
   // reloaded `definitions_captured` does (Spec 134 FR-032).
-  const captured = review.value.server.definitions_captured
-  if (failure) fetchOutcome.value = { kind: 'failed', text: `The fetch attempt failed: ${failure}.${captured ? ' The definitions are captured now: review them before approving.' : ' Nothing was enabled or approved.'}` }
-  else if (captured) fetchOutcome.value = { kind: 'ok', text: 'Tool definitions were captured. Review them before approving.' }
-  else if (review.value.server.enabled === false) fetchOutcome.value = { kind: 'none', text: 'The server is disabled, so its tools could not be fetched. Nothing was enabled or approved.' }
-  else fetchOutcome.value = { kind: 'none', text: 'The attempt finished but no tool definitions were captured. Nothing was enabled or approved.' }
+  fetchAttempt.value = { failure }
 }
 function requestApprove(everything: boolean) { if (refreshing.value) return; if (!review.value?.server.definitions_captured) { blindReview = review.value; blindEverything = everything; confirmOpen.value = true; confirmDialog.value?.showModal(); return }; void approve(false, everything ? [] : undefined) }
 function closeConfirm() { confirmOpen.value = false; blindReview = null; confirmDialog.value?.close?.() }
@@ -360,7 +380,7 @@ async function approve(force: boolean, block?: string[]) {
   if (force && !lastBlock.value) { notice.value = STALE_FORCE_NOTICE; return } // stale force retry: needs a fresh decision
   const server = props.serverName // a response for a server the screen no longer shows is dropped below
   const visit = visitGeneration
-  closeConfirm(); forceDialog.value?.close?.(); approving.value = true; notice.value = ''
+  closeConfirm(); forceDialog.value?.close?.(); approving.value = true; notice.value = ''; approveNotice.value = ''
   const tools = review.value?.tools ?? []
   const all = tools.map(t => t.name)
   const retry = force && lastBlock.value !== null
@@ -384,6 +404,9 @@ async function approve(force: boolean, block?: string[]) {
     if (isStaleReviewError(message)) { lastBlock.value = null; lastExpected = undefined; await reloadAfterStaleReview(server, visit, message); return }
     // A refresh that began while this attempt was in flight dropped its block list (lastBlock was cleared): the force retry is bound to a snapshot that is gone, so do not offer it and do not replace the refreshed review with an error panel; show the stale notice beside the fresh approval controls instead.
     if (!force && /dangerous/i.test(message) && lastBlock.value === null) { notice.value = STALE_FORCE_NOTICE; return }
+    // No scan result yet: nothing was approved and nothing is wrong with the review. Keep it on screen and say
+    // what to do here; the core's sentence names a CLI flag this screen does not have.
+    if (/no scan results found/i.test(message)) { lastBlock.value = null; lastExpected = undefined; approveNotice.value = NO_SCAN_NOTICE; return }
     error.value = message
     if (!force && /dangerous/i.test(message)) forceDialog.value?.showModal?.()
     return
@@ -461,10 +484,11 @@ async function refreshAfterScanSettled(event: Event) {
   if (serverName && serverName !== props.serverName) return
   scanning.value = false
   rescanning.value = false
+  approveNotice.value = '' // the scan it asked for has run
   void load()
 }
 // Component reuse across /review/A -> /review/B: scan state and any pending force retry belong to the old server.
-watch(() => props.serverName, () => { visitGeneration++; readinessChecks = 0; if (readinessTimer) clearTimeout(readinessTimer); readinessTimer = null; choices.clear(); review.value = null; allowedTools.value = []; clearFilters(); stateFilter.value = initialStateFilter(props.change); lastBlock.value = null; notice.value = ''; toolNotice.value = ''; approving.value = false; requarantining.value = false; refreshing.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; fetchOutcome.value = null; error.value = ''; void load() })
+watch(() => props.serverName, () => { visitGeneration++; readinessChecks = 0; if (readinessTimer) clearTimeout(readinessTimer); readinessTimer = null; choices.clear(); review.value = null; allowedTools.value = []; clearFilters(); stateFilter.value = initialStateFilter(props.change); lastBlock.value = null; notice.value = ''; toolNotice.value = ''; approving.value = false; requarantining.value = false; refreshing.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; fetchAttempt.value = null; approveNotice.value = ''; error.value = ''; void load() })
 onMounted(() => {
   void load()
   window.addEventListener('mcpproxy:review-changed', refreshAfterReviewChange)

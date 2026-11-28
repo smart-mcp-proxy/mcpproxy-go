@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
@@ -208,7 +210,7 @@ func computeServerItems(s AttentionServer, now time.Time, serverErrorThreshold t
 			Kind:    AttentionKindServerError,
 			Rank:    AttentionRankServerError,
 			Subject: subject,
-			Summary: fmt.Sprintf("%s: connection error", s.Name),
+			Summary: fmt.Sprintf("%s: %s", s.Name, serverErrorReason(s.Health.Summary)),
 			Detail:  s.Detail,
 			Fix: contracts.AttentionFix{
 				Verb:   AttentionFixRestart,
@@ -309,4 +311,35 @@ func computeClientNeverSeen(c AttentionClient, now time.Time, clientNeverSeenThr
 		},
 		Since: *c.ConnectedAt,
 	}, true
+}
+
+// serverErrorReason is the reason a server_error item gives after the server
+// name. It is the server's own health summary ("Server exited during
+// startup", "Connection refused"), the sentence the server list already
+// shows, so one server does not carry two different explanations on two
+// screens. It falls back to "connection error" when health has no summary or
+// only says the server is still connecting. The first letter is lowered to
+// match the other items ("github: sign in required") unless the first word is
+// an acronym or a name (OAuth, HTTP, GitHub).
+func serverErrorReason(healthSummary string) string {
+	const fallback = "connection error"
+	reason := strings.TrimSpace(healthSummary)
+	if reason == "" || strings.HasPrefix(strings.ToLower(reason), "connecting") {
+		return fallback
+	}
+	// Lower only an ordinary capitalised word ("Server"): one capital followed
+	// by lower-case letters to the end of the word. "OAuth", "HTTP" and
+	// "GitHub" keep their spelling.
+	runes := []rune(reason)
+	end := 1
+	for end < len(runes) && unicode.IsLetter(runes[end]) {
+		if !unicode.IsLower(runes[end]) {
+			return reason
+		}
+		end++
+	}
+	if end > 1 && unicode.IsUpper(runes[0]) {
+		runes[0] = unicode.ToLower(runes[0])
+	}
+	return string(runes)
 }

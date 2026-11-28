@@ -111,6 +111,39 @@ export function toolState(tool: ReviewTool, quarantined: boolean): ToolControl {
 
 export const REVIEW_SELECTION_HINT = 'Only read-only tools with a clean scan start checked. Unchecked tools stay blocked after approval until you enable them on the Tools tab.'
 
+/** How the review tool list is ordered. */
+export type ReviewSortOrder = 'review' | 'name' | 'server'
+export const REVIEW_SORT_OPTIONS: { value: ReviewSortOrder; label: string }[] = [
+  { value: 'review', label: 'Needs review first' },
+  { value: 'name', label: 'Name, A to Z' },
+  { value: 'server', label: 'Server order' },
+]
+const reviewRank = (t: ReviewTool) => (t.approval_status === 'changed' ? 0 : t.approval_status === 'pending' ? 1 : 2)
+
+/**
+ * The list in the chosen order, as a new array. 'review' puts what the
+ * operator has to decide first (changed tools, then pending ones) and keeps
+ * the server's order inside each group; 'server' is the order the core sent.
+ */
+export function sortReviewTools(tools: ReviewTool[], order: ReviewSortOrder): ReviewTool[] {
+  if (order === 'server') return tools.slice()
+  if (order === 'name') return tools.slice().sort((a, b) => a.name.localeCompare(b.name))
+  return tools.map((tool, index) => ({ tool, index })).sort((a, b) => reviewRank(a.tool) - reviewRank(b.tool) || a.index - b.index).map(x => x.tool)
+}
+
+const isCleanRead = (t: ReviewTool) => t.tier === 'read' && t.scan_verdict === 'clean'
+
+/**
+ * The hint above the tool list. The core also pre-checks a tool that is
+ * already approved (an auto-approved tool on a server still in quarantine, for
+ * example), whatever its tier or scan state; when such a tool is on screen the
+ * hint says so, or "only read-only tools with a clean scan" would be untrue.
+ */
+export function selectionHint(tools: ReviewTool[]): string {
+  const approvedExtra = tools.some(t => t.default_allowed === true && t.approval_status === 'approved' && !isCleanRead(t))
+  return approvedExtra ? `${REVIEW_SELECTION_HINT} Tools that are already approved also start checked.` : REVIEW_SELECTION_HINT
+}
+
 /** What the user explicitly chose for one tool, with the payload they saw. */
 export interface SelectionChoice {
   allowed: boolean

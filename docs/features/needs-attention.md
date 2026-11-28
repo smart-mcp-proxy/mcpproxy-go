@@ -55,6 +55,8 @@ lists instead of re-rendering the whole thing on every change.
 | `skill_review` | 62 (changed) / 63 (pending) | With [Skills over MCP](./skills.md) on: an enabled, not quarantined, not excluded server with ≥ 1 held skill (pending or changed, not blocked, listed) in that state; one item per state. **Administrators only**: a scoped caller never sees it | `review` → the server's Skills tab in the Web UI (`/servers/<name>?tab=skills`); the macOS app opens that page in the browser |
 | `client_never_seen` | 70 | A client MCPProxy recorded as connected ≥ 5 minutes ago, with no MCP session observed since | `reload_hint` → shows how to restart the client |
 
+A `server_error` item reads `<server>: <reason>`, where the reason is the server's own health summary (for example `filesystem: server exited during startup`), the same sentence the server list shows. It reads `<server>: connection error` when health gives no reason.
+
 The first six kinds are the [profiles](https://docs.mcpproxy.app/features/profiles)
 warnings, computed by the same function that fills the Clients page banner, so
 the two cannot disagree. They outrank the server items because they are
