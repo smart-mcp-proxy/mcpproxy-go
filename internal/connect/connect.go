@@ -1732,7 +1732,11 @@ func findEquivalentJSONServerName(serversMap map[string]interface{}, baseURL, re
 			if !ok {
 				continue
 			}
-			if endpointURLMatches(entryURL, baseURL) {
+			// Exact (or legacy-query) match only, NOT the localhost alias of
+			// endpointURLMatches: this lookup decides which entry a Connect
+			// rewrites, and Undo replays it against the backup, so widening it
+			// would change what an earlier, still undoable Connect replays to.
+			if entryURL == baseURL || strings.HasPrefix(entryURL, baseURL+"?") {
 				return name, true
 			}
 		}
@@ -1890,16 +1894,25 @@ func entryPointsToBridge(entry map[string]interface{}, baseURL string) bool {
 	}
 	hasBridgePkg := false
 	pointsToUs := false
+	afterBridge := false // the argument right after "mcp-remote" is its destination
 	for _, a := range rawArgs {
 		s, ok := a.(string)
 		if !ok {
+			afterBridge = false
 			continue
 		}
-		if s == "mcp-remote" {
-			hasBridgePkg = true
-		}
-		if endpointURLMatches(s, baseURL) {
+		if s == baseURL || strings.HasPrefix(s, baseURL+"?") {
 			pointsToUs = true
+		}
+		// The localhost alias counts only for the bridge's destination: a
+		// later argument (a header value, say) that happens to be a loopback
+		// URL does not make an entry bound elsewhere ours.
+		if afterBridge && loopbackNameAlias(s, baseURL) {
+			pointsToUs = true
+		}
+		afterBridge = s == "mcp-remote"
+		if afterBridge {
+			hasBridgePkg = true
 		}
 	}
 	return hasBridgePkg && pointsToUs

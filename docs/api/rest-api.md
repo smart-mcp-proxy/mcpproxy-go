@@ -1304,7 +1304,7 @@ another port. Consumers that need the stronger claim must check
 `endpoint_match == "this"`; a UI showing a bare "Connected" on
 `endpoint_match == "other"` is reporting someone else's link as its own.
 
-`localhost`, `127.0.0.1` and `[::1]` are treated as the same host for this comparison: an entry written as `http://localhost:8080/mcp` is `"this"` on an instance listening on `127.0.0.1:8080`. Scheme, port and path must still be equal.
+The name `localhost` is treated as the loopback address for this comparison: an entry written as `http://localhost:8080/mcp` is `"this"` on an instance listening on `127.0.0.1:8080` (or `[::1]:8080`). Scheme, port and path must still be equal. Two different loopback addresses (`127.0.0.1` and `127.0.0.2`, or `127.0.0.1` and `[::1]`) are not the same endpoint. The alias applies to this status and to Disconnect; which entry a Connect rewrites is still decided by exact address.
 
 #### GET /api/v1/connect/{client}
 
