@@ -1451,7 +1451,7 @@ Spec: [130-skills-review-ux](./specs/130-skills-review-ux/) · PR: #1987 #1988
 | Registries — easier search + add-server | Done | P1 | 21/24 (88%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |
 | Scanner simplification (deterministic default, opt-in deep scan) | Done | P1 | 38/42 (90%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
 | Deferred-schema serialization for the direct tools/list surface (spec 102) | Done | P1 | 89/89 (100%) | [102-schema-deferred](./specs/102-schema-deferred/) | #1063 |
-| Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) | Done | P1 | 111/113 (98%) | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) |  |
+| Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) | Done | P1 | 112/113 (99%) | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) |  |
 | Spec 113 upstream resilience: OAuth refresh, discovery, call-error taxonomy, session re-init | Done | P1 | 78/100 (78%) | [113-upstream-resilience](./specs/113-upstream-resilience/) | #1495 #1498 #1499 #1501 #1502 #1504 #1510 #1650 |
 | Spec 115 admin MCP credentials tool: client credentials + agent token lifecycle | Done | P1 | 86/87 (99%) | [115-mcp-credential-lifecycle](./specs/115-mcp-credential-lifecycle/) | #1557 |
 | Quarantine/approval testing pilot: independent policy model, scenario inventory, mutation gate | Done | P1 | — |  | #1619 #1631 #1634 |
@@ -1581,7 +1581,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [102-schema-deferred](./specs/102-schema-deferred/) | `shipped` | 89/89 (100%) |
 | [103-token-bench](./specs/103-token-bench/) | `shipped` | 62/64 (97%) |
 | [104-auto-routing-mode](./specs/104-auto-routing-mode/) | — | — |
-| [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) | `shipped` | 111/113 (98%) |
+| [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) | `shipped` | 112/113 (99%) |
 | [106-security-residual-fixes](./specs/106-security-residual-fixes/) | `shipped` | 18/19 (95%) |
 | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) | `shipped` | 126/126 (100%) |
 | [108-profiles-v3](./specs/108-profiles-v3/) | `shipped` | 194/195 (99%) |
