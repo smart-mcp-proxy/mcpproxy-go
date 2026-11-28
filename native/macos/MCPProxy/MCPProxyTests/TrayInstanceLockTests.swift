@@ -63,4 +63,34 @@ final class TrayInstanceLockTests: XCTestCase {
         XCTAssertEqual(TrayInstanceLock.acquire(at: lockURL), .heldByAnotherTray)
         close(again)
     }
+
+    /// A tray that started in the gap owns the lock now; the failed launch must
+    /// report that, so the old tray quits instead of running beside it unlocked.
+    func testHandOverReportsATrayThatStartedInTheGap() {
+        guard case .acquired(let held) = TrayInstanceLock.acquire(at: lockURL) else {
+            return XCTFail("the first tray must get the lock")
+        }
+        struct LaunchFailed: Error {}
+        var gapTray: TrayInstanceLock?
+        let outcome = TrayInstanceLock.handOver(held, at: lockURL) {
+            gapTray = TrayInstanceLock.acquire(at: lockURL)
+            throw LaunchFailed()
+        }
+        guard case .failed(_, let relock) = outcome else { return XCTFail("the launch failed") }
+        XCTAssertEqual(relock, .heldByAnotherTray)
+        if case .acquired(let fd)? = gapTray { close(fd) }
+    }
+
+    /// `Process.run()` only proves `open` started. A launcher that exits
+    /// non-zero (bundle moved, LaunchServices refused it) must count as a failed
+    /// launch, or the old tray quits and leaves none.
+    func testLauncherThatExitsNonZeroIsAFailedLaunch() {
+        let failing = Process()
+        failing.executableURL = URL(fileURLWithPath: "/usr/bin/false")
+        XCTAssertThrowsError(try TrayInstanceLock.runSuccessorLauncher(failing))
+
+        let succeeding = Process()
+        succeeding.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        XCTAssertNoThrow(try TrayInstanceLock.runSuccessorLauncher(succeeding))
+    }
 }

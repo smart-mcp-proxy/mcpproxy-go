@@ -49,6 +49,22 @@ enum TrayInstanceLock: Equatable {
         case failed(Error, relock: TrayInstanceLock)
     }
 
+    struct LauncherFailed: Error, CustomStringConvertible {
+        let status: Int32
+        var description: String { "the launcher exited with status \(status)" }
+    }
+
+    /// Runs the launcher (`open -n <bundle>`) and waits for it. `run()` alone
+    /// only proves the launcher started; `open` reports a bundle it could not
+    /// launch through its exit status, and that must count as a failed launch.
+    static func runSuccessorLauncher(_ launcher: Process) throws {
+        try launcher.run()
+        launcher.waitUntilExit()
+        guard launcher.terminationStatus == 0 else {
+            throw LauncherFailed(status: launcher.terminationStatus)
+        }
+    }
+
     /// Starts a successor tray while this one is still running (relaunch into a
     /// replaced bundle). The lock is released first: the successor checks it at
     /// launch, and finding it still held it would exit, leaving no tray at all.

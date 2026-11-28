@@ -1864,16 +1864,23 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // tray exits and none is left.
                     if let descriptor = self.trayLockDescriptor {
                         self.trayLockDescriptor = nil
-                        switch TrayInstanceLock.handOver(descriptor, at: InstancePaths.trayLockURL,
-                                                         launch: { try launcher.run() }) {
+                        switch TrayInstanceLock.handOver(
+                            descriptor, at: InstancePaths.trayLockURL,
+                            launch: { try TrayInstanceLock.runSuccessorLauncher(launcher) }) {
                         case .launched:
                             break
+                        case .failed(_, .heldByAnotherTray):
+                            // Another tray started in the gap and owns the lock;
+                            // it is the one tray now, so this one steps aside.
+                            NSLog("[MCPProxy] Another MCPProxy tray took over during the relaunch - quitting")
+                            NSApp.terminate(nil)
+                            return
                         case .failed(let error, let relock):
                             if case .acquired(let again) = relock { self.trayLockDescriptor = again }
                             throw error
                         }
                     } else {
-                        try launcher.run()
+                        try TrayInstanceLock.runSuccessorLauncher(launcher)
                     }
                 } catch {
                     NSLog("[MCPProxy] Could not launch %@: %@", bundlePath, error.localizedDescription)
