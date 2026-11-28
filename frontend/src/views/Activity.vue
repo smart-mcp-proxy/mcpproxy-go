@@ -1901,7 +1901,19 @@ applyRouteFilters()
 // already ran once during setup (immediately above), so the initial values
 // it just set never trigger this watch — only a later, genuine URL change
 // does.
-watch(() => route.query, () => applyRouteFilters(), { deep: true })
+watch(() => route.query, () => {
+  applyRouteFilters()
+  // Spec 124: a session's Tool calls link was followed. Its address can differ
+  // from the one before in nothing the refetch below watches (two sessions'
+  // links carry the same `type`; after a reload only `view` changes), so the
+  // calls are read here unless that watch has already started a request.
+  if (callsLinkLoadSeq === null) return
+  const before = callsLinkLoadSeq
+  callsLinkLoadSeq = null
+  void nextTick(() => { if (activitiesLoadSeq === before && activeView.value !== 'sessions') void loadActivities() })
+}, { deep: true })
+/** The request counter when a session's Tool calls link was clicked; null otherwise. */
+let callsLinkLoadSeq: number | null = null
 
 // Activity types configuration. Derived from the single label map in
 // utils/activity so the filter dropdown cannot drift from the Type column
@@ -2202,6 +2214,7 @@ const getSessionLabel = (sessionId: string): string => {
  * that session's calls unseen. Only the link does this, and only for a session
  * other than the one the calls view already shows: the tabs, Back, a bookmark
  * and the way back to the same session leave the filters as the user set them.
+ * The click also arms the read of that session's calls (see the route watch).
  * "The same session" is the one the calls views showed last: a timeline opened
  * from a call's details has no `session` in its address.
  */
@@ -2211,6 +2224,7 @@ function onOpenTimelineClick(event: MouseEvent): void {
 }
 
 function resetUnaddressedCallFilters(session: string): void {
+  callsLinkLoadSeq = activitiesLoadSeq
   if (session === lastCallsSession) return
   filterParentId.value = ''
   filterSensitiveData.value = ''
@@ -3291,9 +3305,7 @@ watch([effectiveTypes, filterServer, filterTool, filterStatus, filterSensitiveDa
 // `scopeConflict` is a source too: a conflict that resolves without any other
 // filter ref changing (a URL edit, or "Clear filters" setting everything in one
 // tick) must refetch, and a callback runs once per flush so it never doubles up.
-// `filterSession` is one too (Spec 124): two sessions' Tool calls links carry
-// the same explicit `type`, so nothing else changes between them.
-watch([effectiveTypes, filterServer, filterTool, filterStatus, filterSession, filterStartDate, filterEndDate, scopeConflict], () => {
+watch([effectiveTypes, filterServer, filterTool, filterStatus, filterStartDate, filterEndDate, scopeConflict], () => {
   void loadActivities()
 }, { deep: true })
 

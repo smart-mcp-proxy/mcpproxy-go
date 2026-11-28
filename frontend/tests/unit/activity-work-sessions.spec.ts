@@ -246,6 +246,40 @@ describe('Activity Sessions view (Spec 124)', () => {
     wrapper.unmount()
   })
 
+  it('a Tool calls link followed from a reloaded Sessions address reads the calls, though only the view changes', async () => {
+    // The address a look back at Sessions leaves behind: the session and the
+    // type list of its Tool calls link are still in it.
+    const types = 'tool_call,internal_tool_call,policy_decision'
+    const { wrapper, api } = await mountAt(`/activity?view=sessions&session=${WS_FAILED.id}&type=${types}`)
+    expect(api.getActivities).not.toHaveBeenCalled()
+    await wrapper.get(`[data-test="ws-calls-link-${WS_FAILED.id}"]`).trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(api.getActivities).toHaveBeenCalledTimes(1)
+    expect(wrapper.findAll('[data-test="activity-row"]').length).toBe(1)
+    wrapper.unmount()
+  })
+
+  it('a Tool calls link reads the calls once, not twice', async () => {
+    const { wrapper, api } = await mountAt('/activity?view=sessions')
+    await wrapper.get(`[data-test="ws-calls-link-${WS_FAILED.id}"]`).trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(api.getActivities).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('choosing a session in the calls view narrows the rows already read, as before', async () => {
+    const { wrapper, router, api } = await mountAt('/activity')
+    const before = api.getActivities.mock.calls.length
+    await router.push({ query: { session: WS_FAILED.id } })
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.findAll('[data-test="activity-row"]').length).toBe(1)
+    expect(api.getActivities.mock.calls.length).toBe(before)
+    wrapper.unmount()
+  })
+
   it('a timeline opened from a call and its Tool calls link back keep the filters of that session\'s calls', async () => {
     const { wrapper } = await mountAt(`/activity?session=${WS_FAILED.id}`)
     await wrapper.get('[data-test="activity-filters-toggle"]').trigger('click')
@@ -352,6 +386,9 @@ describe('Activity Sessions view (Spec 124)', () => {
     wrapper.unmount()
     const timeline = await mountAt(`/activity?view=sessions&ws=${WS_FAILED.id}&ws=other`)
     expect(timeline.wrapper.find('[data-test="session-timeline"]').exists()).toBe(true)
+    // The first value names the session: that one is asked for, not the other.
+    expect(timeline.api.getWorkSessionTimeline.mock.calls.every((call: any[]) => call[0] === WS_FAILED.id)).toBe(true)
+    expect(timeline.api.getWorkSessionTimeline).toHaveBeenCalled()
     expect(timeline.wrapper.get('[data-test="activity-filter-strip"]').attributes('style') ?? '').toContain('display: none')
     timeline.wrapper.unmount()
   })

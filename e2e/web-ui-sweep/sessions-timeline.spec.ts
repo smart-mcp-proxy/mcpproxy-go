@@ -516,6 +516,13 @@ for (const width of [390, 1024, 1280, 1440]) {
       expect(box.x, `${hook} starts on screen`).toBeGreaterThanOrEqual(0)
       expect(box.x + Math.min(box.width, 40), `${hook} is on screen`).toBeLessThanOrEqual(width)
     }
+    // And whole: neither is cut by the line that holds it.
+    const cut = await listRow.evaluate((tr) => ['ws-token-narrow', 'ws-project'].filter((hook) => {
+      const el = tr.querySelector(`[data-test="${hook}"]`) as HTMLElement
+      const line = (hook === 'ws-project' ? el.parentElement! : el) as HTMLElement
+      return line.scrollWidth > line.clientWidth + 1
+    }))
+    expect(cut, 'cut off by their own line').toEqual([])
     // The last failure can be read where it is shown: whole in the folded
     // lines below 1280 px, and from there in a column of its own that is wide
     // enough for the error class, the reason and the time to the millisecond.

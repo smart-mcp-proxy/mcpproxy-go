@@ -500,13 +500,19 @@ function revealPosition(): void {
 
 // A new position keeps the amount of context the page has (US1 scenario 4):
 // after "load earlier rows", the next failure opens just as wide.
+/** Set while a page at `end` is given a fixed anchor: not a new position. */
+let reanchoring = false
 watch([sessionId, at], () => {
   // Bodies read at the old position go with it, as on Refresh: the core may
   // have masked a response since, and the row can come back on a later page.
   bodiesEpoch++
   bodies.clear()
-  expanded.clear()
-  scrollToPosition = true
+  if (reanchoring) {
+    reanchoring = false
+  } else {
+    expanded.clear()
+    scrollToPosition = true
+  }
   void load()
 })
 
@@ -556,6 +562,8 @@ function loadAround(): void {
     const positioned = current.rows.find(row => row.index === current.position)
     const anchor = positioned?.activity?.id ? `row:${positioned.activity.id}` : edgeRowAt('last')
     if (anchor) {
+      // The same rows around a fixed row: what is open stays open.
+      reanchoring = true
       goTo(anchor)
       return
     }

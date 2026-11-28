@@ -229,6 +229,22 @@ describe('Session timeline (Spec 124 FR-062)', () => {
     expect(api.getWorkSessionTimeline).toHaveBeenLastCalledWith(WS_FAILED.id, { at: 'row:a15', before: 70, after: 20 })
   })
 
+  it('that widening keeps the rows the operator has open', async () => {
+    const page = timelinePage({ session: { ...WS_FAILED, status: 'active' }, position: 15, failure_index: 3, has_before: true })
+    const withBody = structuredClone(page.rows[4]) as any
+    withBody.activity.arguments = { repo: 'acme/app' }
+    door.page = page
+    door.bodies = { ...page, rows: [withBody] }
+    const { wrapper, router } = await mountTimeline(`/activity?view=sessions&ws=${WS_FAILED.id}&at=end`)
+    await wrapper.get('[data-test="timeline-expand-14"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="timeline-load-earlier"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(router.currentRoute.value.query.at).toBe('row:a15')
+    expect(wrapper.get('[data-test="timeline-detail-14"]').text()).toContain('acme/app')
+  })
+
   it('a page at the end of a session that has ended stays at the end when it is widened', async () => {
     // WS_FAILED has ended: its end does not move, and the selection must not either.
     door.page = timelinePage({ position: 16, failure_index: 5, has_before: true })
@@ -623,6 +639,21 @@ describe('Session timeline (Spec 124 FR-062)', () => {
     const notice = wrapper.get('[data-test="timeline-earlier-failures"]')
     expect(notice.text()).toContain('7 failures')
     expect(notice.text()).toContain('5 are still in the log')
+  })
+
+  it('tells a trimmed start from failures that were removed: each note has its own cause', async () => {
+    // Early successful rows were trimmed; every failure is still in the log.
+    door.page = timelinePage({ earlier_failures_not_stored: false })
+    const trimmed = await mountTimeline()
+    expect(trimmed.wrapper.find('[data-test="timeline-truncated-start"]').exists()).toBe(true)
+    expect(trimmed.wrapper.find('[data-test="timeline-earlier-failures"]').exists()).toBe(false)
+    trimmed.wrapper.unmount()
+    // The start is whole; failures were removed.
+    door.page = timelinePage({ session: { ...WS_FAILED, truncated_start_at: undefined } })
+    const removed = await mountTimeline()
+    expect(removed.wrapper.find('[data-test="timeline-truncated-start"]').exists()).toBe(false)
+    expect(removed.wrapper.find('[data-test="timeline-earlier-failures"]').exists()).toBe(true)
+    removed.wrapper.unmount()
   })
 
   it('shows neither note when nothing was removed', async () => {
