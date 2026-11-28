@@ -126,6 +126,16 @@
                 {{ part.label }}
               </span>
             </template>
+            <!-- The Tool calls view leaves out approvals, scans and system events. Say so, one click from all of them. -->
+            <button
+              v-if="hiddenEventCount > 0"
+              type="button"
+              class="link link-hover text-sm max-sm:min-h-11 max-sm:inline-flex max-sm:items-center"
+              style="color: var(--ds-brand-text)"
+              data-test="activity-show-all-events"
+              :title="`This view lists tool calls only. ${hiddenEventCount} other ${hiddenEventCount === 1 ? 'event is' : 'events are'} not shown here: tool approvals, security scans and system events.`"
+              @click="setView('all')"
+            >Show all {{ summary?.total_count }} events</button>
           </div>
 
           <div class="flex-1"></div>
@@ -1730,6 +1740,8 @@ function setView(id: ActivityViewId): void {
 // State
 const activities = ref<ActivityRecord[]>([])
 const summary = ref<ActivitySummaryResponse | null>(null)
+// Events in the summary window that the Tool calls view does not list (approvals, scans, system events).
+const hiddenEventCount = computed(() => (activeView.value === 'calls' && summary.value ? Math.max(0, (summary.value.total_count ?? 0) - (summary.value.call_count ?? 0)) : 0))
 const loading = ref(false)
 const error = ref<string | null>(null)
 const selectedActivity = ref<ActivityRecord | null>(null)

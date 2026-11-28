@@ -264,3 +264,24 @@ describe('Activity Log — row treatment', () => {
   })
 
 })
+
+// Home lists approvals and system events; the default Tool calls view hides
+// them. The view says so and offers the way to every event (rc.1 feedback).
+describe('Activity Log — events that are not tool calls stay reachable', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    window.localStorage.clear()
+  })
+
+  it('the Tool calls view offers "Show all events" and it opens the All view', async () => {
+    const wrapper = await mountActivity()
+    const link = wrapper.get('[data-test="activity-show-all-events"]')
+    expect(link.text()).toBe('Show all 54 events')
+    expect(link.attributes('title')).toContain('approvals')
+    await link.trigger('click')
+    await flushPromises()
+    expect(wrapper.vm.$route.query.view).toBe('all')
+    expect(wrapper.find('[data-test="activity-show-all-events"]').exists()).toBe(false)
+  })
+})

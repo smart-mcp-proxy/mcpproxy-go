@@ -207,10 +207,11 @@ describe('usage strip window label (P4-19)', () => {
 })
 
 describe('recent activity (P4-21)', () => {
-  it('shows five rows and links to Activity', async () => {
+  it('shows five rows and links to every Activity event', async () => {
     const { wrapper } = await mountHome()
     expect(wrapper.findAll(T('recent-activity-row'))).toHaveLength(5)
-    expect(wrapper.get('a[data-test="recent-activity-view-all"]').attributes('href')).toBe('/activity')
+    // The list above mixes calls, approvals and system events, so the link opens the view that shows all of them.
+    expect(wrapper.get('a[data-test="recent-activity-view-all"]').attributes('href')).toBe('/activity?view=all')
   })
 
   it('is empty, failed and absent for a tenant', async () => {
