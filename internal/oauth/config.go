@@ -2117,6 +2117,10 @@ func (c *CallbackServer) handleParsedCallback(w http.ResponseWriter, query url.V
 		return
 	}
 
+	// The received iss is never logged: it is attacker-controlled free text
+	// that no masker reliably covers (query, fragment, encodings). Logs say
+	// only whether it was present.
+	//
 	// Spec 135 FR-003/FR-005: the issuer decision runs for the flow this
 	// state selects, before the provider's error is reported and before the
 	// page is chosen. A refusal reaches the flow as CallbackResult.Err, so
@@ -2129,8 +2133,7 @@ func (c *CallbackServer) handleParsedCallback(w http.ResponseWriter, query url.V
 				zap.String("state", StateFingerprint(state)),
 				zap.String("expected_issuer", logSafeURL(issuerCheck.Expected.Issuer)),
 				zap.String("issuer_source", string(issuerCheck.Expected.Source)),
-				zap.Bool("iss_present", issPresent),
-				zap.String("iss", logSafeURL(params.Get("iss"))))
+				zap.Bool("iss_present", issPresent))
 			// Not recorded here: the flow that owns this state receives the
 			// refusal and records it once, on the loopback and the remote
 			// callback alike, under its own retirement rules.
@@ -2146,14 +2149,12 @@ func (c *CallbackServer) handleParsedCallback(w http.ResponseWriter, query url.V
 				zap.String("reason", decision.Waived),
 				zap.String("state", StateFingerprint(state)),
 				zap.String("expected_issuer", logSafeURL(issuerCheck.Expected.Issuer)),
-				zap.Bool("iss_present", issPresent),
-				zap.String("iss", logSafeURL(params.Get("iss"))))
+				zap.Bool("iss_present", issPresent))
 		case issPresent && issuerCheck.Expected.Source == IssuerSourceSynthetic:
 			// FR-004: a present iss on a synthetic flow is logged, never kept.
 			c.logger.Info("OAuth callback carries an iss for an endpoint-override (synthetic) issuer; not used as provenance",
 				zap.String("state", StateFingerprint(state)),
-				zap.String("expected_issuer", logSafeURL(issuerCheck.Expected.Issuer)),
-				zap.String("iss", logSafeURL(params.Get("iss"))))
+				zap.String("expected_issuer", logSafeURL(issuerCheck.Expected.Issuer)))
 		}
 	}
 	c.send(state, ch, CallbackResult{Query: query})
