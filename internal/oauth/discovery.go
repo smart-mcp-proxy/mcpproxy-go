@@ -668,13 +668,13 @@ func ValidateOAuthMetadata(serverURL, serverName string, timeout time.Duration) 
 
 // ValidateOAuthMetadataForServer is ValidateOAuthMetadataWithEnv for a
 // configured upstream, the pre-flight check a sign-in runs. It skips the check
-// (nil, nil) when the server's oauth block sets auth_server_metadata_url, or
-// both authorization_endpoint and token_endpoint: the sign-in then reads that
-// document, or serves one built from the endpoints, instead of relying on
-// discovery, so the discovery this check performs says nothing about whether
-// the sign-in can work.
+// (nil, nil) when the server's oauth block sets auth_server_metadata_url,
+// authorization_endpoint or token_endpoint: the sign-in then reads that
+// document, or writes the endpoints over the fetched one (or serves one built
+// from them), so the unmodified discovery this check performs says nothing
+// about whether the sign-in can work.
 func ValidateOAuthMetadataForServer(env Env, serverConfig *config.ServerConfig, timeout time.Duration) (*OAuthMetadataValidationResult, error) {
-	if o := serverConfig.OAuth; o != nil && (o.AuthServerMetadataURL != "" || (o.AuthorizationEndpoint != "" && o.TokenEndpoint != "")) {
+	if o := serverConfig.OAuth; o != nil && (o.AuthServerMetadataURL != "" || o.AuthorizationEndpoint != "" || o.TokenEndpoint != "") {
 		return nil, nil
 	}
 	return ValidateOAuthMetadataWithEnv(env, serverConfig.URL, serverConfig.Name, timeout)

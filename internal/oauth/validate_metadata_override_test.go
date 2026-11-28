@@ -122,3 +122,28 @@ func TestWellKnownPRM_OversizedDocumentIsNotUsed(t *testing.T) {
 	InvalidateDiscovery(base + "/mcp")
 	assert.Nil(t, wellKnownPRM(Env{Ctx: context.Background()}, base+"/mcp", discoveryOverrides{}, 5*time.Second, zap.NewNop()))
 }
+
+// One endpoint override is enough: the transport writes it over the fetched
+// document, so the unmodified document this check reads can lack that field.
+func TestValidateOAuthMetadataForServer_HonoursSingleEndpointOverride(t *testing.T) {
+	var base string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/oauth-protected-resource/mcp":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"resource": %q, "authorization_servers": [%q]}`, base+"/mcp", base)
+		case "/.well-known/oauth-authorization-server":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"issuer": %q, "authorization_endpoint": "%s/a"}`, base, base)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	base = srv.URL
+	sc := &config.ServerConfig{Name: "token-only", URL: base + "/mcp",
+		OAuth: &config.OAuthConfig{TokenEndpoint: base + "/t"}}
+	res, err := ValidateOAuthMetadataForServer(Env{Ctx: context.Background()}, sc, 5*time.Second)
+	require.NoError(t, err)
+	assert.Nil(t, res)
+}
