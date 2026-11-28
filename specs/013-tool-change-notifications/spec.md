@@ -2,7 +2,7 @@
 
 **Feature Branch**: `013-tool-change-notifications`
 **Created**: 2025-12-20
-**Status**: Draft
+**Status**: Implemented
 **Issue**: https://github.com/smart-mcp-proxy/mcpproxy-go/issues/209
 **Input**: User description: "Need to fix this issue https://github.com/smart-mcp-proxy/mcpproxy-go/issues/209 fix, add tests, update online docs"
 
