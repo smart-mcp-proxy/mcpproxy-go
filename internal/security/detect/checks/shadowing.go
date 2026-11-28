@@ -398,26 +398,7 @@ func (c *Shadowing) referenceSignals(tool detect.ToolView, reg detect.RegistryVi
 	// a coin flip on any description that repeats the token.
 	locs := wordRe.FindAllStringIndex(tool.Description, -1)
 	seen := make(map[string]struct{})
-	// A name can occur more than once, and the occurrences can differ in how
-	// they are written ("For this reason, ... use the reason tool"). The signal
-	// for a name is HARD when ANY occurrence is written as a tool name, and its
-	// span marks the first such occurrence; otherwise it is SOFT on the first.
-	namedAt := make(map[string][2]int)
-	for _, loc := range locs {
-		tok := tool.Description[loc[0]:loc[1]]
-		if _, done := namedAt[tok]; done {
-			continue
-		}
-		// The same cheap filters as the loop below, first: a self-reference and
-		// a name that is unknown or not distinctive never produce a signal, so
-		// no shape work is spent on them however often they repeat.
-		if tok == tool.Name || !distinctiveName(tok) {
-			continue
-		}
-		if _, known := reg.ToolsByName[tok]; known && writtenAsToolName(tool.Description, loc[0], loc[1]) {
-			namedAt[tok] = [2]int{loc[0], loc[1]}
-		}
-	}
+	namedAt := namedReferences(tool, reg, locs)
 	var sigs []detect.Signal
 	for _, loc := range locs {
 		tok := tool.Description[loc[0]:loc[1]]
@@ -484,6 +465,32 @@ func (c *Shadowing) referenceSignals(tool detect.ToolView, reg detect.RegistryVi
 		})
 	}
 	return sigs
+}
+
+// namedReferences maps each referenced name to the first occurrence that is
+// written as a tool name.
+// A name can occur more than once, and the occurrences can differ in how
+// they are written ("For this reason, ... use the reason tool"). The signal
+// for a name is HARD when ANY occurrence is written as a tool name, and its
+// span marks the first such occurrence; otherwise it is SOFT on the first.
+func namedReferences(tool detect.ToolView, reg detect.RegistryView, locs [][]int) map[string][2]int {
+	namedAt := make(map[string][2]int)
+	for _, loc := range locs {
+		tok := tool.Description[loc[0]:loc[1]]
+		if _, done := namedAt[tok]; done {
+			continue
+		}
+		// The same cheap filters as the loop below, first: a self-reference and
+		// a name that is unknown or not distinctive never produce a signal, so
+		// no shape work is spent on them however often they repeat.
+		if tok == tool.Name || !distinctiveName(tok) {
+			continue
+		}
+		if _, known := reg.ToolsByName[tok]; known && writtenAsToolName(tool.Description, loc[0], loc[1]) {
+			namedAt[tok] = [2]int{loc[0], loc[1]}
+		}
+	}
+	return namedAt
 }
 
 // writtenAsToolName reports whether the occurrence desc[start:end] is written
@@ -578,7 +585,7 @@ func isQualifierEnd(r rune) bool {
 		return true
 	}
 	switch r {
-	case ':', ',', ';', '!', '?':
+	case ':', ',', ';':
 		return false
 	}
 	if unicode.IsSpace(r) || unicode.In(r, unicode.Ps, unicode.Pe, unicode.Pi, unicode.Pf) {

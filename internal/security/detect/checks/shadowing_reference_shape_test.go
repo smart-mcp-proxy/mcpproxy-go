@@ -30,6 +30,7 @@ func TestShadowing_ReferenceTierFollowsHowTheNameIsWritten(t *testing.T) {
 		{"qualified with a server", "reason", "Use analytics:reason to interpret the result.", detect.TierHard},
 		{"qualifier ends in a dash", "reason", "Use analytics-:reason to interpret the result.", detect.TierHard},
 		{"qualifier ends in a plus", "reason", "Use analytics+:reason to interpret the result.", detect.TierHard},
+		{"qualifier ends in an exclamation mark", "reason", "Use analytics!:reason to interpret the result.", detect.TierHard},
 		{"inward guillemets", "reason", "Use \u00bbreason\u00ab to interpret the result.", detect.TierHard},
 		{"outward guillemets", "reason", "Use \u00abreason\u00bb to interpret the result.", detect.TierHard},
 		{"German quotes", "reason", "Use \u201ereason\u201c to interpret the result.", detect.TierHard},
@@ -135,16 +136,23 @@ func TestShadowing_NeighbourScanIsBounded(t *testing.T) {
 }
 
 // A self-reference costs no shape work, however often it repeats: the pre-pass
-// drops it with the same cheap test as the main loop.
+// drops it before classifying. The description is built so that the last
+// occurrence WOULD classify as a written tool name (the word "tool" follows it
+// within the limit), so an entry in the result means the guard is gone.
 func TestShadowing_SelfReferencesAreNotClassified(t *testing.T) {
-	desc := strings.Repeat("reason"+strings.Repeat(" ", 31), 2000) + "tool"
+	desc := strings.Repeat("reason"+strings.Repeat(" ", neighbourRuneLimit-1), 2000) + "tool"
+	self := detect.ToolView{Server: "a", Name: "reason", Description: desc}
 	reg := detect.NewRegistryView([]detect.ToolView{
-		{Server: "a", Name: "reason", Description: desc},
+		self,
 		{Server: "b", Name: "reason", Description: "Reason about a question, on another server entirely."},
 	})
-	for _, s := range inspectInReg(&Shadowing{}, reg, "a", "reason") {
-		if len(s.Spans) > 0 {
-			t.Fatalf("a self-reference produced a reference signal: %+v", s)
-		}
+	locs := wordRe.FindAllStringIndex(desc, -1)
+	if got := namedReferences(self, reg, locs); len(got) != 0 {
+		t.Fatalf("the pre-pass classified a self-reference: %v", got)
+	}
+	// The same text under another tool name is classified: the guard is what made the difference.
+	other := detect.ToolView{Server: "a", Name: "helper", Description: desc}
+	if got := namedReferences(other, reg, locs); len(got) != 1 {
+		t.Fatalf("control: want the reference classified for another tool, got %v", got)
 	}
 }
