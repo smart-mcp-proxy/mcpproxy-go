@@ -516,6 +516,12 @@ func namedReferences(tool detect.ToolView, reg detect.RegistryView, locs [][]int
 // unavailable") is left out of the rule because a name is not followed by a
 // plural noun; the singular stays, since "the X tool" is the commonest way a
 // description names a tool.
+//
+// Accepted limit: code marks are read as a pair around the token, not as
+// Markdown. In "`one`reason`two`" the word stands between two code spans and
+// reads HARD. Telling the two apart needs the parity of every backtick before
+// the token, a scan of the whole prefix per occurrence, for a shape that
+// ordinary descriptions do not contain.
 func writtenAsToolName(desc string, start, end int) bool {
 	before, beforeSize := utf8.DecodeLastRuneInString(desc[:start])
 	after, afterSize := utf8.DecodeRuneInString(desc[end:])
