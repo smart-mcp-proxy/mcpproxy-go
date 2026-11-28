@@ -138,7 +138,8 @@ describe('OnboardingWizard verify states (F13)', () => {
     const wrapper = await openVerifyTab({
       resolved: { success: true, data: { routing_mode: 'retrieve_tools' } },
     })
-    expect(wrapper.find('[data-test="verify-first-upstream-call"]').exists()).toBe(false)
+    // Spec 134 FR-053: unknown has its own text instead of a missing row.
+    expect(wrapper.find('[data-test="verify-first-upstream-call"]').attributes('data-state')).toBe('unknown')
     expect(wrapper.find('[data-test="verify-client-connected"]').text())
       .not.toContain('does not yet mean a tool has run')
   })
@@ -190,7 +191,7 @@ describe('OnboardingWizard verify states (F13)', () => {
 
   it('degrades silently (never an error, never a false negative) when the status call fails', async () => {
     const wrapper = await openVerifyTab({ rejects: true })
-    expect(wrapper.find('[data-test="verify-first-upstream-call"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="verify-first-upstream-call"]').attributes('data-state')).toBe('unknown')
     // The rest of the panel still rendered — the failure must not abort onOpened().
     expect(wrapper.find('[data-test="verify-sample-prompts"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="panel-verify"]').text()).not.toContain('No upstream tool call')
@@ -204,7 +205,7 @@ describe('OnboardingWizard verify states (F13)', () => {
       const wrapper = await openVerifyTab({
         resolved: { success: true, data: { routing_mode: mode, activation: { first_real_tool_call_ever: false } } },
       })
-      expect(wrapper.find('[data-test="verify-first-upstream-call"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="verify-first-upstream-call"]').attributes('data-state')).toBe('unknown')
       const panel = wrapper.find('[data-test="panel-verify"]')
       expect(panel.text()).not.toContain('No upstream tool call')
       expect(panel.text()).not.toContain('does not yet mean a tool has run')

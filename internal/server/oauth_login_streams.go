@@ -65,7 +65,7 @@ type oauthStreamRegistry struct {
 }
 
 // resetOAuthStreams starts a fresh tracking lifecycle for a new server run: the
-// previous run's registry (already stopped and joined by stopOAuthStreams) is
+// previous run's registry (already stopped by stopOAuthStreamsOfRun) is
 // dropped, and tracking is accepted again. Allocation stays lazy.
 func (s *Server) resetOAuthStreams() {
 	s.oauthStreamsMu.Lock()
@@ -104,7 +104,7 @@ func (s *Server) oauthRunGen() uint64 {
 func (s *Server) trackOAuthRequest(grantID string, expiresAt time.Time, epoch, run uint64, interrupt func()) (release func(), ok bool) {
 	st := &oauthStream{grantID: grantID, expiresAt: expiresAt, epoch: epoch, interrupt: interrupt}
 	// The stopping flag, the registry's creation and the entry's insertion are
-	// one critical section: a track after stopOAuthStreams has marked the run
+	// one critical section: a track after stopOAuthStreamsOfRun has marked the run
 	// stopped is refused, whether or not a registry ever existed.
 	s.oauthStreamsMu.Lock()
 	if s.oauthStreamsStopping || run != s.oauthStreamsRun {
@@ -196,11 +196,19 @@ func (s *Server) watchOAuthStreams(reg *oauthStreamRegistry) {
 	}
 }
 
-// stopOAuthStreams interrupts every tracked request, stops the watcher and
-// waits for it. It runs at server shutdown, before the HTTP server waits for
-// its active handlers. Nothing is tracked afterwards.
-func (s *Server) stopOAuthStreams() {
+// stopOAuthStreamsOfRun interrupts every tracked request of server run run
+// (oauthRunGen captured when the stop began), stops the watcher and waits for
+// it. Nothing is tracked afterwards. It runs after the HTTP shutdown, and Serve
+// returns as soon as that shutdown begins, so a next run may already have
+// started: its tracking is then left alone. The stopped run's registry was
+// dropped by that start; its watcher returns on its own once the run's last
+// request ends, and the HTTP shutdown has ended them.
+func (s *Server) stopOAuthStreamsOfRun(run uint64) {
 	s.oauthStreamsMu.Lock()
+	if run != s.oauthStreamsRun {
+		s.oauthStreamsMu.Unlock()
+		return
+	}
 	s.oauthStreamsStopping = true // also with no registry: late tracking is refused
 	reg := s.oauthStreams.Load()
 	s.oauthStreamsMu.Unlock()

@@ -161,3 +161,12 @@ export async function cleanupScopeActivity(): Promise<void> {
   await quiet(() => api('PATCH', '/config', { anonymous_profile: '' }))
   await quiet(() => api('DELETE', `/profiles/${SCOPE_PROFILE}?force=true`))
 }
+
+
+// Spec 134 FR-060: a client's controls live in its Manage side panel.
+export async function openManagePanel(page: import('@playwright/test').Page, id: string = CLIENT_ID): Promise<void> {
+  const panel = page.locator(`[data-test="client-manage-panel-${id}"]`)
+  if (await panel.isVisible().catch(() => false)) return
+  await page.locator(`[data-test="client-manage-${id}"]`).click()
+  await panel.waitFor({ state: 'visible' })
+}

@@ -36,13 +36,14 @@ func RequestExit(pid int) error {
 
 // HoldPID keeps Windows from giving pid to another process until release: an
 // open handle to a process reserves its PID even after the process is reaped.
-// Call it while the process is still unreaped.
-func HoldPID(pid int) (release func()) {
+// Call it while the process is still unreaped. held is false when the process
+// could not be opened, so its PID may already be another process's.
+func HoldPID(pid int) (release func(), held bool) {
 	h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid)) //nolint:gosec // pid is a live PID from exec.Cmd.Process.Pid
 	if err != nil {
-		return func() {}
+		return func() {}, false
 	}
-	return func() { _ = windows.CloseHandle(h) }
+	return func() { _ = windows.CloseHandle(h) }, true
 }
 
 // IsSuspended reports whether cmd was marked to start suspended.

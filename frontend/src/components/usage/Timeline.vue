@@ -2,9 +2,9 @@
   <div data-test="usage-timeline">
     <div class="flex items-center justify-between mb-2">
       <h3 class="font-semibold text-sm">Activity over time</h3>
-      <span class="text-xs opacity-60">{{ windowLabel }}</span>
+      <span class="text-xs text-base-content/60">{{ windowLabel }}</span>
     </div>
-    <div v-if="buckets.length === 0" class="text-sm opacity-60 py-8 text-center" data-test="usage-timeline-empty">
+    <div v-if="buckets.length === 0" class="text-sm text-base-content/60 py-8 text-center" data-test="usage-timeline-empty">
       No activity in this window.
     </div>
     <div v-else class="relative" style="height: 220px">
@@ -26,11 +26,13 @@ import {
 } from 'chart.js'
 import type { ChartOptions } from 'chart.js'
 import type { UsageTimeBucket, UsageWindow } from '@/types'
+import { chartTextOptions, useChartColors } from '@/utils/chartColors'
 import { formatNumber } from '@/utils/usageFormat'
 
 ChartJS.register(BarElement, CategoryScale, LinearScale, Tooltip, Legend)
 
 const props = defineProps<{ buckets: UsageTimeBucket[]; window: UsageWindow }>()
+const colors = useChartColors()
 
 // Spec 109-k, T119: link map "Usage chart bar (tool x bucket)" -> the calls
 // behind the bar. A bucket carries only its own `start`; `end` is the next
@@ -74,14 +76,14 @@ const chartData = computed(() => ({
     {
       label: 'Calls',
       data: props.buckets.map(b => b.calls - b.errors),
-      backgroundColor: '#3b82f6',
+      backgroundColor: colors.value.brand,
       borderWidth: 0,
       stack: 'activity',
     },
     {
       label: 'Errors',
       data: props.buckets.map(b => b.errors),
-      backgroundColor: '#ef4444',
+      backgroundColor: colors.value.error,
       borderWidth: 0,
       stack: 'activity',
     },
@@ -100,7 +102,7 @@ const chartOptions = computed<ChartOptions<'bar'>>(() => ({
     if (target) target.style.cursor = elements.length > 0 ? 'pointer' : 'default'
   },
   plugins: {
-    legend: { display: true, position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } },
+    legend: { display: true, position: 'bottom', labels: { boxWidth: 12, font: { size: 12 }, color: colors.value.muted } },
     tooltip: {
       callbacks: {
         footer: (items) => {
@@ -111,10 +113,10 @@ const chartOptions = computed<ChartOptions<'bar'>>(() => ({
     },
   },
   scales: {
-    x: { stacked: true, ticks: { maxRotation: 0, autoSkip: true, font: { size: 10 } } },
+    x: { stacked: true, ...chartTextOptions(colors.value), ticks: { maxRotation: 0, autoSkip: true, font: { size: 12 }, color: colors.value.muted } },
     // Spec 109 FR-074: a call count is never fractional — force integer
     // ticks rather than letting chart.js round a small max into 0.5/1.5s.
-    y: { stacked: true, beginAtZero: true, ticks: { precision: 0, callback: (v) => formatNumber(Number(v)) } },
+    y: { stacked: true, beginAtZero: true, ...chartTextOptions(colors.value), ticks: { precision: 0, callback: (v) => formatNumber(Number(v)), color: colors.value.muted } },
   },
 }))
 </script>

@@ -35,7 +35,7 @@ All three gaps are real. Two of them need more than the dependency bump, because
 ### Gap 3: DCR omits `application_type`. CONFIRMED, but the right value is not the one the issue proposes
 
 - mcp-go v1.0.0 `RegisterClient` (`mcp-go@v1.0.0/client/transport/oauth.go:987-1019`) sends `client_name`, `redirect_uris`, `token_endpoint_auth_method`, `grant_types`, `response_types`, `scope`, and, when set, `client_uri` and `resource`. It never sends `application_type`. mcpproxy calls it from `internal/upstream/core/connection_oauth.go:1161`, `:1506`, `:2207` and from `oauth_stale_dcr_client.go:133`.
-- `application_type` is defined by OpenID Connect Dynamic Client Registration 1.0 §2, not by RFC 7591. It defaults to **`web`** when omitted. Native clients are the ones expected to use loopback `http` redirect URIs. OIDC states the hard "https only, no localhost" rule for web clients that use the implicit grant, and it does not state it for the code grant, but providers commonly apply native-versus-web redirect policy on this field. mcpproxy's normal redirect is `http://127.0.0.1:<port>/oauth/callback` and it is a native app, so the correct declaration is **`native` for a loopback redirect** and `web` only for a non-loopback redirect such as the remote callback. Sending `"web"` for the loopback flow, as the issue suggests, would declare the wrong type. mcp-go v1.4.0 derives the value from the redirect URI (`applicationType(redirectURI)`), and the plan checks that its mapping matches.
+- `application_type` is defined by OpenID Connect Dynamic Client Registration 1.0 §2, not by RFC 7591. It defaults to **`web`** when omitted. Native clients are the ones expected to use loopback `http` redirect URIs. OIDC states the hard "https only, no localhost" rule for web clients that use the implicit grant, and it does not state it for the code grant, but providers commonly apply native-versus-web redirect policy on this field. mcpproxy's normal redirect is `http://127.0.0.1:<port>/oauth/callback` and it is a native app, so the correct declaration is **`native` for an `http` loopback redirect** and `web` otherwise: a non-loopback redirect such as the remote callback, or an `https` redirect on a loopback host. Sending `"web"` for the loopback flow, as the issue suggests, would declare the wrong type. mcp-go v1.4.0 derives the value from the redirect URI (`applicationType(redirectURI)`), and the plan checks that its mapping matches.
 
 ## Scope
 
@@ -163,7 +163,7 @@ An upstream's PRM names authorization server `https://auth.example.com`, but the
 
 ### User Story 5: DCR declares the right application type (Priority: P2)
 
-When mcpproxy registers itself, the request sends `"application_type": "native"` for a loopback redirect URI and `"web"` for a non-loopback one.
+When mcpproxy registers itself, the request sends `"application_type": "native"` for an `http` loopback redirect URI and `"web"` for any other (non-loopback, or `https` on a loopback host).
 
 **Why this priority**: it fixes registrations that strict providers reject. It is not an attack defence.
 
@@ -171,8 +171,8 @@ When mcpproxy registers itself, the request sends `"application_type": "native"`
 
 **Acceptance Scenarios**:
 
-1. **Given** a redirect whose host is `127.0.0.1`, `[::1]` or `localhost`, **When** DCR runs, **Then** the body has `application_type: "native"`.
-2. **Given** a non-loopback redirect host, **When** DCR runs, **Then** the body has `application_type: "web"`.
+1. **Given** an `http` redirect whose host is `127.0.0.1`, another `127/8` address, `[::1]` or `localhost`, **When** DCR runs, **Then** the body has `application_type: "native"`.
+2. **Given** a non-loopback redirect host, or an `https` redirect on a loopback host, **When** DCR runs, **Then** the body has `application_type: "web"`.
 3. **Given** a provider that rejects the field, **Then** mcpproxy does not retry without it. The existing DCR error surfaces, and the docs name the supported remedy: a pre-registered client, configured as a static `oauth.client_id`.
 
 ---
@@ -269,7 +269,7 @@ A brokered upstream (`ConnectorConfig`, static endpoints, no discovery) can now 
 
 **DCR**
 
-- **FR-016**: DCR MUST send `application_type: "native"` when the registered redirect URI's host is a loopback address or `localhost`, and `"web"` otherwise. It MUST NOT retry without the field.
+- **FR-016**: DCR MUST send `application_type: "native"` when the registered redirect URI is an `http` URI whose host is a loopback address or `localhost`, and `"web"` otherwise, including an `https` URI on a loopback host (OpenID Connect DCR 1.0 §2 allows a native client only loopback `http` or custom-scheme redirect URIs). It MUST NOT retry without the field.
 
 **Surfaces**
 
@@ -307,7 +307,7 @@ These are decisions made on the maintainer's behalf (zero-interruption policy). 
 1. **Strict by default**, with a per-server opt-out only (FR-014).
 2. **Trust on first use for legacy rows** (FR-011). Forcing every server to sign in again would close only the window described under "Protection model", at the cost of one sign-in per server for every user. mcp-go makes the same choice. The protection claims (SC-002) are stated for bound rows only.
 3. **mcpproxy owns the `iss` decision** in its callback handler. mcp-go cannot tell a synthetic document from a discovered one, and the broker does not use mcp-go. Where the two agree, mcp-go's `ProcessAuthorizationCallback` also runs, as a second check.
-4. **`application_type` follows OIDC DCR**: `native` for loopback, `web` otherwise.
+4. **`application_type` follows OIDC DCR**: `native` for an `http` loopback redirect, `web` otherwise (`https` on a loopback host included).
 5. **No new activity-log type and no telemetry change.** Failures go through the existing OAuth failure record, health, the Spec 124 `upstream_event` rows, and logs.
 6. **Trailing slash** is tolerated once for metadata equality and never for `iss`.
 7. **Broker**: the `issuer` field is optional, and an absent `iss` is accepted there (US7).

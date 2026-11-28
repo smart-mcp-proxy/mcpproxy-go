@@ -411,7 +411,7 @@ The `TIER` column is computed once by the core, so it agrees with the Web UI, ma
 
 ### activity list `--view`
 
-`mcpproxy activity list --view calls|system|all` selects the same views as the Web UI and macOS Activity page: `calls` is tool calls only, `system` is system events, `all` is everything (the default, so scripts keep working). The CLI has no `sessions` view; use `--session <id>` for one session's history. `--from` and `--to` take RFC 3339 or relative times (`-24h`). See [Activity Commands](/cli/activity-commands).
+`mcpproxy activity list --view calls|system|all` selects the same views as the Web UI and macOS Activity page: `calls` is tool calls only, `system` is system events, `all` is everything (the default, so scripts keep working). Sessions have their own commands: `mcpproxy activity sessions` lists work sessions with their failure facts, and `mcpproxy activity session <id>` prints one session's timeline around its failures (`--session <id>` on `activity list` still filters the list to one session). `--from` and `--to` take RFC 3339 or relative times (`-24h`). See [Activity Commands](/cli/activity-commands).
 
 ### call tool
 

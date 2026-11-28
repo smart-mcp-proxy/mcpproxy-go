@@ -38,7 +38,7 @@ const (
 	// no activity for this long is over.
 	workSessionIdleWindow = 30 * time.Minute
 
-	workSessionNotFound = "Work session not found"
+	workSessionNotFound = contracts.WorkSessionNotFoundMessage
 )
 
 // workSessionController is the storage a work-session door reads. It is an
@@ -579,7 +579,7 @@ func (s *Server) handleWorkSessionTimeline(w http.ResponseWriter, r *http.Reques
 	}
 	page, from, position, okPos := col.finish()
 	if !okPos {
-		s.writeError(w, r, http.StatusBadRequest, "Invalid at. No such failure or row in this session")
+		s.writeError(w, r, http.StatusBadRequest, contracts.WorkSessionNoSuchPositionMessage)
 		return
 	}
 

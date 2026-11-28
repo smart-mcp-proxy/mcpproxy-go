@@ -1,6 +1,6 @@
 <template>
   <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-normal" :data-test="`credential-lifecycle-${id}`">
-    <span v-if="binding" class="font-medium whitespace-nowrap" :data-test="`credential-binding-${id}`">{{ binding }}</span>
+    <span v-if="binding && !hideBinding" class="font-medium whitespace-nowrap" :data-test="`credential-binding-${id}`">{{ binding }}</span>
     <span v-if="issuer" class="opacity-70 whitespace-nowrap" :data-test="`credential-issuer-${id}`">{{ issuer }}</span>
     <span v-if="lease && !hideLease" class="opacity-80 whitespace-nowrap" :data-test="`credential-lease-${id}`">{{ lease }}</span>
     <span v-else-if="expiryText && !hideLease" class="opacity-80 whitespace-nowrap" :data-test="`credential-expiry-${id}`">{{ expiryText }}</span>
@@ -48,6 +48,8 @@ const props = defineProps<{
   showState?: boolean
   // Tokens show the lease in their own Expires column.
   hideLease?: boolean
+  // The Tokens table has a Profile column that already says which profile the token is pinned to.
+  hideBinding?: boolean
   now?: number
 }>()
 

@@ -1,14 +1,13 @@
 <template>
-  <!-- Spec 109 FR-052/FR-053: one header status pill — "● 2 of 4 online · 13
-       tools · Retrieve". Online means the ONE usable predicate (health.usable),
+  <!-- Spec 109 FR-052/FR-053, Spec 134 FR-011: one header online indicator -
+       "● 2 of 4 online". Online means the ONE usable predicate (health.usable),
        so a connected-but-quarantined server does not count; this never reads
        /status upstream_stats.connected_servers. When servers wait for review
-       the online part says so ("● 0 online · 4 awaiting review · 0 tools ·
-       Retrieve") instead of reading as a failed install, and before the first
-       server list it reads "Loading servers…". Below 1100px it collapses to
-       "● 2/4"; the title carries the full text. Links to Servers. Rendered for
-       admin/personal principals only (a tenant's serversStore is never loaded;
-       Spec 107 FR-041). -->
+       the online part says so ("● 0 online · 4 awaiting review"), and before
+       the first server list it reads "Loading servers…". Below 1100px it
+       collapses to "● 2/4"; the title carries the full text. The usable-tool
+       count and routing mode live on Home (PR 4). Links to Servers. Rendered
+       for admin/personal principals only (Spec 107 FR-041). -->
   <router-link
     to="/servers"
     class="flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-2 min-h-11 sm:min-h-0 bg-base-200 rounded text-sm whitespace-nowrap shrink-0 hover:bg-base-300 transition-colors"
@@ -30,15 +29,6 @@
             <span data-test="header-status-offline">{{ offline }} offline</span>
           </span>
         </template>
-        <span class="text-base-content/50"> · </span>
-        <span data-test="header-status-tools">{{ toolsLabel }}</span>
-        <!-- The longer awaiting-review wording would overflow the header at
-             1100-1279px, so the routing-mode chip (and the offline count)
-             drop out there; the pill's title still carries the full text. -->
-        <span :class="awaiting > 0 ? 'max-[1279px]:hidden' : ''" data-test="header-status-mode-group">
-          <span class="text-base-content/50"> · </span>
-          <span class="text-base-content/70" data-test="header-status-mode" :title="modeTitle">{{ modeLabel }}</span>
-        </span>
       </template>
     </span>
   </router-link>
@@ -48,19 +38,11 @@
 import { computed } from 'vue'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
-import { routingModeMeta } from '@/utils/routingMode'
+import { isOnline } from '@/utils/fleetCounts'
 import type { Server } from '@/types'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
-
-// A server is online when the core's unified health says it is usable. An old
-// core that predates `health` falls back to the same facts the predicate is
-// built from: connected, enabled and not quarantined.
-function isOnline(server: Server): boolean {
-  if (server.health) return server.health.usable
-  return server.connected && server.enabled && !server.quarantined
-}
 
 // Awaiting review is the same "waiting for review" the Home attention list
 // shows: admin_state quarantined (a disabled+quarantined row is admin_state
@@ -79,17 +61,6 @@ const awaiting = computed(() => serversStore.servers.filter(s => !isOnline(s) &&
 // Offline: enabled and neither usable nor waiting for review (connecting,
 // error, sign-in, secret, config). Disabled rows are in no bucket.
 const offline = computed(() => serversStore.servers.filter(s => isEnabled(s) && !isOnline(s) && !isAwaiting(s)).length)
-const tools = computed(() =>
-  serversStore.servers.filter(isOnline).reduce((sum, s) => sum + (s.tool_count ?? 0), 0),
-)
-const toolsLabel = computed(() => `${tools.value} ${tools.value === 1 ? 'tool' : 'tools'}`)
-
-const modeLabel = computed(() => routingModeMeta(systemStore.routingMode).label)
-const modeTitle = computed(() =>
-  systemStore.routingRestartRequired
-    ? `Restart pending: /mcp will serve ${routingModeMeta(systemStore.pendingRoutingMode).label} after the next start`
-    : undefined,
-)
 
 // Before the first server list lands the counts are unknown, not zero: print
 // that instead of "0 of 0 online". If that first load failed, say so.
@@ -100,11 +71,6 @@ const stateKind = computed<'loading' | 'error' | 'ok'>(() => {
 
 const onlineText = computed(() => (awaiting.value > 0 ? `${online.value} online` : `${online.value} of ${total.value} online`))
 
-// A routing mode waiting for a restart must be readable without hover.
-const pendingText = computed(() =>
-  systemStore.routingRestartRequired ? `Restart pending: /mcp will serve ${routingModeMeta(systemStore.pendingRoutingMode).label} after the next start` : '',
-)
-
 const fullText = computed(() => {
   if (stateKind.value === 'loading') return 'Loading servers…'
   if (stateKind.value === 'error') return 'Servers unavailable'
@@ -113,8 +79,6 @@ const fullText = computed(() => {
     parts.push(`${awaiting.value} awaiting review`)
     if (offline.value > 0) parts.push(`${offline.value} offline`)
   }
-  parts.push(toolsLabel.value, modeLabel.value)
-  if (pendingText.value) parts.push(pendingText.value)
   return parts.join(' · ')
 })
 
@@ -142,6 +106,6 @@ const ariaLabel = computed(() => {
     label += `${awaiting.value} awaiting review, `
     if (offline.value > 0) label += `${offline.value} offline, `
   }
-  return `${label}${toolsLabel.value}, routing mode ${modeLabel.value}${pendingText.value ? `. ${pendingText.value}` : ''}`
+  return label.replace(/, $/, '')
 })
 </script>

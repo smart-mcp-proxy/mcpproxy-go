@@ -1,37 +1,25 @@
 <template>
   <div v-if="hints.length > 0" ref="root" class="hints-panel-wrapper">
     <!-- Collapsed State: Single Line with Bulb Icon -->
-    <div
+    <button
       v-if="!isExpanded"
-      @click="toggleExpanded"
-      @keydown.enter.prevent="toggleExpanded"
-      @keydown.space.prevent="toggleExpanded"
-      class="hints-collapsed"
-      role="button"
-      tabindex="0"
+      type="button"
       aria-expanded="false"
       data-test="hints-toggle"
+      @click="toggleExpanded"
+      class="hints-collapsed"
     >
       <UiIcon name="lightbulb" class="w-4 h-4 bulb-icon" />
       <span class="hints-title">Hints: {{ getSummaryText() }}</span>
       <svg class="expand-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
       </svg>
-    </div>
+    </button>
 
     <!-- Expanded State: Full Hints Content -->
     <div v-else class="hints-expanded">
       <!-- Header with Collapse Button -->
-      <div
-        class="hints-header"
-        @click="toggleExpanded"
-        @keydown.enter.prevent="toggleExpanded"
-        @keydown.space.prevent="toggleExpanded"
-        role="button"
-        tabindex="0"
-        aria-expanded="true"
-        data-test="hints-toggle"
-      >
+      <button type="button" class="hints-header" aria-expanded="true" data-test="hints-toggle" @click="toggleExpanded">
         <div class="hints-header-left">
           <UiIcon name="lightbulb" class="w-4 h-4 bulb-icon" />
           <span class="hints-title">Hints</span>
@@ -39,7 +27,7 @@
         <svg class="collapse-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7" />
         </svg>
-      </div>
+      </button>
 
       <!-- Hints Content -->
       <div class="hints-content">
@@ -95,7 +83,7 @@
 <script setup lang="ts">
 import UiIcon from '@/components/UiIcon.vue'
 import type { UiIconName } from '@/utils/uiIcons'
-import { nextTick, ref } from 'vue'
+import { ref, nextTick } from 'vue'
 
 export interface HintSection {
   title?: string
@@ -127,16 +115,12 @@ const props = withDefaults(defineProps<Props>(), {
 const isExpanded = ref(props.defaultExpanded)
 
 const root = ref<HTMLElement | null>(null)
-
-// The collapsed and expanded headers are different elements; after a toggle
-// (keyboard or assistive technology) focus would fall to <body>, so it returns
-// to the new header.
 const toggleExpanded = () => {
   const hadFocus = !!root.value?.contains(document.activeElement)
   isExpanded.value = !isExpanded.value
-  if (hadFocus) {
-    void nextTick(() => root.value?.querySelector<HTMLElement>('[data-test="hints-toggle"]')?.focus())
-  }
+  // The button is replaced by its other state: hand focus to the new one so a
+  // second Space/Enter collapses again.
+  if (hadFocus) void nextTick(() => root.value?.querySelector<HTMLElement>('[data-test="hints-toggle"]')?.focus())
 }
 
 const getSummaryText = () => {
@@ -176,6 +160,10 @@ const copyToClipboard = async (text: string) => {
 
 /* Collapsed State */
 .hints-collapsed {
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
   display: flex;
   align-items: center;
   gap: 0.75rem;
@@ -237,6 +225,11 @@ const copyToClipboard = async (text: string) => {
 }
 
 .hints-header {
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  border-width: 0 0 1px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -358,10 +351,6 @@ const copyToClipboard = async (text: string) => {
   cursor: pointer;
   color: color-mix(in oklch, var(--color-base-content) 70%, transparent);
   transition: all 0.2s ease;
-}
-
-@media (max-width: 767px) {
-  .copy-button { min-height: 44px; min-width: 44px; }
 }
 
 .copy-button:hover {

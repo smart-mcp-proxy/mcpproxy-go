@@ -12,7 +12,7 @@
     <p v-if="!fields.length" class="text-sm text-base-content/50 py-4">No settings match your search.</p>
 
     <!-- per-section action bar -->
-    <div class="flex items-center justify-between pt-2">
+    <div class="flex flex-wrap items-center justify-between gap-2 pt-2" :data-test="`settings-save-row-${sectionId}`">
       <div class="text-sm min-h-[1.25rem]">
         <span v-if="lastResult?.requires_restart" class="text-warning" :data-test="`settings-restart-${sectionId}`">
           <UiIcon name="alert" class="w-4 h-4 inline" /> Saved — restart required{{ lastResult.restart_reason ? `: ${lastResult.restart_reason}` : '' }}

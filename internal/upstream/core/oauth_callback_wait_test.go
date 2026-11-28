@@ -78,7 +78,7 @@ func TestWaitForOAuthCallbackAsync_ExpiryIsReported(t *testing.T) {
 	start := time.Now()
 	go func() {
 		defer close(done)
-		c.waitForOAuthCallbackAsync(ctx, nil, "verifier", "state-nobody-answers", "corr-expiry")
+		c.waitForOAuthCallbackAsync(ctx, nil, "verifier", "state-nobody-answers", nil, "corr-expiry")
 	}()
 
 	select {
