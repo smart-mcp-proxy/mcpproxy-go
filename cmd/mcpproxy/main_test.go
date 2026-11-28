@@ -19,7 +19,9 @@ const sandboxedEnv = "MCPPROXY_TEST_SANDBOXED"
 func TestMain(m *testing.M) {
 	// Tests that re-run this binary as a child pass it an already sandboxed
 	// environment plus their own overrides, which must survive.
-	if os.Getenv(sandboxedEnv) != "" {
+	// The marker carries the sandbox home, so a stale or inherited marker that
+	// does not match this process's HOME does not switch the sandbox off.
+	if marker := os.Getenv(sandboxedEnv); marker != "" && marker == os.Getenv("HOME") {
 		os.Exit(m.Run())
 	}
 	home, err := os.MkdirTemp("", "mcpproxy-cmd-test-home-")
@@ -32,6 +34,11 @@ func TestMain(m *testing.M) {
 	for _, kv := range os.Environ() {
 		k, _, _ := strings.Cut(kv, "=")
 		up := strings.ToUpper(k)
+		// MCPP_CONFIG names a config file for config.Load, like --config.
+		if up == "MCPP_CONFIG" {
+			_ = os.Unsetenv(k)
+			continue
+		}
 		if strings.HasPrefix(up, "MCPPROXY_") && !strings.HasPrefix(up, "MCPPROXY_TEST_") && up != "MCPPROXY_UPDATE_GOLDEN" {
 			_ = os.Unsetenv(k)
 		}
@@ -44,7 +51,7 @@ func TestMain(m *testing.M) {
 		"LOCALAPPDATA":    filepath.Join(home, "AppData", "Local"),
 		"XDG_CONFIG_HOME": filepath.Join(home, ".config"),
 		"XDG_DATA_HOME":   filepath.Join(home, ".local", "share"),
-		sandboxedEnv:      "1",
+		sandboxedEnv:      home,
 	} {
 		_ = os.Setenv(k, v)
 	}
