@@ -408,6 +408,12 @@ func (c *Shadowing) referenceSignals(tool detect.ToolView, reg detect.RegistryVi
 		if _, done := namedAt[tok]; done {
 			continue
 		}
+		// The same cheap filters as the loop below, first: a self-reference and
+		// a name that is unknown or not distinctive never produce a signal, so
+		// no shape work is spent on them however often they repeat.
+		if tok == tool.Name || !distinctiveName(tok) {
+			continue
+		}
 		if _, known := reg.ToolsByName[tok]; known && writtenAsToolName(tool.Description, loc[0], loc[1]) {
 			namedAt[tok] = [2]int{loc[0], loc[1]}
 		}
@@ -504,6 +510,14 @@ func (c *Shadowing) referenceSignals(tool detect.ToolView, reg detect.RegistryVi
 // plural noun; the singular stays, since "the X tool" is the commonest way a
 // description names a tool.
 func writtenAsToolName(desc string, start, end int) bool {
+	before, beforeSize := utf8.DecodeLastRuneInString(desc[:start])
+	after, afterSize := utf8.DecodeRuneInString(desc[end:])
+	// The tokenizer is ASCII: a letter, digit or combining mark it did not
+	// consume on either side means the token is a fragment of a longer word
+	// (reasón, 2reason, reasonné). A fragment is not a written tool name.
+	if (beforeSize > 0 && isIdentRune(before)) || (afterSize > 0 && isIdentRune(after)) {
+		return false
+	}
 	tok := desc[start:end]
 	sawLower := false
 	for _, r := range tok {
@@ -516,18 +530,16 @@ func writtenAsToolName(desc string, start, end int) bool {
 			sawLower = true
 		}
 	}
-	before, beforeSize := utf8.DecodeLastRuneInString(desc[:start])
-	after, _ := utf8.DecodeRuneInString(desc[end:])
 	if after == '(' {
 		return true
 	}
 	if beforeSize > 0 && quotePair(before, after) {
 		return true
 	}
-	// server:tool. The qualifier must be there (a character a server name can end
-	// with): a colon after a space or at the start of the text is punctuation.
+	// server:tool. The qualifier must be there: a colon after a space, a bracket,
+	// a quote or other punctuation, or at the start of the text, is punctuation.
 	if before == ':' {
-		if q, size := utf8.DecodeLastRuneInString(desc[:start-beforeSize]); size > 0 && (isIdentRune(q) || q == '-' || q == '.' || q == '/') {
+		if q, size := utf8.DecodeLastRuneInString(desc[:start-beforeSize]); size > 0 && isQualifierEnd(q) {
 			return true
 		}
 	}
@@ -549,10 +561,34 @@ func quotePair(open, closing rune) bool {
 		return closing == '\u2019'
 	case '\u201a': // ‚
 		return closing == '\u2018' || closing == '\u2019'
-	case '\u00ab': // «
+	case '\u00ab': // «reason»
 		return closing == '\u00bb'
+	case '\u00bb': // »reason«
+		return closing == '\u00ab'
 	}
 	return false
+}
+
+// isQualifierEnd reports whether r can be the last character of a server name
+// in front of the ":" of server:tool. A server name may hold anything but ":",
+// so this excludes only what a sentence puts before a colon that is
+// punctuation: white space, brackets, quotes, and other separators.
+func isQualifierEnd(r rune) bool {
+	if isIdentRune(r) {
+		return true
+	}
+	switch r {
+	case ':', ',', ';', '!', '?':
+		return false
+	}
+	if unicode.IsSpace(r) || unicode.In(r, unicode.Ps, unicode.Pe, unicode.Pi, unicode.Pf) {
+		return false
+	}
+	switch r {
+	case '"', '\'', '`':
+		return false
+	}
+	return unicode.IsPunct(r) || unicode.IsSymbol(r)
 }
 
 func isToolNoun(w string) bool {

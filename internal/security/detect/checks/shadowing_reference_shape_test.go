@@ -29,6 +29,9 @@ func TestShadowing_ReferenceTierFollowsHowTheNameIsWritten(t *testing.T) {
 		{"capitalised noun beside it", "reason", "The Reason-free path is slow. Use reason Tool instead.", detect.TierHard},
 		{"qualified with a server", "reason", "Use analytics:reason to interpret the result.", detect.TierHard},
 		{"qualifier ends in a dash", "reason", "Use analytics-:reason to interpret the result.", detect.TierHard},
+		{"qualifier ends in a plus", "reason", "Use analytics+:reason to interpret the result.", detect.TierHard},
+		{"inward guillemets", "reason", "Use \u00bbreason\u00ab to interpret the result.", detect.TierHard},
+		{"outward guillemets", "reason", "Use \u00abreason\u00bb to interpret the result.", detect.TierHard},
 		{"German quotes", "reason", "Use \u201ereason\u201c to interpret the result.", detect.TierHard},
 		{"typographic double quotes", "reason", "Use \u201creason\u201d to interpret the result.", detect.TierHard},
 		{"typographic single quotes", "reason", "Use \u2018reason\u2019 to interpret the result.", detect.TierHard},
@@ -54,6 +57,11 @@ func TestShadowing_ReferenceTierFollowsHowTheNameIsWritten(t *testing.T) {
 		{"noun is the tail of a longer identifier", "reason", "Returns the multi_tool reason code.", detect.TierSoft},
 		{"plural noun starts the next clause", "reason", "Explains the reason tools are unavailable.", detect.TierSoft},
 		{"colon is punctuation", "reason", "Note: reason codes are listed below.", detect.TierSoft},
+		{"colon after a bracket", "reason", "The cause ):reason codes follow.", detect.TierSoft},
+		{"colon after a quote", "reason", "He wrote \":reason codes follow.", detect.TierSoft},
+		{"token continues with a combining mark", "reason", "Use the tool reason\u0301 for this.", detect.TierSoft},
+		{"token continues with a non-ASCII letter", "reason", "Use the tool reason\u00e9 for this.", detect.TierSoft},
+		{"token starts inside a longer word", "reason", "Use the 2reason tool for this.", detect.TierSoft},
 		{"colon at the start", "reason", ":reason codes are listed below.", detect.TierSoft},
 		{"unpaired typographic quote", "reason", "The \u201creason code is returned.", detect.TierSoft},
 	}
@@ -123,5 +131,20 @@ func TestShadowing_NeighbourScanIsBounded(t *testing.T) {
 	far := "Use reason" + strings.Repeat(" ", neighbourRuneLimit) + "tool for everything."
 	if writtenAsToolName(far, at, at+len("reason")) {
 		t.Errorf("%d spaces is at the limit", neighbourRuneLimit)
+	}
+}
+
+// A self-reference costs no shape work, however often it repeats: the pre-pass
+// drops it with the same cheap test as the main loop.
+func TestShadowing_SelfReferencesAreNotClassified(t *testing.T) {
+	desc := strings.Repeat("reason"+strings.Repeat(" ", 31), 2000) + "tool"
+	reg := detect.NewRegistryView([]detect.ToolView{
+		{Server: "a", Name: "reason", Description: desc},
+		{Server: "b", Name: "reason", Description: "Reason about a question, on another server entirely."},
+	})
+	for _, s := range inspectInReg(&Shadowing{}, reg, "a", "reason") {
+		if len(s.Spans) > 0 {
+			t.Fatalf("a self-reference produced a reference signal: %+v", s)
+		}
 	}
 }
