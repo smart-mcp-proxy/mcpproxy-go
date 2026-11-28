@@ -110,6 +110,18 @@ describe('Activity Sessions view (Spec 124)', () => {
     wrapper.unmount()
   })
 
+  it('the filter strip is put away while a timeline is open and is back with the list', async () => {
+    // Nothing on the strip narrows a timeline; the list one step back has it.
+    const { wrapper } = await mountAt(`/activity?view=sessions&ws=${WS_FAILED.id}&at=failure:2`)
+    const strip = () => wrapper.get('[data-test="activity-filter-strip"]')
+    expect(strip().attributes('style') ?? '').toContain('display: none')
+    await wrapper.get('[data-test="activity-view-tab-sessions"]').trigger('click')
+    await flushPromises()
+    expect(strip().attributes('style') ?? '').not.toContain('display: none')
+    expect(wrapper.find('[data-test="activity-filters-toggle"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it('switching to Tool calls from a timeline drops the session from the address', async () => {
     const { wrapper, router } = await mountAt(`/activity?view=sessions&ws=${WS_FAILED.id}&at=end`)
     await wrapper.get('[data-test="activity-view-tab-calls"]').trigger('click')

@@ -1,9 +1,10 @@
 // Work-session list and failure timeline sweep (Spec 124 PR-3, FR-060..FR-065).
 //
 // Two kinds of test:
-//  - Live: a named REST run (X-MCPProxy-Run) is seeded with good calls and one
-//    refused call, then found in Activity -> Sessions with "Failed only" and
-//    opened at its first failure. These read the real doors
+//  - Live: a named REST run (X-MCPProxy-Run) is seeded with good calls and two
+//    refused calls, then found in Activity -> Sessions with "Failed only" and
+//    opened at its first failure. A second run fails earlier and is active
+//    later, so the two orders of the list differ. These read the real doors
 //    (GET /api/v1/work-sessions and .../timeline). Needs the fixture upstream
 //    (SWEEP_SERVER_NAME).
 //  - Fixture: one timeline page is fulfilled from data, because an upstream
@@ -20,9 +21,12 @@ const BASE = process.env.MCPPROXY_BASE_URL || 'http://127.0.0.1:18080'
 const KEY = process.env.MCPPROXY_API_KEY || ''
 const SERVER = process.env.SWEEP_SERVER_NAME || ''
 const RUN = `sweep-124-${Date.now()}`
+/** Fails before RUN does and makes a call after it: last in failure order, first in activity order. */
+const RUN_B = `${RUN}-b`
 const FIXTURE_WS = 'ws-fixture-124'
 
 let seeded = ''
+let seededB = ''
 
 function url(route: string): string {
   const sep = route.includes('?') ? '&' : '?'
@@ -59,10 +63,10 @@ const headers = (extra: Record<string, string> = {}): Record<string, string> => 
 })
 
 /** One tool call over REST under the run name: no MCP connection behind it. */
-async function restCall(tool: string, args: unknown) {
+async function restCall(tool: string, args: unknown, run = RUN) {
   const r = await fetch(`${BASE}/api/v1/tools/call`, {
     method: 'POST',
-    headers: headers({ 'X-MCPProxy-Run': RUN }),
+    headers: headers({ 'X-MCPProxy-Run': run }),
     body: JSON.stringify({ tool_name: 'call_tool_read', arguments: { name: tool, args } }),
   })
   await r.text()
@@ -79,18 +83,25 @@ const getJSON = async (route: string): Promise<any> => (await fetch(`${BASE}/api
  * Twelve good calls (two rows each: more than the 20 rows of context), a call
  * MCPProxy refuses (a tool the server does not have), a good call, a second
  * refused call and a last good one. Two failures tell "first" from "last".
+ * Around it, the second run: one refused call before, one good call after.
  * Returns once every attempt is recorded.
  */
 async function seedRun(): Promise<string> {
+  await restCall(`${SERVER}:${FIRST_FAILURE}`, {}, RUN_B)
   for (let i = 1; i <= GOOD_BEFORE; i++) await restCall(`${SERVER}:echo`, { msg: `sweep 124 step ${i}` })
   await restCall(`${SERVER}:${FIRST_FAILURE}`, {})
   await restCall(`${SERVER}:echo`, { msg: 'sweep 124 between the failures' })
   await restCall(`${SERVER}:${SECOND_FAILURE}`, {})
   await restCall(`${SERVER}:echo`, { msg: 'sweep 124 after the failure' })
+  await restCall(`${SERVER}:echo`, { msg: 'sweep 124 second run, after the first one failed' }, RUN_B)
   for (let i = 0; i < 60; i++) {
     const body = await getJSON(`/work-sessions?run=${encodeURIComponent(RUN)}&failed=true`)
     const session = body?.data?.sessions?.[0]
-    if (session?.id && session.attempts >= ATTEMPTS && session.failures >= 2) return session.id
+    const other = (await getJSON(`/work-sessions?run=${encodeURIComponent(RUN_B)}&failed=true`))?.data?.sessions?.[0]
+    if (session?.id && session.attempts >= ATTEMPTS && session.failures >= 2 && other?.id && other.attempts >= 2) {
+      seededB = other.id
+      return session.id
+    }
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
   throw new Error(`the seeded run ${RUN} never appeared as a failed work session with ${ATTEMPTS} attempts`)
@@ -200,9 +211,33 @@ test('two actions from the list to the first failure: "Failed only", then the ro
   expect(filteredURL.searchParams.get('sort')).toBe('last_failure')
   const lastFailures = (await page.locator('[data-test="work-sessions-row"] [data-test="ws-last-failure"]').allInnerTexts()).map((text) => text.slice(0, 23))
   expect(lastFailures.every((text) => /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/.test(text)), lastFailures.join(' | ')).toBe(true)
-  expect(lastFailures, 'rows are ordered by last failure, newest first').toEqual([...lastFailures].sort().reverse())
   const row = page.locator(`[data-test="work-sessions-row"][data-session="${seeded}"]`)
   await expect(row).toBeVisible()
+  // The rows are the door's, in the door's order. The second run failed first
+  // and was active last, so the two orders put the two runs the other way round.
+  const shownIds = () => page.locator('[data-test="work-sessions-row"]').evaluateAll((rows) => rows.map((r) => r.getAttribute('data-session')))
+  const doorIds = async (sort: string) => ((await getJSON(`/work-sessions?failed=true&sort=${sort}&limit=25`)).data.sessions as any[]).map((s) => s.id)
+  const byFailure = await shownIds()
+  expect(byFailure).toEqual(await doorIds('last_failure'))
+  expect(byFailure.indexOf(seeded), 'newest failure first').toBeLessThan(byFailure.indexOf(seededB))
+  await page.locator('[data-test="work-sessions-sort"]').selectOption('last_activity')
+  await expect(page).toHaveURL(/[?&]sort=last_activity/)
+  await expect.poll(async () => { const ids = await shownIds(); return ids.indexOf(seededB) < ids.indexOf(seeded) }, { message: 'latest activity first' }).toBe(true)
+  expect(await shownIds()).toEqual(await doorIds('last_activity'))
+  await page.locator('[data-test="work-sessions-sort"]').selectOption('last_failure')
+  await expect.poll(async () => (await shownIds())[0]).toBe(byFailure[0])
+
+  // "Include blocked" off: both runs only have calls MCPProxy refused, so both
+  // leave the list, and come back with it on. The filter is the door's.
+  const withoutBlocked = page.waitForResponse((response) => /\/api\/v1\/work-sessions\?/.test(response.url()) && response.url().includes('include_blocked=false'))
+  await page.locator('[data-test="work-sessions-include-blocked"]').uncheck()
+  await withoutBlocked
+  await expect(row).toHaveCount(0)
+  await expect(page.locator(`[data-test="work-sessions-row"][data-session="${seededB}"]`)).toHaveCount(0)
+  await page.locator('[data-test="work-sessions-include-blocked"]').check()
+  await expect(row).toBeVisible()
+  await expect(page.locator(`[data-test="work-sessions-row"][data-session="${seededB}"]`)).toBeVisible()
+  await expect(page).not.toHaveURL(/include_blocked/)
   await expect(row.locator('[data-test="ws-client"]')).toContainText(RUN)
   await expect(row.locator('[data-test="ws-failures"] .font-mono')).toHaveText('2')
   await expect(row.locator('[data-test="ws-last-failure"]')).toContainText(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/)
@@ -322,11 +357,15 @@ test('timeline rows: an upstream event above the failure it explains, retention 
   await page.setViewportSize({ width: 1440, height: 900 })
   const asked = await mockTimeline(page)
   await open(page, `/activity?view=sessions&ws=${FIXTURE_WS}&at=failure:2`)
-  expect(asked[0]).toBe('failure:2')
 
   const row = (index: number) => page.locator(`[data-test="timeline-row"][data-index="${index}"]`)
   await expect(row(43)).toHaveAttribute('data-position', 'true')
+  // Checked once the page is on screen: the request has been made by then.
+  expect(asked[0]).toBe('failure:2')
   await expect(row(43)).toHaveAttribute('aria-current', 'true')
+  // The position is shown, not only marked: an outline that no other row has.
+  await expect(row(43)).toHaveCSS('outline-style', 'solid')
+  await expect(row(44)).toHaveCSS('outline-style', 'none')
   await expect(row(39)).toHaveCount(0)
   await expect(row(43)).toContainText('The upstream server needs a login.')
 
@@ -375,6 +414,8 @@ test('timeline rows: an upstream event above the failure it explains, retention 
   // The highlight moved with it.
   await expect(row(44)).toHaveAttribute('data-position', 'true')
   await expect(row(43)).not.toHaveAttribute('data-position', 'true')
+  await expect(row(44)).toHaveCSS('outline-style', 'solid')
+  await expect(row(43)).toHaveCSS('outline-style', 'none')
   await expect(page.locator('[data-test="timeline-cli"]')).toHaveText(`mcpproxy activity session ${FIXTURE_WS} --at failure:3`)
 
   // Load earlier rows: the same position, a wider page.
@@ -386,10 +427,14 @@ test('timeline rows: an upstream event above the failure it explains, retention 
   await expect(row(44)).toHaveAttribute('data-position', 'true')
   await expect(page.locator('[data-test="timeline-cli"]')).toHaveText(`mcpproxy activity session ${FIXTURE_WS} --at failure:3 --before 70`)
 
-  // The Sessions tab leaves the timeline for the list.
+  // No filter of the page narrows a timeline: the strip is put away here.
+  await expect(page.locator('[data-test="activity-filter-strip"]')).toBeHidden()
+
+  // The Sessions tab leaves the timeline for the list, where the Filters control is.
   await page.locator('[data-test="activity-view-tab-sessions"]').click()
   await expect(page).not.toHaveURL(/[?&]ws=/)
   await expect(page.locator('[data-test="work-sessions"]')).toBeVisible()
+  await expect(page.locator('[data-test="activity-filters-toggle"]')).toBeVisible()
 })
 
 test('an unknown session shows "Session not found" and a way back', async ({ page }) => {
@@ -398,6 +443,7 @@ test('an unknown session shows "Session not found" and a way back', async ({ pag
   const state = page.locator('[data-test="timeline-not-found"]')
   await expect(state).toContainText('Session not found')
   await expect(page.locator('[data-test="timeline-row"]')).toHaveCount(0)
+  await expect(page.locator('[data-test="activity-filter-strip"]')).toBeHidden()
   await state.locator('[data-test="timeline-back-to-list"]').click()
   await expect(page).not.toHaveURL(/[?&]ws=/)
   await expect(page).toHaveURL(/[?&]failed=true/)
@@ -413,6 +459,31 @@ test('the connections table is still there, one level down', async ({ page }) =>
   await section.locator('summary').focus()
   await page.keyboard.press('Enter')
   await expect(section.locator('[data-test="sessions-table"], [data-test="sessions-empty"]')).toBeVisible()
+})
+
+test('390 px: a row with an agent token and a project shows both (FR-060)', async ({ page }) => {
+  // The live run uses the API key and names no project, so this row is fulfilled.
+  await page.setViewportSize({ width: 390, height: 844 })
+  const session = fixtureBase(2).session
+  await page.route(/\/api\/v1\/work-sessions\?/, async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: { sessions: [session], total: 1, limit: 25, offset: 0 } }) })
+  })
+  await open(page, '/activity?view=sessions')
+  const phoneRow = page.locator(`[data-test="work-sessions-row"][data-session="${FIXTURE_WS}"]`)
+  await expect(phoneRow).toBeVisible()
+  await expect(phoneRow.locator('[data-test="ws-token-narrow"]')).toBeVisible()
+  await expect(phoneRow.locator('[data-test="ws-token-narrow"]')).toHaveText('nightly-bot')
+  await expect(phoneRow.locator('[data-test="ws-client"]')).toContainText('overnight-agent')
+  await expect(phoneRow.locator('[data-test="ws-project"]')).toBeVisible()
+  await expect(phoneRow.locator('[data-test="ws-project"]')).toHaveText('payments')
+  await expect(phoneRow.locator('[data-test="ws-truncated"]')).toBeVisible()
+  // Each of them is inside the screen, not cut off by the table's edge.
+  for (const hook of ['ws-token-narrow', 'ws-project']) {
+    const box = (await phoneRow.locator(`[data-test="${hook}"]`).boundingBox())!
+    expect(box.x, `${hook} starts on screen`).toBeGreaterThanOrEqual(0)
+    expect(box.x + Math.min(box.width, 40), `${hook} is on screen`).toBeLessThanOrEqual(390)
+  }
+  expect(await sidewaysScroll(page), 'page scrolls sideways').toBeLessThanOrEqual(0)
 })
 
 test('390 px: list and timeline fit, controls are 44 px tall', async ({ page }) => {

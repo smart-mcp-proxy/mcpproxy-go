@@ -49,6 +49,7 @@ async function mountPanel(path = '/activity?view=sessions', connections: unknown
       { path: '/tools', name: 'tools', component: stub },
       { path: '/clients', name: 'clients', component: stub },
       { path: '/tokens', name: 'tokens', component: stub },
+      { path: '/my/tokens', name: 'user-tokens', component: stub },
       { path: '/profiles/:name', name: 'profile-editor', component: stub },
     ],
   })
@@ -240,9 +241,61 @@ describe('Work-session list (Spec 124 FR-060)', () => {
     // The calls count is the link, so it is there at every width.
     expect(link.text()).toBe('120')
     expect(link.attributes('aria-label')).toContain('120 calls')
+    // The count is of attempts, and an attempt MCPProxy refused is stored as a
+    // decision: the link names the three row types, so a session of refusals
+    // only does not open an empty table.
     expect(link.attributes('href')).toBe(
-      router.resolve({ name: 'activity', query: { view: 'calls', session: WS_FAILED.id } }).fullPath,
+      router.resolve({ name: 'activity', query: { view: 'calls', session: WS_FAILED.id, type: 'tool_call,internal_tool_call,policy_decision' } }).fullPath,
     )
+  })
+
+  it('the Tool calls link does not carry a time range the list did not apply', async () => {
+    const { wrapper } = await mountPanel('/activity?view=sessions&from=-24h&to=2026-11-27T00:00:00Z&client=cursor')
+    const href = wrapper.get(`[data-test="ws-calls-link-${WS_FAILED.id}"]`).attributes('href')!
+    // The client filter narrowed the list, so it is kept; the time range is not.
+    expect(Object.fromEntries(new URL(href, 'http://x').searchParams)).toEqual({
+      view: 'calls', session: WS_FAILED.id, client: 'cursor', type: 'tool_call,internal_tool_call,policy_decision',
+    })
+  })
+
+  it("a signed-in user's token link opens their own token page, not the administrator's", async () => {
+    const auth = useAuthStore()
+    auth.isTeamsEdition = true
+    auth.user = { id: 'u1', email: 'u@example.com', role: 'user' } as any
+    const { wrapper } = await mountPanel()
+    const row = wrapper.findAll('[data-test="work-sessions-row"]')[0]
+    expect(row.get('[data-test="ws-token"] a').attributes('href')).toBe('/my/tokens')
+    expect(row.get('[data-test="ws-token-narrow"] a').attributes('href')).toBe('/my/tokens')
+  })
+
+  it('back from a timeline, focus is not pulled away from where the user has moved it', async () => {
+    const { wrapper, router, api } = await mountPanel('/activity?view=sessions', [], true)
+    await router.push({ query: { ...router.currentRoute.value.query, ws: WS_FAILED.id } })
+    await flushPromises()
+    await flushPromises()
+    // The list answer is slow; the user tabs on meanwhile.
+    let release!: (value: unknown) => void
+    api.getWorkSessions.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    await router.back()
+    await flushPromises()
+    const elsewhere = document.createElement('button')
+    document.body.appendChild(elsewhere)
+    elsewhere.focus()
+    release({ sessions: list.rows, total: list.rows.length, limit: 25, offset: 0 })
+    await flushPromises()
+    await flushPromises()
+    expect(document.activeElement).toBe(elsewhere)
+    elsewhere.remove()
+    wrapper.unmount()
+  })
+
+  it('a panel that was left while it waited for the filters asks for nothing', async () => {
+    setAvailableFeatures([])
+    const { wrapper, api } = await mountPanel('/activity?view=sessions&client=cursor')
+    wrapper.unmount()
+    await useSystemStore().fetchScopeFilterFeatures()
+    await flushPromises()
+    expect(api.getWorkSessions).not.toHaveBeenCalled()
   })
 
   it('a session that never failed opens at its most recent row (US1 scenario 6)', async () => {

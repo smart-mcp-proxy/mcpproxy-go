@@ -92,7 +92,9 @@
       toggle. Active filters stay visible as dismissable chips even collapsed,
       so the list is never silently narrowed.
     -->
-    <div ref="filterStripEl" class="card bg-base-100 shadow-sm relative" data-test="activity-filter-strip">
+    <!-- Spec 124: nothing on the strip narrows one session's timeline, so it
+         is put away while one is open; the Sessions list has it. -->
+    <div v-show="!timelineOpen" ref="filterStripEl" class="card bg-base-100 shadow-sm relative" data-test="activity-filter-strip">
       <div class="card-body py-3 gap-1">
         <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
           <!-- Counts: total muted; only non-zero error/blocked/rejected speak up. -->
@@ -2191,6 +2193,8 @@ const getSessionLabel = (sessionId: string): string => {
 /** Spec 124: the Sessions list's own filter. It is in the address, so the
  * Filters count and "Clear Filters" account for it in that view. */
 const sessionsFailedOnly = computed(() => activeView.value === 'sessions' && route.query.failed === 'true')
+// One session's timeline is open (the Sessions view with `ws` in the address).
+const timelineOpen = computed(() => activeView.value === 'sessions' && typeof route.query.ws === 'string' && route.query.ws !== '')
 
 const hasActiveFilters = computed(() => {
   return sessionsFailedOnly.value || selectedTypes.value.length > 0 || filterServer.value || filterTool.value || filterSession.value || filterStatus.value || filterSensitiveData.value || filterSeverity.value || filterAuthType.value || filterAgentName.value || filterStartDate.value || filterEndDate.value || filterParentId.value

@@ -121,7 +121,7 @@
                 type="button"
                 class="btn btn-sm join-item max-sm:min-h-11"
                 data-test="timeline-prev-failure"
-                :disabled="!navigation.prev || loading"
+                :disabled="!navigation.prev"
                 @click="navigation.prev && goTo(navigation.prev)"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
@@ -133,7 +133,7 @@
                 type="button"
                 class="btn btn-sm join-item max-sm:min-h-11"
                 data-test="timeline-next-failure"
-                :disabled="!navigation.next || loading"
+                :disabled="!navigation.next"
                 @click="navigation.next && goTo(navigation.next)"
               >
                 Next failure
@@ -233,7 +233,21 @@
                           >{{ toolLabel(row) }}</code>
                           <span v-if="kindLabel(row)" class="text-xs text-base-content/70">{{ kindLabel(row) }}</span>
                         </div>
-                        <div v-if="rowMessage(row) || eventCode(row)" class="text-xs mt-0.5 break-words" :class="row.failed ? '' : 'text-base-content/70'">
+                        <!-- An error on a row that is not the counted failure (the
+                             built-in wrapper of the call above it) repeats that
+                             failure's text: one line here, whole in the details. -->
+                        <div
+                          v-if="isRepeatedError(row)"
+                          class="text-xs mt-0.5 truncate text-base-content/70"
+                          :title="rowMessage(row)"
+                          data-test="timeline-message"
+                        >{{ rowMessage(row) }}</div>
+                        <div
+                          v-else-if="rowMessage(row) || eventCode(row)"
+                          class="text-xs mt-0.5 break-words"
+                          :class="row.failed ? '' : 'text-base-content/70'"
+                          data-test="timeline-message"
+                        >
                           {{ rowMessage(row) }}
                           <code v-if="eventCode(row)" class="ml-1 break-all" data-test="timeline-code">{{ eventCode(row) }}</code>
                         </div>
@@ -357,6 +371,7 @@ import type {
 import { useScopeQuery } from '@/composables/useScopeQuery'
 import { useScopeLabels } from '@/composables/useScopeLabels'
 import { useProfilesStore } from '@/stores/profiles'
+import { useAuthStore } from '@/stores/auth'
 import { profileEditorLink } from '@/utils/profileRoute'
 import { profileSourceLabel } from '@/utils/profiles'
 import { formatType, statusPresentation } from '@/utils/activity'
@@ -371,6 +386,7 @@ import {
   formatSessionDuration,
   isRecoveryEvent,
   normalizeTimelineAt,
+  sessionCallsPatch,
   sessionTokenName,
   timelineCliCommand,
   upstreamEventLabel,
@@ -381,6 +397,7 @@ import UiIcon from '@/components/UiIcon.vue'
 const route = useRoute()
 const scopeQuery = useScopeQuery('activity')
 const profiles = useProfilesStore()
+const authStore = useAuthStore()
 const { valueLabel } = useScopeLabels()
 
 // ---- address ---------------------------------------------------------------
@@ -471,6 +488,10 @@ function revealPosition(): void {
 // A new position keeps the amount of context the page has (US1 scenario 4):
 // after "load earlier rows", the next failure opens just as wide.
 watch([sessionId, at], () => {
+  // Bodies read at the old position go with it, as on Refresh: the core may
+  // have masked a response since, and the row can come back on a later page.
+  bodiesEpoch++
+  bodies.clear()
   expanded.clear()
   scrollToPosition = true
   void load()
@@ -543,7 +564,7 @@ const facts = computed<Fact[]>(() => {
   const out: Fact[] = []
   const token = sessionTokenName(s)
   out.push(token
-    ? { label: 'Agent token', value: token, to: scopeQuery.linkTo('tokens', { token }) }
+    ? { label: 'Agent token', value: token, to: authStore.principalKind === 'tenant' ? { path: '/my/tokens' } : scopeQuery.linkTo('tokens', { token }) }
     : { label: 'Agent token', value: '—' })
   if (s.client_id) {
     out.push({
@@ -599,7 +620,7 @@ const facts = computed<Fact[]>(() => {
  * they would hide rows of the session that is on screen.
  */
 const callsLink = computed(() =>
-  scopeQuery.linkTo('activity', { view: 'calls', session: sessionId.value, profile: '', client: '', token: '' }))
+  scopeQuery.linkTo('activity', { ...sessionCallsPatch(sessionId.value), profile: '', client: '', token: '' }))
 
 const scopeNote = computed(() => {
   const applied = scopeQuery.chips.value.some(chip => chip.name === 'profile' || chip.name === 'client' || chip.name === 'token')
@@ -676,6 +697,15 @@ function rowMessage(row: WorkSessionTimelineRow): string {
   // A refusal by MCPProxy keeps its explanation as the decision's reason.
   if (row.failed || a.status === 'error' || a.status === 'blocked') return a.error_message || decisionReason(row)
   return ''
+}
+
+/**
+ * A call that ended in an error but is not a failure of the session: the row
+ * of the failure itself is next to it and already prints the same text.
+ */
+function isRepeatedError(row: WorkSessionTimelineRow): boolean {
+  if (row.kind === 'upstream_event' || row.failed || row.policy_block) return false
+  return row.activity?.status === 'error' && rowMessage(row) !== ''
 }
 
 function decisionReason(row: WorkSessionTimelineRow): string {

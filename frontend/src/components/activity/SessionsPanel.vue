@@ -127,7 +127,7 @@
                 <td class="hidden sm:table-cell" data-test="ws-token">
                   <router-link
                     v-if="sessionTokenName(ws)"
-                    :to="scopeQuery.linkTo('tokens', { token: sessionTokenName(ws) })"
+                    :to="tokenLink(sessionTokenName(ws))"
                     class="link link-hover text-sm break-words"
                   >{{ sessionTokenName(ws) }}</router-link>
                   <span v-else class="text-base-content/60" title="No agent token: the call used the API key or a client credential">—</span>
@@ -135,7 +135,7 @@
                 <td>
                   <!-- Below sm the token column folds into this cell. -->
                   <div v-if="sessionTokenName(ws)" class="sm:hidden text-sm break-words" data-test="ws-token-narrow">
-                    <router-link :to="scopeQuery.linkTo('tokens', { token: sessionTokenName(ws) })" class="link link-hover">{{ sessionTokenName(ws) }}</router-link>
+                    <router-link :to="tokenLink(sessionTokenName(ws))" class="link link-hover">{{ sessionTokenName(ws) }}</router-link>
                   </div>
                   <div data-test="ws-client">
                     <router-link
@@ -268,7 +268,7 @@ import { useScopeLabels, type ScopeName } from '@/composables/useScopeLabels'
 import { useAuthStore } from '@/stores/auth'
 import { useSystemStore } from '@/stores/system'
 import { formatDateTime, formatDateTimeMillis, formatRelative } from '@/utils/datetime'
-import { formatSessionDuration, sessionTokenName } from '@/utils/workSessions'
+import { formatSessionDuration, sessionCallsPatch, sessionTokenName } from '@/utils/workSessions'
 import SessionConnections from '@/components/activity/SessionConnections.vue'
 import SessionTimeline from '@/components/activity/SessionTimeline.vue'
 import StateTag from '@/components/StateTag.vue'
@@ -389,8 +389,9 @@ let waitingForScope = false
 const urlNamesScope = (): boolean =>
   ['profile', 'client', 'token'].some(name => typeof route.query[name] === 'string' && route.query[name] !== '')
 
+let unmounted = false
 async function load(): Promise<void> {
-  if (timelineId.value) return
+  if (timelineId.value || unmounted) return
   if (!scopeReady) {
     // One wait: a call that arrives meanwhile (the filters becoming known
     // changes what is asked) is served by the request this one sends.
@@ -399,7 +400,8 @@ async function load(): Promise<void> {
     if (urlNamesScope()) await systemStore.waitForScopeFeatures()
     waitingForScope = false
     scopeReady = true
-    if (timelineId.value) return
+    // The view may have been left, or a timeline opened, during the wait.
+    if (timelineId.value || unmounted) return
   }
   const seq = ++loadSeq
   const key = listKey.value
@@ -476,9 +478,14 @@ watch(timelineId, async (id, before) => {
     return
   }
   if (!before) return
-  // Back from a timeline: the same page of the list, read again.
+  // Back from a timeline: the same page of the list, read again. Focus goes
+  // to the row that was opened, unless the user has put it somewhere else
+  // while the answer was on its way.
+  const held = document.activeElement
   await load()
   await nextTick()
+  const now = document.activeElement
+  if (now && now !== document.body && now !== held && now.isConnected) return
   focusFirst([`[data-test="ws-open-${lastOpened}"]`, '[data-test="work-sessions-failed-toggle"]'])
 })
 
@@ -488,6 +495,7 @@ watch(() => props.autoRefresh, on => {
   timer = on ? setInterval(() => { if (!loading.value) void load() }, REFRESH_MS) : null
 }, { immediate: true })
 onUnmounted(() => {
+  unmounted = true
   if (timer) clearInterval(timer)
   loadSeq++
 })
@@ -533,13 +541,19 @@ function firstFailure(ws: WorkSession): string {
   return formatDateTimeMillis(ws.first_failure_at)
 }
 
+/** A signed-in user of the server edition has a token page of their own; the
+ * administrator's list answers them 403. */
+function tokenLink(name: string): RouteLocationRaw {
+  return authStore.principalKind === 'tenant' ? { path: '/my/tokens' } : scopeQuery.linkTo('tokens', { token: name })
+}
+
 /**
  * FR-065: the session's rows in the Tool calls view. A page filter that this
  * list did not apply is not carried along: the list showed the session without
  * it, and the calls view would apply it and could come up empty.
  */
 function callsLink(id: string): RouteLocationRaw {
-  const patch: Record<string, string> = { view: 'calls', session: id }
+  const patch = sessionCallsPatch(id)
   for (const chip of scopeChips.value) if (notApplied(chip)) patch[chip.name] = ''
   return scopeQuery.linkTo('activity', patch)
 }

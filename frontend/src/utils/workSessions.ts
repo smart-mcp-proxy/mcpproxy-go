@@ -6,6 +6,8 @@ import type { ActivityRecord, WorkSessionTimelineResponse } from '@/types/api'
 export const TIMELINE_CONTEXT_DEFAULT = 20
 /** The most rows the door accepts on one side. */
 export const TIMELINE_CONTEXT_MAX = 250
+/** The most rows one page holds, the positioned row included. */
+export const TIMELINE_PAGE_MAX = 500
 /** Rows one "load earlier / later" adds. */
 export const TIMELINE_CONTEXT_STEP = 50
 
@@ -19,7 +21,10 @@ export const TIMELINE_AT_DEFAULT = 'first_failure'
 export function normalizeTimelineAt(raw: string | null | undefined): string {
   const value = (raw ?? '').trim()
   if (value === 'end' || value === TIMELINE_AT_DEFAULT) return value
-  if (/^failure:[1-9][0-9]*$/.test(value)) return value
+  // The door and the CLI read the ordinal as a number, so `failure:02` is the
+  // second failure; the address keeps the plain form.
+  const ordinal = /^failure:([0-9]{1,9})$/.exec(value)
+  if (ordinal) return Number(ordinal[1]) >= 1 ? `failure:${Number(ordinal[1])}` : TIMELINE_AT_DEFAULT
   if (/^row:.+$/.test(value)) return value
   return TIMELINE_AT_DEFAULT
 }
@@ -42,10 +47,24 @@ export interface TimelineCliView {
 export function timelineCliCommand(view: TimelineCliView): string {
   const words = ['mcpproxy', 'activity', 'session', shellWord(view.id)]
   if (view.at && view.at !== TIMELINE_AT_DEFAULT) words.push('--at', shellWord(view.at))
+  // The door shortens `after` when both sides do not fit one page; the CLI
+  // refuses such a request instead, so the command names what the door answered.
+  const after = Math.max(0, Math.min(view.after, TIMELINE_PAGE_MAX - 1 - view.before))
   if (view.before !== TIMELINE_CONTEXT_DEFAULT) words.push('--before', String(view.before))
-  if (view.after !== TIMELINE_CONTEXT_DEFAULT) words.push('--after', String(view.after))
+  if (after !== TIMELINE_CONTEXT_DEFAULT) words.push('--after', String(after))
   if (view.includeBodies) words.push('--include-bodies')
   return words.join(' ')
+}
+
+/**
+ * The query of the Tool calls view for one session (FR-065), as a `linkTo`
+ * patch. A session's count is of attempts, and an attempt MCPProxy refused is
+ * stored as a decision, which the view leaves out by default: the three types
+ * are named, so a session of refusals only does not open an empty table. The
+ * page's time range is dropped: neither the list nor a timeline applied it.
+ */
+export function sessionCallsPatch(id: string): Record<string, string> {
+  return { view: 'calls', session: id, type: 'tool_call,internal_tool_call,policy_decision', from: '', to: '' }
 }
 
 const two = (n: number) => String(n).padStart(2, '0')

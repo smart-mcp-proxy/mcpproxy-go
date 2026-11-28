@@ -259,6 +259,41 @@ describe('Session timeline (Spec 124 FR-062)', () => {
     expect(detail).toContain('Request id: req-a14')
   })
 
+  it('an error on a row that is not the counted failure takes one line; the details keep it whole', async () => {
+    // Every REST call is stored twice: the upstream call (the failure) and the
+    // built-in wrapper around it, which repeats the same error.
+    const text = 'The upstream server needs a login.\nSign in with: mcpproxy auth login --server=github'
+    const page = timelinePage()
+    const wrapperRow = {
+      index: 15,
+      kind: 'internal_call',
+      at: '2026-11-26T22:40:00.251Z',
+      activity: { ...(page.rows[4] as any).activity, id: 'a14w', type: 'internal_call', tool_name: 'call_tool_read', error_message: text, metadata: { error_code: 'MCPX_OAUTH_LOGIN_REQUIRED' } },
+    }
+    ;(page.rows[4] as any).activity.error_message = text
+    page.rows.splice(5, 2, wrapperRow as any, { index: 16, kind: 'session_end', at: '2026-11-26T22:41:05.000Z' })
+    door.page = page
+    door.bodies = { ...page, rows: [wrapperRow] }
+    const { wrapper } = await mountTimeline()
+    // The failure itself prints its error whole.
+    const failure = rowAt(wrapper, 14).get('[data-test="timeline-message"]')
+    expect(failure.classes()).not.toContain('truncate')
+    expect(failure.text()).toContain('mcpproxy auth login')
+    // The wrapper keeps its Error tag and one line of the same text.
+    const repeat = rowAt(wrapper, 15)
+    expect(repeat.attributes('data-failed')).not.toBe('true')
+    expect(repeat.text()).toContain('Error')
+    const line = repeat.get('[data-test="timeline-message"]')
+    expect(line.classes()).toContain('truncate')
+    expect(line.attributes('title')).toBe(text)
+    expect(line.find('[data-test="timeline-code"]').exists()).toBe(false)
+    await wrapper.get('[data-test="timeline-expand-15"]').trigger('click')
+    await flushPromises()
+    const detail = wrapper.get('[data-test="timeline-detail-15"]').text()
+    expect(detail).toContain('mcpproxy auth login --server=github')
+    expect(detail).toContain('Error code: MCPX_OAUTH_LOGIN_REQUIRED')
+  })
+
   it('shows why MCPProxy refused a call, in the row and in its details', async () => {
     const page = timelinePage()
     ;(page.rows[5] as any).bodies_removed = false
@@ -474,9 +509,62 @@ describe('Session timeline (Spec 124 FR-062)', () => {
     expect(facts).toContain('41m 05s')
     expect(facts).toContain('120')
     expect(facts).toContain('3 connections')
+    // The session's attempts: its calls and the calls MCPProxy refused, which
+    // are stored as decisions and are not in the Tool calls view by default.
     expect(wrapper.get('[data-test="timeline-calls-link"]').attributes('href')).toBe(
-      router.resolve({ name: 'activity', query: { view: 'calls', session: WS_FAILED.id } }).fullPath,
+      router.resolve({ name: 'activity', query: { view: 'calls', session: WS_FAILED.id, type: 'tool_call,internal_tool_call,policy_decision' } }).fullPath,
     )
+  })
+
+  it('the link to the tool calls does not carry a time range the timeline did not apply', async () => {
+    const { wrapper, router } = await mountTimeline(`/activity?view=sessions&ws=${WS_FAILED.id}&from=-1h&to=2026-11-27T00:00:00Z&client=cursor`)
+    expect(wrapper.get('[data-test="timeline-calls-link"]').attributes('href')).toBe(
+      router.resolve({ name: 'activity', query: { view: 'calls', session: WS_FAILED.id, type: 'tool_call,internal_tool_call,policy_decision' } }).fullPath,
+    )
+  })
+
+  it('a step to another failure drops bodies read earlier, like Refresh does', async () => {
+    const page = timelinePage()
+    const first = structuredClone(page.rows[4]) as any
+    first.activity.response = 'token=abc123'
+    door.bodies = { ...page, rows: [first] }
+    const { wrapper, router, api } = await mountTimeline()
+    await wrapper.get('[data-test="timeline-expand-14"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="timeline-detail-14"]').text()).toContain('token=abc123')
+
+    // The core masked the response meanwhile; the page moves away and back.
+    const masked = structuredClone(page.rows[4]) as any
+    masked.activity.response = 'token=***'
+    door.bodies = { ...page, rows: [masked] }
+    await router.replace({ query: { ...router.currentRoute.value.query, at: 'failure:1' } })
+    await flushPromises()
+    await router.replace({ query: { ...router.currentRoute.value.query, at: 'failure:2' } })
+    await flushPromises()
+    await wrapper.get('[data-test="timeline-expand-14"]').trigger('click')
+    await flushPromises()
+    const detail = wrapper.get('[data-test="timeline-detail-14"]').text()
+    expect(detail).toContain('token=***')
+    expect(detail).not.toContain('abc123')
+    expect(api.getWorkSessionTimeline.mock.calls.filter((c: any[]) => c[1]?.include_bodies).length).toBe(2)
+  })
+
+  it('a failure step stays usable while the next page is on its way, so the keyboard focus stays on it', async () => {
+    const { wrapper, api } = await mountTimeline()
+    let release!: (value: unknown) => void
+    api.getWorkSessionTimeline.mockImplementation(() => new Promise(resolve => { release = resolve }))
+    const next = wrapper.get('[data-test="timeline-next-failure"]')
+    ;(next.element as HTMLElement).focus()
+    await next.trigger('click')
+    await flushPromises()
+    // Still loading: the button is not disabled, and focus is still on it.
+    expect(next.attributes('disabled')).toBeUndefined()
+    expect(document.activeElement).toBe(next.element)
+    release(timelinePage({ failure_index: 3, position: 15 }))
+    await flushPromises()
+    expect(wrapper.get('[data-test="timeline-failure-label"]').text()).toBe('failure 3 of 5')
+    expect(document.activeElement).toBe(next.element)
+    wrapper.unmount()
   })
 
   it('keeps the first and the last failure in the facts, to the millisecond', async () => {
@@ -597,6 +685,9 @@ describe('work-session helpers', () => {
     expect(normalizeTimelineAt('failure:3')).toBe('failure:3')
     expect(normalizeTimelineAt('failure:0')).toBe('first_failure')
     expect(normalizeTimelineAt('failure:x')).toBe('first_failure')
+    // The door and the CLI read the ordinal as a number: 02 is the second failure.
+    expect(normalizeTimelineAt('failure:02')).toBe('failure:2')
+    expect(normalizeTimelineAt('failure:00')).toBe('first_failure')
     expect(normalizeTimelineAt('row:01JABC')).toBe('row:01JABC')
     expect(normalizeTimelineAt('row:')).toBe('first_failure')
     expect(normalizeTimelineAt('sideways')).toBe('first_failure')
@@ -607,6 +698,15 @@ describe('work-session helpers', () => {
     expect(timelineCliCommand({ id: 'ws-1', at: 'end', before: 20, after: 20 })).toBe('mcpproxy activity session ws-1 --at end')
     expect(timelineCliCommand({ id: 'ws-1', at: 'row:01JABC', before: 0, after: 250, includeBodies: true })).toBe(
       'mcpproxy activity session ws-1 --at row:01JABC --before 0 --after 250 --include-bodies',
+    )
+    // The door answers at most 500 rows, the positioned one included, and the
+    // CLI refuses a request for more: with both sides at the limit the page on
+    // screen is 250 before and 249 after.
+    expect(timelineCliCommand({ id: 'ws-1', at: 'row:01JABC', before: 250, after: 250 })).toBe(
+      'mcpproxy activity session ws-1 --at row:01JABC --before 250 --after 249',
+    )
+    expect(timelineCliCommand({ id: 'ws-1', at: 'end', before: 250, after: 249 })).toBe(
+      'mcpproxy activity session ws-1 --at end --before 250 --after 249',
     )
     // An id is quoted when a shell would read it as more than one word.
     expect(timelineCliCommand({ id: "ws it's", at: 'first_failure', before: 20, after: 20 })).toBe(
