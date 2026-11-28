@@ -101,7 +101,7 @@ Based on plan.md structure:
 - [x] T032 [US2] Add TTY detection for simplified non-TTY output in internal/cli/output/table.go
 - [x] T033 [US2] Add NO_COLOR support to TableFormatter in internal/cli/output/table.go
 - [x] T034 [US2] Migrate tools list command to use OutputFormatter in cmd/mcpproxy/tools_cmd.go
-- [ ] T035 [US2] Migrate doctor command to use OutputFormatter in cmd/mcpproxy/doctor_cmd.go
+- [x] T035 [US2] Migrate doctor command to use OutputFormatter in cmd/mcpproxy/doctor_cmd.go
 - [x] T036 [US2] E2E test: mcpproxy upstream list displays aligned table
 
 **Checkpoint**: Table output works, both JSON and table formats functional ✅

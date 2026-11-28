@@ -50,13 +50,13 @@
 - [x] T015 Implement GetSessionByID storage method in internal/storage/manager.go
 - [x] T016 Implement UpdateSessionStats storage method in internal/storage/manager.go
 - [x] T017 Implement session retention cleanup (keep 100 most recent) in internal/storage/manager.go
-- [ ] T018 [P] Write unit tests for session storage operations in internal/storage/session_test.go
+- [x] T018 [P] Write unit tests for session storage operations in internal/storage/session_test.go
 - [x] T019 Extend SessionStore to persist sessions to storage in internal/server/session_store.go
 - [x] T020 Add session lifecycle hooks (create on initialize, close on disconnect) in internal/server/mcp.go
 - [x] T021 [P] Add sessions API route registration in internal/httpapi/server.go
 - [x] T022 Implement handleGetSessions endpoint in internal/httpapi/server.go
 - [x] T023 Implement handleGetSessionDetail endpoint in internal/httpapi/server.go
-- [ ] T024 [P] Write integration tests for session API endpoints in internal/httpapi/session_test.go
+- [x] T024 [P] Write integration tests for session API endpoints in internal/httpapi/session_test.go
 
 **Checkpoint**: Foundation ready - user story implementation can now begin
 
