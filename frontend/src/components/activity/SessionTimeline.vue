@@ -459,6 +459,11 @@ async function load(): Promise<void> {
     shown.value = asked
     error.value = ''
     notFound.value = false
+    // Bodies belong to the answer they were read with: the core may have
+    // masked a response since. The rows that are open are read again.
+    bodiesEpoch++
+    bodies.clear()
+    for (const row of response.rows) if (isExpanded(row)) void loadBodies(row)
     if (scrollToPosition) {
       scrollToPosition = false
       void nextTick(revealPosition)
@@ -636,7 +641,9 @@ const scopeNote = computed(() => {
 // Result and Duration fold away below `sm` (640 px). A cell that spans the row
 // must span exactly the columns that are shown: a wider colspan adds phantom
 // columns, and a fixed-layout table then gives them the subject's width.
-const SM_QUERY = '(min-width: 640px)'
+// Tailwind's `sm` is 40rem, not 640px: the two differ when the browser's
+// default font size is not 16px.
+const SM_QUERY = '(min-width: 40rem)'
 const media = typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia(SM_QUERY) : null
 const wide = ref(media ? media.matches : true)
 const onMedia = (event: MediaQueryListEvent): void => { wide.value = event.matches }
@@ -787,7 +794,9 @@ const rowKey = (row: WorkSessionTimelineRow): string => row.activity?.id ?? `i${
 const isExpanded = (row: WorkSessionTimelineRow): boolean => expanded.has(rowKey(row))
 const bodyState = (row: WorkSessionTimelineRow): BodyState | undefined => bodies.get(rowKey(row))
 /** True once the bodies of any row were shown: the CLI needs --include-bodies for the same view. */
-const bodiesShown = computed(() => (page.value?.rows ?? []).some(row => isExpanded(row) && !row.bodies_removed && !!bodyState(row)?.record))
+const hasBody = (record?: ActivityRecord): boolean =>
+  !!record && ((!!record.arguments && Object.keys(record.arguments).length > 0) || !!record.response)
+const bodiesShown = computed(() => (page.value?.rows ?? []).some(row => isExpanded(row) && !row.bodies_removed && hasBody(bodyState(row)?.record)))
 
 function toggle(row: WorkSessionTimelineRow): void {
   const key = rowKey(row)

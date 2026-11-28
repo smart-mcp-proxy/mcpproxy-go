@@ -86,6 +86,11 @@ describe('Session timeline (Spec 124 FR-062)', () => {
     expect(rowAt(wrapper, 14).attributes('aria-current')).toBe('true')
     expect(rowAt(wrapper, 12).attributes('data-failed')).toBe('true')
     expect(rowAt(wrapper, 12).attributes('data-position')).toBeUndefined()
+    // A failure the page is not positioned at keeps its own surface.
+    expect(rowAt(wrapper, 12).classes()).toContain('timeline-row-failed')
+    expect(rowAt(wrapper, 12).classes()).not.toContain('timeline-row-position')
+    expect(rowAt(wrapper, 14).classes()).toContain('timeline-row-position')
+    expect(rowAt(wrapper, 11).classes()).not.toContain('timeline-row-failed')
     expect(rowAt(wrapper, 11).attributes('data-failed')).toBeUndefined()
     expect(rowAt(wrapper, 14).text()).toContain('github:list_issues')
     expect(rowAt(wrapper, 14).text()).toContain('The upstream server needs a login.')
@@ -425,8 +430,10 @@ describe('Session timeline (Spec 124 FR-062)', () => {
 
   it('stops asking for bodies in the command once retention removed those of the opened row', async () => {
     const page = timelinePage({ has_after: true })
+    const withBody = structuredClone(page.rows[4]) as any
+    withBody.activity.arguments = { repo: 'acme/app' }
     door.page = page
-    door.bodies = { ...page, rows: [page.rows[4]] }
+    door.bodies = { ...page, rows: [withBody] }
     const { wrapper } = await mountTimeline()
     await wrapper.get('[data-test="timeline-expand-14"]').trigger('click')
     await flushPromises()
@@ -438,6 +445,42 @@ describe('Session timeline (Spec 124 FR-062)', () => {
     await wrapper.get('[data-test="timeline-load-later"]').trigger('click')
     await flushPromises()
     expect(wrapper.get('[data-test="timeline-detail-14"]').text()).toContain('removed by retention')
+    expect(wrapper.get('[data-test="timeline-cli"]').text()).not.toContain('--include-bodies')
+  })
+
+  it('a page read again, wider, reads the bodies of the open rows again', async () => {
+    const page = timelinePage({ has_after: true })
+    const first = structuredClone(page.rows[4]) as any
+    first.activity.response = 'token=abc123'
+    door.page = page
+    door.bodies = { ...page, rows: [first] }
+    const { wrapper, api } = await mountTimeline()
+    await wrapper.get('[data-test="timeline-expand-14"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="timeline-detail-14"]').text()).toContain('token=abc123')
+    // The scan finished meanwhile: the door now answers the masked response.
+    const masked = structuredClone(page.rows[4]) as any
+    masked.activity.response = 'token=***'
+    door.bodies = { ...page, rows: [masked] }
+    await wrapper.get('[data-test="timeline-load-later"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    const detail = wrapper.get('[data-test="timeline-detail-14"]').text()
+    expect(detail).toContain('token=***')
+    expect(detail).not.toContain('abc123')
+    expect(api.getWorkSessionTimeline.mock.calls.filter((c: any[]) => c[1]?.include_bodies).length).toBe(2)
+  })
+
+  it('does not ask for bodies in the command when the open row has neither arguments nor a response', async () => {
+    const page = timelinePage()
+    const bare = structuredClone(page.rows[1]) as any
+    delete bare.activity.arguments
+    delete bare.activity.response
+    door.bodies = { ...page, rows: [bare] }
+    const { wrapper } = await mountTimeline()
+    await wrapper.get('[data-test="timeline-expand-11"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="timeline-detail-11"]').text()).toContain('No arguments recorded')
     expect(wrapper.get('[data-test="timeline-cli"]').text()).not.toContain('--include-bodies')
   })
 

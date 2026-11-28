@@ -280,6 +280,8 @@ test('two actions from the list to the first failure: "Failed only", then the ro
   page.on('request', (request) => {
     if (request.url().includes(`/work-sessions/${seeded}/timeline`)) timelineRequests.push(request.url())
   })
+  // The answer that fills the page: the page is compared with it, not with a later read.
+  const firstPage = page.waitForResponse((response) => response.url().includes(`/work-sessions/${seeded}/timeline`) && !response.url().includes('include_bodies'))
   await row.locator(`[data-test="ws-open-${seeded}"]`).focus()
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(new RegExp(`[?&]ws=${seeded}`))
@@ -293,7 +295,10 @@ test('two actions from the list to the first failure: "Failed only", then the ro
   await expect(positioned.locator('[data-test="timeline-time"]')).toHaveText(/^\d{2}:\d{2}:\d{2}\.\d{3}$/)
   await expect(page.locator('[data-test="timeline-failure-label"]')).toHaveText('failure 1 of 2')
   // The page is the door's default page: the same rows, the same position, 20 rows before it.
-  const door = (await getJSON(`/work-sessions/${seeded}/timeline`)).data
+  const firstResponse = await firstPage
+  expect(firstResponse.status()).toBe(200)
+  expect(new URL(firstResponse.url()).searchParams.get('at') ?? 'first_failure').toBe('first_failure')
+  const door = (await firstResponse.json()).data
   const shownIndices = await page.locator('[data-test="timeline-row"]').evaluateAll((rows) => rows.map((r) => Number(r.getAttribute('data-index'))))
   expect(shownIndices).toEqual(door.rows.map((r: any) => r.index))
   expect(Number(await positioned.getAttribute('data-index'))).toBe(door.position)
@@ -482,30 +487,57 @@ test('the connections table is still there, one level down', async ({ page }) =>
   await expect(section.locator('[data-test="sessions-table"], [data-test="sessions-empty"]')).toBeVisible()
 })
 
-test('390 px: a row with an agent token and a project shows both (FR-060)', async ({ page }) => {
-  // The live run uses the API key and names no project, so this row is fulfilled.
-  await page.setViewportSize({ width: 390, height: 844 })
-  const session = fixtureBase(2).session
-  await page.route(/\/api\/v1\/work-sessions\?/, async (route) => {
-    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: { sessions: [session], total: 1, limit: 25, offset: 0 } }) })
+for (const width of [390, 1024, 1280, 1440]) {
+  test(`${width} px: a row shows its agent token, project, error class and last failure (FR-060)`, async ({ page }) => {
+    // The live run uses the API key and names no project, so this row is fulfilled.
+    await page.setViewportSize({ width, height: 844 })
+    const session = fixtureBase(2).session
+    await page.route(/\/api\/v1\/work-sessions\?/, async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: { sessions: [session], total: 1, limit: 25, offset: 0 } }) })
+    })
+    await open(page, '/activity?view=sessions')
+    const listRow = page.locator(`[data-test="work-sessions-row"][data-session="${FIXTURE_WS}"]`)
+    await expect(listRow).toBeVisible()
+    await expect(listRow.locator('[data-test="ws-token-narrow"]')).toBeVisible()
+    await expect(listRow.locator('[data-test="ws-token-narrow"]')).toHaveText('nightly-bot')
+    await expect(listRow.locator('[data-test="ws-client"]')).toContainText('overnight-agent')
+    await expect(listRow.locator('[data-test="ws-project"]')).toBeVisible()
+    await expect(listRow.locator('[data-test="ws-project"]')).toHaveText('payments')
+    await expect(listRow.locator('[data-test="ws-truncated"]')).toBeVisible()
+    // Each of them is inside the screen, not cut off by the table's edge.
+    for (const hook of ['ws-token-narrow', 'ws-project']) {
+      const box = (await listRow.locator(`[data-test="${hook}"]`).boundingBox())!
+      expect(box.x, `${hook} starts on screen`).toBeGreaterThanOrEqual(0)
+      expect(box.x + Math.min(box.width, 40), `${hook} is on screen`).toBeLessThanOrEqual(width)
+    }
+    // The last failure can be read where it is shown: whole in the folded
+    // lines below 1280 px, and from there in a column of its own that is wide
+    // enough for the error class, the reason and the time to the millisecond.
+    const time = /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}/
+    if (width < 1280) {
+      const folded = listRow.locator('[data-test="ws-reason-narrow"]')
+      await expect(folded).toBeVisible()
+      await expect(folded).toContainText('proxy_policy')
+      await expect(folded).toContainText('MCPProxy refused the call.')
+      await expect(folded).toContainText(time)
+      await expect(listRow.locator('[data-test="ws-reason"]')).toBeHidden()
+    } else {
+      await expect(listRow.locator('[data-test="ws-reason-narrow"]')).toBeHidden()
+      await expect(listRow.locator('[data-test="ws-error-class"]')).toHaveText('proxy_policy')
+      const cell = await listRow.evaluate((tr) => {
+        const clipped = (el: Element | null) => !el || el.scrollWidth > (el as HTMLElement).clientWidth + 1
+        const reason = tr.querySelector('[data-test="ws-reason-text"]') as HTMLElement
+        return { classClipped: clipped(tr.querySelector('[data-test="ws-error-class"]')), timeClipped: clipped(tr.querySelector('td [data-test="ws-last-failure"]')), reasonWidth: reason.getBoundingClientRect().width }
+      })
+      expect(cell.classClipped, 'error class is cut').toBe(false)
+      expect(cell.timeClipped, 'last failure time is cut').toBe(false)
+      expect(cell.reasonWidth, 'room for the reason').toBeGreaterThanOrEqual(150)
+      await expect(listRow.locator('td [data-test="ws-last-failure"]')).toContainText(time)
+    }
+    expect(await sidewaysScroll(page), 'page scrolls sideways').toBeLessThanOrEqual(0)
+    if (width === 1024) await shot(page, 'sessions-list-1024-light')
   })
-  await open(page, '/activity?view=sessions')
-  const phoneRow = page.locator(`[data-test="work-sessions-row"][data-session="${FIXTURE_WS}"]`)
-  await expect(phoneRow).toBeVisible()
-  await expect(phoneRow.locator('[data-test="ws-token-narrow"]')).toBeVisible()
-  await expect(phoneRow.locator('[data-test="ws-token-narrow"]')).toHaveText('nightly-bot')
-  await expect(phoneRow.locator('[data-test="ws-client"]')).toContainText('overnight-agent')
-  await expect(phoneRow.locator('[data-test="ws-project"]')).toBeVisible()
-  await expect(phoneRow.locator('[data-test="ws-project"]')).toHaveText('payments')
-  await expect(phoneRow.locator('[data-test="ws-truncated"]')).toBeVisible()
-  // Each of them is inside the screen, not cut off by the table's edge.
-  for (const hook of ['ws-token-narrow', 'ws-project']) {
-    const box = (await phoneRow.locator(`[data-test="${hook}"]`).boundingBox())!
-    expect(box.x, `${hook} starts on screen`).toBeGreaterThanOrEqual(0)
-    expect(box.x + Math.min(box.width, 40), `${hook} is on screen`).toBeLessThanOrEqual(390)
-  }
-  expect(await sidewaysScroll(page), 'page scrolls sideways').toBeLessThanOrEqual(0)
-})
+}
 
 test('390 px: list and timeline fit, controls are 44 px tall', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })

@@ -107,24 +107,26 @@
             <caption class="sr-only">
               Work sessions: one row per agent run, with its calls, failures and the last failure.
             </caption>
-            <!-- Nine facts in six cells of two lines, so that the reason of the
-                 last failure has room at 1280 px and the table never scrolls
-                 sideways (Spec 134 SC-006). Fixed widths go to the cells whose
-                 content has a known size; the last-failure cell takes the rest. -->
+            <!-- Nine facts in cells of two lines, and the table never scrolls
+                 sideways (Spec 134 SC-006). The page's sidebar takes 16rem, so
+                 a column appears only where there is room to read it: the last
+                 failure from xl (below it, its facts fold into the client
+                 cell), the agent token from 2xl. Fixed widths go to the cells
+                 whose content has a known size. -->
             <thead>
               <tr>
-                <th class="hidden sm:table-cell sm:w-[14%]">Agent token</th>
-                <th class="sm:w-[19%]"><span class="sm:hidden">Agent · Client</span><span class="max-sm:hidden">Client · Project</span></th>
+                <th class="hidden 2xl:table-cell 2xl:w-[13%]">Agent token</th>
+                <th class="xl:w-[22%] 2xl:w-[18%]"><span class="2xl:hidden">Agent · Client</span><span class="max-2xl:hidden">Client · Project</span></th>
                 <th class="hidden md:table-cell md:w-[10rem]">Started · Duration</th>
                 <th class="w-[3.25rem] sm:w-[4rem] text-right">Calls</th>
                 <th class="w-[4.75rem] sm:w-[5.5rem] text-right">Failures</th>
-                <th class="hidden sm:table-cell">Last failure · Reason</th>
+                <th class="hidden xl:table-cell">Last failure · Reason</th>
                 <th class="w-[5.5rem] sm:w-[6rem]"><span class="sr-only">Open timeline</span></th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="ws in sessions" :key="ws.id" data-test="work-sessions-row" :data-session="ws.id">
-                <td class="hidden sm:table-cell" data-test="ws-token">
+                <td class="hidden 2xl:table-cell" data-test="ws-token">
                   <router-link
                     v-if="sessionTokenName(ws)"
                     :to="tokenLink(sessionTokenName(ws))"
@@ -133,8 +135,8 @@
                   <span v-else class="text-base-content/60" title="No agent token: the call used the API key or a client credential">—</span>
                 </td>
                 <td>
-                  <!-- Below sm the token column folds into this cell. -->
-                  <div v-if="sessionTokenName(ws)" class="sm:hidden text-sm break-words" data-test="ws-token-narrow">
+                  <!-- Below 2xl the token column folds into this cell. -->
+                  <div v-if="sessionTokenName(ws)" class="2xl:hidden text-sm break-words" data-test="ws-token-narrow">
                     <router-link :to="tokenLink(sessionTokenName(ws))" class="link link-hover">{{ sessionTokenName(ws) }}</router-link>
                   </div>
                   <div data-test="ws-client">
@@ -154,8 +156,8 @@
                   <div class="md:hidden text-xs text-base-content/70 break-words mt-0.5" data-test="ws-started-narrow">
                     {{ formatDateTime(ws.started_at) }} · {{ formatSessionDuration(ws.duration_ms) }} · {{ ws.status === 'active' ? 'active' : 'ended' }}
                   </div>
-                  <!-- Below sm the last-failure cell folds into this one. -->
-                  <div v-if="ws.last_failure" class="sm:hidden text-xs mt-0.5" data-test="ws-reason-narrow">
+                  <!-- Below xl the last-failure cell folds into this one. -->
+                  <div v-if="ws.last_failure" class="xl:hidden text-xs mt-0.5" data-test="ws-reason-narrow">
                     <div class="break-words">{{ reasonText(ws) }}</div>
                     <div v-if="reasonWhere(ws)" class="text-base-content/70 break-words">{{ reasonWhere(ws) }}</div>
                     <div class="text-base-content/70 break-words">{{ formatDateTimeMillis(ws.last_failure.at) }}</div>
@@ -168,6 +170,14 @@
                       data-test="ws-truncated"
                       :title="`Rows before ${formatDateTime(ws.truncated_start_at)} were removed by retention`"
                     >Start trimmed</StateTag>
+                  </div>
+                  <!-- The one case where the counts are not lifetime facts. -->
+                  <div v-if="ws.rebuilt" class="mt-0.5">
+                    <StateTag
+                      tone="off"
+                      data-test="ws-rebuilt"
+                      title="The summary of this session was lost and rebuilt from the rows still in the log: its counts cover those rows only"
+                    >Rebuilt from rows</StateTag>
                   </div>
                 </td>
                 <td class="hidden md:table-cell">
@@ -192,7 +202,7 @@
                   <span class="font-mono" :class="failureClass(ws)">{{ ws.failures }}</span>
                   <div v-if="ws.policy_blocks > 0" class="text-xs text-base-content/70 whitespace-nowrap">{{ ws.policy_blocks }} blocked</div>
                 </td>
-                <td class="hidden sm:table-cell">
+                <td class="hidden xl:table-cell">
                   <template v-if="ws.last_failure">
                     <!-- The error class keeps its place in front: a long reason
                          is cut, the class is not. -->
@@ -243,9 +253,9 @@
           </div>
         </div>
 
-        <p class="text-xs text-base-content/70">
+        <p class="text-xs text-base-content/70" data-test="work-sessions-note">
           A work session is one agent's run of work: one credential, one client, one project, until it has been idle for 30 minutes.
-          Counts are lifetime facts and stay exact after retention has removed rows.
+          Counts are lifetime facts and stay exact after retention has removed rows, except for a session marked "Rebuilt from rows".
         </p>
       </div>
     </div>

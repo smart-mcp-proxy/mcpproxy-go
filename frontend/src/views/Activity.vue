@@ -1836,8 +1836,10 @@ function dateTimeLocalToISO(value: string): string | undefined {
 // converge rather than loop: re-applying the query re-sets refs to the
 // values they already have as soon as a round trip settles, which triggers
 // nothing further.
-// The view the address named last, to tell a link out of Sessions.
+// The view and the session the address named last, to tell a link out of
+// Sessions that names another session from a look at the tab and back.
 let lastRouteView = ''
+let lastRouteSession = ''
 function applyRouteFilters(): void {
   const q = route.query
   const str = (v: unknown): string => (typeof v === 'string' ? v : '')
@@ -1845,13 +1847,16 @@ function applyRouteFilters(): void {
   // Spec 124: a session link out of the Sessions view shows that session's
   // calls. "Sensitive data" and "View sub-calls" are not in the address and
   // have no chip in Sessions, so one left from earlier would narrow the
-  // session's calls unseen.
+  // session's calls unseen. A tab round trip keeps the session it had, and
+  // with it the filters the user set on its calls.
   const view = str(q.view)
-  if (lastRouteView === 'sessions' && view !== 'sessions' && str(q.session)) {
+  const session = str(q.session)
+  if (lastRouteView === 'sessions' && view !== 'sessions' && session && session !== lastRouteSession) {
     filterParentId.value = ''
     filterSensitiveData.value = ''
   }
   lastRouteView = view
+  lastRouteSession = session
 
   filterSession.value = str(q.session)
   filterStatus.value = str(q.status)
@@ -2205,9 +2210,10 @@ const getSessionLabel = (sessionId: string): string => {
 
 /** Spec 124: the Sessions list's own filter. It is in the address, so the
  * Filters count and "Clear Filters" account for it in that view. */
-const sessionsFailedOnly = computed(() => activeView.value === 'sessions' && route.query.failed === 'true')
+// Read as the panel reads them: the first value of a repeated parameter.
+const sessionsFailedOnly = computed(() => activeView.value === 'sessions' && scopeQuery.state.failed === 'true')
 // One session's timeline is open (the Sessions view with `ws` in the address).
-const timelineOpen = computed(() => activeView.value === 'sessions' && typeof route.query.ws === 'string' && route.query.ws !== '')
+const timelineOpen = computed(() => activeView.value === 'sessions' && !!scopeQuery.state.ws)
 
 const hasActiveFilters = computed(() => {
   return sessionsFailedOnly.value || selectedTypes.value.length > 0 || filterServer.value || filterTool.value || filterSession.value || filterStatus.value || filterSensitiveData.value || filterSeverity.value || filterAuthType.value || filterAgentName.value || filterStartDate.value || filterEndDate.value || filterParentId.value

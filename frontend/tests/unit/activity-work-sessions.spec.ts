@@ -175,6 +175,58 @@ describe('Activity Sessions view (Spec 124)', () => {
     wrapper.unmount()
   })
 
+  it('a session link out of the Sessions view does not inherit the parent of "View sub-calls"', async () => {
+    const { wrapper, router, api } = await mountAt('/activity')
+    const run = { id: 'act-3', type: 'internal_tool_call', status: 'success', timestamp: '2026-11-26T22:38:00Z', tool_name: 'code_execution', request_id: 'r3', duration_ms: 5 }
+    api.getActivities.mockImplementation(() => Promise.resolve({ success: true, data: { activities: [CALL, NO_SESSION, run], total: 3, limit: 200, offset: 0 } }))
+    await router.push({ query: { view: 'all' } })
+    await flushPromises()
+    await flushPromises()
+    await wrapper.get('[data-test="activity-open-act-3"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="activity-view-subcalls"]').trigger('click')
+    await flushPromises()
+    expect(api.getActivities.mock.calls.at(-1)[0].parent_id).toBe('r3')
+    await router.push({ query: { view: 'sessions' } })
+    await flushPromises()
+    await router.push({ query: { view: 'calls', session: WS_FAILED.id } })
+    await flushPromises()
+    await flushPromises()
+    expect(api.getActivities.mock.calls.at(-1)[0].parent_id).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('a look at Sessions and back by the tabs keeps the filters of the calls view', async () => {
+    // Only a link that names another session resets them, not a tab round trip.
+    const { wrapper } = await mountAt(`/activity?session=${WS_FAILED.id}`)
+    await wrapper.get('[data-test="activity-filters-toggle"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('select[aria-label="Filter by sensitive data"]').setValue('true')
+    await flushPromises()
+    await wrapper.get('[data-test="activity-view-tab-sessions"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="activity-view-tab-calls"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.findAll('[data-test="activity-row"]').length).toBe(0)
+    if (!wrapper.find('select[aria-label="Filter by sensitive data"]').exists()) {
+      await wrapper.get('[data-test="activity-filters-toggle"]').trigger('click')
+      await flushPromises()
+    }
+    expect((wrapper.get('select[aria-label="Filter by sensitive data"]').element as HTMLSelectElement).value).toBe('true')
+    wrapper.unmount()
+  })
+
+  it('reads a repeated Sessions parameter as its first value, like the panel does', async () => {
+    const { wrapper } = await mountAt(`/activity?view=sessions&failed=true&failed=false`)
+    expect(wrapper.get('[data-test="activity-filters-count"]').text()).toBe('1')
+    wrapper.unmount()
+    const timeline = await mountAt(`/activity?view=sessions&ws=${WS_FAILED.id}&ws=other`)
+    expect(timeline.wrapper.find('[data-test="session-timeline"]').exists()).toBe(true)
+    expect(timeline.wrapper.get('[data-test="activity-filter-strip"]').attributes('style') ?? '').toContain('display: none')
+    timeline.wrapper.unmount()
+  })
+
   it('the calls view does not count a "failed" left in the address', async () => {
     const { wrapper } = await mountAt('/activity?failed=true')
     expect(wrapper.find('[data-test="activity-filters-count"]').exists()).toBe(false)

@@ -237,6 +237,15 @@ describe('Work-session list (Spec 124 FR-060)', () => {
     wrapper.unmount()
   })
 
+  it('marks a session whose counts were rebuilt from the rows still in the log', async () => {
+    list.rows = [{ ...WS_FAILED, rebuilt: true }, WS_OK]
+    const { wrapper } = await mountPanel()
+    const rows = wrapper.findAll('[data-test="work-sessions-row"]')
+    expect(rows[0].get('[data-test="ws-rebuilt"]').text()).toContain('Rebuilt')
+    expect(rows[1].find('[data-test="ws-rebuilt"]').exists()).toBe(false)
+    expect(wrapper.get('[data-test="work-sessions-note"]').text()).toContain('Rebuilt')
+  })
+
   it('says so on the row when the start of a session was trimmed (FR-061)', async () => {
     const { wrapper } = await mountPanel()
     const rows = wrapper.findAll('[data-test="work-sessions-row"]')
@@ -361,7 +370,12 @@ describe('Work-session list (Spec 124 FR-060)', () => {
     expect(started.classes()).toContain('md:hidden')
     expect(started.text()).toMatch(/2026-11-2\d \d{2}:\d{2}:00 · 41m 05s · ended/)
     const narrow = row.get('[data-test="ws-reason-narrow"]')
-    expect(narrow.classes()).toContain('sm:hidden')
+    // The last-failure column needs room: below xl its facts are in this cell.
+    expect(narrow.classes()).toContain('xl:hidden')
+    expect(row.get('[data-test="ws-reason"]').element.closest('td')!.className).toContain('xl:table-cell')
+    // And the token column is a column only where there is room for seven.
+    expect(row.get('[data-test="ws-token-narrow"]').classes()).toContain('2xl:hidden')
+    expect(row.get('[data-test="ws-token"]').classes()).toContain('2xl:table-cell')
     expect(narrow.text()).toContain('The upstream server needs a login.')
     expect(narrow.text()).toMatch(/\d{2}:\d{2}:00\.250/)
     expect(narrow.text()).toContain('auth · github:list_issues')

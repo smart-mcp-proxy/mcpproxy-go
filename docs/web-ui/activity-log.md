@@ -78,23 +78,23 @@ Click any row to open the detail drawer showing:
 
 ### Sessions and the failure timeline
 
-The **Sessions** tab (`/ui/activity?view=sessions`) lists [work sessions](../features/activity-log.md#work-sessions-and-the-failure-timeline): one row per agent run, read from `GET /api/v1/work-sessions`.
+The **Sessions** tab (`/ui/activity?view=sessions`) lists [work sessions](../features/activity-log.md#work-sessions-and-the-failure-timeline): one row per agent run, read from `GET /api/v1/work-sessions`. A run is told apart by its credential, its client and its project: two scripts that use the same API key over REST within 30 minutes of each other are one session, unless each sends its own `X-MCPProxy-Run` name.
 
 | Cell | What it shows |
 |------|---------------|
-| Agent token | The token the run used, linked to the agent tokens list. A dash when the call used the API key or a client credential. |
+| Agent token | The token the run used, linked to the agent tokens list. A dash when the call used the API key or a client credential. A column of its own on a wide screen; otherwise the first line of the next cell. |
 | Client · Project | The client (or the calling surface: `rest`, `cli`, `webui`, `tray`), the run name sent as `X-MCPProxy-Run`, and the project when the client disclosed one. "Start trimmed" marks a session whose first rows retention has removed. |
 | Started · Duration | Start time, duration, and whether the session is still active. |
 | Calls | The number of attempts. It is a link to the Tool calls view filtered by this session; the link includes the calls MCPProxy refused and drops the page's time range, which this list does not apply. |
 | Failures | The number of failures, with the policy blocks among them on a second line. |
-| Last failure · Reason | The short reason of the last failure, its error class and `server:tool`, and when it happened. |
+| Last failure · Reason | The error class of the last failure, its short reason and `server:tool`, and when it happened, with the first failure under it when there was more than one. "Rebuilt from rows" in the client cell marks a session whose counts cover only the rows still in the log. Below 1280 px these lines fold into the client cell. |
 | Timeline | Opens the session's timeline. |
 
 Above the table:
 
 - **Failed only** keeps the sessions that have at least one failure. With it on, **Include blocked** decides whether a call MCPProxy itself refused (quarantine, a profile, a rate limit) counts as a failure. Switch it off to see only sessions where something else failed.
 - **Sort** orders by last activity or by last failure, newest first. With "Failed only" on, the list reads newest failure first unless you choose otherwise.
-- The filter, the order and the paging are applied by the server, so the list is exact however long the log is. The profile, client and token filters of the page ("View as", the Filters popover) narrow the list too, with two exceptions that a line under the toolbar names when they apply: "unattributed" has no meaning for work sessions, and a signed-in user of the server edition cannot filter by profile. The page reads the list again every 30 seconds while Auto-refresh is on.
+- The filter, the order and the paging are applied by the server, so the list is exact however long the log is. The profile, client and token filters of the page ("View as", the Filters popover) narrow the list too, with two exceptions that a line under the toolbar names when they apply: "unattributed" has no meaning for work sessions, and a signed-in user of the server edition who is not an administrator cannot filter by profile. The page reads the list again every 30 seconds while Auto-refresh is on.
 
 The filter and the order are part of the address (`failed=true`, `include_blocked=false`, `sort=last_failure` or `sort=last_activity` when it is not the default), so a filtered list can be bookmarked. "Clear Filters" in the Filters popover switches "Failed only" off as well.
 
@@ -102,7 +102,7 @@ A session that never failed opens at its most recent row. Below 640 px the last 
 
 The table of MCP connections that this tab used to show (capabilities, token count, "Tools it sees", "View Activity") is in the **Client connections** section under the list. It is collapsed until you open it.
 
-**Timeline.** A row's Timeline button opens `/ui/activity?view=sessions&ws=<session id>&at=<position>`. The address names the session and the row the page is positioned at, so it can be shared and reloaded. Without `at` the page opens at the first failure that is still in the log, with the 20 rows before it and the 20 after. A session that never failed opens at its most recent row. A session whose failed rows were all removed by retention still shows its lifetime failure count and opens at its earliest remaining row.
+**Timeline.** A row's Timeline button opens `/ui/activity?view=sessions&ws=<session id>&at=<position>`. The address names the session and the row the page is positioned at, so it can be shared and reloaded. Without `at` the page opens at the first failure that is still in the log, with the 20 rows before it and the 20 after. A session that never failed opens at its most recent row. A session whose failed rows were all removed by retention still shows its lifetime failure count and opens at its earliest remaining row. `at=failure:<n>` counts the failures that are in the log now, so the same address can open a different row, or none, once retention has removed an earlier failure; to share one particular row, use `at=row:<activity id>` (the address the page has after "Open in session timeline" from a call's details).
 
 - A failed call has a red bar and background; a call MCPProxy refused is amber and says "Blocked". The row the page is positioned at has an outline.
 - A call made through a built-in tool is stored as two rows: the upstream call, which is the failure, and the built-in call around it (`call_tool_read` and the like), which ended in the same error. The second one shows one line of that error; its details have the whole text.
@@ -114,10 +114,10 @@ The table of MCP connections that this tab used to show (capabilities, token cou
 - **Refresh** reads the same page again, for a session that is still running.
 - The facts at the top repeat what the list row shows and add the first and the last failure to the millisecond. The profile, client and token filters of the page narrow the list of sessions; they do not change a timeline, so the Filters control is put away while a timeline is open and is back on the list.
 - The arrow at the end of a row opens its details. The arguments and the response are fetched only then.
-- **Copy as CLI command** gives the `mcpproxy activity session <id> ...` command that prints the same position and the same rows in a terminal. Once a row is open here, the command has `--include-bodies`, which prints the arguments and responses of every row of the page, not only of the rows opened in the browser: keep that in mind before pasting the output into a report.
+- **Copy as CLI command** gives the `mcpproxy activity session <id> ...` command that prints the same position and the same rows in a terminal. Once the arguments or the response of a row are on screen here, the command has `--include-bodies`, which prints the arguments and responses of every row of the page, not only of the rows opened in the browser: keep that in mind before pasting the output into a report.
 - **Tool calls of this session** opens the Tool calls view filtered by the session, with the calls MCPProxy refused included (a Type filter names the three row types) and without the page's time range, which a timeline does not apply. From there, a call's detail panel has **Open in session timeline**, which opens the timeline at that call.
 
-**What retention changes.** A session leaves the list once its last activity is older than `session_retention_days` (7 by default); the cleanup pass applies this, so a long run that is still active stays listed. While it is listed, its counts are lifetime facts and stay exact. The one exception is a session marked **Rebuilt from rows** in its timeline: its summary was lost and rebuilt from the rows still in the log, so its counts cover those rows only. Under the record or size cap a whole session can be removed before that, oldest last activity first; its address then shows "Session not found". When retention has removed rows, the timeline says so instead of showing a shorter history as if it were complete:
+**What retention changes.** A session leaves the list once its last activity is older than `session_retention_days` (7 by default); the cleanup pass applies this, so a long run that is still active stays listed. While it is listed, its counts are lifetime facts and stay exact. There are two exceptions. A session marked **Rebuilt from rows** (in the list and in its timeline) lost its summary, which was rebuilt from the rows still in the log, so its counts cover those rows only. And a long-lived connection that goes quiet for longer than the retention window and then continues under the same session id starts a new summary: the session is listed again with the counts of what happened since, and nothing marks it. Under the record or size cap a whole session can be removed before that, oldest last activity first; its address then shows "Session not found". When retention has removed rows, the timeline says so instead of showing a shorter history as if it were complete:
 
 - "The start of this session is no longer in the log" appears at the top when the first rows are gone, and the list row carries "Start trimmed".
 - "This session had N failures in all. M are still in the log" appears when failures were removed. The failure steps then count the M that are left.
