@@ -1317,14 +1317,14 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 
 | # | Status | Progress |
 | --- | --- | --- |
-| [001-code-execution](./specs/001-code-execution/) | `in-flight` | 78/127 (61%) |
+| [001-code-execution](./specs/001-code-execution/) | `in-flight` | 84/127 (66%) |
 | [001-fix-skipped-auth-tests](./specs/001-fix-skipped-auth-tests/) | — | — |
 | [001-oas-endpoint-documentation](./specs/001-oas-endpoint-documentation/) | `in-flight` | 36/69 (52%) |
 | [001-oauth-scope-discovery](./specs/001-oauth-scope-discovery/) | — | — |
-| [001-update-version-display](./specs/001-update-version-display/) | `in-flight` | 39/58 (67%) |
+| [001-update-version-display](./specs/001-update-version-display/) | `in-flight` | 40/58 (69%) |
 | [002-windows-installer](./specs/002-windows-installer/) | `in-flight` | 35/60 (58%) |
-| [003-tool-annotations-webui](./specs/003-tool-annotations-webui/) | `in-flight` | 37/64 (58%) |
-| [004-management-health-refactor](./specs/004-management-health-refactor/) | `in-flight` | 75/101 (74%) |
+| [003-tool-annotations-webui](./specs/003-tool-annotations-webui/) | `in-flight` | 39/64 (61%) |
+| [004-management-health-refactor](./specs/004-management-health-refactor/) | `in-flight` | 76/101 (75%) |
 | [005-rest-management-integration](./specs/005-rest-management-integration/) | `shipped` | 45/45 (100%) |
 | [006-oauth-extra-params](./specs/006-oauth-extra-params/) | `in-flight` | 44/65 (68%) |
 | [007-oauth-e2e-testing](./specs/007-oauth-e2e-testing/) | `in-flight` | 94/103 (91%) |
@@ -1335,8 +1335,8 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [012-docusaurus-docs-site](./specs/012-docusaurus-docs-site/) | `in-flight` | 74/89 (83%) |
 | [012-unified-health-status](./specs/012-unified-health-status/) | `shipped` | 44/44 (100%) |
 | [013-structured-server-state](./specs/013-structured-server-state/) | `shipped` | 46/46 (100%) |
-| [013-tool-change-notifications](./specs/013-tool-change-notifications/) | `in-flight` | 26/45 (58%) |
-| [014-cli-output-formatting](./specs/014-cli-output-formatting/) | `in-flight` | 62/66 (94%) |
+| [013-tool-change-notifications](./specs/013-tool-change-notifications/) | `in-flight` | 27/45 (60%) |
+| [014-cli-output-formatting](./specs/014-cli-output-formatting/) | `shipped` | 63/66 (95%) |
 | [015-server-management-cli](./specs/015-server-management-cli/) | `shipped` | 50/50 (100%) |
 | [016-activity-log-backend](./specs/016-activity-log-backend/) | `in-flight` | 44/50 (88%) |
 | [017-activity-cli-commands](./specs/017-activity-cli-commands/) | `in-flight` | 51/60 (85%) |
