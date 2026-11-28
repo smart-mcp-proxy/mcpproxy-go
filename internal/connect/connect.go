@@ -1732,7 +1732,7 @@ func findEquivalentJSONServerName(serversMap map[string]interface{}, baseURL, re
 			if !ok {
 				continue
 			}
-			if entryURL == baseURL || strings.HasPrefix(entryURL, baseURL+"?") {
+			if endpointURLMatches(entryURL, baseURL) {
 				return name, true
 			}
 		}
@@ -1898,7 +1898,7 @@ func entryPointsToBridge(entry map[string]interface{}, baseURL string) bool {
 		if s == "mcp-remote" {
 			hasBridgePkg = true
 		}
-		if s == baseURL || strings.HasPrefix(s, baseURL+"?") {
+		if endpointURLMatches(s, baseURL) {
 			pointsToUs = true
 		}
 	}

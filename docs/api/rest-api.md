@@ -1304,6 +1304,8 @@ another port. Consumers that need the stronger claim must check
 `endpoint_match == "this"`; a UI showing a bare "Connected" on
 `endpoint_match == "other"` is reporting someone else's link as its own.
 
+`localhost`, `127.0.0.1` and `[::1]` are treated as the same host for this comparison: an entry written as `http://localhost:8080/mcp` is `"this"` on an instance listening on `127.0.0.1:8080`. Scheme, port and path must still be equal.
+
 #### GET /api/v1/connect/{client}
 
 On-demand single-client status. Reads the one client's config **at request
