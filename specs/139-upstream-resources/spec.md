@@ -147,6 +147,7 @@ A client that connects to `/mcp/s/docs` (one upstream server, as if connected di
 - **Upstream returns a different URI in the read contents than the one requested**: each content item's URI is mapped into the namespace when it is an address of the same server; the item keeps its content.
 - **Upstream returns a blob**: passed through as base64 within the size cap. Output policy runs on text contents; a blob is not decoded for policy unless its MIME type is textual (`text/*`, `application/json`, `application/xml`, `+json`, `+xml`), in which case the decoded text is checked and a block decision refuses the read; redact and strip are not applied inside blobs (the blob is passed unchanged and the row records that it was not rewritten).
 - **The upstream answers "not found"**: the client gets "resource not found" with the protocol-era-appropriate code the SDK uses for the client's protocol version.
+- **A reachable server that is disconnected** (and cannot be reconnected on use): the read fails with a connection error; the caller already may reach that server, so this reveals nothing it could not list.
 - **A server listed resources, then lost the resources capability on reconnect**: its resources disappear at the next rebuild; reads are refused.
 - **Feature switched off at runtime**: the aggregated set is cleared on every surface, clients receive `list_changed`, reads are refused; the capability stays advertised on instances built while it was on (the SDK cannot withdraw a capability from a live instance) and simply lists nothing.
 - **`code_execution` sandbox**: no resource API in this spec.
@@ -186,19 +187,19 @@ A client that connects to `/mcp/s/docs` (one upstream server, as if connected di
 
 **Skills**
 
-- **FR-017**: A resource whose URI starts with `skill://`, a template whose pattern starts with `skill://`, and (while the skills feature is on) any URI that a skill in the server's skill catalog lists as its own address or as one of its files, whatever the skill's approval state, MUST be excluded from listing and reading on every surface.
+- **FR-017**: The following MUST be excluded from listing and reading on every surface: a resource whose URI is in the `skill://` namespace (scheme compared case-insensitively, as RFC 3986 requires); a template whose filling could produce such a URI (its literal text before the first expression starts with `skill://`, or is a case-insensitive prefix of `skill://` followed by an expression); and any URI that a stored skill record of the server names as the skill's own address or as one of its files (current or approved copy, whatever the approval state). The read path applies the same rules to the final original URI, so a template such as `file:///{+path}` cannot be filled onto a skill file either.
 - **FR-018**: On `/mcp/s/<server>` with the native skills surface, the native surface MUST keep answering the reads it claims (Spec 125); this feature MUST NOT change which reads it claims.
 
 **Content**
 
 - **FR-019**: Text contents of every read MUST go through the configured output policy as untrusted upstream output, with the same decisions, policy-decision rows and errors as an upstream tool response.
 - **FR-020**: Blob contents MUST be passed through unchanged within the size cap; when the blob's MIME type is textual the decoded text MUST be checked for a block decision.
-- **FR-021**: A read MUST be bounded: mcpproxy MUST stop reading an upstream response larger than the resource response cap (8 MiB of JSON response), refuse the read with an error naming the cap, and never buffer more than the cap plus a fixed margin.
+- **FR-021**: A read MUST be bounded by the resource response cap (8 MiB of upstream JSON response): over the cap the read MUST be refused with an error naming the cap. On streamable HTTP, where each request has its own response body, mcpproxy MUST stop reading at the cap and never buffer more than the cap plus a fixed margin. On stdio and legacy SSE the response arrives on a stream shared by all messages and cannot be cut per request; there the decoded result MUST be measured and refused over the cap (the same exposure any tool result of that server already has).
 
 **Activity**
 
 - **FR-022**: Every read that reaches a listed resource or a template of an eligible server, on every surface, MUST record exactly one activity row (a read of an address that matches nothing registered is answered "not found" by the MCP layer before any server is involved, and records none), of a new type `resource_read` with: server, original URI, proxied URI (as the client used it), status (`success`, `error`, `blocked`), error message, duration, total content bytes, content count, MIME types, attribution (caller, profile, work session) as tool calls carry, and the response body under the same size and detection rules as a tool call's response. A blocked read MUST also record the policy decision as a companion row, as prompts do.
-- **FR-023**: Listing and subscription requests MUST NOT record activity rows in this spec.
+- **FR-023**: Listing and subscription requests MUST NOT record activity rows in this spec. A `resource_read` row is not a work-session attempt (Spec 124 counters do not change), but it is a request row of its credential's work session, like `prompt_get`.
 - **FR-024**: The new activity type MUST appear wherever activity types are filtered or described (REST filter, CLI `activity list --type`, Web UI activity filter, OpenAPI).
 
 **Changes and subscriptions (US5)**
@@ -234,7 +235,7 @@ A client that connects to `/mcp/s/docs` (one upstream server, as if connected di
 - **SC-003**: Across a matrix of callers (administrator, scoped agent token, pinned token, profile-bound client) and servers (healthy, quarantined, disabled, out of scope), 0 resources of an unreachable server are listed and 0 reads of one reach the upstream.
 - **SC-004**: 0 skill files (approved, held or unusable) are listed or read through the plain resource path on any surface.
 - **SC-005**: Every read produces exactly one `resource_read` row (100% of reads in the test matrix, including refusals that reach the read handler).
-- **SC-006**: A read of an upstream response 10× the cap completes with a refusal while mcpproxy's memory for that read stays under the cap plus margin.
+- **SC-006**: On streamable HTTP, a read of an upstream response 10× the cap completes with a refusal while mcpproxy's memory for that read stays under the cap plus margin; on every transport an over-cap response is refused.
 - **SC-007**: (US5) A client receives `list_changed` within 2 seconds of the upstream's notification, and `resources/updated` reaches only subscribed sessions.
 
 ## Out of Scope
@@ -249,7 +250,7 @@ A client that connects to `/mcp/s/docs` (one upstream server, as if connected di
 ## Assumptions
 
 - Upstream servers are spoken to in the pinned upstream protocol era (Spec 058); upstream subscriptions use `resources/subscribe`.
-- While the skills feature is off, mcpproxy does not read skill catalogs, so only the `skill://` namespace rule (FR-017 first clause) applies; files a skill names under other schemes are ordinary resources in that state, since no skill gate exists to bypass.
+- The FR-017 exclusion reads the stored skill records whether or not the skills feature is on now (records stay after the feature is switched off). A server whose skills were never read (feature never on) has no records, so only the `skill://` namespace rules apply to it; files such a server's skills name under other schemes are ordinary resources in that state, since no skill gate exists to bypass.
 - A resource is not approval-gated, like a tool response; protections are the reach gates, the metadata scan, output policy, size cap and activity record.
 - Caps are safety ceilings chosen as constants (as for prompts), not configuration.
 - The 8 MiB cap is measured on the upstream JSON response, so base64 blobs count at their encoded size.
