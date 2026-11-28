@@ -2101,7 +2101,9 @@ func (c *CallbackServer) handleParsedCallback(w http.ResponseWriter, query url.V
 			"(the sign-in may have timed out, or it was started by a different mcpproxy session)", c.ServerName, StateFingerprint(state))
 		c.logger.Error("❌ OAuth callback dropped - no flow is waiting for this state",
 			zap.String("state", StateFingerprint(state)),
-			zap.String("error", ScrubUpstreamText(params.Get("error"))))
+			// No flow, so no issuer decision: the provider error is not
+			// reported (Spec 135 FR-005), only its presence.
+			zap.Bool("error_present", params.Get("error") != ""))
 
 		// Surface it to the operator instead of burying it in the log (issue #975).
 		if notifyFailure {
