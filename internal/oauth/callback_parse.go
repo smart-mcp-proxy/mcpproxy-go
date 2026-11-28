@@ -13,6 +13,10 @@ var ErrInvalidCallback = errors.New("invalid OAuth callback")
 // authorization response query, already accepted by ParseCallbackQuery.
 type CallbackResult struct {
 	Query url.Values
+	// Err is set when the callback handler refused the response for this
+	// flow (Spec 135 FR-003: an *IssuerMismatchError). The flow must not
+	// exchange the code and reports Err as the login's failure.
+	Err error
 }
 
 // Get returns the first value of key ("" when absent).

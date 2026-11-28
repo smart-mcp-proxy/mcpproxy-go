@@ -3103,6 +3103,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 				if enabled := serverStatus.Config.OAuth.RefreshReplayEnabled; enabled != nil {
 					oauthConfig["refresh_replay_enabled"] = *enabled
 				}
+				if skip := serverStatus.Config.OAuth.SkipIssuerValidation; skip != nil {
+					oauthConfig["skip_issuer_validation"] = *skip
+				}
 			}
 
 			// GH #1172: a token record left behind by an earlier OAuth login

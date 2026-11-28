@@ -71,6 +71,10 @@ func classifyOAuth(err error, _ ClassifierHints) Code {
 	// login-required below, and a login is exactly what must not be offered.
 	case strings.Contains(msg, "stored oauth token") && strings.Contains(msg, "cannot be decrypted"):
 		return OAuthTokenUndecryptable
+	// Spec 135: a refused authorization response. Matched before the
+	// login-required text, which the refusal's advice would otherwise hit.
+	case strings.Contains(msg, "mcpx_oauth_issuer_mismatch"):
+		return OAuthIssuerMismatch
 	// Re-auth (a previously-working stored token broke) is matched BEFORE the
 	// login-required backstop because "re-login available" contains the
 	// "login available" substring; the order of these two cases is load-bearing.

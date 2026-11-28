@@ -238,6 +238,7 @@ type OAuthConfig struct {
 	RedirectPort         int               `json:"redirect_port,omitempty"`
 	PKCEEnabled          bool              `json:"pkce_enabled,omitempty"`
 	RefreshReplayEnabled *bool             `json:"refresh_replay_enabled,omitempty"`
+	SkipIssuerValidation *bool             `json:"skip_issuer_validation,omitempty"`
 	// Spec 113-b operator overrides of OAuth discovery (https-or-loopback URLs,
 	// never credentials). Empty means "use discovery".
 	AuthorizationEndpoint string     `json:"authorization_endpoint,omitempty"`

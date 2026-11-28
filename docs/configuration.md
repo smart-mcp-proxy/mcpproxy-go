@@ -640,6 +640,7 @@ explicitly to one of `http`, `sse`, or `streamable-http`.
 | `authorization_endpoint` | string | No | Overrides the authorization endpoint the authorization server advertises (see [Overriding OAuth discovery](#overriding-oauth-discovery)) |
 | `token_endpoint` | string | No | Overrides the token endpoint |
 | `refresh_replay_enabled` | boolean | No | Disabled by default. Allows one bounded transport retry only for an explicit `token_endpoint` that supports idempotent refresh replay |
+| `skip_issuer_validation` | boolean | No | Disabled by default. Accepts a sign-in response whose RFC 9207 `iss` is wrong or missing, with a warning, for a provider known to misreport it. Such sign-ins are not mix-up protected; toggling it does not sign the server out. See [OAuth Authentication](features/oauth-authentication.md#which-authorization-server-answered-rfc-9207-iss) |
 | `registration_endpoint` | string | No | Overrides the Dynamic Client Registration endpoint |
 | `auth_server_metadata_url` | string | No | Authorization server metadata URL to use instead of discovering one |
 

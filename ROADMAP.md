@@ -1448,5 +1448,5 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [132-client-oauth-login](./specs/132-client-oauth-login/) | `in-flight` | 8/72 (11%) |
 | [133-admin-action-audit](./specs/133-admin-action-audit/) | — | — |
 | [134-webui-simplify](./specs/134-webui-simplify/) | — | — |
-| [135-oauth-client-hardening](./specs/135-oauth-client-hardening/) | `in-flight` | 14/39 (36%) |
+| [135-oauth-client-hardening](./specs/135-oauth-client-hardening/) | `in-flight` | 18/39 (46%) |
 | [137-tool-listing-fields](./specs/137-tool-listing-fields/) | — | — |

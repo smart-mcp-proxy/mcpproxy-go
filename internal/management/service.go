@@ -518,6 +518,9 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			if enabled, ok := oauthRaw["refresh_replay_enabled"].(bool); ok {
 				oauthCfg.RefreshReplayEnabled = &enabled
 			}
+			if skip, ok := oauthRaw["skip_issuer_validation"].(bool); ok {
+				oauthCfg.SkipIssuerValidation = &skip
+			}
 			if pkceEnabled, ok := oauthRaw["pkce_enabled"].(bool); ok {
 				oauthCfg.PKCEEnabled = pkceEnabled
 			}

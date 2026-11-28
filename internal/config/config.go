@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -897,14 +898,20 @@ type ServerConfig struct {
 
 // OAuthConfig represents OAuth configuration for a server
 type OAuthConfig struct {
-	ClientID             string            `json:"client_id,omitempty" mapstructure:"client_id"`
-	ClientSecret         string            `json:"client_secret,omitempty" mapstructure:"client_secret"`
-	RedirectURI          string            `json:"redirect_uri,omitempty" mapstructure:"redirect_uri"`
-	CallbackBaseURL      string            `json:"callback_base_url,omitempty" mapstructure:"callback_base_url"`
-	Scopes               []string          `json:"scopes,omitempty" mapstructure:"scopes"`
-	PKCEEnabled          bool              `json:"pkce_enabled,omitempty" mapstructure:"pkce_enabled"`
-	RefreshReplayEnabled *bool             `json:"refresh_replay_enabled,omitempty" mapstructure:"refresh_replay_enabled"` // Opt in only when token_endpoint supports idempotent refresh replay for at least 30 seconds.
-	ExtraParams          map[string]string `json:"extra_params,omitempty" mapstructure:"extra_params"`                     // Additional OAuth parameters (e.g., RFC 8707 resource)
+	ClientID             string   `json:"client_id,omitempty" mapstructure:"client_id"`
+	ClientSecret         string   `json:"client_secret,omitempty" mapstructure:"client_secret"`
+	RedirectURI          string   `json:"redirect_uri,omitempty" mapstructure:"redirect_uri"`
+	CallbackBaseURL      string   `json:"callback_base_url,omitempty" mapstructure:"callback_base_url"`
+	Scopes               []string `json:"scopes,omitempty" mapstructure:"scopes"`
+	PKCEEnabled          bool     `json:"pkce_enabled,omitempty" mapstructure:"pkce_enabled"`
+	RefreshReplayEnabled *bool    `json:"refresh_replay_enabled,omitempty" mapstructure:"refresh_replay_enabled"` // Opt in only when token_endpoint supports idempotent refresh replay for at least 30 seconds.
+	// SkipIssuerValidation (Spec 135 FR-014) accepts an authorization
+	// response whose RFC 9207 iss is wrong or missing, with a WARN, for a
+	// provider known to misreport it. Such a login is not mix-up protected.
+	// The strict callback parse is never skipped. Request policy, not
+	// credential identity: toggling it never clears a grant.
+	SkipIssuerValidation *bool             `json:"skip_issuer_validation,omitempty" mapstructure:"skip_issuer_validation"`
+	ExtraParams          map[string]string `json:"extra_params,omitempty" mapstructure:"extra_params"` // Additional OAuth parameters (e.g., RFC 8707 resource)
 
 	// Spec 113-b: optional per-server discovery overrides. Each is an absolute
 	// https URL (http only on a loopback host) with no query, fragment or
@@ -3419,19 +3426,36 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 
 // OAuthConfigChanged checks if OAuth configuration has changed between two configs.
 // Returns true if any OAuth field differs (ClientID, Scopes, ExtraParams, etc.)
+// oauthBlockIsPolicyOnly reports whether o sets nothing but request-policy
+// fields (RefreshReplayEnabled, SkipIssuerValidation): such a block names the
+// same credentials as no oauth block at all.
+func oauthBlockIsPolicyOnly(o *OAuthConfig) bool {
+	c := *o
+	c.RefreshReplayEnabled = nil
+	c.SkipIssuerValidation = nil
+	return reflect.ValueOf(c).IsZero()
+}
+
 func OAuthConfigChanged(old, new *OAuthConfig) bool {
 	// Both nil - no change
 	if old == nil && new == nil {
 		return false
 	}
 
-	// One nil, one not - changed
+	// One nil, one not - changed, unless the present block holds only
+	// policy fields.
 	if (old == nil) != (new == nil) {
-		return true
+		present := old
+		if present == nil {
+			present = new
+		}
+		return !oauthBlockIsPolicyOnly(present)
 	}
 
-	// RefreshReplayEnabled is request policy, not credential identity. Changing
-	// it replaces the connection (ConnectionEquivalent) without clearing a grant.
+	// RefreshReplayEnabled and SkipIssuerValidation are request policy, not
+	// credential identity. Changing them replaces the connection
+	// (ConnectionEquivalent) without clearing a grant. An oauth block that
+	// holds only policy fields is therefore the same identity as no block.
 	// Compare the credential/discovery fields below.
 	if old.ClientID != new.ClientID ||
 		old.ClientSecret != new.ClientSecret ||

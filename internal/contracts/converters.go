@@ -75,6 +75,10 @@ func ConvertServerConfig(cfg *config.ServerConfig, globalIsolation *config.Docke
 			enabled := *cfg.OAuth.RefreshReplayEnabled
 			server.OAuth.RefreshReplayEnabled = &enabled
 		}
+		if cfg.OAuth.SkipIssuerValidation != nil {
+			skip := *cfg.OAuth.SkipIssuerValidation
+			server.OAuth.SkipIssuerValidation = &skip
+		}
 	}
 
 	// Convert isolation config. The per-server overrides that actually live on
@@ -461,6 +465,9 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 			}
 			if enabled, ok := oauth["refresh_replay_enabled"].(bool); ok {
 				server.OAuth.RefreshReplayEnabled = &enabled
+			}
+			if skip, ok := oauth["skip_issuer_validation"].(bool); ok {
+				server.OAuth.SkipIssuerValidation = &skip
 			}
 			if pkceEnabled, ok := oauth["pkce_enabled"].(bool); ok {
 				server.OAuth.PKCEEnabled = pkceEnabled

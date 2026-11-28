@@ -102,7 +102,7 @@ func TestCoreLoginCompletion_ParkedAcrossRemoval_T2_9(t *testing.T) {
 
 			done := make(chan error, 1)
 			go func() {
-				_, err := c.exchangeAuthorizationCode(context.Background(), h, nil, code, state, verifier)
+				_, err := exchangeForTest(context.Background(), t, c, h, nil, code, state, verifier)
 				done <- err
 			}()
 			select {
@@ -145,7 +145,7 @@ func TestCoreLoginCompletion_CurrentBindingStores(t *testing.T) {
 	c.SetCredentialBinding(cur)
 	store := oauth.NewBoundPersistentTokenStore(f.name, f.srv.MCPURL, f.db, cur)
 	h, code, state, verifier := loginPairHandler(t, f.staleDCRFixture, store)
-	stored, err := c.exchangeAuthorizationCode(context.Background(), h, nil, code, state, verifier)
+	stored, err := exchangeForTest(context.Background(), t, c, h, nil, code, state, verifier)
 	require.NoError(t, err)
 	assert.True(t, stored)
 	rec := f.record(t)

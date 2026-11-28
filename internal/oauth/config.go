@@ -165,6 +165,10 @@ type CallbackServer struct {
 	waitersMu         sync.Mutex
 	waiters           map[string]chan CallbackResult
 	remoteCallbackURL string // protected by waitersMu
+	// issuerChecks holds the RFC 9207 expectation each flow armed for its
+	// state (Spec 135 FR-002/FR-003). Protected by waitersMu; an entry lives
+	// exactly as long as the state's waiter.
+	issuerChecks map[string]IssuerExpectation
 	// invalidated maps a state whose flow gave up (its instance was retired
 	// while it waited, GH #1722) to the reason, so the callback that arrives
 	// later can say why the login was invalidated. Protected by waitersMu;
@@ -1858,8 +1862,27 @@ func (c *CallbackServer) UnregisterState(state string) {
 
 	if _, exists := c.waiters[state]; exists {
 		delete(c.waiters, state)
+		delete(c.issuerChecks, state)
 		c.logger.Debug("Unregistered OAuth callback waiter", zap.String("state", StateFingerprint(state)))
 	}
+}
+
+// ArmIssuerCheck records the issuer expectation of the flow that registered
+// state (Spec 135 FR-002). The flow calls it after its authorization URL is
+// built and before the URL leaves it, so the callback handler decides the
+// response's iss for that flow before choosing the page (FR-003). It returns
+// false, storing nothing, when no waiter is registered for state.
+func (c *CallbackServer) ArmIssuerCheck(state string, e IssuerExpectation) bool {
+	c.waitersMu.Lock()
+	defer c.waitersMu.Unlock()
+	if _, exists := c.waiters[state]; !exists {
+		return false
+	}
+	if c.issuerChecks == nil {
+		c.issuerChecks = make(map[string]IssuerExpectation)
+	}
+	c.issuerChecks[state] = e
+	return true
 }
 
 // InvalidateState drops the waiter for a state whose flow cannot finish any
@@ -1874,6 +1897,7 @@ func (c *CallbackServer) InvalidateState(state, reason string) {
 		return
 	}
 	delete(c.waiters, state)
+	delete(c.issuerChecks, state)
 	if c.invalidated == nil {
 		c.invalidated = make(map[string]string)
 	}
@@ -1916,14 +1940,17 @@ func (c *CallbackServer) HasState(state string) bool {
 	return exists
 }
 
-// deliver hands the strictly parsed callback to the flow that registered this
-// state. The waiter is single-use: it is removed on delivery so a replayed
-// callback cannot be delivered twice. Returns false when no flow is waiting.
-func (c *CallbackServer) deliver(state string, result CallbackResult) bool {
+// take removes the waiter for state together with its armed issuer
+// expectation, atomically, so one callback alone can consume a flow. The
+// waiter is single-use: a replayed callback cannot be delivered twice.
+// Returns false when no flow is waiting.
+func (c *CallbackServer) take(state string) (chan CallbackResult, IssuerExpectation, bool) {
 	c.waitersMu.Lock()
 	ch, exists := c.waiters[state]
+	exp := c.issuerChecks[state]
 	if exists {
 		delete(c.waiters, state)
+		delete(c.issuerChecks, state)
 	}
 	waiterCount := len(c.waiters)
 	c.waitersMu.Unlock()
@@ -1932,9 +1959,13 @@ func (c *CallbackServer) deliver(state string, result CallbackResult) bool {
 		c.logger.Warn("OAuth callback carries a state no flow is waiting for",
 			zap.String("state", StateFingerprint(state)),
 			zap.Int("other_waiters", waiterCount))
-		return false
+		return nil, IssuerExpectation{}, false
 	}
+	return ch, exp, true
+}
 
+// send hands a result to a waiter channel taken by take.
+func (c *CallbackServer) send(state string, ch chan CallbackResult, result CallbackResult) bool {
 	select {
 	case ch <- result:
 		return true
@@ -1955,6 +1986,7 @@ func (c *CallbackServer) dropAllWaiters() int {
 
 	dropped := len(c.waiters)
 	c.waiters = make(map[string]chan CallbackResult)
+	c.issuerChecks = nil
 	return dropped
 }
 
@@ -2062,7 +2094,8 @@ func (c *CallbackServer) handleParsedCallback(w http.ResponseWriter, query url.V
 	// Route the params to the flow that minted this state. A callback nobody is
 	// waiting for is NOT delivered to some other flow and NOT reported to the
 	// user as a success (issue #975).
-	if !c.deliver(state, CallbackResult{Query: query}) {
+	ch, issuerCheck, taken := c.take(state)
+	if !taken {
 		reason := fmt.Errorf("OAuth callback for server %q could not be delivered: state %s is unknown or expired "+
 			"(the sign-in may have timed out, or it was started by a different mcpproxy session)", c.ServerName, StateFingerprint(state))
 		c.logger.Error("❌ OAuth callback dropped - no flow is waiting for this state",
@@ -2083,6 +2116,41 @@ func (c *CallbackServer) handleParsedCallback(w http.ResponseWriter, query url.V
 		c.writePage(w, http.StatusBadRequest, callbackPage(callbackTitleFailed, message))
 		return
 	}
+
+	// Spec 135 FR-003/FR-005: the issuer decision runs for the flow this
+	// state selects, before the provider's error is reported and before the
+	// page is chosen. A refusal reaches the flow as CallbackResult.Err, so
+	// the code is never exchanged.
+	if issuerCheck.Armed() {
+		decision, issErr := DecideAuthorizationResponseIssuer(query, issuerCheck.Expected, issuerCheck.Skip)
+		if issErr != nil {
+			c.send(state, ch, CallbackResult{Query: query, Err: issErr})
+			c.logger.Warn("❌ OAuth callback refused: the response's issuer does not match the flow",
+				zap.String("state", StateFingerprint(state)),
+				zap.String("expected_issuer", logSafeURL(issuerCheck.Expected.Issuer)),
+				zap.String("issuer_source", string(issuerCheck.Expected.Source)),
+				zap.Bool("iss_present", issPresent),
+				zap.String("iss", ScrubUpstreamText(params.Get("iss"))))
+			if notifyFailure {
+				GetTokenStoreManager().RecordOAuthFailure(c.ServerName,
+					fmt.Errorf("OAuth callback for server %q was refused: %w", c.ServerName, issErr))
+			}
+			c.writePage(w, http.StatusBadRequest, callbackPage(callbackTitleFailed,
+				fmt.Sprintf("The sign-in response could not be confirmed as coming from the expected authorization server (%s). "+
+					"Nothing was signed in. Start the sign-in again from mcpproxy for '%s'.",
+					issuerOriginOrUnknown(issuerCheck.Expected.Issuer), c.ServerName)))
+			return
+		}
+		if decision.Waived != "" {
+			c.logger.Warn("⚠️ OAuth callback issuer check waived; this login is not mix-up protected",
+				zap.String("reason", decision.Waived),
+				zap.String("state", StateFingerprint(state)),
+				zap.String("expected_issuer", logSafeURL(issuerCheck.Expected.Issuer)),
+				zap.Bool("iss_present", issPresent),
+				zap.String("iss", ScrubUpstreamText(params.Get("iss"))))
+		}
+	}
+	c.send(state, ch, CallbackResult{Query: query})
 
 	c.logger.Info("✅ OAuth callback parameters delivered to the waiting flow",
 		zap.String("state", StateFingerprint(state)))

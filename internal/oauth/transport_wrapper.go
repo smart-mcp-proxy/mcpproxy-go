@@ -12,8 +12,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/mark3labs/mcp-go/client"
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
@@ -56,6 +58,22 @@ type OAuthTransportWrapper struct {
 	mu        sync.RWMutex
 	tokenURL  *url.URL
 	authzURL  *url.URL
+
+	// servedSynthetic records whether the last metadata document this wrapper
+	// served was built from the endpoint overrides (Spec 135 FR-004: the
+	// flow's issuer source is then "synthetic").
+	servedSynthetic atomic.Bool
+}
+
+// ServedSyntheticMetadata reports whether the OAuth config's transport
+// wrapper last answered the metadata request with a document built from the
+// endpoint overrides. False when the config has no mcpproxy wrapper.
+func ServedSyntheticMetadata(cfg *client.OAuthConfig) bool {
+	if cfg == nil || cfg.HTTPClient == nil {
+		return false
+	}
+	w, ok := cfg.HTTPClient.Transport.(*OAuthTransportWrapper)
+	return ok && w.servedSynthetic.Load()
 }
 
 // SetEndpoints configures discovery overrides for this wrapper. Call before the
@@ -652,6 +670,7 @@ func (w *OAuthTransportWrapper) roundTripMetadata(req *http.Request) (*http.Resp
 			return nil, nil, false // not a JSON object: leave it to mcp-go untouched
 		}
 		body = rewritten
+		w.servedSynthetic.Store(false)
 	case ep.overrides.authz != "" && ep.overrides.token != "":
 		synth, serr := w.synthesizeMetadata()
 		if serr != nil {
@@ -662,6 +681,7 @@ func (w *OAuthTransportWrapper) roundTripMetadata(req *http.Request) (*http.Resp
 			zap.String("authorization_endpoint", logSafeURL(ep.overrides.authz)),
 			zap.String("token_endpoint", logSafeURL(ep.overrides.token)))
 		body = synth
+		w.servedSynthetic.Store(true)
 		var m map[string]any
 		if json.Unmarshal(body, &m) == nil {
 			w.learnFromDoc(m)

@@ -115,7 +115,7 @@ func TestLoginCompletion_TokenAndClientStoredAsOnePair(t *testing.T) {
 
 	doneA := make(chan error, 1)
 	go func() {
-		stored, err := c.exchangeAuthorizationCode(ctx, hA, cbA, codeA, stateA, verA)
+		stored, err := exchangeForTest(ctx, t, c, hA, cbA, codeA, stateA, verA)
 		if err == nil && !stored { // as finishOAuth(!stored)
 			c.persistCompletedDCRCredentials(hA.GetClientID(), hA.GetClientSecret())
 		}
@@ -129,7 +129,7 @@ func TestLoginCompletion_TokenAndClientStoredAsOnePair(t *testing.T) {
 		t.Fatal("login A never reached its token save")
 	}
 
-	storedB, err := c.exchangeAuthorizationCode(ctx, hB, cbB, codeB, stateB, verB)
+	storedB, err := exchangeForTest(ctx, t, c, hB, cbB, codeB, stateB, verB)
 	require.NoError(t, err)
 	require.True(t, storedB)
 
@@ -181,7 +181,7 @@ func TestLoginCompletion_ExtraParamsClientIDNotReplacedByHandlerClient(t *testin
 	f := newStaleDCRFixture(t, oauthserver.ErrorMode{}, "login-pair-extra")
 	c := f.client(t, &config.OAuthConfig{ExtraParams: map[string]string{"client_id": "from-extra-params"}})
 	h, code, state, verifier := loginPairHandler(t, f, oauth.NewPersistentTokenStore(f.name, f.srv.MCPURL, f.db))
-	stored, err := c.exchangeAuthorizationCode(context.Background(), h, nil, code, state, verifier)
+	stored, err := exchangeForTest(context.Background(), t, c, h, nil, code, state, verifier)
 	require.NoError(t, err)
 	assert.False(t, stored, "an untagged exchange leaves the client write to finishOAuth")
 	rec, err := f.db.GetOAuthToken(f.key)
