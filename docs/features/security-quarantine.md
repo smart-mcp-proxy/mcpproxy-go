@@ -466,7 +466,7 @@ block approval, and three **soft** checks that raise a human-review item:
 | Check | Tier | Catches |
 |-------|------|---------|
 | `unicode.hidden` | hard | Zero-width / bidi / TAG-block / PUA character smuggling |
-| `shadowing.cross_server` | hard / soft | Hard: impersonation clone (same name + near-duplicate description on another server) or exclusive cross-server reference. Soft (review only, R2-5): a distinctive name another server also exposes with a genuinely different description that does not name its own server (name squat) |
+| `shadowing.cross_server` | hard / soft | Hard: impersonation clone (same name + near-duplicate description on another server) or exclusive cross-server reference written as a tool name (identifier, code-marked, or beside the word "tool"). Soft (review only): the same reference as a plain word of a sentence; and (R2-5) a distinctive name another server also exposes with a genuinely different description that does not name its own server (name squat) |
 | `payload.decoded` | hard | base64/hex blob that decodes to a shell/exfil command |
 | `phrase.injection` | hard | Curated instruction-override / exfiltration directives |
 | `directive.imperative` | soft | Injection directives, secrecy imperatives, instruction overrides |

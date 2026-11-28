@@ -42,17 +42,10 @@ func scanOne(t *testing.T, reg detect.RegistryView, server, name string) (detect
 // name-membership test over prose tokens, so it fires — auto-quarantining a
 // Google API server over one word in one sentence.
 //
-// This test PINS TODAY'S BEHAVIOUR, which is still HARD/dangerous. Demoting the
-// reference branch to soft is approved but deferred until scan reports carry a
-// ruleset version, because a tier change only reaches an install on rescan (see
-// the TIERS note in shadowing.go). What lands now is the SPAN: the finding
-// points at the exact word, so an operator dismisses this in a second instead of
-// reading 4,500 characters.
-//
-// When the demote ships, this test is the one to flip — Tier to soft,
-// ThreatLevel to warning, span tier to "soft" — and it should keep asserting the
-// span, which does not change.
-func TestShadowing_ReferenceOnOrdinaryProseIsSpannedAndStillHard(t *testing.T) {
+// A plain word of a sentence is review-only (SOFT): the verdict is a warning,
+// never dangerous, and the span still points at the exact word. The tier split
+// is described in the TIERS note in shadowing.go.
+func TestShadowing_ReferenceOnOrdinaryProseIsSpannedAndSoft(t *testing.T) {
 	const desc = "Creates a new user in a Cloud SQL instance. For this reason, you can't add two IAM users with the same email address."
 	reg := detect.NewRegistryView([]detect.ToolView{
 		{Server: "com.googleapis.sqladmin/mcp", Name: "create_user", Description: desc},
@@ -63,20 +56,16 @@ func TestShadowing_ReferenceOnOrdinaryProseIsSpannedAndStillHard(t *testing.T) {
 	if len(sigs) != 1 {
 		t.Fatalf("expected exactly one reference signal, got %+v", sigs)
 	}
-	// Deferred-demote tripwire: flip this to TierSoft in the same commit that
-	// ships the demote. Asserting the CURRENT tier keeps the test honest — a
-	// silent tier drift in either direction fails here.
-	if sigs[0].Tier != detect.TierHard {
-		t.Errorf("Tier = %v, want hard — the reference demote is deferred; see the TIERS note in shadowing.go", sigs[0].Tier)
+	if sigs[0].Tier != detect.TierSoft {
+		t.Errorf("Tier = %v, want soft: a plain word in prose is review-only", sigs[0].Tier)
 	}
 
 	f, ok := scanOne(t, reg, "com.googleapis.sqladmin/mcp", "create_user")
 	if !ok {
 		t.Fatal("expected a finding for the flagged tool")
 	}
-	if f.ThreatLevel != detect.ThreatLevelDangerous {
-		t.Errorf("ThreatLevel = %q, want %q — today the reference branch still produces a dangerous verdict; the demote is deferred",
-			f.ThreatLevel, detect.ThreatLevelDangerous)
+	if f.ThreatLevel != detect.ThreatLevelWarning {
+		t.Errorf("ThreatLevel = %q, want %q: one coincidental word must not mark a server dangerous", f.ThreatLevel, detect.ThreatLevelWarning)
 	}
 
 	if len(f.Spans) != 1 {
@@ -90,8 +79,8 @@ func TestShadowing_ReferenceOnOrdinaryProseIsSpannedAndStillHard(t *testing.T) {
 	if got := sliceSpan(desc, sp); got != "reason" {
 		t.Errorf("description.slice(%d,%d) = %q, want %q", sp.Start, sp.End, got, "reason")
 	}
-	if sp.CheckID != "shadowing.cross_server" || sp.Tier != "hard" {
-		t.Errorf("span carries CheckID=%q Tier=%q, want shadowing.cross_server/hard — per-mark labelling depends on these",
+	if sp.CheckID != "shadowing.cross_server" || sp.Tier != "soft" {
+		t.Errorf("span carries CheckID=%q Tier=%q, want shadowing.cross_server/soft — per-mark labelling depends on these",
 			sp.CheckID, sp.Tier)
 	}
 	if sp.Snippet != "reason" {

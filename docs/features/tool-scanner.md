@@ -148,6 +148,19 @@ all servers' tools:
    tool that lives *only* on different servers (steering the agent's tool
    selection). A name the tool's own server also exposes is ordinary
    self-documentation and is never flagged, whoever else exposes it.
+   The tier depends on how the name is written:
+   - **Hard** when it is written as a tool name: an identifier
+     (`create_payment_intent`, `createInvoice`, `search2`), a name in backticks
+     or quotes, a call (`reason(...)`), a name qualified with its server
+     (`analytics:reason`), or a name directly beside the word "tool" or
+     "function" ("the reason tool"). One such occurrence is enough, wherever
+     it stands in the description.
+   - **Soft (review only)** when it is a plain word of a sentence. "For this
+     reason, you can't add two IAM users" on a server installed next to one
+     with a tool named `reason` is a warning, not a dangerous finding.
+
+   A report made before this split keeps its verdict until the server is
+   scanned again.
 
 The reference shape requires the name to be **distinctive**: generic verbs
 (`search`, `get`, `list`) appear in prose constantly and are never flagged. A
@@ -279,7 +292,7 @@ domain.
 | Check ID | Tier | Catches |
 |----------|------|---------|
 | `unicode.hidden` | hard | Zero-width / bidi / TAG-block / PUA character smuggling (raw text) |
-| `shadowing.cross_server` | hard / soft | Hard: impersonation clone (same name + near-duplicate description) or exclusive cross-server reference. Soft: name squat (distinctive shared name, different description, no own-server provenance) |
+| `shadowing.cross_server` | hard / soft | Hard: impersonation clone (same name + near-duplicate description) or exclusive cross-server reference written as a tool name. Soft: the same reference as a plain word of a sentence; name squat (distinctive shared name, different description, no own-server provenance) |
 | `payload.decoded` | hard | base64/hex blob that decodes to a shell/exfil command |
 | `phrase.injection` | hard | Curated instruction-override / exfiltration directives (position-discounted; blocks approval) |
 | `tpa.bundle` | hard | Known-attack regex signatures from the TPA corpus (`tpa.<TPA-id>.<detector>` signals) |

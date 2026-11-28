@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 )
@@ -51,42 +52,47 @@ import (
 // ("search", "get", "list") appear in prose constantly. A tool referencing its
 // OWN name is also ignored.
 //
-// TIERS — both shapes are currently HARD. A demote of shape 2 (reference) to
-// SOFT is an APPROVED but DEFERRED change (maintainer decision, 2026-09-01),
-// held back until scan reports carry a ruleset version.
+// TIERS — the clone shape is HARD. The reference shape is split by how the
+// name is written (writtenAsToolName):
 //
-// Why the demote is wanted: distinctiveName() is a bare length-and-stop-list
-// test applied to every identifier-shaped token in ordinary English prose, and
-// prose is full of them. Google Cloud SQL's create_user description says "For
-// this reason, you can't add two IAM users…"; another installed server exposes a
-// tool named "reason"; the branch auto-quarantines a Google API server over one
-// word in one sentence. Patching the heuristic (stop-list additions, a length
-// bump) is not the fix — every such patch guesses which English words happen to
-// be tool names on some other install, and the next collision moves to the next
-// word.
+//   - HARD when the occurrence is written as a tool name: an identifier
+//     (create_payment_intent, createInvoice), code-marked (`reason`, "reason",
+//     reason(...)) or beside the word "tool"/"function".
+//   - SOFT (review-only) when it is a plain word of the sentence.
 //
-// Why it is deferred rather than shipped: a tier change only reaches an install
-// on RESCAN. Persisted reports store ThreatLevel and tier as data, and nothing
-// in the tree invalidates a report when the ruleset that produced it changes, so
-// shipping the demote today fixes new scans and silently leaves every existing
-// dangerous verdict standing. The stale direction is the safe one (over-flagging,
-// not under-flagging), and the measured blast radius is small — 7 of 947 findings
-// across 3 of 19 scanned servers on a 28-server install — so the demote is worth
-// strictly more once it can actually propagate. It ships with the Phase 3
-// bundle-fingerprint rescan trigger, which has to invalidate stale reports anyway.
+// Why the split: distinctiveName() is a bare length-and-stop-list test applied
+// to every identifier-shaped token in ordinary English prose, and prose is full
+// of them. Google Cloud SQL's create_user description says "For this reason,
+// you can't add two IAM users…"; another installed server exposes a tool named
+// "reason"; a HARD verdict marked a Google API server dangerous over one word
+// in one sentence. Patching the heuristic (stop-list additions, a length bump)
+// is not the fix — every such patch guesses which English words happen to be
+// tool names on some other install, and the next collision moves to the next
+// word. The shape of the occurrence is what separates a named tool from a word.
 //
-// The span emitted below is independent of the tier and lands now: a genuine
-// steering description AND this false positive both point at the exact word,
-// which is what makes a one-second dismissal possible either way.
+// History: demoting the WHOLE reference shape to SOFT was approved on
+// 2026-09-01 and deferred until scan reports carry a ruleset version, because a
+// tier change only reaches an install on RESCAN (persisted reports store
+// ThreatLevel and tier as data, and nothing invalidates a report when the
+// ruleset changes). The plain-word half shipped after v0.76.0-rc.1, when the
+// false positive above was hit in use; the identifier half stays HARD. The
+// propagation limit still holds: an existing report keeps its old verdict until
+// the server is scanned again.
+//
+// The span emitted below is independent of the tier: a genuine steering
+// description and a coincidental word both point at the exact word.
 type Shadowing struct{}
 
 // shadowingConfidence rates both shapes. detect.aggregate SUMS confidences
 // across a tool's signals, so an over-stated number does not just mislabel one
 // signal — it inflates the combined confidence of every tool the check touches.
-// A per-shape split (the reference shape is a token-membership test over prose
-// and cannot honestly claim 0.85) is deferred with the tier split described
-// above.
+// The plain-word reference has its own, lower number (proseReferenceConfidence).
 const shadowingConfidence = 0.85
+
+// proseReferenceConfidence rates a reference that is only a plain word of a
+// sentence (not written as a tool name). It is a token-membership test over
+// English prose and the weakest evidence this check produces.
+const proseReferenceConfidence = 0.3
 
 // nameSquatConfidence rates the SOFT name-squat shape (1b). It sits well below
 // shadowingConfidence: a bare name collision with different prose is weak
@@ -392,6 +398,7 @@ func (c *Shadowing) referenceSignals(tool detect.ToolView, reg detect.RegistryVi
 	// a coin flip on any description that repeats the token.
 	locs := wordRe.FindAllStringIndex(tool.Description, -1)
 	seen := make(map[string]struct{})
+	namedAt := namedReferences(tool, reg, locs)
 	var sigs []detect.Signal
 	for _, loc := range locs {
 		tok := tool.Description[loc[0]:loc[1]]
@@ -425,10 +432,28 @@ func (c *Shadowing) referenceSignals(tool detect.ToolView, reg detect.RegistryVi
 		if !onOtherServer || onOwnServer {
 			continue
 		}
-		// Every occurrence after the first is skipped by `seen` ABOVE, and every
-		// occurrence that failed a filter was skipped before reaching here, so
-		// loc is the offset of the occurrence that actually produced this signal.
+		// One signal per name: later occurrences are skipped by `seen` above. Its
+		// span is the first occurrence written as a tool name when there is one
+		// (namedAt), else this first occurrence.
 		seen[tok] = struct{}{}
+		named, isNamed := namedAt[tok]
+		if isNamed {
+			loc = named[:]
+		}
+		if !isNamed {
+			// An ordinary word in a sentence that happens to be another server's
+			// tool name ("For this reason, ..."). Review-only; see the TIERS note.
+			sigs = append(sigs, detect.Signal{
+				CheckID:    c.ID(),
+				Tier:       detect.TierSoft,
+				ThreatType: detect.ThreatToolPoisoning,
+				Confidence: proseReferenceConfidence,
+				Evidence:   detect.CapEvidence(fmt.Sprintf("description contains the word %q, also the name of a tool on another server", tok)),
+				Detail:     fmt.Sprintf("Tool %q description contains the word %q, which is also the name of a tool on another server. In ordinary prose this is a coincidence; review it if the sentence tells the agent to use that tool.", tool.Name, tok),
+				Spans:      detect.DescriptionSpan(c.ID(), detect.TierSoft, tool.Description, loc[0], loc[1]),
+			})
+			continue
+		}
 		sigs = append(sigs, detect.Signal{
 			CheckID:    c.ID(),
 			Tier:       detect.TierHard,
@@ -440,4 +465,234 @@ func (c *Shadowing) referenceSignals(tool detect.ToolView, reg detect.RegistryVi
 		})
 	}
 	return sigs
+}
+
+// namedReferences maps each referenced name to the first occurrence that is
+// written as a tool name.
+// A name can occur more than once, and the occurrences can differ in how
+// they are written ("For this reason, ... use the reason tool"). The signal
+// for a name is HARD when ANY occurrence is written as a tool name, and its
+// span marks the first such occurrence; otherwise it is SOFT on the first.
+func namedReferences(tool detect.ToolView, reg detect.RegistryView, locs [][]int) map[string][2]int {
+	namedAt := make(map[string][2]int)
+	for _, loc := range locs {
+		tok := tool.Description[loc[0]:loc[1]]
+		if _, done := namedAt[tok]; done {
+			continue
+		}
+		// The same cheap filters as the loop below, first: a self-reference and
+		// a name that is unknown or not distinctive never produce a signal, so
+		// no shape work is spent on them however often they repeat.
+		if tok == tool.Name || !distinctiveName(tok) {
+			continue
+		}
+		if _, known := reg.ToolsByName[tok]; known && writtenAsToolName(tool.Description, loc[0], loc[1]) {
+			namedAt[tok] = [2]int{loc[0], loc[1]}
+		}
+	}
+	return namedAt
+}
+
+// writtenAsToolName reports whether the occurrence desc[start:end] is written
+// the way a description names a tool, as opposed to an ordinary word of the
+// sentence. It is an allow-list of SHAPES, judged on the raw text:
+//
+//   - the token itself is identifier-shaped: it has an underscore or a digit,
+//     or a capital after a lower-case letter (create_user, search2, createUser);
+//   - it is marked as code: enclosed in a pair of backticks or quotes (ASCII or
+//     typographic), or followed directly by "(";
+//   - it is qualified with a server, the proxy's own spelling (server:reason);
+//   - the word "tool" or "function" stands directly beside it as a whole word
+//     ("the reason tool", "tool reason"), across white space on the same line
+//     (fewer than neighbourRuneLimit characters of it).
+//
+// Everything else is a plain word and is reported as SOFT. The list only ever
+// RAISES an occurrence to HARD, so a miss costs a tier and never silence: a
+// description that steers toward a plain-word tool name without any of these
+// marks is still surfaced for review.
+//
+// Accepted limit: the noun rule cannot read grammar. "Explains the reason tool
+// calls fail" is prose and reads HARD. The plural ("the reason tools are
+// unavailable") is left out of the rule because a name is not followed by a
+// plural noun; the singular stays, since "the X tool" is the commonest way a
+// description names a tool.
+//
+// Accepted limit: code marks are read as a pair around the token, not as
+// Markdown. In "`one`reason`two`" the word stands between two code spans and
+// reads HARD. Telling the two apart needs the parity of every backtick before
+// the token, a scan of the whole prefix per occurrence, for a shape that
+// ordinary descriptions do not contain.
+func writtenAsToolName(desc string, start, end int) bool {
+	before, beforeSize := utf8.DecodeLastRuneInString(desc[:start])
+	after, afterSize := utf8.DecodeRuneInString(desc[end:])
+	// The tokenizer is ASCII: a letter, digit or combining mark it did not
+	// consume on either side means the token is a fragment of a longer word
+	// (reasón, 2reason, reasonné). A fragment is not a written tool name.
+	if (beforeSize > 0 && isIdentRune(before)) || (afterSize > 0 && isIdentRune(after)) {
+		return false
+	}
+	tok := desc[start:end]
+	sawLower := false
+	for _, r := range tok {
+		switch {
+		case r == '_' || unicode.IsDigit(r):
+			return true
+		case unicode.IsUpper(r) && sawLower:
+			return true
+		case unicode.IsLower(r):
+			sawLower = true
+		}
+	}
+	if after == '(' {
+		return true
+	}
+	if beforeSize > 0 && quotePair(before, after) {
+		return true
+	}
+	// server:tool. The qualifier must be there: a colon after a space, a bracket,
+	// a quote or other punctuation, or at the start of the text, is punctuation.
+	if before == ':' {
+		if q, size := utf8.DecodeLastRuneInString(desc[:start-beforeSize]); size > 0 && isQualifierEnd(q) {
+			return true
+		}
+	}
+	return isToolNoun(wordBefore(desc, start)) || isToolNoun(wordAfter(desc, end))
+}
+
+// quotePair reports whether open and closing enclose a quoted word: the same
+// ASCII mark on both sides, or a typographic opener with a closer its writing
+// conventions use („reason“ and „reason” are both in use).
+func quotePair(open, closing rune) bool {
+	switch open {
+	case '`', '"', '\'':
+		return closing == open
+	case '\u201c': // “
+		return closing == '\u201d'
+	case '\u201e': // „
+		return closing == '\u201c' || closing == '\u201d'
+	case '\u2018': // ‘
+		return closing == '\u2019'
+	case '\u201a': // ‚
+		return closing == '\u2018' || closing == '\u2019'
+	case '\u00ab': // «reason»
+		return closing == '\u00bb'
+	case '\u00bb': // »reason«
+		return closing == '\u00ab'
+	}
+	return false
+}
+
+// isQualifierEnd reports whether r can be the last character of a server name
+// in front of the ":" of server:tool. A server name may hold anything but ":",
+// so this excludes only what a sentence puts before a colon that is
+// punctuation: white space, brackets, quotes, and other separators.
+func isQualifierEnd(r rune) bool {
+	if isIdentRune(r) {
+		return true
+	}
+	switch r {
+	case ':', ',', ';':
+		return false
+	}
+	if unicode.IsSpace(r) || unicode.In(r, unicode.Ps, unicode.Pe, unicode.Pi, unicode.Pf) {
+		return false
+	}
+	switch r {
+	case '"', '\'', '`':
+		return false
+	}
+	return unicode.IsPunct(r) || unicode.IsSymbol(r)
+}
+
+func isToolNoun(w string) bool {
+	switch strings.ToLower(w) {
+	case "tool", "function":
+		return true
+	}
+	return false
+}
+
+// isIdentRune reports whether r can be part of an identifier-like word. A
+// combining mark belongs to the letter before it, so it continues the word.
+func isIdentRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r)
+}
+
+// isInlineSpace reports whether r separates words on one line: any Unicode
+// space (the no-break space included) that is not a line break of any kind.
+func isInlineSpace(r rune) bool {
+	switch r {
+	case '\n', '\r', '\v', '\f', '\u0085', '\u2028', '\u2029':
+		return false
+	}
+	return unicode.IsSpace(r)
+}
+
+// neighbourRuneLimit bounds how far wordBefore/wordAfter look, so a hostile
+// description cannot make the neighbour scan long.
+const neighbourRuneLimit = 32
+
+// wordBefore returns the whole word that ends just before i, separated from it
+// by inline white space only. It is "" when there is no white space, when
+// another character intervenes, when the scan limit is reached, or when the
+// word is only the tail of a longer identifier (multi_tool).
+func wordBefore(desc string, i int) string {
+	j, n := i, 0
+	for j > 0 && n < neighbourRuneLimit {
+		r, size := utf8.DecodeLastRuneInString(desc[:j])
+		if !isInlineSpace(r) {
+			break
+		}
+		j -= size
+		n++
+	}
+	if j == i || n == neighbourRuneLimit {
+		return ""
+	}
+	k, n := j, 0
+	for k > 0 && n < neighbourRuneLimit {
+		r, size := utf8.DecodeLastRuneInString(desc[:k])
+		if !unicode.IsLetter(r) {
+			break
+		}
+		k -= size
+		n++
+	}
+	if k > 0 {
+		if r, _ := utf8.DecodeLastRuneInString(desc[:k]); isIdentRune(r) {
+			return ""
+		}
+	}
+	return desc[k:j]
+}
+
+// wordAfter is the mirror of wordBefore (tools_enabled is not the word "tools").
+func wordAfter(desc string, i int) string {
+	j, n := i, 0
+	for j < len(desc) && n < neighbourRuneLimit {
+		r, size := utf8.DecodeRuneInString(desc[j:])
+		if !isInlineSpace(r) {
+			break
+		}
+		j += size
+		n++
+	}
+	if j == i || n == neighbourRuneLimit {
+		return ""
+	}
+	k, n := j, 0
+	for k < len(desc) && n < neighbourRuneLimit {
+		r, size := utf8.DecodeRuneInString(desc[k:])
+		if !unicode.IsLetter(r) {
+			break
+		}
+		k += size
+		n++
+	}
+	if k < len(desc) {
+		if r, _ := utf8.DecodeRuneInString(desc[k:]); isIdentRune(r) {
+			return ""
+		}
+	}
+	return desc[j:k]
 }
