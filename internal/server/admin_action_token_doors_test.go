@@ -206,6 +206,17 @@ func TestAdminActionDoors_RESTTokenDoors(t *testing.T) {
 	require.Equal(t, "ci-bot", lines[0]["target"].(map[string]interface{})["name"])
 	require.Equal(t, map[string]interface{}{"kind": "api_key"}, lines[0]["caller"])
 	require.Equal(t, ref, lines[0]["target"].(map[string]interface{})["ref"])
+	// The committed transition (round 27): the revoked key is the one the
+	// rotation issued, and revoked went false → true.
+	revokeChanges := map[string]map[string]interface{}{}
+	for _, c := range lines[0]["changes"].([]interface{}) {
+		m := c.(map[string]interface{})
+		revokeChanges[m["field"].(string)] = m
+	}
+	require.Equal(t, auth.TokenPrefix(rotated.Data.Token), revokeChanges["/token_prefix"]["before"], "the revoked key is the one the rotation returned")
+	require.NotContains(t, revokeChanges["/token_prefix"], "after")
+	require.Equal(t, false, revokeChanges["/revoked"]["before"])
+	require.Equal(t, true, revokeChanges["/revoked"]["after"])
 	require.Equal(t, 1, e.activityRequestIDs("req-revoke-1"))
 	code, _ = e.rest(http.MethodDelete, "/api/v1/tokens/ci-bot", "req-revoke-2", nil)
 	require.Equal(t, http.StatusNoContent, code)

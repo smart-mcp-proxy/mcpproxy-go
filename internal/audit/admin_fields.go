@@ -91,7 +91,10 @@ var knownFieldRoots = map[string]bool{
 }
 
 func knownRoot(seg string) bool {
+	// A literal key spanning segments ("rate_limit/per_minute") is a path,
+	// never one segment: a segment holding '/' is not a fixed root.
 	_, literal := literalFields[seg]
+	literal = literal && !strings.Contains(seg, "/")
 	return literal || secretPrefixes[seg] || nestedRoots[seg] || opaqueRoots[seg] || knownFieldRoots[seg]
 }
 

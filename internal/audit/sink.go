@@ -267,7 +267,7 @@ func NewFileSink(path string, maxSizeMB, maxBackups, maxAgeDays int, compress bo
 		if err != nil {
 			return nil, err
 		}
-		repairOK = torn && writeNewline(held) == nil
+		repairOK = torn && repairAtOpen(held) == nil
 		if afterTailCheck != nil {
 			afterTailCheck()
 		}
@@ -281,10 +281,16 @@ func NewFileSink(path string, maxSizeMB, maxBackups, maxAgeDays int, compress bo
 			_ = held.Close()
 			return nil, fmt.Errorf("audit: cannot open %s: %w", path, err)
 		}
-		// A failed repair keeps its handle for the first Write to retry on
-		// the file that was torn (even if renamed or removed).
-		if (torn && !repairOK) || sameFileAsPath(held, path) {
+		// The identity check holds whether or not the repair worked (round
+		// 27): a failed repair keeps its handle for the first Write to retry
+		// only while the path still names that file.
+		if sameFileAsPath(held, path) {
 			break
+		}
+		if torn && !repairOK {
+			// The replaced file is no longer the sink's, but its torn tail
+			// still gets one more best-effort repair through the handle.
+			_ = writeNewline(held)
 		}
 		_ = held.Close()
 		_ = lj.Close()
@@ -312,6 +318,10 @@ const openNoRotateMB = 1 << 20
 // maxOpenAttempts bounds how often NewFileSink re-checks a file that was
 // replaced while it was opened.
 const maxOpenAttempts = 3
+
+// repairAtOpen repairs a torn tail found at open; a test replaces it to make
+// the repair fail.
+var repairAtOpen = writeNewline
 
 // afterTailCheck, when set by a test, runs between the tail check and the
 // writer's open.

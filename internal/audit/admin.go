@@ -265,6 +265,10 @@ func NewAdminAction(in AdminActionInput) (Line, error) {
 	if !adminCallerKinds[kind] {
 		return Line{}, fmt.Errorf("audit.NewAdminAction: invalid caller.kind %q", kind)
 	}
+	if kind == "stdio" && in.Source != "mcp" {
+		// Native stdio administration is source mcp (FR-011).
+		return Line{}, fmt.Errorf("audit.NewAdminAction: caller.kind stdio is source mcp, not %q", in.Source)
+	}
 	needsTrigger := kind == "none" || kind == "internal"
 	if needsTrigger != (in.Trigger != "") {
 		return Line{}, fmt.Errorf("audit.NewAdminAction: trigger is required iff caller.kind is none or internal (kind %q, trigger %q)", kind, in.Trigger)
@@ -340,9 +344,14 @@ func NewAdminAction(in AdminActionInput) (Line, error) {
 		masked, hit := maskAllSpans(in.RequestID)
 		if hit {
 			noteFieldMask()
+		}
+		rendered := truncateField(masked)
+		if rendered != in.RequestID {
+			// Masked or cut: the line's id no longer joins (round 27: an
+			// unmarked request_id is always the join key, at most 256).
 			f["request_id_masked"] = true
 		}
-		f["request_id"] = truncateField(masked)
+		f["request_id"] = rendered
 	}
 	setOptString(f, "trigger", in.Trigger)
 	setOptString(f, "policy", in.Policy)

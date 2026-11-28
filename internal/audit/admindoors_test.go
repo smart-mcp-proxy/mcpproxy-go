@@ -89,7 +89,41 @@ func TestAdminDoorRegistry_PendingOnlyShrinks(t *testing.T) {
 // (runtime applyConfigInTx → DiscoverAndIndexTools), whose approval
 // transitions belong to the door that committed the change.
 func TestAdminDoorRegistry_ConfigApplyDiscoveryPass(t *testing.T) {
-	for _, door := range []string{"REST POST /api/v1/config/apply", "REST PATCH /api/v1/config"} {
+	// Round 27: so does every server mutation (AddServer, PatchServer,
+	// RemoveServer, the MCP upstream_servers ops, enable/disable, bulk enable,
+	// quarantine, server approval) and a secret write that restarts servers.
+	doors := []string{"REST POST /api/v1/config/apply", "REST PATCH /api/v1/config",
+		"CLI mcpproxy catalog add",
+		"CLI mcpproxy registry add",
+		"CLI mcpproxy security approve",
+		"CLI mcpproxy upstream add",
+		"CLI mcpproxy upstream add-json",
+		"CLI mcpproxy upstream disable",
+		"CLI mcpproxy upstream enable",
+		"CLI mcpproxy upstream import",
+		"CLI mcpproxy upstream patch",
+		"CLI mcpproxy upstream remove",
+		"MCP quarantine_security",
+		"MCP upstream_servers",
+		"REST DELETE /api/v1/secrets/{name}",
+		"REST DELETE /api/v1/servers/{id}/",
+		"REST PATCH /api/v1/servers/{id}/",
+		"REST POST /api/v1/registries/{id}/servers/{serverId}/add",
+		"REST POST /api/v1/secrets/",
+		"REST POST /api/v1/servers",
+		"REST POST /api/v1/servers/disable_all",
+		"REST POST /api/v1/servers/enable_all",
+		"REST POST /api/v1/servers/import",
+		"REST POST /api/v1/servers/import/json",
+		"REST POST /api/v1/servers/import/path",
+		"REST POST /api/v1/servers/{id}/config-to-secret",
+		"REST POST /api/v1/servers/{id}/disable",
+		"REST POST /api/v1/servers/{id}/enable",
+		"REST POST /api/v1/servers/{id}/quarantine",
+		"REST POST /api/v1/servers/{id}/security/approve",
+		"REST POST /api/v1/servers/{id}/unquarantine",
+	}
+	for _, door := range doors {
 		found := false
 		for _, d := range audit.AdminDoors {
 			if d.Door != door || d.Branch != "discovery pass" {

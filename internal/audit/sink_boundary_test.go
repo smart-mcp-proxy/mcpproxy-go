@@ -575,3 +575,54 @@ func TestNewFileSink_OverLimitReplacementIsNotRotatedUnchecked(t *testing.T) {
 		}
 	}
 }
+
+// Round 27: a failed repair at open still requires the path to name the
+// checked file; a torn replacement is checked and repaired in its turn.
+func TestNewFileSink_FailedRepairStillChecksIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not rename a file another handle holds open")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	if err := os.WriteFile(path, []byte(`{"seq":"first-torn`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failed := false
+	repairAtOpen = func(f *os.File) error {
+		if !failed {
+			failed = true
+			return errors.New("disk full")
+		}
+		return writeNewline(f)
+	}
+	replaced := false
+	afterTailCheck = func() {
+		if replaced {
+			return
+		}
+		replaced = true
+		if err := os.Rename(path, path+".old"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{"seq":"second-torn`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer func() { afterTailCheck, repairAtOpen = nil, writeNewline }()
+	s, err := NewFileSink(path, 10, 1, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.Write([]byte(`{"seq":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs := assertWellDelimited(t, raw)
+	if len(recs) != 1 || recs[0] != `{"seq":1}` {
+		t.Fatalf("want the record on its own line after the replacement's fragment, got %q", raw)
+	}
+}

@@ -847,3 +847,29 @@ func TestRenderLabel_CertificateHeaderIsNotAPrivateKey(t *testing.T) {
 		t.Fatal("a certificate header is not a private-key block")
 	}
 }
+
+// Round 27: native stdio administration is source mcp (FR-011); the builder
+// refuses what the schema refuses.
+func TestNewAdminAction_StdioCallerIsSourceMCP(t *testing.T) {
+	in := tokenRotateInput()
+	in.Caller = audit.Caller{Kind: "stdio"}
+	in.Origin, in.Source = "local", "api"
+	if _, err := audit.NewAdminAction(in); err == nil {
+		t.Fatal("a stdio caller with source api must be rejected")
+	}
+	in.Source = "mcp"
+	if _, err := audit.NewAdminAction(in); err != nil {
+		t.Fatalf("a stdio caller with source mcp is valid: %v", err)
+	}
+}
+
+// Round 27: a request_id the line cannot carry whole is marked, so an
+// unmarked request_id is always the join key itself (at most 256).
+func TestNewAdminAction_TruncatedRequestIDIsMarked(t *testing.T) {
+	in := tokenRotateInput()
+	in.RequestID = strings.Repeat("a", 257)
+	_, obj := mustAdmin(t, in)
+	if obj["request_id_masked"] != true {
+		t.Fatalf("a truncated request_id is marked: %v", obj["request_id"])
+	}
+}

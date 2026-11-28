@@ -15,6 +15,7 @@ package audit_test
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -326,6 +327,12 @@ func TestAdminActionSchema_PositiveAndNegative(t *testing.T) {
 		baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "/enabled", "before": true})}),
 		baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "/args", "withheld": "value"})}),
 		baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "/enabled", "withheld": "value"})}),
+		// Dynamic segments only where the classifier allows one (round 27).
+		baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "/env/GITHUB_TOKEN", "withheld": "secret"})}),
+		baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "/profiles/work/mode", "withheld": "value"})}),
+		baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "", "withheld": "value", "field_masked": true})}),
+		baseAdminFixture(map[string]interface{}{"request_id": strings.Repeat("a", 256)}),
+		baseAdminFixture(map[string]interface{}{"request_id": strings.Repeat("a", 256) + "...(truncated)", "request_id_masked": true}),
 	}
 	for i, fx := range ok {
 		if err := sch.Validate(roundTrip(t, fx)); err != nil {
@@ -358,6 +365,10 @@ func TestAdminActionSchema_PositiveAndNegative(t *testing.T) {
 		"change with value and withheld":  baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "/enabled", "before": true, "withheld": "value"})}),
 		"change with object value":        baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "/args", "after": map[string]interface{}{"x": 1}})}),
 		"change field not a pointer":      baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "enabled", "withheld": "value"})}),
+		"dynamic segment under args":      baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "/args/operator-private-text", "withheld": "value"})}),
+		"unknown root spelled":            baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "/operator-private-text", "withheld": "value"})}),
+		"server name segment":             baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "/mcpServers/github", "withheld": "value"})}),
+		"unmasked request_id over 256":    baseAdminFixture(map[string]interface{}{"request_id": strings.Repeat("a", 257)}),
 		"stdio caller with source api":    baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "stdio"}}),
 		"bad client surface":              baseAdminFixture(map[string]interface{}{"client": map[string]interface{}{"surface": "tray"}}),
 		"secret target with name":         baseAdminFixture(map[string]interface{}{"target": map[string]interface{}{"kind": "secret", "name": "GITHUB_TOKEN", "name_withheld": true, "ref": "sec_abcdefgh"}}),
