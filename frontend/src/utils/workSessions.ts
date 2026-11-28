@@ -23,8 +23,8 @@ export function normalizeTimelineAt(raw: string | null | undefined): string {
   if (value === 'end' || value === TIMELINE_AT_DEFAULT) return value
   // The door and the CLI read the ordinal as a number, so `failure:02` is the
   // second failure; the address keeps the plain form.
-  const ordinal = /^failure:([0-9]{1,9})$/.exec(value)
-  if (ordinal) return Number(ordinal[1]) >= 1 ? `failure:${Number(ordinal[1])}` : TIMELINE_AT_DEFAULT
+  const ordinal = /^failure:0*([1-9][0-9]{0,8})$/.exec(value)
+  if (ordinal) return `failure:${ordinal[1]}`
   if (/^row:.+$/.test(value)) return value
   return TIMELINE_AT_DEFAULT
 }

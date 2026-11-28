@@ -9,6 +9,7 @@ import { useClientsStore } from '@/stores/clients'
 import { useSystemStore } from '@/stores/system'
 import { useProfilesStore } from '@/stores/profiles'
 import { makeClient, makeProfile } from './fixtures/profiles108i'
+import { formatDateTime } from '@/utils/datetime'
 import { WS_FAILED, WS_OK, WS_SCOPED, timelinePage } from './fixtures/workSessions124'
 
 // Spec 124 PR-3 (T110; FR-060, FR-061, FR-065): Activity -> Sessions lists work
@@ -90,13 +91,21 @@ describe('Work-session list (Spec 124 FR-060)', () => {
     expect(failed.get('[data-test="ws-client"]').text()).toContain('Cursor')
     expect(failed.get('[data-test="ws-project"]').text()).toBe('payments')
     expect(failed.get('[data-test="ws-started"]').text()).toMatch(/2026-11-2\d \d{2}:\d{2}:\d{2}/)
+    // The start of the session, not another of its times.
+    expect(failed.get('[data-test="ws-started"]').text()).toBe(formatDateTime(WS_FAILED.started_at))
+    expect(failed.get('[data-test="ws-started-narrow"]').text()).toContain(formatDateTime(WS_FAILED.started_at))
     expect(failed.get('[data-test="ws-duration"]').text()).toBe('41m 05s')
     expect(failed.get('[data-test="ws-calls"]').text()).toBe('120')
     expect(failed.get('[data-test="ws-failures"]').text()).toContain('7')
     expect(failed.get('[data-test="ws-failures"]').text()).toContain('2 blocked')
     expect(failed.get('[data-test="ws-last-failure"]').text()).toMatch(/2026-11-2\d \d{2}:\d{2}:\d{2}/)
     expect(failed.get('[data-test="ws-reason"]').text()).toContain('The upstream server needs a login.')
-    expect(failed.get('[data-test="ws-reason"]').text()).toContain('auth · github:list_issues')
+    expect(failed.get('[data-test="ws-reason"]').text()).toContain('github:list_issues')
+    // The error class has its own place in front, which a long reason cannot push out of the cell.
+    const errorClass = failed.get('[data-test="ws-error-class"]')
+    expect(errorClass.text()).toBe('auth')
+    expect(errorClass.classes()).toContain('shrink-0')
+    expect(failed.get('[data-test="ws-reason-text"]').classes()).toContain('truncate')
 
     const clean = rows[1]
     expect(clean.get('[data-test="ws-client"]').text()).toContain('rest')
@@ -256,6 +265,43 @@ describe('Work-session list (Spec 124 FR-060)', () => {
     expect(Object.fromEntries(new URL(href, 'http://x').searchParams)).toEqual({
       view: 'calls', session: WS_FAILED.id, client: 'cursor', type: 'tool_call,internal_tool_call,policy_decision',
     })
+  })
+
+  it('the Tool calls link does not narrow the session by the profile filter', async () => {
+    // A session has one credential and one client, but its profile can change
+    // on the way: the list matches the latest one and counts the whole session.
+    const { wrapper } = await mountPanel('/activity?view=sessions&profile=work-readonly&token=nightly-bot')
+    const query = new URL(wrapper.get(`[data-test="ws-calls-link-${WS_FAILED.id}"]`).attributes('href')!, 'http://x').searchParams
+    expect(query.has('profile')).toBe(false)
+    expect(query.get('token')).toBe('nightly-bot')
+  })
+
+  it('the token and the client links name their subject only, without the other filters of the page', async () => {
+    const { wrapper } = await mountPanel('/activity?view=sessions&profile=work-readonly')
+    const row = wrapper.findAll('[data-test="work-sessions-row"]')[0]
+    const query = (selector: string) => Object.fromEntries(new URL(row.get(selector).attributes('href')!, 'http://x').searchParams)
+    expect(query('[data-test="ws-token"] a')).toEqual({ token: 'nightly-bot' })
+    expect(query('[data-test="ws-client"] a')).toEqual({ client: 'cursor' })
+  })
+
+  it('a signed-in user gets no link to the client roster, which does not load for them', async () => {
+    const auth = useAuthStore()
+    auth.isTeamsEdition = true
+    auth.user = { id: 'u1', email: 'u@example.com', role: 'user' } as any
+    const { wrapper } = await mountPanel()
+    const client = wrapper.findAll('[data-test="work-sessions-row"]')[0].get('[data-test="ws-client"]')
+    expect(client.find('a').exists()).toBe(false)
+    expect(client.text()).toContain('Cursor')
+  })
+
+  it('a repeated filter in the address also waits for the build to say what it accepts', async () => {
+    setAvailableFeatures([])
+    const { api } = await mountPanel('/activity?view=sessions&client=cursor&client=other')
+    expect(api.getWorkSessions).not.toHaveBeenCalled()
+    await useSystemStore().fetchScopeFilterFeatures()
+    await flushPromises()
+    expect(api.getWorkSessions).toHaveBeenCalledTimes(1)
+    expect(api.getWorkSessions.mock.calls[0][0]).toMatchObject({ client: 'cursor' })
   })
 
   it("a signed-in user's token link opens their own token page, not the administrator's", async () => {

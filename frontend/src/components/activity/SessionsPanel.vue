@@ -139,11 +139,11 @@
                   </div>
                   <div data-test="ws-client">
                     <router-link
-                      v-if="ws.client_id"
-                      :to="scopeQuery.linkTo('clients', { client: ws.client_id })"
+                      v-if="ws.client_id && !isTenant"
+                      :to="scopeQuery.linkTo('clients', { client: ws.client_id, profile: '', token: '' })"
                       class="link link-hover text-sm font-medium break-words"
                     >{{ clientLabel(ws.client_id) }}</router-link>
-                    <span v-else class="text-sm font-medium break-words">{{ ws.client_name || ws.surface || '—' }}</span>
+                    <span v-else class="text-sm font-medium break-words">{{ ws.client_id ? clientLabel(ws.client_id) : (ws.client_name || ws.surface || '—') }}</span>
                     <div v-if="clientNote(ws)" class="text-xs text-base-content/70 truncate" :title="clientNote(ws)">{{ clientNote(ws) }}</div>
                   </div>
                   <!-- The project, when the client disclosed one. -->
@@ -194,8 +194,11 @@
                 </td>
                 <td class="hidden sm:table-cell">
                   <template v-if="ws.last_failure">
-                    <div class="text-sm truncate" data-test="ws-reason" :title="`${reasonText(ws)}${reasonWhere(ws) ? ` (${reasonWhere(ws)})` : ''}`">
-                      {{ reasonText(ws) }}<span v-if="reasonWhere(ws)" class="text-base-content/70"> · {{ reasonWhere(ws) }}</span>
+                    <!-- The error class keeps its place in front: a long reason
+                         is cut, the class is not. -->
+                    <div class="flex items-baseline gap-1.5 min-w-0 text-sm" data-test="ws-reason" :title="`${reasonText(ws)}${reasonWhere(ws) ? ` (${reasonWhere(ws)})` : ''}`">
+                      <span v-if="ws.last_failure.error_class" class="shrink-0 font-medium" data-test="ws-error-class">{{ ws.last_failure.error_class }}</span>
+                      <span class="truncate min-w-0" data-test="ws-reason-text">{{ reasonRest(ws) }}</span>
                     </div>
                     <div class="text-xs text-base-content/70 truncate" data-test="ws-last-failure">
                       {{ formatDateTimeMillis(ws.last_failure.at) }} · {{ formatRelative(ws.last_failure.at) }}
@@ -387,7 +390,12 @@ let loadSeq = 0
 let scopeReady = false
 let waitingForScope = false
 const urlNamesScope = (): boolean =>
-  ['profile', 'client', 'token'].some(name => typeof route.query[name] === 'string' && route.query[name] !== '')
+  ['profile', 'client', 'token'].some(name => {
+    // The first value of a repeated parameter counts, as the filter reads it.
+    const raw = route.query[name]
+    const value = Array.isArray(raw) ? raw[0] : raw
+    return typeof value === 'string' && value !== ''
+  })
 
 let unmounted = false
 async function load(): Promise<void> {
@@ -544,8 +552,10 @@ function firstFailure(ws: WorkSession): string {
 /** A signed-in user of the server edition has a token page of their own; the
  * administrator's list answers them 403. */
 function tokenLink(name: string): RouteLocationRaw {
-  return authStore.principalKind === 'tenant' ? { path: '/my/tokens' } : scopeQuery.linkTo('tokens', { token: name })
+  return isTenant.value ? { path: '/my/tokens' } : scopeQuery.linkTo('tokens', { token: name, profile: '', client: '' })
 }
+/** The client roster, like the token list, is the administrator's. */
+const isTenant = computed(() => authStore.principalKind === 'tenant')
 
 /**
  * FR-065: the session's rows in the Tool calls view. A page filter that this
@@ -553,7 +563,9 @@ function tokenLink(name: string): RouteLocationRaw {
  * it, and the calls view would apply it and could come up empty.
  */
 function callsLink(id: string): RouteLocationRaw {
-  const patch = sessionCallsPatch(id)
+  // The profile is the session's latest one, not a fact of each call: the
+  // list counts the whole session, so the calls are not narrowed by it.
+  const patch: Record<string, string> = { ...sessionCallsPatch(id), profile: '' }
   for (const chip of scopeChips.value) if (notApplied(chip)) patch[chip.name] = ''
   return scopeQuery.linkTo('activity', patch)
 }
@@ -570,6 +582,15 @@ function reasonText(ws: WorkSession): string {
   if (failure.reason) return failure.reason
   if (failure.policy_block) return 'Blocked by MCPProxy'
   return failure.error_class || failure.error_code || 'Failed'
+}
+
+/** What follows the error class on the row: the reason and the tool. */
+function reasonRest(ws: WorkSession): string {
+  const failure = ws.last_failure
+  if (!failure) return ''
+  const text = failure.reason || (failure.policy_block ? 'Blocked by MCPProxy' : (failure.error_code || (failure.error_class ? '' : 'Failed')))
+  const tool = failure.server && failure.tool ? `${failure.server}:${failure.tool}` : (failure.tool || failure.server || '')
+  return [text, tool].filter(Boolean).join(' · ')
 }
 
 function reasonWhere(ws: WorkSession): string {

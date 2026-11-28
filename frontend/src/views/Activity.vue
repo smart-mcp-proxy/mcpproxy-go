@@ -1836,9 +1836,22 @@ function dateTimeLocalToISO(value: string): string | undefined {
 // converge rather than loop: re-applying the query re-sets refs to the
 // values they already have as soon as a round trip settles, which triggers
 // nothing further.
+// The view the address named last, to tell a link out of Sessions.
+let lastRouteView = ''
 function applyRouteFilters(): void {
   const q = route.query
   const str = (v: unknown): string => (typeof v === 'string' ? v : '')
+
+  // Spec 124: a session link out of the Sessions view shows that session's
+  // calls. "Sensitive data" and "View sub-calls" are not in the address and
+  // have no chip in Sessions, so one left from earlier would narrow the
+  // session's calls unseen.
+  const view = str(q.view)
+  if (lastRouteView === 'sessions' && view !== 'sessions' && str(q.session)) {
+    filterParentId.value = ''
+    filterSensitiveData.value = ''
+  }
+  lastRouteView = view
 
   filterSession.value = str(q.session)
   filterStatus.value = str(q.status)

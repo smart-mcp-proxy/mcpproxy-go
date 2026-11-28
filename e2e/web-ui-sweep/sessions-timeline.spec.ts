@@ -203,7 +203,9 @@ test('two actions from the list to the first failure: "Failed only", then the ro
   await page.locator('[data-test="work-sessions-failed-toggle"]').check()
   await expect(page).toHaveURL(/[?&]failed=true/)
   // The rows of the unfiltered list stay on screen, inert, until the filtered answer is shown.
-  const filteredURL = new URL((await filtered).url())
+  const filteredAnswer = await filtered
+  const filteredURL = new URL(filteredAnswer.url())
+  expect(filteredAnswer.status()).toBe(200)
   await expect(page.locator('[data-test="work-sessions-table-wrap"]')).not.toHaveAttribute('aria-busy', 'true')
   // Failed sessions read newest failure first: the control says so, the door
   // was asked for it, and the rows are in that order.
@@ -213,25 +215,44 @@ test('two actions from the list to the first failure: "Failed only", then the ro
   expect(lastFailures.every((text) => /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/.test(text)), lastFailures.join(' | ')).toBe(true)
   const row = page.locator(`[data-test="work-sessions-row"][data-session="${seeded}"]`)
   await expect(row).toBeVisible()
-  // The rows are the door's, in the door's order. The second run failed first
-  // and was active last, so the two orders put the two runs the other way round.
+  // The rows are the door's, in the door's order: each list is compared with
+  // the answer that filled it. The second run failed first and was active
+  // last, so the two orders put the two runs the other way round.
   const shownIds = () => page.locator('[data-test="work-sessions-row"]').evaluateAll((rows) => rows.map((r) => r.getAttribute('data-session')))
-  const doorIds = async (sort: string) => ((await getJSON(`/work-sessions?failed=true&sort=${sort}&limit=25`)).data.sessions as any[]).map((s) => s.id)
-  const byFailure = await shownIds()
-  expect(byFailure).toEqual(await doorIds('last_failure'))
+  const answerIds = async (response: { json(): Promise<any> }) => ((await response.json()).data.sessions as any[]).map((session) => session.id as string)
+  const listAnswer = (match: string) => page.waitForResponse((response) => /\/api\/v1\/work-sessions\?/.test(response.url()) && response.url().includes('failed=true') && response.url().includes(match))
+  const byFailure = await answerIds(filteredAnswer)
+  await expect.poll(shownIds).toEqual(byFailure)
+  expect(byFailure.indexOf(seeded), 'the seeded run is listed').toBeGreaterThanOrEqual(0)
+  expect(byFailure.indexOf(seededB), 'the second run is listed').toBeGreaterThanOrEqual(0)
   expect(byFailure.indexOf(seeded), 'newest failure first').toBeLessThan(byFailure.indexOf(seededB))
+  const activityAnswer = listAnswer('sort=last_activity')
   await page.locator('[data-test="work-sessions-sort"]').selectOption('last_activity')
   await expect(page).toHaveURL(/[?&]sort=last_activity/)
-  await expect.poll(async () => { const ids = await shownIds(); return ids.indexOf(seededB) < ids.indexOf(seeded) }, { message: 'latest activity first' }).toBe(true)
-  expect(await shownIds()).toEqual(await doorIds('last_activity'))
+  const activityResponse = await activityAnswer
+  expect(activityResponse.status()).toBe(200)
+  const byActivity = await answerIds(activityResponse)
+  await expect.poll(shownIds).toEqual(byActivity)
+  expect(byActivity.indexOf(seeded)).toBeGreaterThanOrEqual(0)
+  expect(byActivity.indexOf(seededB)).toBeGreaterThanOrEqual(0)
+  expect(byActivity.indexOf(seededB), 'latest activity first').toBeLessThan(byActivity.indexOf(seeded))
+  const backAnswer = listAnswer('sort=last_failure')
   await page.locator('[data-test="work-sessions-sort"]').selectOption('last_failure')
-  await expect.poll(async () => (await shownIds())[0]).toBe(byFailure[0])
+  await expect.poll(shownIds).toEqual(await answerIds(await backAnswer))
 
   // "Include blocked" off: both runs only have calls MCPProxy refused, so both
-  // leave the list, and come back with it on. The filter is the door's.
-  const withoutBlocked = page.waitForResponse((response) => /\/api\/v1\/work-sessions\?/.test(response.url()) && response.url().includes('include_blocked=false'))
+  // leave the list, and come back with it on. The filter is the door's: the
+  // answer is a good one without them, and the list shows that answer.
+  const withoutBlocked = listAnswer('include_blocked=false')
   await page.locator('[data-test="work-sessions-include-blocked"]').uncheck()
-  await withoutBlocked
+  const withoutResponse = await withoutBlocked
+  expect(withoutResponse.status()).toBe(200)
+  const without = await answerIds(withoutResponse)
+  expect(without).not.toContain(seeded)
+  expect(without).not.toContain(seededB)
+  await expect(page.locator('[data-test="work-sessions-error"]')).toHaveCount(0)
+  if (without.length === 0) await expect(page.locator('[data-test="work-sessions-empty"]')).toBeVisible()
+  else await expect.poll(shownIds).toEqual(without)
   await expect(row).toHaveCount(0)
   await expect(page.locator(`[data-test="work-sessions-row"][data-session="${seededB}"]`)).toHaveCount(0)
   await page.locator('[data-test="work-sessions-include-blocked"]').check()

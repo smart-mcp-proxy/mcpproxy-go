@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import SessionTimeline from '@/components/activity/SessionTimeline.vue'
 import { setAvailableFeatures } from '@/composables/useScopeQuery'
+import { useAuthStore } from '@/stores/auth'
 import {
   failureNavigation,
   formatSessionDuration,
@@ -211,6 +212,28 @@ describe('Session timeline (Spec 124 FR-062)', () => {
     expect(api.getWorkSessionTimeline).toHaveBeenLastCalledWith(WS_FAILED.id, { at: 'failure:2', before: 70, after: 70 })
   })
 
+  it('shows the rows a wider page brings, and keeps them after a step to another failure', async () => {
+    const later = { index: 16, kind: 'call', at: '2026-11-26T22:40:30.000Z', activity: { id: 'a16', type: 'tool_call', status: 'success', timestamp: '2026-11-26T22:40:30.000Z', server_name: 'github', tool_name: 'later_call' } }
+    const wide = (overrides: Record<string, unknown> = {}) => {
+      const page = timelinePage(overrides)
+      page.rows.splice(6, 1, later as any, { index: 17, kind: 'session_end', at: '2026-11-26T22:41:05.000Z' })
+      return page
+    }
+    door.page = timelinePage({ has_after: true })
+    const { wrapper, api } = await mountTimeline()
+    api.getWorkSessionTimeline.mockImplementation((_id: string, params: { at: string; after: number }) =>
+      Promise.resolve(params.after > 20 ? wide(params.at === 'failure:3' ? { failure_index: 3, position: 15 } : {}) : timelinePage({ has_after: true })))
+    expect(wrapper.find('[data-test="timeline-row"][data-index="16"][data-kind="call"]').exists()).toBe(false)
+    await wrapper.get('[data-test="timeline-load-later"]').trigger('click')
+    await flushPromises()
+    expect(rowAt(wrapper, 16).text()).toContain('later_call')
+    expect(wrapper.findAll('[data-test="timeline-row"]').length).toBe(8)
+    await wrapper.get('[data-test="timeline-next-failure"]').trigger('click')
+    await flushPromises()
+    expect(api.getWorkSessionTimeline).toHaveBeenLastCalledWith(WS_FAILED.id, { at: 'failure:3', before: 20, after: 70 })
+    expect(rowAt(wrapper, 16).text()).toContain('later_call')
+  })
+
   it('reads the same page again on Refresh', async () => {
     const { wrapper, api } = await mountTimeline()
     await wrapper.get('[data-test="timeline-refresh"]').trigger('click')
@@ -398,6 +421,42 @@ describe('Session timeline (Spec 124 FR-062)', () => {
     expect(bodies).not.toContain('No arguments recorded')
     // No bodies are on screen, so the command does not ask for them.
     expect(wrapper.get('[data-test="timeline-cli"]').text()).not.toContain('--include-bodies')
+  })
+
+  it('stops asking for bodies in the command once retention removed those of the opened row', async () => {
+    const page = timelinePage({ has_after: true })
+    door.page = page
+    door.bodies = { ...page, rows: [page.rows[4]] }
+    const { wrapper } = await mountTimeline()
+    await wrapper.get('[data-test="timeline-expand-14"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="timeline-cli"]').text()).toContain('--include-bodies')
+    // Retention strips the bodies; the page is read again, wider.
+    const stripped = timelinePage({ has_after: true })
+    ;(stripped.rows[4] as any).bodies_removed = true
+    door.page = stripped
+    await wrapper.get('[data-test="timeline-load-later"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="timeline-detail-14"]').text()).toContain('removed by retention')
+    expect(wrapper.get('[data-test="timeline-cli"]').text()).not.toContain('--include-bodies')
+  })
+
+  it('the token and the client facts link to their subject only, and not at all to a roster a signed-in user cannot load', async () => {
+    const { wrapper } = await mountTimeline(`/activity?view=sessions&ws=${WS_FAILED.id}&profile=work-readonly`)
+    const links = () => wrapper.get('[data-test="timeline-facts"]').findAll('a').map(a => a.attributes('href')!)
+    const query = (href: string) => Object.fromEntries(new URL(href, 'http://x').searchParams)
+    expect(query(links().find(href => href.startsWith('/tokens'))!)).toEqual({ token: 'nightly-bot' })
+    expect(query(links().find(href => href.startsWith('/clients'))!)).toEqual({ client: 'cursor' })
+    wrapper.unmount()
+
+    const auth = useAuthStore()
+    auth.isTeamsEdition = true
+    auth.user = { id: 'u1', email: 'u@example.com', role: 'user' } as any
+    const tenant = await mountTimeline(`/activity?view=sessions&ws=${WS_FAILED.id}`)
+    const hrefs = tenant.wrapper.get('[data-test="timeline-facts"]').findAll('a').map(a => a.attributes('href')!)
+    expect(hrefs.some(href => href.startsWith('/clients'))).toBe(false)
+    expect(hrefs).toContain('/my/tokens')
+    tenant.wrapper.unmount()
   })
 
   it('a failed body request offers a retry and does not add --include-bodies', async () => {
@@ -662,13 +721,19 @@ describe('Session timeline (Spec 124 FR-062)', () => {
 
   it('a position that is not in the session offers the first failure', async () => {
     door.fail = Object.assign(new Error('Invalid at. No such failure or row in this session'), { status: 400 })
-    const { wrapper, router } = await mountTimeline(`/activity?view=sessions&ws=${WS_FAILED.id}&at=failure:99`)
+    const { wrapper, router, api } = await mountTimeline(`/activity?view=sessions&ws=${WS_FAILED.id}&at=failure:99`)
     expect(wrapper.get('[data-test="timeline-error"]').text()).toContain('No such failure or row')
+    // The error is announced: it replaced the control the user was on.
+    expect(wrapper.get('[data-test="timeline-error"]').attributes('role')).toBe('alert')
     door.fail = null
+    door.page = timelinePage({ failure_index: 1, position: 12 })
     await wrapper.get('[data-test="timeline-open-first-failure"]').trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.query.at).toBeUndefined()
-    expect(wrapper.findAll('[data-test="timeline-row"]').length).toBeGreaterThan(0)
+    // The door is asked for the first failure, and that row is the one marked.
+    expect(api.getWorkSessionTimeline).toHaveBeenLastCalledWith(WS_FAILED.id, { at: 'first_failure', before: 20, after: 20 })
+    expect(wrapper.findAll('[data-test="timeline-row"][data-position="true"]').map(r => r.attributes('data-index'))).toEqual(['12'])
+    expect(wrapper.get('[data-test="timeline-failure-label"]').text()).toBe('failure 1 of 5')
   })
 
   it('never sends a malformed position to the door', async () => {
@@ -688,6 +753,8 @@ describe('work-session helpers', () => {
     // The door and the CLI read the ordinal as a number: 02 is the second failure.
     expect(normalizeTimelineAt('failure:02')).toBe('failure:2')
     expect(normalizeTimelineAt('failure:00')).toBe('first_failure')
+    expect(normalizeTimelineAt('failure:0000000002')).toBe('failure:2')
+    expect(normalizeTimelineAt('failure:000000000000')).toBe('first_failure')
     expect(normalizeTimelineAt('row:01JABC')).toBe('row:01JABC')
     expect(normalizeTimelineAt('row:')).toBe('first_failure')
     expect(normalizeTimelineAt('sideways')).toBe('first_failure')

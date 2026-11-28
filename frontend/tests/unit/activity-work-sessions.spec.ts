@@ -155,6 +155,26 @@ describe('Activity Sessions view (Spec 124)', () => {
     wrapper.unmount()
   })
 
+  it('a session link out of the Sessions view does not inherit filters that only the calls view showed', async () => {
+    // "Sensitive data" and "View sub-calls" are not in the address and have no
+    // chip in Sessions: a session's calls would come up narrowed, or empty.
+    const { wrapper, router, api } = await mountAt('/activity')
+    await wrapper.get('[data-test="activity-filters-toggle"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('select[aria-label="Filter by sensitive data"]').setValue('true')
+    await flushPromises()
+    expect(wrapper.findAll('[data-test="activity-row"]').length).toBe(0)
+    await router.push({ query: { view: 'sessions' } })
+    await flushPromises()
+    await router.push({ query: { view: 'calls', session: WS_FAILED.id } })
+    await flushPromises()
+    await flushPromises()
+    // The session's call is listed (the other row belongs to no session).
+    expect(wrapper.findAll('[data-test="activity-row"]').length).toBe(1)
+    expect(api.getActivities.mock.calls.at(-1)[0].parent_id).toBeUndefined()
+    wrapper.unmount()
+  })
+
   it('the calls view does not count a "failed" left in the address', async () => {
     const { wrapper } = await mountAt('/activity?failed=true')
     expect(wrapper.find('[data-test="activity-filters-count"]').exists()).toBe(false)
@@ -184,6 +204,8 @@ describe('Activity Sessions view (Spec 124)', () => {
     const { wrapper } = await mountAt('/activity')
     await wrapper.get('[data-test="activity-open-act-2"]').trigger('click')
     await flushPromises()
+    // The details did open: the row keeps them, only the timeline link is absent.
+    expect(wrapper.get('[data-test="activity-detail-panel"]').text()).toContain(NO_SESSION.tool_name)
     expect(wrapper.find('[data-test="activity-open-timeline"]').exists()).toBe(false)
     wrapper.unmount()
   })

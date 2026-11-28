@@ -44,7 +44,7 @@
       </div>
     </div>
 
-    <div v-else-if="error" class="alert alert-error" data-test="timeline-error">
+    <div v-else-if="error" class="alert alert-error" role="alert" data-test="timeline-error">
       <UiIcon name="alert" class="w-5 h-5" />
       <span>{{ error }}</span>
       <div class="flex flex-wrap gap-2">
@@ -563,15 +563,19 @@ const facts = computed<Fact[]>(() => {
   const s = session.value
   const out: Fact[] = []
   const token = sessionTokenName(s)
+  // A signed-in user of the server edition has a token page of their own and
+  // no client roster. A link names its subject only: the page filters do not
+  // apply to a timeline and must not narrow the page it leads to.
+  const isTenant = authStore.principalKind === 'tenant'
   out.push(token
-    ? { label: 'Agent token', value: token, to: authStore.principalKind === 'tenant' ? { path: '/my/tokens' } : scopeQuery.linkTo('tokens', { token }) }
+    ? { label: 'Agent token', value: token, to: isTenant ? { path: '/my/tokens' } : scopeQuery.linkTo('tokens', { token, profile: '', client: '' }) }
     : { label: 'Agent token', value: '—' })
   if (s.client_id) {
     out.push({
       label: 'Client',
       value: valueLabel('client', s.client_id),
       note: s.client_name ? `~${s.client_name} (reported)` : undefined,
-      to: scopeQuery.linkTo('clients', { client: s.client_id }),
+      to: isTenant ? undefined : scopeQuery.linkTo('clients', { client: s.client_id, profile: '', token: '' }),
     })
   } else {
     out.push({ label: 'Client', value: s.client_name || s.surface || '—' })
@@ -783,7 +787,7 @@ const rowKey = (row: WorkSessionTimelineRow): string => row.activity?.id ?? `i${
 const isExpanded = (row: WorkSessionTimelineRow): boolean => expanded.has(rowKey(row))
 const bodyState = (row: WorkSessionTimelineRow): BodyState | undefined => bodies.get(rowKey(row))
 /** True once the bodies of any row were shown: the CLI needs --include-bodies for the same view. */
-const bodiesShown = computed(() => (page.value?.rows ?? []).some(row => isExpanded(row) && !!bodyState(row)?.record))
+const bodiesShown = computed(() => (page.value?.rows ?? []).some(row => isExpanded(row) && !row.bodies_removed && !!bodyState(row)?.record))
 
 function toggle(row: WorkSessionTimelineRow): void {
   const key = rowKey(row)
