@@ -133,9 +133,9 @@
               class="link link-hover text-sm max-sm:min-h-11 max-sm:inline-flex max-sm:items-center"
               style="color: var(--ds-brand-text)"
               data-test="activity-show-all-events"
-              :title="`This view lists tool calls only. ${hiddenEventCount} other ${hiddenEventCount === 1 ? 'event is' : 'events are'} not shown here: tool approvals, security scans and system events.`"
-              @click="setView('all')"
-            >Show all {{ summary?.total_count }} events</button>
+              title="This view lists tool calls. Tool approvals, security scans and system events from the same period are in the All view."
+              @click="showAllEvents"
+            >Show all events</button>
           </div>
 
           <div class="flex-1"></div>
@@ -1740,8 +1740,15 @@ function setView(id: ActivityViewId): void {
 // State
 const activities = ref<ActivityRecord[]>([])
 const summary = ref<ActivitySummaryResponse | null>(null)
-// Events in the summary window that the Tool calls view does not list (approvals, scans, system events).
-const hiddenEventCount = computed(() => (activeView.value === 'calls' && summary.value ? Math.max(0, (summary.value.total_count ?? 0) - (summary.value.call_count ?? 0)) : 0))
+// Whether the summary window holds events that are not calls (approvals, scans, system events). A hint, not a row count.
+// Offered only without a status filter: with one, the All view would still hide what the link promises.
+const hiddenEventCount = computed(() => (activeView.value === 'calls' && !filterStatus.value && summary.value ? Math.max(0, (summary.value.total_count ?? 0) - (summary.value.call_count ?? 0)) : 0))
+// The link removes itself when the view changes, so focus moves to the tab it selected.
+async function showAllEvents(): Promise<void> {
+  setView('all')
+  await nextTick()
+  document.querySelector<HTMLElement>('[data-test="activity-view-tab-all"]')?.focus()
+}
 const loading = ref(false)
 const error = ref<string | null>(null)
 const selectedActivity = ref<ActivityRecord | null>(null)

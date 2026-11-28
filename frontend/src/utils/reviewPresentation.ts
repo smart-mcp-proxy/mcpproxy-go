@@ -139,9 +139,10 @@ const isCleanRead = (t: ReviewTool) => t.tier === 'read' && t.scan_verdict === '
  * example), whatever its tier or scan state; when such a tool is on screen the
  * hint says so, or "only read-only tools with a clean scan" would be untrue.
  */
+export const REVIEW_SELECTION_HINT_WITH_APPROVED = 'Tools that are already approved and not blocked start checked, and so do read-only tools with a clean scan. Unchecked tools stay blocked after approval until you enable them on the Tools tab.'
 export function selectionHint(tools: ReviewTool[]): string {
   const approvedExtra = tools.some(t => t.default_allowed === true && t.approval_status === 'approved' && !isCleanRead(t))
-  return approvedExtra ? `${REVIEW_SELECTION_HINT} Tools that are already approved also start checked.` : REVIEW_SELECTION_HINT
+  return approvedExtra ? REVIEW_SELECTION_HINT_WITH_APPROVED : REVIEW_SELECTION_HINT
 }
 
 /** What the user explicitly chose for one tool, with the payload they saw. */

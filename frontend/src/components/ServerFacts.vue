@@ -1,5 +1,5 @@
 <template>
-  <section class="space-y-2 rounded border bg-base-100 p-3" style="border-color: var(--ds-border)" aria-label="Server facts" data-test="server-facts" :data-has-diagnostic="hasDiagnostic ? 'true' : 'false'">
+  <section class="space-y-2 rounded border bg-base-100 p-3" style="border-color: var(--ds-border)" aria-label="Server facts" data-test="server-facts">
     <dl class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-x-6 gap-y-2 text-sm">
       <div class="flex items-center gap-1.5 min-w-0" data-test="fact-identity">
         <dt class="text-base-content/70">Id</dt>

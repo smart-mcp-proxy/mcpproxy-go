@@ -31,7 +31,7 @@
       data-test="usage-strip-errors"
     >
       <div class="card-body py-2 px-4 gap-0">
-        <div class="text-xl font-bold leading-none">{{ loaded ? summary.error_count : '—' }}</div>
+        <div class="text-xl font-bold leading-none">{{ loaded ? callErrors : '—' }}</div>
         <div class="text-xs text-base-content/70 mt-1">errors</div>
       </div>
     </router-link>
@@ -56,7 +56,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useScopeQuery } from '@/composables/useScopeQuery'
 import api from '@/services/api'
@@ -66,9 +66,12 @@ const authStore = useAuthStore()
 // available, profile/client/token) carries from Home into Activity.
 const scope = useScopeQuery('home')
 const loaded = ref(false)
-// "errors" is error_count, not call_error_count: the latter also counts blocked calls (it is the numerator of
-// the error rate), and this strip shows blocked calls in their own tile, which links to its own filter.
-const summary = reactive({ call_count: 0, blocked_count: 0, error_count: 0 })
+const summary = reactive({ call_count: 0, blocked_count: 0, call_error_count: 0 })
+// call_error_count is the failures within the calls and includes blocked calls (it is the numerator of the
+// error rate). This strip shows blocked calls in their own tile, so "errors" is the rest: the calls that ran
+// and failed, which is what its link (Tool calls, status error) lists. error_count is not used: it also counts
+// rows that are not calls, such as a failed security scan.
+const callErrors = computed(() => Math.max(0, summary.call_error_count - summary.blocked_count))
 
 const load = async () => {
   // Spec 107 FR-041: /activity/summary is an admin-only core door — a
@@ -79,7 +82,7 @@ const load = async () => {
     if (response.success && response.data) {
       summary.call_count = response.data.call_count ?? 0
       summary.blocked_count = response.data.blocked_count ?? 0
-      summary.error_count = response.data.error_count ?? 0
+      summary.call_error_count = response.data.call_error_count ?? 0
       loaded.value = true
     }
   } catch {

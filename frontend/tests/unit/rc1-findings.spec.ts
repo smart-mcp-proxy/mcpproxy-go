@@ -8,7 +8,7 @@ import AppFooter from '@/components/AppFooter.vue'
 import UsageSummaryStrip from '@/components/UsageSummaryStrip.vue'
 import { useSystemStore } from '@/stores/system'
 import { setAvailableFeatures } from '@/composables/useScopeQuery'
-import { REVIEW_SELECTION_HINT, selectionHint, sortReviewTools } from '@/utils/reviewPresentation'
+import { REVIEW_SELECTION_HINT, REVIEW_SELECTION_HINT_WITH_APPROVED, selectionHint, sortReviewTools } from '@/utils/reviewPresentation'
 import api from '@/services/api'
 import type { Server } from '@/types'
 
@@ -59,16 +59,59 @@ describe('review screen (rc.1 findings)', () => {
     expect(w.find('[data-test="review-approve-server"]').exists()).toBe(true)
     const notice = w.get('[data-test="review-approve-notice"]')
     expect(notice.attributes('role')).toBe('alert')
-    expect(notice.text()).toContain('scan')
+    expect(notice.text()).toContain('Run the scan above')
     expect(notice.text()).not.toContain('--force')
+    w.unmount()
+  })
+
+  it('a blind approval refused for the same reason points at fetching first: there is no scan button yet', async () => {
+    ;(api.getServerReview as any).mockResolvedValue(review(false))
+    ;(api.securityApprove as any).mockResolvedValue({ success: false, error: 'no scan results found; run a scan first or use --force' })
+    const w = mount(ReviewScreen, { props: { serverName: 'fx' }, ...stubs }); await flushPromises()
+    expect(w.find('[data-test="review-scan-action"]').exists()).toBe(false)
+    ;(w.findAll('dialog')[0].element as HTMLDialogElement).showModal = vi.fn()
+    await w.get('[data-test="review-approve-server"]').trigger('click')
+    await w.get('[data-test="review-blind-confirm"]').trigger('click'); await flushPromises()
+    expect(api.securityApprove).toHaveBeenCalledTimes(1)
+    expect(w.get('[data-test="review-approve-notice"]').text()).toContain('Fetch its tool definitions')
+    w.unmount()
+  })
+
+  it('a refusal that answers after a scan settled is not shown over the new state', async () => {
+    ;(api.getServerReview as any).mockResolvedValue(review(true))
+    let answer!: (v: unknown) => void
+    ;(api.securityApprove as any).mockReturnValue(new Promise(resolve => { answer = resolve }))
+    const w = mount(ReviewScreen, { props: { serverName: 'fx' }, ...stubs }); await flushPromises()
+    await w.get('[data-test="review-approve-server"]').trigger('click')
+    window.dispatchEvent(new CustomEvent('mcpproxy:scan-settled', { detail: { server_name: 'fx' } })); await flushPromises()
+    answer({ success: false, error: 'no scan results found; run a scan first or use --force' }); await flushPromises()
+    expect(w.find('[data-test="review-approve-notice"]').exists()).toBe(false)
+    expect(w.find('.alert-error').exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('fetch feedback does not carry over to a server re-added under the same name', async () => {
+    const withInc = (captured: boolean, incarnation: string) => { const r = review(captured); (r.data.server as any).incarnation = incarnation; return r }
+    ;(api.getServerReview as any).mockResolvedValue(withInc(false, 'one'))
+    ;(api.discoverServerTools as any).mockResolvedValue({ success: false, error: 'boom' })
+    const w = mount(ReviewScreen, { props: { serverName: 'fx' }, ...stubs }); await flushPromises()
+    await w.get('[data-test="review-fetch-definitions"]').trigger('click'); await flushPromises()
+    expect(w.get('[data-test="review-fetch-outcome"]').text()).toContain('boom')
+    ;(api.getServerReview as any).mockResolvedValue(withInc(false, 'two'))
+    window.dispatchEvent(new CustomEvent('mcpproxy:review-changed', { detail: { payload: { server: 'fx' } } })); await flushPromises()
+    expect(w.find('[data-test="review-fetch-outcome"]').exists()).toBe(false)
     w.unmount()
   })
 
   it('the selection hint also explains tools that start checked because they are already approved', () => {
     expect(selectionHint([tool as any])).toBe(REVIEW_SELECTION_HINT)
     const approvedWrite = { ...tool, name: 'w1', tier: 'write', scan_verdict: 'not_scanned', approval_status: 'approved', default_allowed: true }
-    expect(selectionHint([tool as any, approvedWrite as any])).toContain('already approved')
-    expect(selectionHint([tool as any, approvedWrite as any]).startsWith(REVIEW_SELECTION_HINT)).toBe(true)
+    const hint = selectionHint([tool as any, approvedWrite as any])
+    expect(hint).toBe(REVIEW_SELECTION_HINT_WITH_APPROVED)
+    expect(hint).toContain('already approved and not blocked')
+    expect(hint).not.toContain('Only read-only') // the two sentences would contradict each other
+    // An approved tool that is blocked does not start checked, so it does not change the hint.
+    expect(selectionHint([tool as any, { ...approvedWrite, default_allowed: false, disabled: true } as any])).toBe(REVIEW_SELECTION_HINT)
   })
 
   it('renders that hint on the screen', async () => {
@@ -108,10 +151,28 @@ describe('review tool order (rc.1 feedback)', () => {
   })
 })
 
+describe('review: "review them" follows the order on screen', () => {
+  it('focuses a held tool that the sort moved to the first page', async () => {
+    vi.clearAllMocks()
+    ;(api.listScanHistory as any).mockResolvedValue({ success: true, data: { scans: [], total: 0 } })
+    ;(api.getQueueProgress as any).mockResolvedValue({ success: true, data: { status: 'idle' } })
+    const many = Array.from({ length: 30 }, (_, i) => ({ ...tool, name: `ok_${String(i).padStart(2, '0')}`, approval_status: 'approved' }))
+    const tools = [...many, { ...tool, name: 'held_last', approval_status: 'pending' }]
+    ;(api.getServerReview as any).mockResolvedValue({ success: true, data: { server: { name: 'fx', transport: 'stdio', quarantined: false, definitions_captured: true }, tools } })
+    const w = mount(ReviewScreen, { props: { serverName: 'fx' }, attachTo: document.body, ...stubs }); await flushPromises()
+    await (w.vm as any).revealHeld(); await flushPromises()
+    const target = w.find('[data-test="review-tool-held_last"]')
+    expect(target.exists()).toBe(true) // on the page shown, although it is last in server order
+    expect(document.activeElement).toBe(target.element)
+    w.unmount()
+  })
+})
+
 describe('Home usage strip (rc.1 findings)', () => {
   it('a blocked call is counted once: "errors" excludes the calls already shown as "blocked"', async () => {
     setActivePinia(createPinia()); setAvailableFeatures([])
-    ;(api.getActivitySummary as any).mockResolvedValue({ success: true, data: { call_count: 7, blocked_count: 1, error_count: 1, call_error_count: 2 } })
+    // error_count also holds a failed security scan here: it is not a call and must not be counted.
+    ;(api.getActivitySummary as any).mockResolvedValue({ success: true, data: { call_count: 7, blocked_count: 1, error_count: 2, call_error_count: 2 } })
     const router = createRouter({ history: createMemoryHistory(), routes: [
       { path: '/', name: 'home', component: { template: '<div />' } },
       { path: '/usage', name: 'usage', component: { template: '<div />' } },
