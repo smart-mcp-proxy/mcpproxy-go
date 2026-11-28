@@ -2084,8 +2084,9 @@ func (c *CallbackServer) handleParsedCallback(w http.ResponseWriter, query url.V
 		zap.Bool("code_present", params.Get("code") != ""),
 		zap.String("code", callbackParamField("code", params.Get("code"))),
 		zap.String("state", StateFingerprint(params.Get("state"))),
-		zap.String("error", ScrubUpstreamText(params.Get("error"))),
-		zap.String("error_description", ScrubUpstreamText(params.Get("error_description"))),
+		// Spec 135 FR-005: the provider's error is reported only once the
+		// issuer decision has passed (logged in the provider-error branch).
+		zap.Bool("error_present", params.Get("error") != ""),
 		zap.Bool("iss_present", issPresent),
 		zap.Int("total_params", len(params)))
 
@@ -2165,6 +2166,10 @@ func (c *CallbackServer) handleParsedCallback(w http.ResponseWriter, query url.V
 	// The provider itself reported a failure: the flow was told, but the user
 	// must not see a success page.
 	if providerErr := params.Get("error"); providerErr != "" {
+		c.logger.Warn("OAuth provider returned an error to the sign-in",
+			zap.String("state", StateFingerprint(state)),
+			zap.String("error", ScrubUpstreamText(providerErr)),
+			zap.String("error_description", ScrubUpstreamText(params.Get("error_description"))))
 		message := providerErr
 		if desc := params.Get("error_description"); desc != "" {
 			message = providerErr + ": " + desc
