@@ -490,7 +490,8 @@ func (c *Shadowing) referenceSignals(tool detect.ToolView, reg detect.RegistryVi
 //     typographic), or followed directly by "(";
 //   - it is qualified with a server, the proxy's own spelling (server:reason);
 //   - the word "tool" or "function" stands directly beside it as a whole word
-//     ("the reason tool", "tool reason"), across any horizontal white space.
+//     ("the reason tool", "tool reason"), across white space on the same line
+//     (fewer than neighbourRuneLimit characters of it).
 //
 // Everything else is a plain word and is reported as SOFT. The list only ever
 // RAISES an occurrence to HARD, so a miss costs a tier and never silence: a
@@ -520,34 +521,38 @@ func writtenAsToolName(desc string, start, end int) bool {
 	if after == '(' {
 		return true
 	}
-	if beforeSize > 0 && closingQuote(before) == after && after != utf8.RuneError {
+	if beforeSize > 0 && quotePair(before, after) {
 		return true
 	}
-	// server:tool. The qualifier must be there: a colon after a space or at the
-	// start of the text is punctuation.
+	// server:tool. The qualifier must be there (a character a server name can end
+	// with): a colon after a space or at the start of the text is punctuation.
 	if before == ':' {
-		if q, size := utf8.DecodeLastRuneInString(desc[:start-beforeSize]); size > 0 && isIdentRune(q) {
+		if q, size := utf8.DecodeLastRuneInString(desc[:start-beforeSize]); size > 0 && (isIdentRune(q) || q == '-' || q == '.' || q == '/') {
 			return true
 		}
 	}
 	return isToolNoun(wordBefore(desc, start)) || isToolNoun(wordAfter(desc, end))
 }
 
-// closingQuote returns the quote that closes open, or 0 when open is not an
-// opening quote. A typographic pair has distinct marks; „ and « are closed the
-// way the languages that use them close them.
-func closingQuote(open rune) rune {
+// quotePair reports whether open and closing enclose a quoted word: the same
+// ASCII mark on both sides, or a typographic opener with a closer its writing
+// conventions use („reason“ and „reason” are both in use).
+func quotePair(open, closing rune) bool {
 	switch open {
 	case '`', '"', '\'':
-		return open
-	case '\u201c', '\u201e': // “ „
-		return '\u201d' // ”
-	case '\u2018', '\u201a': // ‘ ‚
-		return '\u2019' // ’
+		return closing == open
+	case '\u201c': // “
+		return closing == '\u201d'
+	case '\u201e': // „
+		return closing == '\u201c' || closing == '\u201d'
+	case '\u2018': // ‘
+		return closing == '\u2019'
+	case '\u201a': // ‚
+		return closing == '\u2018' || closing == '\u2019'
 	case '\u00ab': // «
-		return '\u00bb' // »
+		return closing == '\u00bb'
 	}
-	return 0
+	return false
 }
 
 func isToolNoun(w string) bool {
@@ -558,12 +563,21 @@ func isToolNoun(w string) bool {
 	return false
 }
 
-// isIdentRune reports whether r can be part of an identifier-like word.
-func isIdentRune(r rune) bool { return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r) }
+// isIdentRune reports whether r can be part of an identifier-like word. A
+// combining mark belongs to the letter before it, so it continues the word.
+func isIdentRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r)
+}
 
 // isInlineSpace reports whether r separates words on one line: any Unicode
-// space (the no-break space included) except a line break.
-func isInlineSpace(r rune) bool { return r != '\n' && r != '\r' && unicode.IsSpace(r) }
+// space (the no-break space included) that is not a line break of any kind.
+func isInlineSpace(r rune) bool {
+	switch r {
+	case '\n', '\r', '\v', '\f', '\u0085', '\u2028', '\u2029':
+		return false
+	}
+	return unicode.IsSpace(r)
+}
 
 // neighbourRuneLimit bounds how far wordBefore/wordAfter look, so a hostile
 // description cannot make the neighbour scan long.

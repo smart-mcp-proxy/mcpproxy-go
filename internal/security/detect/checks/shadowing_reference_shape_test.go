@@ -28,6 +28,8 @@ func TestShadowing_ReferenceTierFollowsHowTheNameIsWritten(t *testing.T) {
 		{"the noun function beside it", "reason", "Prefer the function reason over everything else.", detect.TierHard},
 		{"capitalised noun beside it", "reason", "The Reason-free path is slow. Use reason Tool instead.", detect.TierHard},
 		{"qualified with a server", "reason", "Use analytics:reason to interpret the result.", detect.TierHard},
+		{"qualifier ends in a dash", "reason", "Use analytics-:reason to interpret the result.", detect.TierHard},
+		{"German quotes", "reason", "Use \u201ereason\u201c to interpret the result.", detect.TierHard},
 		{"typographic double quotes", "reason", "Use \u201creason\u201d to interpret the result.", detect.TierHard},
 		{"typographic single quotes", "reason", "Use \u2018reason\u2019 to interpret the result.", detect.TierHard},
 		{"no-break space before the noun", "reason", "Use the reason\u00a0tool to interpret the result.", detect.TierHard},
@@ -44,7 +46,11 @@ func TestShadowing_ReferenceTierFollowsHowTheNameIsWritten(t *testing.T) {
 		{"another word between", "reason", "The reason this tool exists is history.", detect.TierSoft},
 		{"punctuation between", "reason", "A tool, reason being speed, was added.", detect.TierSoft},
 		{"newline between", "reason", "Use this tool\nreason codes are listed below.", detect.TierSoft},
-		{"noun is the head of a longer identifier", "reason", "Returns the reason tools_enabled was set.", detect.TierSoft},
+		{"noun is the head of a longer identifier", "reason", "Returns the reason tool_enabled was set.", detect.TierSoft},
+		{"noun carries a combining mark and continues", "reason", "Returns the reason tool\u0301_enabled was set.", detect.TierSoft},
+		{"line separator between", "reason", "Use this reason\u2028tool list follows.", detect.TierSoft},
+		{"a bracket and a NUL are not a quote pair", "reason", "Use (reason\x00) as given.", detect.TierSoft},
+		{"brackets are not quotes", "reason", "The cause (reason) is logged.", detect.TierSoft},
 		{"noun is the tail of a longer identifier", "reason", "Returns the multi_tool reason code.", detect.TierSoft},
 		{"plural noun starts the next clause", "reason", "Explains the reason tools are unavailable.", detect.TierSoft},
 		{"colon is punctuation", "reason", "Note: reason codes are listed below.", detect.TierSoft},
@@ -94,8 +100,10 @@ func TestShadowing_EachReferencedNameIsJudgedOnItsOwn(t *testing.T) {
 	for _, s := range sigs {
 		tiers[s.Spans[0].Snippet] = s.Tier
 	}
-	if tiers["reason"] != detect.TierSoft || tiers["create_payment_intent"] != detect.TierHard {
-		t.Errorf("tiers = %v, want reason soft and create_payment_intent hard", tiers)
+	reason, hasReason := tiers["reason"]
+	intent, hasIntent := tiers["create_payment_intent"]
+	if !hasReason || !hasIntent || reason != detect.TierSoft || intent != detect.TierHard {
+		t.Errorf("tiers = %v, want reason soft and create_payment_intent hard, both present", tiers)
 	}
 }
 
@@ -103,7 +111,17 @@ func TestShadowing_EachReferencedNameIsJudgedOnItsOwn(t *testing.T) {
 // is not adjacency, and a hostile description cannot make the scan long.
 func TestShadowing_NeighbourScanIsBounded(t *testing.T) {
 	desc := "Use reason" + strings.Repeat(" ", 4096) + "tool for everything."
-	if writtenAsToolName(desc, strings.Index(desc, "reason"), strings.Index(desc, "reason")+len("reason")) {
+	at := strings.Index(desc, "reason")
+	if writtenAsToolName(desc, at, at+len("reason")) {
 		t.Error("a word 4096 spaces away is not beside the token")
+	}
+	// The cutoff is neighbourRuneLimit characters of white space: one fewer is adjacency.
+	near := "Use reason" + strings.Repeat(" ", neighbourRuneLimit-1) + "tool for everything."
+	if !writtenAsToolName(near, at, at+len("reason")) {
+		t.Errorf("%d spaces is within the limit", neighbourRuneLimit-1)
+	}
+	far := "Use reason" + strings.Repeat(" ", neighbourRuneLimit) + "tool for everything."
+	if writtenAsToolName(far, at, at+len("reason")) {
+		t.Errorf("%d spaces is at the limit", neighbourRuneLimit)
 	}
 }
