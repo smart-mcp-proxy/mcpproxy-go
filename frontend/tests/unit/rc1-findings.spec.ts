@@ -17,7 +17,7 @@ import type { Server } from '@/types'
 vi.mock('@/services/api', () => ({ default: {
   getServerReview: vi.fn(), securityApprove: vi.fn(), securityReject: vi.fn(),
   approveTools: vi.fn(), blockTools: vi.fn(), discoverServerTools: vi.fn(), listScanHistory: vi.fn(), scanAll: vi.fn(), getQueueProgress: vi.fn(), cancelAllScans: vi.fn(), startScan: vi.fn(), quarantineServer: vi.fn(),
-  getActivitySummary: vi.fn(),
+  getActivitySummary: vi.fn(), getActivities: vi.fn(),
 } }))
 
 const stubs = { global: { stubs: { RouterLink: { template: '<a><slot /></a>' } } } }
@@ -77,6 +77,34 @@ describe('review screen (rc.1 findings)', () => {
     w.unmount()
   })
 
+  it('the no-scan notice follows the review: after the definitions are fetched it points at the scan', async () => {
+    ;(api.getServerReview as any).mockResolvedValue(review(false))
+    ;(api.securityApprove as any).mockResolvedValue({ success: false, error: 'no scan results found; run a scan first or use --force' })
+    const w = mount(ReviewScreen, { props: { serverName: 'fx' }, ...stubs }); await flushPromises()
+    ;(w.findAll('dialog')[0].element as HTMLDialogElement).showModal = vi.fn()
+    await w.get('[data-test="review-approve-server"]').trigger('click')
+    await w.get('[data-test="review-blind-confirm"]').trigger('click'); await flushPromises()
+    expect(w.get('[data-test="review-approve-notice"]').text()).toContain('Fetch its tool definitions')
+    ;(api.getServerReview as any).mockResolvedValue(review(true))
+    window.dispatchEvent(new CustomEvent('mcpproxy:review-changed', { detail: { payload: { server: 'fx' } } })); await flushPromises()
+    expect(w.get('[data-test="review-approve-notice"]').text()).toContain('Run the scan above')
+    w.unmount()
+  })
+
+  it('a refusal for a server that was replaced under the same name meanwhile is not shown', async () => {
+    const withInc = (incarnation: string) => { const r = review(true); (r.data.server as any).incarnation = incarnation; return r }
+    ;(api.getServerReview as any).mockResolvedValue(withInc('one'))
+    let answer!: (v: unknown) => void
+    ;(api.securityApprove as any).mockReturnValue(new Promise(resolve => { answer = resolve }))
+    const w = mount(ReviewScreen, { props: { serverName: 'fx' }, ...stubs }); await flushPromises()
+    await w.get('[data-test="review-approve-server"]').trigger('click')
+    ;(api.getServerReview as any).mockResolvedValue(withInc('two'))
+    window.dispatchEvent(new CustomEvent('mcpproxy:review-changed', { detail: { payload: { server: 'fx' } } })); await flushPromises()
+    answer({ success: false, error: 'no scan results found; run a scan first or use --force' }); await flushPromises()
+    expect(w.find('[data-test="review-approve-notice"]').exists()).toBe(false)
+    w.unmount()
+  })
+
   it('a refusal that answers after a scan settled is not shown over the new state', async () => {
     ;(api.getServerReview as any).mockResolvedValue(review(true))
     let answer!: (v: unknown) => void
@@ -108,7 +136,8 @@ describe('review screen (rc.1 findings)', () => {
     const approvedWrite = { ...tool, name: 'w1', tier: 'write', scan_verdict: 'not_scanned', approval_status: 'approved', default_allowed: true }
     const hint = selectionHint([tool as any, approvedWrite as any])
     expect(hint).toBe(REVIEW_SELECTION_HINT_WITH_APPROVED)
-    expect(hint).toContain('already approved and not blocked')
+    expect(hint).toContain('already approved')
+    expect(hint).toContain('unless they are blocked or held')
     expect(hint).not.toContain('Only read-only') // the two sentences would contradict each other
     // An approved tool that is blocked does not start checked, so it does not change the hint.
     expect(selectionHint([tool as any, { ...approvedWrite, default_allowed: false, disabled: true } as any])).toBe(REVIEW_SELECTION_HINT)
@@ -169,17 +198,35 @@ describe('review: "review them" follows the order on screen', () => {
 })
 
 describe('Home usage strip (rc.1 findings)', () => {
-  it('a blocked call is counted once: "errors" excludes the calls already shown as "blocked"', async () => {
+  const router = () => createRouter({ history: createMemoryHistory(), routes: [
+    { path: '/', name: 'home', component: { template: '<div />' } },
+    { path: '/usage', name: 'usage', component: { template: '<div />' } },
+    { path: '/activity', name: 'activity', component: { template: '<div />' } },
+  ] })
+  const mountStrip = async () => {
     setActivePinia(createPinia()); setAvailableFeatures([])
-    // error_count also holds a failed security scan here: it is not a call and must not be counted.
+    const w = shallowMount(UsageSummaryStrip, { global: { plugins: [router()], stubs: { RouterLink: false } } }); await flushPromises()
+    return w
+  }
+
+  it('"errors" is the number of rows its link lists: failed tool calls in the last 24 hours', async () => {
+    // One failed call, one blocked call, one blocked preflight (not a call) and one failed scan (not a call).
+    ;(api.getActivitySummary as any).mockResolvedValue({ success: true, data: { call_count: 7, blocked_count: 2, error_count: 2, call_error_count: 2 } })
+    ;(api.getActivities as any).mockResolvedValue({ success: true, data: { activities: [], total: 1 } })
+    const w = await mountStrip()
+    expect(w.get('[data-test="usage-strip-blocked"]').text()).toContain('2')
+    expect(w.get('[data-test="usage-strip-errors"]').text()).toMatch(/^1\s*errors$/)
+    const query = (api.getActivities as any).mock.calls.at(-1)[0]
+    expect(query.status).toBe('error')
+    expect(query.type).toContain('tool_call')
+    expect(query.type).not.toContain('security_scan')
+    expect(Date.now() - Date.parse(query.start_time)).toBeGreaterThan(23 * 3600 * 1000)
+  })
+
+  it('falls back to failed calls minus blocked calls when the list does not answer', async () => {
     ;(api.getActivitySummary as any).mockResolvedValue({ success: true, data: { call_count: 7, blocked_count: 1, error_count: 2, call_error_count: 2 } })
-    const router = createRouter({ history: createMemoryHistory(), routes: [
-      { path: '/', name: 'home', component: { template: '<div />' } },
-      { path: '/usage', name: 'usage', component: { template: '<div />' } },
-      { path: '/activity', name: 'activity', component: { template: '<div />' } },
-    ] })
-    const w = shallowMount(UsageSummaryStrip, { global: { plugins: [router], stubs: { RouterLink: false } } }); await flushPromises()
-    expect(w.get('[data-test="usage-strip-blocked"]').text()).toContain('1')
+    ;(api.getActivities as any).mockResolvedValue({ success: false, error: 'nope' })
+    const w = await mountStrip()
     expect(w.get('[data-test="usage-strip-errors"]').text()).toMatch(/^1\s*errors$/)
   })
 })

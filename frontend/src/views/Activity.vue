@@ -1741,8 +1741,9 @@ function setView(id: ActivityViewId): void {
 const activities = ref<ActivityRecord[]>([])
 const summary = ref<ActivitySummaryResponse | null>(null)
 // Whether the summary window holds events that are not calls (approvals, scans, system events). A hint, not a row count.
-// Offered only without a status filter: with one, the All view would still hide what the link promises.
-const hiddenEventCount = computed(() => (activeView.value === 'calls' && !filterStatus.value && summary.value ? Math.max(0, (summary.value.total_count ?? 0) - (summary.value.call_count ?? 0)) : 0))
+// Offered only when no filter is on: the summary is not narrowed by the table's filters, and a filter that
+// stays on in the All view (status, server, tool, ...) could still hide what the link promises.
+const hiddenEventCount = computed(() => (activeView.value === 'calls' && !hasActiveFilters.value && summary.value ? Math.max(0, (summary.value.total_count ?? 0) - (summary.value.call_count ?? 0)) : 0))
 // The link removes itself when the view changes, so focus moves to the tab it selected.
 async function showAllEvents(): Promise<void> {
   setView('all')

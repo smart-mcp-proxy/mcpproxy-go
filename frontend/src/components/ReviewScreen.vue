@@ -176,7 +176,10 @@ const STALE_FORCE_NOTICE = 'The review changed after the approval attempt. Revie
 const notice = ref('')
 // An approval the core refused for a reason the operator can fix on this screen. It sits beside the approve
 // button; the review stays where it is.
-const approveNotice = ref('')
+// Set when the core refused an approval because no scan exists. The sentence is computed from the review on
+// screen, so it names the step that is available now (fetch first, or scan).
+const noScanRefused = ref(false)
+const approveNotice = computed(() => (!noScanRefused.value ? '' : review.value?.server.definitions_captured ? NO_SCAN_NOTICE : NO_SCAN_NOT_CAPTURED_NOTICE))
 const NO_SCAN_NOTICE = 'This server has not been scanned yet, so it cannot be approved. Run the scan above, then approve.'
 const NO_SCAN_NOT_CAPTURED_NOTICE = 'This server has not been scanned yet, so it cannot be approved. Fetch its tool definitions above and scan it, then approve.'
 // Counts scans that settled on this screen, so a refusal that answers after one is not shown over the new state.
@@ -329,11 +332,11 @@ async function refreshReadiness() {
 }
 // Each visit (a serverName change) takes a generation too: a response that started in an earlier visit is dropped even when the screen is back on the same server name (A -> B -> A).
 let visitGeneration = 0
-async function load() { if (typeof api.getServerReview !== 'function') return; readinessChecks = 0; readinessRequestGeneration++; const server = props.serverName; const generation = ++loadGeneration; if (!review.value) loading.value = true; refreshing.value = true; invalidateForceRetry(); if (confirmOpen.value) { closeConfirm(); notice.value = STALE_FORCE_NOTICE }; error.value = ''; const res = await api.getServerReview(server); if (server !== props.serverName || generation !== loadGeneration) return; loading.value = false; refreshing.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; if (review.value && review.value.server.incarnation !== res.data.server.incarnation) { choices.clear(); fetchAttempt.value = null; fetchSeq++; approveNotice.value = '' }; review.value = res.data; allowedTools.value = mergeSelection(res.data.tools, choices); invalidateForceRetry(); if (confirmOpen.value && blindReview !== res.data) { closeConfirm(); notice.value = STALE_FORCE_NOTICE }; scheduleReadinessRefresh(); emit('refreshed') }
+async function load() { if (typeof api.getServerReview !== 'function') return; readinessChecks = 0; readinessRequestGeneration++; const server = props.serverName; const generation = ++loadGeneration; if (!review.value) loading.value = true; refreshing.value = true; invalidateForceRetry(); if (confirmOpen.value) { closeConfirm(); notice.value = STALE_FORCE_NOTICE }; error.value = ''; const res = await api.getServerReview(server); if (server !== props.serverName || generation !== loadGeneration) return; loading.value = false; refreshing.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; if (review.value && review.value.server.incarnation !== res.data.server.incarnation) { choices.clear(); fetchAttempt.value = null; fetchSeq++; noScanRefused.value = false }; review.value = res.data; allowedTools.value = mergeSelection(res.data.tools, choices); invalidateForceRetry(); if (confirmOpen.value && blindReview !== res.data) { closeConfirm(); notice.value = STALE_FORCE_NOTICE }; scheduleReadinessRefresh(); emit('refreshed') }
 async function rescan() {
   const server = props.serverName
   const visit = visitGeneration
-  rescanning.value = true; approveNotice.value = ''
+  rescanning.value = true; noScanRefused.value = false
   const res = await api.startScan(server)
   if (!isCurrent(server, visit)) return // late response for a server the screen no longer shows
   if (!res.success) { rescanning.value = false; error.value = res.error || 'Failed to start scan' }
@@ -384,7 +387,7 @@ async function approve(force: boolean, block?: string[]) {
   if (force && !lastBlock.value) { notice.value = STALE_FORCE_NOTICE; return } // stale force retry: needs a fresh decision
   const server = props.serverName // a response for a server the screen no longer shows is dropped below
   const visit = visitGeneration
-  closeConfirm(); forceDialog.value?.close?.(); approving.value = true; notice.value = ''; approveNotice.value = ''
+  closeConfirm(); forceDialog.value?.close?.(); approving.value = true; notice.value = ''; noScanRefused.value = false
   const scansAtStart = scanSettledCount
   const tools = review.value?.tools ?? []
   const all = tools.map(t => t.name)
@@ -413,8 +416,9 @@ async function approve(force: boolean, block?: string[]) {
     // what to do here; the core's sentence names a CLI flag this screen does not have.
     if (/no scan results found/i.test(message)) {
       lastBlock.value = null; lastExpected = undefined
-      // A scan settled while this attempt was in flight: the refusal describes the state before it.
-      if (scansAtStart === scanSettledCount) approveNotice.value = review.value?.server.definitions_captured ? NO_SCAN_NOTICE : NO_SCAN_NOT_CAPTURED_NOTICE
+      // A scan settled while this attempt was in flight: the refusal describes the state before it...
+      // ...and so does a refusal for a server that was replaced under the same name meanwhile.
+      if (scansAtStart === scanSettledCount && review.value?.server.incarnation === inc) noScanRefused.value = true
       return
     }
     error.value = message
@@ -494,11 +498,11 @@ async function refreshAfterScanSettled(event: Event) {
   if (serverName && serverName !== props.serverName) return
   scanning.value = false
   rescanning.value = false
-  approveNotice.value = ''; scanSettledCount++ // the scan it asked for has run
+  noScanRefused.value = false; scanSettledCount++ // the scan it asked for has run
   void load()
 }
 // Component reuse across /review/A -> /review/B: scan state and any pending force retry belong to the old server.
-watch(() => props.serverName, () => { visitGeneration++; readinessChecks = 0; if (readinessTimer) clearTimeout(readinessTimer); readinessTimer = null; choices.clear(); review.value = null; allowedTools.value = []; clearFilters(); stateFilter.value = initialStateFilter(props.change); lastBlock.value = null; notice.value = ''; toolNotice.value = ''; approving.value = false; requarantining.value = false; refreshing.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; fetchAttempt.value = null; approveNotice.value = ''; error.value = ''; void load() })
+watch(() => props.serverName, () => { visitGeneration++; readinessChecks = 0; if (readinessTimer) clearTimeout(readinessTimer); readinessTimer = null; choices.clear(); review.value = null; allowedTools.value = []; clearFilters(); stateFilter.value = initialStateFilter(props.change); lastBlock.value = null; notice.value = ''; toolNotice.value = ''; approving.value = false; requarantining.value = false; refreshing.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; fetchAttempt.value = null; noScanRefused.value = false; error.value = ''; void load() })
 onMounted(() => {
   void load()
   window.addEventListener('mcpproxy:review-changed', refreshAfterReviewChange)
