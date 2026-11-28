@@ -1304,6 +1304,8 @@ another port. Consumers that need the stronger claim must check
 `endpoint_match == "this"`; a UI showing a bare "Connected" on
 `endpoint_match == "other"` is reporting someone else's link as its own.
 
+The name `localhost` is treated as the loopback address for this comparison: an entry written as `http://localhost:8080/mcp` is `"this"` on an instance listening on `127.0.0.1:8080` (or `[::1]:8080`). Scheme, port and path must still be equal. Two different loopback addresses (`127.0.0.1` and `127.0.0.2`, or `127.0.0.1` and `[::1]`) are not the same endpoint. An entry that matches exactly always wins over one that matches through the alias, wherever it stands in the file. The alias decides which entry MCPProxy treats as its own when none matches exactly: this status and the `server_name` it returns (which the Web UI passes to Disconnect), and the entry whose credential is read when client credentials are reconciled. Disconnect itself removes by name, and Connect writes the requested name, adopting a differently named entry only on an exact address match.
+
 #### GET /api/v1/connect/{client}
 
 On-demand single-client status. Reads the one client's config **at request

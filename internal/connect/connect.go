@@ -1732,6 +1732,10 @@ func findEquivalentJSONServerName(serversMap map[string]interface{}, baseURL, re
 			if !ok {
 				continue
 			}
+			// Exact (or legacy-query) match only, NOT the localhost alias of
+			// endpointURLMatches: this lookup decides which entry a Connect
+			// rewrites, and Undo replays it against the backup, so widening it
+			// would change what an earlier, still undoable Connect replays to.
 			if entryURL == baseURL || strings.HasPrefix(entryURL, baseURL+"?") {
 				return name, true
 			}
@@ -1795,6 +1799,12 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLoc
 	// A name-only match is the weakest evidence, so it never short-circuits the
 	// scan: a sibling entry that genuinely points at us wins over it.
 	var nameOnly *entryLocation
+	// An entry that addresses us only through the localhost alias
+	// (loopbackNameAlias) is weaker than an exact match and stronger than a
+	// bare name: it is remembered and returned only when no entry anywhere in
+	// the file matches exactly, so which entry the scan selects for a file
+	// that already had an exact match is what it always was.
+	var aliasOnly *entryLocation
 
 	for _, name := range entryScanOrder(serversMap) {
 		entry, ok := serversMap[name].(map[string]interface{})
@@ -1808,6 +1818,9 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLoc
 				if s.urlPointsHere(u, baseURL, client.ID) {
 					return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}, true, true
 				}
+				if aliasOnly == nil && loopbackNameAlias(u, baseURL) {
+					aliasOnly = &entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}
+				}
 			}
 		}
 
@@ -1816,6 +1829,9 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLoc
 		// args so a bridge written under a custom server name is still found.
 		if entryPointsToBridge(entry, baseURL) {
 			return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}, true, true
+		}
+		if aliasOnly == nil && bridgeDestinationIsAlias(entry, baseURL) {
+			aliasOnly = &entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}
 		}
 
 		// Also match by server name. This arm is why "connected" has historically
@@ -1826,6 +1842,9 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLoc
 		}
 	}
 
+	if aliasOnly != nil {
+		return *aliasOnly, true, true
+	}
 	if nameOnly != nil {
 		return *nameOnly, true, true
 	}
@@ -1903,6 +1922,76 @@ func entryPointsToBridge(entry map[string]interface{}, baseURL string) bool {
 		}
 	}
 	return hasBridgePkg && pointsToUs
+}
+
+// bridgeDestinationIsAlias reports whether a stdio-bridge entry runs
+// mcp-remote against this instance written with the localhost alias. Unlike
+// the exact check above it reads the entry as the launcher does:
+//
+//   - the command is a package runner (npx, bunx, pnpx; a path or a Windows
+//     .cmd/.exe suffix is allowed). "echo mcp-remote <url>" starts no bridge;
+//   - the executable is the first argument that is not a flag or the value of
+//     --package / -p, or the argument after a "--" that comes before it;
+//   - it must be mcp-remote (a version pin is allowed), and the argument right
+//     after it is the destination.
+//
+// A loopback URL anywhere else (a header value, an argument of another
+// package) does not make the entry ours.
+func bridgeDestinationIsAlias(entry map[string]interface{}, baseURL string) bool {
+	command, _ := entry["command"].(string)
+	if !isPackageRunner(command) {
+		return false
+	}
+	rawArgs, ok := entry["args"].([]interface{})
+	if !ok {
+		return false
+	}
+	args := make([]string, 0, len(rawArgs))
+	for _, a := range rawArgs {
+		arg, ok := a.(string)
+		if !ok {
+			return false
+		}
+		args = append(args, arg)
+	}
+	// One pass, as the runner reads it: flags, then either "--" followed by the
+	// executable or the first positional argument. A "--" after a positional
+	// belongs to that package's own arguments.
+	exec := -1
+	for i := 0; i < len(args) && exec < 0; i++ {
+		switch {
+		case args[i] == "--":
+			exec = i + 1
+		case args[i] == "--package" || args[i] == "-p":
+			i++ // its value is a package to install, not the executable
+		case strings.HasPrefix(args[i], "-"):
+		default:
+			exec = i
+		}
+	}
+	if exec < 0 || exec+1 >= len(args) {
+		return false
+	}
+	if args[exec] != "mcp-remote" && !strings.HasPrefix(args[exec], "mcp-remote@") {
+		return false
+	}
+	return loopbackNameAlias(args[exec+1], baseURL)
+}
+
+// isPackageRunner reports whether command is a launcher that runs the package
+// named in its arguments.
+func isPackageRunner(command string) bool {
+	base := command
+	if k := strings.LastIndexAny(base, `/\`); k >= 0 {
+		base = base[k+1:]
+	}
+	base = strings.ToLower(base)
+	base = strings.TrimSuffix(strings.TrimSuffix(base, ".cmd"), ".exe")
+	switch base {
+	case "npx", "bunx", "pnpx":
+		return true
+	}
+	return false
 }
 
 func unmarshalLenientJSON(raw []byte, out interface{}) error {
@@ -2063,6 +2152,7 @@ func (s *Service) findEntryTOMLBytes(raw []byte) (loc entryLocation, found, pars
 	baseURL := s.baseURL()
 
 	var nameOnly *entryLocation
+	var aliasOnly *entryLocation // see findEntryJSONBytes
 
 	for _, name := range entryScanOrder(serversMap) {
 		entry, ok := serversMap[name].(map[string]interface{})
@@ -2073,12 +2163,18 @@ func (s *Service) findEntryTOMLBytes(raw []byte) (loc entryLocation, found, pars
 			if s.urlPointsHere(u, baseURL, "") {
 				return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}, true, true
 			}
+			if aliasOnly == nil && loopbackNameAlias(u, baseURL) {
+				aliasOnly = &entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}
+			}
 		}
 		if name == defaultServerName && nameOnly == nil {
 			nameOnly = &entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), Entry: entry}
 		}
 	}
 
+	if aliasOnly != nil {
+		return *aliasOnly, true, true
+	}
 	if nameOnly != nil {
 		return *nameOnly, true, true
 	}
