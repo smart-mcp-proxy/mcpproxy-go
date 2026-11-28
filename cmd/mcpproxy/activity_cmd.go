@@ -1269,6 +1269,9 @@ func init() {
 	activityCmd.AddCommand(activityShowCmd)
 	activityCmd.AddCommand(activitySummaryCmd)
 	activityCmd.AddCommand(activityExportCmd)
+	// Spec 124 PR-2: work sessions and the failure timeline.
+	activityCmd.AddCommand(newActivitySessionsCmd())
+	activityCmd.AddCommand(newActivitySessionCmd())
 
 	// List command flags
 	activityListCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated for multiple): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, preflight, profile_change, upstream_event")

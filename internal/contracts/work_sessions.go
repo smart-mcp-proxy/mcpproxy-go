@@ -4,6 +4,18 @@ import "time"
 
 // Spec 124: work sessions and their failure timeline.
 
+// WorkSessionNotFoundMessage is the error text of a work-session door for an
+// id that matches no session the caller may read. The CLI tells this answer
+// from any other 404 (a proxy's, an older daemon's) by this text.
+const WorkSessionNotFoundMessage = "Work session not found"
+
+// WorkSessionNoSuchPositionMessage is the timeline door's refusal of a
+// position (`at`) that names a failure or a row the session does not have.
+// The CLI's walk over every failure reads it as "the session lost rows since
+// the last page", which is the one way a number it was just given can be
+// refused.
+const WorkSessionNoSuchPositionMessage = "Invalid at. No such failure or row in this session"
+
 // WorkSessionFailure describes the last failure of a work session.
 type WorkSessionFailure struct {
 	At         time.Time `json:"at"`

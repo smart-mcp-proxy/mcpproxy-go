@@ -1234,13 +1234,18 @@ ws_call() {
 ws_call '{"tool_name":"call_tool_read","arguments":{"name":"everything:echo","args":{"message":"spec 124 first"}}}'
 ws_call '{"tool_name":"call_tool_read","arguments":{"name":"everything:echo","args":{"message":"spec 124 second"}}}'
 ws_call '{"tool_name":"call_tool_read","arguments":{"name":"everything:no_such_tool_spec_124","args":{}}}'
+# A second failure right after the first: their contexts overlap, which the
+# CLI's --failures check below relies on.
+ws_call '{"tool_name":"call_tool_read","arguments":{"name":"everything:no_such_tool_spec_124_again","args":{}}}'
 
 log_test "Work session: a named REST run is listed as failed"
 WS_ID=""
 for _ in $(seq 1 40); do
     curl -s --max-time 10 $CURL_CA_OPTS -H "X-API-Key: $API_KEY" \
         "${API_BASE}/work-sessions?run=${WS_RUN}&failed=true" > "$TEST_RESULTS_FILE"
-    WS_ID=$(jq -r '.data.sessions[0].id // empty' < "$TEST_RESULTS_FILE" 2>/dev/null)
+    # Activity rows are written asynchronously: wait until both failures of
+    # the run are stored, not only until the session exists.
+    WS_ID=$(jq -r '.data.sessions[0] | select(.failures >= 2) | .id // empty' < "$TEST_RESULTS_FILE" 2>/dev/null)
     [ -n "$WS_ID" ] && break
     sleep 0.25
 done
@@ -1419,6 +1424,94 @@ if [ $EXIT_CODE -eq 0 ]; then
     log_pass "CLI: activity export --format csv"
 else
     log_fail "CLI: activity export --format csv"
+    echo "Response: $RESPONSE"
+fi
+
+# Work sessions through the CLI (Spec 124 PR-2): the morning-after case of the
+# REST section above, with the two commands an operator types over SSH. It
+# reads the session the REST section made under $WS_RUN.
+# The JSON checks read stdout only: a warning on stderr is not part of the
+# document.
+log_test "CLI: activity sessions --failed lists the named run"
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity sessions --failed --run "$WS_RUN" -o json 2>/dev/null)
+EXIT_CODE=$?
+CLI_WS_ID=$(echo "$RESPONSE" | jq -r '.sessions[0].id // empty' 2>/dev/null)
+if [ $EXIT_CODE -eq 0 ] && [ -n "$CLI_WS_ID" ] && [ "$CLI_WS_ID" = "$WS_ID" ] && echo "$RESPONSE" | jq -e --arg run "$WS_RUN" '
+        .total == 1 and (.sessions[0] | .run_name == $run and .failures >= 1 and .last_failure != null)' >/dev/null 2>&1; then
+    log_pass "CLI: activity sessions --failed lists the named run"
+else
+    log_fail "CLI: activity sessions --failed lists the named run"
+    echo "Response: $RESPONSE"
+fi
+
+log_test "CLI: activity sessions prints the table"
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity sessions --failed --run "$WS_RUN" -o table 2>&1)
+EXIT_CODE=$?
+if [ $EXIT_CODE -eq 0 ] && echo "$RESPONSE" | grep -q "LAST FAILURE" && echo "$RESPONSE" | grep -q "$WS_RUN" \
+        && [ -n "$CLI_WS_ID" ] && echo "$RESPONSE" | grep -q "^$CLI_WS_ID"; then
+    log_pass "CLI: activity sessions prints the table"
+else
+    log_fail "CLI: activity sessions prints the table"
+    echo "Response: $RESPONSE"
+fi
+
+if [ -n "$CLI_WS_ID" ]; then
+    # Opens at the first failure, with the calls that led to it before it.
+    log_test "CLI: activity session opens at the first failure"
+    RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" -o json 2>/dev/null)
+    EXIT_CODE=$?
+    if [ $EXIT_CODE -eq 0 ] && echo "$RESPONSE" | jq -e '. as $d | $d.failure_index == 1 and $d.failure_total >= 1
+            and ($d.rows | map(select(.index == $d.position)) | .[0].failed == true)
+            and ($d.rows | map(select(.index < $d.position)) | length >= 2)' >/dev/null 2>&1; then
+        log_pass "CLI: activity session opens at the first failure"
+    else
+        log_fail "CLI: activity session opens at the first failure"
+        echo "Response: $RESPONSE"
+    fi
+
+    log_test "CLI: activity session prints the timeline"
+    RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" -o table 2>&1)
+    EXIT_CODE=$?
+    if [ $EXIT_CODE -eq 0 ] && echo "$RESPONSE" | grep -q "Session $CLI_WS_ID" && echo "$RESPONSE" | grep -q "Failure 1 of" \
+            && echo "$RESPONSE" | grep -qE "^(FAIL|BLOCK) " && echo "$RESPONSE" | grep -q "SESSION START"; then
+        log_pass "CLI: activity session prints the timeline"
+    else
+        log_fail "CLI: activity session prints the timeline"
+        echo "Response: $RESPONSE"
+    fi
+
+    # Every failure with the two rows before it. The run failed twice in a
+    # row, so the two contexts overlap (the failures are at most two rows
+    # apart). The rows are then exactly the run from two rows before the first
+    # failure to the last failure: each once, none missing, none outside.
+    log_test "CLI: activity session --failures walks the failures"
+    RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session "$CLI_WS_ID" --failures --before 2 -o json 2>/dev/null)
+    EXIT_CODE=$?
+    # -s: the output is one JSON document, not several.
+    if [ $EXIT_CODE -eq 0 ] && echo "$RESPONSE" | jq -e -s 'length == 1 and (.[0] as $d | ($d.failures | length) >= 2 and ($d.failures | length) == $d.failure_total
+            and ([$d.rows[].index] | length == (unique | length))
+            and ([$d.failures[].number] == [range(1; ($d.failures | length) + 1)])
+            and ([$d.failures[].index] | length == (unique | length))
+            and ([$d.failures[].index] == [$d.rows[] | select(.failed == true) | .index])
+            and ($d.failures[1].index - $d.failures[0].index <= 2)
+            and ([$d.rows[].index] == [range($d.failures[0].index - 2; $d.failures[-1].index + 1)])
+            and ($d.rows | map(select(.index < $d.failures[0].index)) | length == 2)
+            and ($d.rows | all(.index as $i | any($d.failures[]; .index - 2 <= $i and $i <= .index))))' >/dev/null 2>&1; then
+        log_pass "CLI: activity session --failures walks the failures"
+    else
+        log_fail "CLI: activity session --failures walks the failures"
+        echo "Response: $RESPONSE"
+    fi
+fi
+
+log_test "CLI: activity session with an unknown id fails and names the listing"
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity session ws-does-not-exist -o table 2>&1)
+EXIT_CODE=$?
+if [ $EXIT_CODE -eq 1 ] && echo "$RESPONSE" | grep -q "not found" && echo "$RESPONSE" | grep -q "mcpproxy activity sessions" \
+        && ! echo "$RESPONSE" | grep -q "Usage:"; then
+    log_pass "CLI: activity session with an unknown id fails and names the listing"
+else
+    log_fail "CLI: activity session with an unknown id fails and names the listing (exit $EXIT_CODE)"
     echo "Response: $RESPONSE"
 fi
 
