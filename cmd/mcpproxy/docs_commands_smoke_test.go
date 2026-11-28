@@ -51,6 +51,7 @@ var docsSmokeFiles = []string{
 	"docs/features/connect-clients.md",
 	"docs/features/profiles.md",
 	"docs/cli/management-commands.md",
+	"docs/cli/activity-commands.md",
 	"docs/cli/review-commands.md",
 	"docs/cli/profile-commands.md",
 	"docs/cli/security-commands.md",
