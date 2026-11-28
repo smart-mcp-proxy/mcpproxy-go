@@ -41,6 +41,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var updateService = UpdateService()
     var coreManager: CoreProcessManager?
 
+    /// The single-tray lock descriptor (`TrayInstanceLock`), held for the life
+    /// of the process and handed over on a relaunch into a replaced bundle.
+    private var trayLockDescriptor: Int32?
+
     private var statusItem: NSStatusItem?
     /// The corner severity dot overlaid on the status item button, when a
     /// server severity is being badged. Held so `updateStatusIcon()` can reuse
@@ -145,8 +149,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // recorded. exit(), not terminate(): this process owns no core, and
         // applicationWillTerminate would journal a termination for it.
         switch TrayInstanceLock.acquire(at: InstancePaths.trayLockURL) {
-        case .acquired:
-            break
+        case .acquired(let descriptor):
+            trayLockDescriptor = descriptor
         case .heldByAnotherTray:
             NSLog("[MCPProxy] Another MCPProxy tray is already running for %@ - exiting",
                   InstancePaths.root.path)
@@ -1855,7 +1859,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 launcher.executableURL = URL(fileURLWithPath: "/usr/bin/open")
                 launcher.arguments = ["-n", bundlePath]
                 do {
-                    try launcher.run()
+                    // The new tray checks the single-tray lock at launch, while
+                    // this one is still running: release it first, or the new
+                    // tray exits and none is left.
+                    if let descriptor = self.trayLockDescriptor {
+                        self.trayLockDescriptor = nil
+                        switch TrayInstanceLock.handOver(descriptor, at: InstancePaths.trayLockURL,
+                                                         launch: { try launcher.run() }) {
+                        case .launched:
+                            break
+                        case .failed(let error, let relock):
+                            if case .acquired(let again) = relock { self.trayLockDescriptor = again }
+                            throw error
+                        }
+                    } else {
+                        try launcher.run()
+                    }
                 } catch {
                     NSLog("[MCPProxy] Could not launch %@: %@", bundlePath, error.localizedDescription)
                     self.presentAlert(

@@ -41,4 +41,26 @@ enum TrayInstanceLock: Equatable {
         if code == EWOULDBLOCK { return .heldByAnotherTray }
         return .unavailable("flock failed on \(url.path) (errno \(code))")
     }
+
+    enum HandOverOutcome {
+        /// The successor was launched; this tray no longer holds the lock.
+        case launched
+        /// The launch threw. This tray keeps running, holding `relock`.
+        case failed(Error, relock: TrayInstanceLock)
+    }
+
+    /// Starts a successor tray while this one is still running (relaunch into a
+    /// replaced bundle). The lock is released first: the successor checks it at
+    /// launch, and finding it still held it would exit, leaving no tray at all.
+    /// If the launch fails this tray stays, so it takes the lock back.
+    static func handOver(_ descriptor: Int32, at url: URL,
+                         launch: () throws -> Void) -> HandOverOutcome {
+        close(descriptor)
+        do {
+            try launch()
+            return .launched
+        } catch {
+            return .failed(error, relock: acquire(at: url))
+        }
+    }
 }
