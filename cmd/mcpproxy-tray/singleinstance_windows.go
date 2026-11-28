@@ -17,12 +17,18 @@ func acquireSingleInstance(id string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	_, err = windows.CreateMutex(nil, false, name)
+	handle, err := windows.CreateMutex(nil, false, name)
 	switch {
 	case err == nil:
 		return true, nil
+	case errors.Is(err, windows.ERROR_ALREADY_EXISTS):
+		// The handle is valid. Close it now: held while this process logs and
+		// exits, it would keep the mutex alive after the running tray quits
+		// and turn away the next launch too.
+		_ = windows.CloseHandle(handle)
+		return false, nil
 	// ACCESS_DENIED: the mutex exists but belongs to an elevated instance.
-	case errors.Is(err, windows.ERROR_ALREADY_EXISTS), errors.Is(err, windows.ERROR_ACCESS_DENIED):
+	case errors.Is(err, windows.ERROR_ACCESS_DENIED):
 		return false, nil
 	default:
 		return false, err

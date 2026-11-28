@@ -1886,7 +1886,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     NSLog("[MCPProxy] Could not launch %@: %@", bundlePath, error.localizedDescription)
                     self.presentAlert(
                         title: "Could not start the new version",
-                        message: "Open \(bundlePath) manually to finish the upgrade.\n\n"
+                        message: "Quit MCPProxy from its menu, then open \(bundlePath) to finish the upgrade. "
+                            + "While this copy runs, the new one stops at launch.\n\n"
                             + error.localizedDescription
                     )
                     return
