@@ -661,30 +661,36 @@ func ValidateOAuthMetadataWithEnv(env Env, serverURL, serverName string, timeout
 		zap.String("server", serverName),
 		zap.String("url", logSafeURL(serverURL)))
 
-	// Step 1: Make preflight request to get WWW-Authenticate header
-	client := env.client(timeout)
-	resp, err := client.Post(serverURL, "application/json", strings.NewReader("{}"))
-	if err != nil {
-		logger.Debug("Preflight request failed",
-			zap.String("server", serverName),
-			logSafeErrorField(err))
-		// This is a connection error, not a metadata error - return nil to let OAuth flow proceed
-		// The actual OAuth flow will handle connection errors appropriately
-		return nil, nil
-	}
-	defer resp.Body.Close()
+	// Step 1: The well-known metadata first: the preflight POST below is a
+	// failed login to servers that count them, even when the user is signing in.
+	var metadataURL string
+	if wellKnownPRM(env, serverURL, discoveryOverrides{}, timeout) != nil {
+		metadataURL = wellKnownPRMURL(serverURL)
+	} else {
+		// Otherwise, make preflight request to get WWW-Authenticate header
+		client := env.client(timeout)
+		resp, err := client.Post(serverURL, "application/json", strings.NewReader("{}"))
+		if err != nil {
+			logger.Debug("Preflight request failed",
+				zap.String("server", serverName),
+				logSafeErrorField(err))
+			// This is a connection error, not a metadata error - return nil to let OAuth flow proceed
+			// The actual OAuth flow will handle connection errors appropriately
+			return nil, nil
+		}
+		defer resp.Body.Close()
 
-	// If not 401, OAuth might not be required or server uses different auth
-	if resp.StatusCode != http.StatusUnauthorized {
-		logger.Debug("Server did not return 401, skipping metadata validation",
-			zap.String("server", serverName),
-			zap.Int("status_code", resp.StatusCode))
-		return nil, nil
-	}
+		// If not 401, OAuth might not be required or server uses different auth
+		if resp.StatusCode != http.StatusUnauthorized {
+			logger.Debug("Server did not return 401, skipping metadata validation",
+				zap.String("server", serverName),
+				zap.Int("status_code", resp.StatusCode))
+			return nil, nil
+		}
 
-	// Step 2: Extract protected resource metadata URL from WWW-Authenticate
-	wwwAuth := resp.Header.Get("WWW-Authenticate")
-	metadataURL := ExtractResourceMetadataURL(wwwAuth)
+		// Step 2: Extract protected resource metadata URL from WWW-Authenticate
+		metadataURL = ExtractResourceMetadataURL(resp.Header.Get("WWW-Authenticate"))
+	}
 
 	if metadataURL == "" {
 		// No resource_metadata in WWW-Authenticate - this is OK, some servers don't use RFC 9728

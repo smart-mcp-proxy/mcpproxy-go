@@ -421,7 +421,8 @@ func TestCreateOAuthConfig_AutoDetectsResource(t *testing.T) {
 // A server that publishes its RFC 9728 metadata at the well-known URL gets no
 // unauthenticated POST on its MCP endpoint. Home Assistant (modelled here)
 // treats each such 401 as a failed login: it notifies about the client's IP
-// and can ban it. Each reconnect builds the OAuth config again.
+// and can ban it. Each reconnect builds the OAuth config again, and a sign-in
+// validates the metadata first.
 func TestCreateOAuthConfig_WellKnownPRMSkipsUnauthenticatedProbe(t *testing.T) {
 	var serverURL string
 	var unauthenticatedPOSTs atomic.Int32
@@ -430,6 +431,9 @@ func TestCreateOAuthConfig_WellKnownPRMSkipsUnauthenticatedProbe(t *testing.T) {
 		case r.URL.Path == "/.well-known/oauth-protected-resource/api/mcp":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"resource": %q, "authorization_servers": [%q]}`, serverURL+"/api/mcp", serverURL)
+		case r.URL.Path == "/.well-known/oauth-authorization-server":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"issuer": %q, "authorization_endpoint": "%s/auth/authorize", "token_endpoint": "%s/auth/token"}`, serverURL, serverURL, serverURL)
 		case r.URL.Path == "/api/mcp" && r.Method == http.MethodHead:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		case r.URL.Path == "/api/mcp" && r.Header.Get("Authorization") == "":
@@ -460,6 +464,10 @@ func TestCreateOAuthConfig_WellKnownPRMSkipsUnauthenticatedProbe(t *testing.T) {
 		require.NotNil(t, oauthConfig, attempt)
 		assert.Equal(t, serverConfig.URL, extraParams["resource"], attempt)
 	}
+	res, err := ValidateOAuthMetadataWithEnv(Env{Ctx: context.Background()}, serverConfig.URL, serverConfig.Name, 5*time.Second)
+	require.NoError(t, err, "sign-in")
+	require.NotNil(t, res, "sign-in")
+	assert.True(t, res.Valid, "sign-in")
 	assert.Zero(t, unauthenticatedPOSTs.Load(), "the MCP endpoint must get no unauthenticated POST")
 }
 
