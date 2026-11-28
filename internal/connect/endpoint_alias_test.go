@@ -90,6 +90,9 @@ func TestBridgeDestinationAlias(t *testing.T) {
 		with("node", "mcp-remote", "http://localhost:8080/mcp"),      // runs a file named mcp-remote, not the package
 		args("--package", "mcp-remote", "http://localhost:8080/mcp"), // the URL is the executable here, not a destination
 		args("--", "cowsay", "mcp-remote", "http://localhost:8080/mcp"),
+		args("-y", "cowsay", "hello", "--", "mcp-remote", "http://localhost:8080/mcp"), // "--" belongs to cowsay
+		args("-y", "--"),
+		args("-p"),
 		args("some-server", "http://localhost:8080/mcp"),
 		args("-y", "mcp-remote", "http://localhost:9090/mcp"),
 		args(),

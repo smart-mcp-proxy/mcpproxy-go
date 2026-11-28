@@ -1930,8 +1930,8 @@ func entryPointsToBridge(entry map[string]interface{}, baseURL string) bool {
 //
 //   - the command is a package runner (npx, bunx, pnpx; a path or a Windows
 //     .cmd/.exe suffix is allowed). "echo mcp-remote <url>" starts no bridge;
-//   - the executable is the argument after "--" when there is one, else the
-//     first argument that is not a flag or the value of --package / -p;
+//   - the executable is the first argument that is not a flag or the value of
+//     --package / -p, or the argument after a "--" that comes before it;
 //   - it must be mcp-remote (a version pin is allowed), and the argument right
 //     after it is the destination.
 //
@@ -1954,24 +1954,19 @@ func bridgeDestinationIsAlias(entry map[string]interface{}, baseURL string) bool
 		}
 		args = append(args, arg)
 	}
+	// One pass, as the runner reads it: flags, then either "--" followed by the
+	// executable or the first positional argument. A "--" after a positional
+	// belongs to that package's own arguments.
 	exec := -1
-	for i, arg := range args {
-		if arg == "--" {
+	for i := 0; i < len(args) && exec < 0; i++ {
+		switch {
+		case args[i] == "--":
 			exec = i + 1
-			break
-		}
-	}
-	if exec < 0 {
-		for i := 0; i < len(args); i++ {
-			if args[i] == "--package" || args[i] == "-p" {
-				i++ // its value is a package to install, not the executable
-				continue
-			}
-			if strings.HasPrefix(args[i], "-") {
-				continue
-			}
+		case args[i] == "--package" || args[i] == "-p":
+			i++ // its value is a package to install, not the executable
+		case strings.HasPrefix(args[i], "-"):
+		default:
 			exec = i
-			break
 		}
 	}
 	if exec < 0 || exec+1 >= len(args) {
