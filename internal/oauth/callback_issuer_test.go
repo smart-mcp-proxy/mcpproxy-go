@@ -86,11 +86,12 @@ func TestCallback_DecisionBeforePage(t *testing.T) {
 			assert.NotContains(t, body, "access_denied", "the provider error is not reported before the issuer passes")
 			assert.NotContains(t, body, "evil", "the received iss is never rendered")
 			assert.Contains(t, body, "expected authorization server")
+			assert.Equal(t, diagnostics.OAuthIssuerMismatch, diagnostics.Classify(got.Err, diagnostics.ClassifierHints{}))
+			// The owning flow records the refusal, once; the handler does not.
 			select {
 			case f := <-failures:
-				assert.Equal(t, diagnostics.OAuthIssuerMismatch, diagnostics.Classify(f, diagnostics.ClassifierHints{}))
-			case <-time.After(2 * time.Second):
-				t.Fatal("refusal not recorded as an OAuth failure")
+				t.Fatalf("handler recorded the refusal itself: %v", f)
+			case <-time.After(100 * time.Millisecond):
 			}
 		})
 	}

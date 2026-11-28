@@ -118,7 +118,11 @@ func TestLogin_IssuerDecision_EndToEnd(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("refused login was not reported")
 			}
-			time.Sleep(100 * time.Millisecond)
+			select {
+			case dup := <-failures:
+				t.Fatalf("refusal recorded twice: %v", dup)
+			case <-time.After(200 * time.Millisecond):
+			}
 			assert.EqualValues(t, 0, f.srv.Server.TokenRequestCount(), "the code must never reach the token endpoint")
 		})
 	}

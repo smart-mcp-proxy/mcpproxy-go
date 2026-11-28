@@ -2120,7 +2120,7 @@ func (c *CallbackServer) handleParsedCallback(w http.ResponseWriter, query url.V
 	// Spec 135 FR-003/FR-005: the issuer decision runs for the flow this
 	// state selects, before the provider's error is reported and before the
 	// page is chosen. A refusal reaches the flow as CallbackResult.Err, so
-	// the code is never exchanged.
+	// the code is never exchanged; the flow records it.
 	if issuerCheck.Armed() {
 		decision, issErr := DecideAuthorizationResponseIssuer(query, issuerCheck.Expected, issuerCheck.Skip)
 		if issErr != nil {
@@ -2131,10 +2131,9 @@ func (c *CallbackServer) handleParsedCallback(w http.ResponseWriter, query url.V
 				zap.String("issuer_source", string(issuerCheck.Expected.Source)),
 				zap.Bool("iss_present", issPresent),
 				zap.String("iss", ScrubUpstreamText(params.Get("iss"))))
-			if notifyFailure {
-				GetTokenStoreManager().RecordOAuthFailure(c.ServerName,
-					fmt.Errorf("OAuth callback for server %q was refused: %w", c.ServerName, issErr))
-			}
+			// Not recorded here: the flow that owns this state receives the
+			// refusal and records it once, on the loopback and the remote
+			// callback alike, under its own retirement rules.
 			c.writePage(w, http.StatusBadRequest, callbackPage(callbackTitleFailed,
 				fmt.Sprintf("The sign-in response could not be confirmed as coming from the expected authorization server (%s). "+
 					"Nothing was signed in. Start the sign-in again from mcpproxy for '%s'.",

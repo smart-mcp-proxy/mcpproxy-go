@@ -1346,6 +1346,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	select {
 	case params := <-callbackCh:
 		if params.Err != nil {
+			c.reportOAuthFailure(fmt.Errorf("OAuth authorization for %s was refused: %w", c.config.Name, params.Err))
 			return fmt.Errorf("OAuth authorization response refused: %w", params.Err)
 		}
 		waitDuration := time.Since(waitStartTime)
@@ -1631,6 +1632,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 	select {
 	case params := <-callbackCh:
 		if params.Err != nil {
+			c.reportOAuthFailure(fmt.Errorf("OAuth authorization for %s was refused: %w", c.config.Name, params.Err))
 			return result, fmt.Errorf("OAuth authorization response refused: %w", params.Err)
 		}
 		c.logger.Info("🎯 OAuth callback received",
