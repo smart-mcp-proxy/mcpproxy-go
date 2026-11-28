@@ -759,11 +759,21 @@ file, so a rejection seen by the provider can be matched to one client attempt:
   final answer) under the same `flight`. For a client registered on the fly
   (dynamic client registration), a followed redirect shares one line, and a
   redirect that cannot be followed shows as a `network` failure.
+- `OAuth token save finished`: one line each time a token response is stored,
+  with `result` (`saved`; `superseded` when a sign-in or another flight stored
+  a newer grant first, so this response was dropped; `instance_replaced` when
+  the server was removed or reconfigured meanwhile; `cancelled` when the
+  flight's 30-second deadline passed before the answer could be stored;
+  `failed` when the database write failed), the `flight` and `trigger` (`0` and `none` for a sign-in) and
+  `refresh_token_changed` (the provider sent a new refresh token). A
+  `refresh_token` request with `http_status` 200 and no `saved` line for its
+  flight means the new pair was received but not stored.
 - `OAuth refresh flight finished`: the same `flight` with its `outcome` class.
 
 With `refresh_replay_enabled` a flight can send two token requests; both carry
-the flight's number. None of these lines contain URLs, tokens, codes or error
-text.
+the flight's number, and so do its `OAuth refresh attempt finished` and
+`OAuth quick retry skipped` lines. None of these lines contain URLs, tokens,
+codes or error text.
 
 #### Discovery caching
 

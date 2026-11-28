@@ -1442,7 +1442,7 @@ func createOAuthConfigInternal(env Env, serverConfig *config.ServerConfig, stora
 	// Use persistent token store to persist tokens across daemon restarts if storage is available
 	var tokenStore client.TokenStore
 	if storage != nil {
-		tokenStore = NewBoundPersistentTokenStore(serverConfig.Name, serverConfig.URL, storage, env.Binding)
+		tokenStore = NewBoundPersistentTokenStoreWithLogger(serverConfig.Name, serverConfig.URL, storage, env.Binding, logger)
 		logger.Info("🔧 Using persistent token store for OAuth tokens",
 			zap.String("server", serverConfig.Name),
 			zap.String("storage", "BBolt database"))

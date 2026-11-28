@@ -33,6 +33,11 @@ type PersistentTokenStore struct {
 	serverKey  string // Unique key combining server name and URL (used for storage)
 	storage    *storage.BoltDB
 	logger     *zap.Logger
+	// saveLogger receives the one-line outcome of each SaveToken (GH
+	// #1827): the server's OAuth logger, so it reaches main.log and the
+	// server's own log. logger above is zap.L(), the no-op logger in this
+	// binary. nil: no outcome line.
+	saveLogger *zap.Logger
 
 	// binding is set only on the store instance handed to mcp-go, once the
 	// live OAuth handler exists (Spec 113 FR-002). Unbound stores keep the
@@ -65,6 +70,14 @@ func NewPersistentTokenStore(serverName, serverURL string, storage *storage.Bolt
 // credentials of whatever serves the name now.
 func NewBoundPersistentTokenStore(serverName, serverURL string, storage *storage.BoltDB, b commitview.CredentialBinding) client.TokenStore {
 	return newPersistentTokenStore(serverName, serverURL, storage, b)
+}
+
+// NewBoundPersistentTokenStoreWithLogger is NewBoundPersistentTokenStore whose
+// saves each leave one "OAuth token save finished" line on logger (GH #1827).
+func NewBoundPersistentTokenStoreWithLogger(serverName, serverURL string, storage *storage.BoltDB, b commitview.CredentialBinding, logger *zap.Logger) client.TokenStore {
+	p := newPersistentTokenStore(serverName, serverURL, storage, b)
+	p.saveLogger = logger
+	return p
 }
 
 func newPersistentTokenStore(serverName, serverURL string, storage *storage.BoltDB, b commitview.CredentialBinding) *PersistentTokenStore {
@@ -297,6 +310,9 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
+		// The flight's deadline passed (or its caller went away) after the
+		// response arrived: the pair is not stored (GH #1827).
+		LogTokenSave(ctx, p.saveLogger, p.serverName, TokenSaveCancelled, false)
 		return err
 	}
 
@@ -348,11 +364,13 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 		qahooks.ParkOAuthPersist(p.serverName)
 	}
 	var savedRec *storage.OAuthTokenRecord
+	rtChanged := false
 	written, err := p.storage.UpdateOAuthTokenIfBound(p.serverKey, p.serverName, p.cb, func(rec *storage.OAuthTokenRecord) error {
 		if inFlight && !GenerationMatches(rec, flightGen) {
 			discarded = true
 			return storage.ErrSkipOAuthTokenUpdate
 		}
+		rtChanged = rec.RefreshToken != token.RefreshToken
 		savedRec = rec                 // the write assigns its revision to rec
 		rec.DisplayName = p.serverName // Actual server name (for RefreshManager)
 		rec.AccessToken = token.AccessToken
@@ -373,6 +391,7 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 		return nil
 	})
 	if err != nil {
+		LogTokenSave(ctx, p.saveLogger, p.serverName, TokenSaveFailed, false)
 		p.logger.Error("❌ Failed to save OAuth token to persistent storage",
 			zap.String("server", p.serverName),
 			zap.String("server_key", p.serverKey),
@@ -385,12 +404,14 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 		return fmt.Errorf("failed to save OAuth token: %w", err)
 	}
 	if discarded {
+		LogTokenSave(ctx, p.saveLogger, p.serverName, TokenSaveSuperseded, false)
 		p.logger.Info("Discarded a refresh result superseded by a newer grant",
 			zap.String("server", p.serverName),
 			zap.String("server_key", p.serverKey))
 		return nil
 	}
 	if !written {
+		LogTokenSave(ctx, p.saveLogger, p.serverName, TokenSaveInstanceReplaced, false)
 		p.logger.Info("Discarded an OAuth token for a server instance that was removed, replaced or reconfigured",
 			zap.String("server", p.serverName),
 			zap.String("binding", p.cb.String()))
@@ -400,6 +421,7 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 		noteFlightSavedRevision(ctx, savedRec.Revision)
 	}
 	DefaultRefreshCoordinator().NoteTokenSavedFor(p.serverKey, p.cb)
+	LogTokenSave(ctx, p.saveLogger, p.serverName, TokenSaveSaved, rtChanged)
 
 	p.logger.Info("✅ OAuth token saved to persistent storage successfully",
 		zap.String("server", p.serverName),
