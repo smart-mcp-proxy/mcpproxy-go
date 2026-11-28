@@ -222,6 +222,8 @@ MCPProxy auto-detects the configuration format by analyzing:
 
 An MCPProxy file is read with the same rules as `upstream add-json`: the same server keys, the same validation, and an unknown key inside `oauth` is refused. One invalid server fails the whole file. The `oauth` block is stored as written; other unsupported keys are reported as skipped. `trust_mode` is never imported: imported servers start quarantined at the default review tier.
 
+Detection only fires on keys no other client uses. A file whose servers carry none of them (for example an `oauth` block with only `scopes`) is read by another client's parser, which drops the `oauth` block; pass `--format mcpproxy` for such a file.
+
 You can override auto-detection with the `format` parameter:
 - `claude-desktop`
 - `claude-code`
