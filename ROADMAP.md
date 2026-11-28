@@ -52,6 +52,7 @@ graph LR
   telemetry_v7_churn["Telemetry v7: honest funnel + churn ins…"]
   sso["Spec 107 server edition SSO front door…"]
   profiles_v3["Spec 108 profiles v3: scoped profiles,…"]
+  ux_navigation_consistency["Spec 109 navigation, scope filters and…"]
   upstream_resilience["Spec 113 upstream resilience: OAuth ref…"]
   pending_call_outcome["Spec 114 typed pending-call outcome + c…"]
   mcp_credential_lifecycle["Spec 115 admin MCP credentials tool: cl…"]
@@ -62,10 +63,15 @@ graph LR
   pin_visibility_boundary["Spec 118 profile pin as the visibility…"]
   scan_default_trust["Spec 119 scan is the default trust mode…"]
   scan_structural_gate["Spec 120 structural change gate in fron…"]
+  oauth_token_encryption["Spec 123 encrypt upstream OAuth tokens…"]
   skills_over_mcp["Spec 125 Skills over MCP: catalog, appr…"]
   profile_argument_rules["Spec 127 argument rules in profiles (de…"]
   server_list_outcomes["Spec 128 server outcomes on retrieve_to…"]
   per_user_upstream_credentials["Spec 129 per-user upstream credentials…"]
+  skills_review_ux["Specs 130 + 131 Skills review UX: revie…"]
+  webui_simplify["Spec 134 Web UI simplification: problem…"]
+  oauth_client_hardening["Spec 135 OAuth client hardening: issuer…"]
+  tool_listing_fields["Spec 137 preserve the new tool listing…"]
 
   scanner_v2 --> sandbox_isolation
   ux_audit --> action_log_transparency
@@ -94,23 +100,28 @@ graph LR
   profiles_v3 --> profile_argument_rules
   pin_visibility_boundary --> server_list_outcomes
   sso --> per_user_upstream_credentials
+  skills_over_mcp --> skills_review_ux
+  ux_navigation_consistency --> webui_simplify
+  oauth_token_encryption --> oauth_client_hardening
+  scan_structural_gate --> tool_listing_fields
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
   classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class sandbox_isolation,scanner_v2,analytics_dashboard,scanner_simplification,schema_deferred,agent_scope_hardening,sso,upstream_resilience,mcp_credential_lifecycle,config_commit_consistency,review_bound_approvals,quarantine_approval_pilot,auto_rescan_on_change,pin_visibility_boundary,scan_default_trust,scan_structural_gate done;
-  class ux_audit,action_log_transparency,tpa_db,token_bench,telemetry_identity,telemetry_v7_churn,profiles_v3,skills_over_mcp in_progress;
+  class sandbox_isolation,scanner_v2,analytics_dashboard,scanner_simplification,schema_deferred,agent_scope_hardening,sso,upstream_resilience,mcp_credential_lifecycle,config_commit_consistency,review_bound_approvals,quarantine_approval_pilot,auto_rescan_on_change,pin_visibility_boundary,scan_default_trust,scan_structural_gate,oauth_token_encryption,skills_over_mcp,skills_review_ux done;
+  class ux_audit,action_log_transparency,tpa_db,token_bench,telemetry_identity,telemetry_v7_churn,profiles_v3,ux_navigation_consistency,webui_simplify,oauth_client_hardening in_progress;
   class pending_call_outcome in_review;
-  class remote_access_tunnel,auto_routing_mode,tool_graph,profile_argument_rules,server_list_outcomes,per_user_upstream_credentials todo;
+  class remote_access_tunnel,auto_routing_mode,tool_graph,profile_argument_rules,server_list_outcomes,per_user_upstream_credentials,tool_listing_fields todo;
 ```
 
 **Independent epics** (19) — no cross-epic prerequisites; each stands alone:
 
 - 🔵 **Release qualification gate (auto-QA matrix blocks the tag)** — In progress · P0
 - 🔵 **MCP protocol upgrade to 2026-07-28 revision** — In progress · P1
-- 🔵 **Spec 109 navigation, scope filters and cross-surface UX consistency** — In progress · P1
 - 🔵 **Spec 124 work sessions and the failure timeline** — In progress · P1
+- 🔵 **Spec 132 browser login for MCP clients: MCPProxy as an OAuth 2.1 authorization server** — In progress · P1
+- 🔵 **Spec 133 admin_action audit events: who changed the rules, on the JSONL audit line** — In progress · P1
 - 🔵 **Planning/docs truth automation** — In progress · P2
 - 🔵 **Discovery-quality eval harness (Spec 065 second half)** — In progress · P3
 - 🟡 **Spec 121 install surfaces: registry packages, winget/scoop, agent install prompt, install-channel telemetry (E7)** — In review · P2
@@ -124,7 +135,6 @@ graph LR
 - 🟢 **Connect step trust: preview, visible backup, one-click undo** — Done · P0
 - 🟢 **Registries — easier search + add-server** — Done · P1
 - 🟢 **Spec 122 SkillSpector-informed checks for the built-in tool scanner** — Done · P1
-- 🟢 **Spec 123 encrypt upstream OAuth tokens at rest (opt-in key, doctor section, auth tokens commands)** — Done · P1
 - 🟢 **Tray↔core decoupling: socket/REST API only, no config-file reads** — Done · P2
 
 ## Epic details
@@ -460,7 +470,7 @@ graph LR
 <details>
 <summary>🔵 Spec 124 work sessions and the failure timeline — In progress · P1</summary>
 
-> PR-1 shipped 2026-11-19; PR-2 CLI and PR-3 Web UI remain. tasks.md boxes (0/74) are not yet synced.
+> PR-1 shipped 2026-11-19, PR-2 CLI shipped as #2074; PR-3 Web UI is open as #2073.
 
 Spec: [124-session-failure-timeline](./specs/124-session-failure-timeline/)
 
@@ -473,58 +483,132 @@ graph LR
   session_failure_timeline_cli --> session_failure_timeline_web
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class session_failure_timeline_record done;
-  class session_failure_timeline_cli,session_failure_timeline_web todo;
+  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
+  class session_failure_timeline_record,session_failure_timeline_cli done;
+  class session_failure_timeline_web in_review;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
 | PR-1: record and keep (work sessions, attempt roles, upstream_event rows, session-aware retention, REST doors) | 🟢 Done | #1918 |
-| PR-2: CLI commands for work sessions and the timeline (cliclient methods, docs/cli/activity-commands.md) | ⚪ Todo | — |
-| PR-3: Web UI session panel and timeline (unit tests, Playwright sweep, docs/web-ui/) | ⚪ Todo | — |
+| PR-2: CLI commands for work sessions and the timeline (cliclient methods, docs/cli/activity-commands.md) | 🟢 Done | #2074 |
+| PR-3: Web UI session panel and timeline (unit tests, Playwright sweep, docs/web-ui/) | 🟡 In review | #2073 |
 
 </details>
 
 <details>
-<summary>🔵 Spec 125 Skills over MCP: catalog, approval gate, read-only agent tools — In progress · P1</summary>
+<summary>🔵 Spec 132 browser login for MCP clients: MCPProxy as an OAuth 2.1 authorization server — In progress · P1</summary>
 
-> The catalog, approval gate and agent tools have shipped. Native discovery, the Web Skills tab and held-skill review are in review.
+> Opt-in (mcp_oauth_enabled), personal edition only. Backend, consent, management surfaces and the Connect choice have shipped; only claude-code is a verified browser-login client (verification/real-clients.md).
 
-Spec: [125-skills-over-mcp](./specs/125-skills-over-mcp/)
+Spec: [132-client-oauth-login](./specs/132-client-oauth-login/)
 
 ```mermaid
 graph LR
-  skills_over_mcp_spec["Spec 125 Skills over MCP"]
-  skills_over_mcp_catalog["PR-1: administrator-only skills catalog (skil…"]
-  skills_over_mcp_gate["PR-2: hold, scan, approve and block upstream…"]
-  skills_over_mcp_agent_tools["PR-3: retrieve_skills / load_skill / read_ski…"]
-  skills_over_mcp_web["Web Skills tab for reviewing and browsing ski…"]
-  skills_over_mcp_native["Native Skills discovery and reads on single-s…"]
-  skills_over_mcp_review_queue["Review held skills from Home, the review queu…"]
+  client_oauth_login_spec["Agree on the specification (spec, consent con…"]
+  client_oauth_login_backend["PR-1a..1f: opt-in switch, protocol logic, sto…"]
+  client_oauth_login_consent["PR-2a..2c: consent page with client name sugg…"]
+  client_oauth_login_connect["PR-3: browser-login choice in Connect, sweep…"]
 
-  skills_over_mcp_spec --> skills_over_mcp_catalog
-  skills_over_mcp_catalog --> skills_over_mcp_gate
-  skills_over_mcp_gate --> skills_over_mcp_agent_tools
-  skills_over_mcp_agent_tools --> skills_over_mcp_web
-  skills_over_mcp_agent_tools --> skills_over_mcp_native
-  skills_over_mcp_web --> skills_over_mcp_review_queue
+  client_oauth_login_spec --> client_oauth_login_backend
+  client_oauth_login_backend --> client_oauth_login_consent
+  client_oauth_login_consent --> client_oauth_login_connect
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
-  class skills_over_mcp_spec,skills_over_mcp_catalog,skills_over_mcp_gate,skills_over_mcp_agent_tools done;
-  class skills_over_mcp_web,skills_over_mcp_native,skills_over_mcp_review_queue in_review;
+  class client_oauth_login_spec,client_oauth_login_backend,client_oauth_login_consent,client_oauth_login_connect done;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
-| Spec 125 Skills over MCP | 🟢 Done | #1919 |
-| PR-1: administrator-only skills catalog (skills/list, skills/get, bbolt buckets, REST + CLI) | 🟢 Done | #1921 |
-| PR-2: hold, scan, approve and block upstream skills | 🟢 Done | #1923 |
-| PR-3: retrieve_skills / load_skill / read_skill_file for agents | 🟢 Done | #1928 |
-| Web Skills tab for reviewing and browsing skills | 🟡 In review | #1950 |
-| Native Skills discovery and reads on single-server endpoints | 🟡 In review | #1949 |
-| Review held skills from Home, the review queue and the macOS tray | 🟡 In review | #1951 |
+| Agree on the specification (spec, consent contract after review) | 🟢 Done | #1996 #2011 |
+| PR-1a..1f: opt-in switch, protocol logic, storage, runtime service, HTTP endpoints, e2e script and docs | 🟢 Done | #1997 #2010 #2012 #2013 #2017 #2019 |
+| PR-2a..2c: consent page with client name suggestion, logins in Clients hub / CLI / MCP, sign-in requests in the macOS tray | 🟢 Done | #2020 #2021 #2022 |
+| PR-3: browser-login choice in Connect, sweep and real-client record | 🟢 Done | #2025 #2039 |
+
+</details>
+
+<details>
+<summary>🔵 Spec 133 admin_action audit events: who changed the rules, on the JSONL audit line — In progress · P1</summary>
+
+> Spec merged as #2033. Implementation is sliced; PR-1a is open as #2064.
+
+Spec: [133-admin-action-audit](./specs/133-admin-action-audit/)
+
+```mermaid
+graph LR
+  admin_action_audit_spec["Agree on the specification"]
+  admin_action_audit_pr1a["PR-1a: admin_action event kind and agent-toke…"]
+
+  admin_action_audit_spec --> admin_action_audit_pr1a
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
+  class admin_action_audit_spec done;
+  class admin_action_audit_pr1a in_review;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Agree on the specification | 🟢 Done | #2033 |
+| PR-1a: admin_action event kind and agent-token lines | 🟡 In review | #2064 |
+
+</details>
+
+<details>
+<summary>🔵 Spec 134 Web UI simplification: problems first, no function lost — In progress · P1</summary>
+
+> PR 1-8 merged 2026-11 (tokens and shell, Servers table, server detail/review/skills, Home, Activity calls view, Tools, Clients/tokens/usage, settings/profile editor/wizard). No tasks.md; completeness is tracked against specs/134-webui-simplify/function-inventory.md.
+
+Spec: [134-webui-simplify](./specs/134-webui-simplify/)
+
+```mermaid
+graph LR
+  webui_simplify_spec["Agree on the specification and function inven…"]
+  webui_simplify_impl["PR 1-8: redesigned shell, Servers, server det…"]
+
+  webui_simplify_spec --> webui_simplify_impl
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  class webui_simplify_spec,webui_simplify_impl done;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Agree on the specification and function inventory | 🟢 Done | #2046 |
+| PR 1-8: redesigned shell, Servers, server detail, Home, Activity, Tools, Clients, Settings | 🟢 Done | #2049 #2052 #2051 #2053 #2054 #2056 #2057 #2058 |
+
+</details>
+
+<details>
+<summary>🔵 Spec 135 OAuth client hardening: issuer checks on upstream sign-in (mix-up defence) — In progress · P1</summary>
+
+> PR-1 shipped; PR-2 (enforcement with the per-server opt-out) and PR-3 (surfaces, broker iss, docs, e2e) remain.
+
+Spec: [135-oauth-client-hardening](./specs/135-oauth-client-hardening/)
+
+```mermaid
+graph LR
+  oauth_client_hardening_spec["Agree on the specification"]
+  oauth_client_hardening_pr1["PR-1: mcp-go v1.6, strict callback parse and…"]
+  oauth_client_hardening_enforce["PR-2: wrong-AS refusal, discovery issuer equa…"]
+  oauth_client_hardening_surfaces["PR-3: broker iss, surfaces and goldens, edito…"]
+
+  oauth_client_hardening_spec --> oauth_client_hardening_pr1
+  oauth_client_hardening_pr1 --> oauth_client_hardening_enforce
+  oauth_client_hardening_enforce --> oauth_client_hardening_surfaces
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class oauth_client_hardening_spec,oauth_client_hardening_pr1 done;
+  class oauth_client_hardening_enforce,oauth_client_hardening_surfaces todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Agree on the specification | 🟢 Done | #2050 |
+| PR-1: mcp-go v1.6, strict callback parse and DCR application_type | 🟢 Done | #2070 |
+| PR-2: wrong-AS refusal, discovery issuer equality, issuer-bound rows, per-server opt-out | ⚪ Todo | — |
+| PR-3: broker iss, surfaces and goldens, editor fields, docs, e2e | ⚪ Todo | — |
 
 </details>
 
@@ -772,6 +856,28 @@ graph LR
 | Session-aware rank boost in retrieve_tools | ⚪ Todo | — |
 | Workflow mining: frequent chains → suggested stored scripts (spec 097 synergy) | ⚪ Todo | — |
 | Usage-chain analytics on the dashboard/stats page | ⚪ Todo | — |
+
+</details>
+
+<details>
+<summary>⚪ Spec 137 preserve the new tool listing fields (titles, icons, output schema) with review and withholding — Todo · P2</summary>
+
+> Spec-only PR.
+
+Spec: [137-tool-listing-fields](./specs/137-tool-listing-fields/)
+
+```mermaid
+graph LR
+  tool_listing_fields_spec["Agree on the specification"]
+
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  class tool_listing_fields_spec done;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Agree on the specification | 🟢 Done | #2062 |
 
 </details>
 
@@ -1194,6 +1300,46 @@ Spec: [123-oauth-token-encryption](./specs/123-oauth-token-encryption/) · PR: #
 </details>
 
 <details>
+<summary>🟢 Spec 125 Skills over MCP: catalog, approval gate, read-only agent tools — Done · P1</summary>
+
+> Shipped 2026-11: catalog, approval gate, agent tools, native discovery on single-server endpoints, Web Skills tab and held-skill review. Follow-up UX passes are the skills-review-ux epic (Specs 130, 131).
+
+Spec: [125-skills-over-mcp](./specs/125-skills-over-mcp/)
+
+```mermaid
+graph LR
+  skills_over_mcp_spec["Spec 125 Skills over MCP"]
+  skills_over_mcp_catalog["PR-1: administrator-only skills catalog (skil…"]
+  skills_over_mcp_gate["PR-2: hold, scan, approve and block upstream…"]
+  skills_over_mcp_agent_tools["PR-3: retrieve_skills / load_skill / read_ski…"]
+  skills_over_mcp_web["Web Skills tab for reviewing and browsing ski…"]
+  skills_over_mcp_native["Native Skills discovery and reads on single-s…"]
+  skills_over_mcp_review_queue["Review held skills from Home, the review queu…"]
+
+  skills_over_mcp_spec --> skills_over_mcp_catalog
+  skills_over_mcp_catalog --> skills_over_mcp_gate
+  skills_over_mcp_gate --> skills_over_mcp_agent_tools
+  skills_over_mcp_agent_tools --> skills_over_mcp_web
+  skills_over_mcp_agent_tools --> skills_over_mcp_native
+  skills_over_mcp_web --> skills_over_mcp_review_queue
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  class skills_over_mcp_spec,skills_over_mcp_catalog,skills_over_mcp_gate,skills_over_mcp_agent_tools,skills_over_mcp_web,skills_over_mcp_native,skills_over_mcp_review_queue done;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Spec 125 Skills over MCP | 🟢 Done | #1919 |
+| PR-1: administrator-only skills catalog (skills/list, skills/get, bbolt buckets, REST + CLI) | 🟢 Done | #1921 |
+| PR-2: hold, scan, approve and block upstream skills | 🟢 Done | #1923 |
+| PR-3: retrieve_skills / load_skill / read_skill_file for agents | 🟢 Done | #1928 |
+| Web Skills tab for reviewing and browsing skills | 🟢 Done | #1950 |
+| Native Skills discovery and reads on single-server endpoints | 🟢 Done | #1949 |
+| Review held skills from Home, the review queue and the macOS tray | 🟢 Done | #1951 |
+
+</details>
+
+<details>
 <summary>🟢 Tray↔core decoupling: socket/REST API only, no config-file reads — Done · P2</summary>
 
 > Architecture rule (CLAUDE.md): the tray holds no state and talks to the core only via socket/REST + SSE. 2026-07-11 source-of-truth re-audit + fix: Swift tray was already clean (MCPProxyApp.swift opens the config in an external editor, never parses it); the Go tray's update-check gate was already reworked to core-API gating (#805). The last violation — config.LoadFromFile in the Go tray's OAuth login path, live since ff03db92 (2026-05-18, #477) — turned out to be FUNCTIONALLY DEAD: the loaded config fed only two debug log lines, while the actual trigger was already the core-API TriggerOAuthLogin. Deleted rather than ported to REST. Bootstrap reads (socket path, config PATH without parsing, CA cert) are allowed and remain. Now enforced by a test so the rule cannot silently rot.
@@ -1247,6 +1393,15 @@ graph LR
 
 </details>
 
+<details>
+<summary>🟢 Specs 130 + 131 Skills review UX: review navigation and a simpler review card — Done · P2</summary>
+
+> Spec 130 (review navigation) shipped as #1987, Spec 131 (specs/131-skills-card-ux, review card) as #1988; each PR carried its own spec folder.
+
+Spec: [130-skills-review-ux](./specs/130-skills-review-ux/) · PR: #1987 #1988
+
+</details>
+
 ## Epics
 
 | Epic | Status | Priority | Progress | Spec | PR |
@@ -1262,7 +1417,10 @@ graph LR
 | Spec 108 profiles v3: scoped profiles, client binding, scope-aware observability | In progress | P1 | 194/195 (99%) | [108-profiles-v3](./specs/108-profiles-v3/) |  |
 | Spec 109 navigation, scope filters and cross-surface UX consistency | In progress | P1 | 257/258 (100%) | [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/) |  |
 | Spec 124 work sessions and the failure timeline | In progress | P1 | 45/74 (61%) | [124-session-failure-timeline](./specs/124-session-failure-timeline/) |  |
-| Spec 125 Skills over MCP: catalog, approval gate, read-only agent tools | In progress | P1 | 51/51 (100%) | [125-skills-over-mcp](./specs/125-skills-over-mcp/) |  |
+| Spec 132 browser login for MCP clients: MCPProxy as an OAuth 2.1 authorization server | In progress | P1 | 8/72 (11%) | [132-client-oauth-login](./specs/132-client-oauth-login/) |  |
+| Spec 133 admin_action audit events: who changed the rules, on the JSONL audit line | In progress | P1 | — | [133-admin-action-audit](./specs/133-admin-action-audit/) |  |
+| Spec 134 Web UI simplification: problems first, no function lost | In progress | P1 | — | [134-webui-simplify](./specs/134-webui-simplify/) |  |
+| Spec 135 OAuth client hardening: issuer checks on upstream sign-in (mix-up defence) | In progress | P1 | 14/39 (36%) | [135-oauth-client-hardening](./specs/135-oauth-client-hardening/) |  |
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 | Spec 114 typed pending-call outcome + call correlation for long-running stdio tool calls | In review | P2 | — |  | #1536 |
@@ -1274,6 +1432,7 @@ graph LR
 | Windows native tray app `MCP-43` | Todo | P2 | — |  |  |
 | Remote access tunnel (feature-flagged MVP, spec 089) | Todo | P2 | — | [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) |  |
 | Tool co-occurrence graph (experimental, feature-flagged) | Todo | P2 | — |  |  |
+| Spec 137 preserve the new tool listing fields (titles, icons, output schema) with review and withholding | Todo | P2 | — | [137-tool-listing-fields](./specs/137-tool-listing-fields/) |  |
 | Security gateway Tracks C/D (per-arg least-privilege + signature provenance) | Todo | P3 | — | [054-mcp-security-gateway](./specs/054-mcp-security-gateway/) |  |
 | Server marketplace `MCP-37` | Todo (parked) | P3 | — |  |  |
 | Audit SIEM integration `MCP-39` | Todo (parked) | P3 | — |  |  |
@@ -1299,8 +1458,10 @@ graph LR
 | Spec 118 automatic rescan after a tool-definition change (clean verdict recorded as hold evidence) | Done | P1 | — | [118-auto-rescan-on-change](./specs/118-auto-rescan-on-change/) | #1689 |
 | Spec 122 SkillSpector-informed checks for the built-in tool scanner | Done | P1 | 31/31 (100%) | [122-scanner-skillspector-checks](./specs/122-scanner-skillspector-checks/) | #1818 |
 | Spec 123 encrypt upstream OAuth tokens at rest (opt-in key, doctor section, auth tokens commands) | Done | P1 | 0/56 (0%) | [123-oauth-token-encryption](./specs/123-oauth-token-encryption/) | #1886 #1887 #1888 #1891 |
+| Spec 125 Skills over MCP: catalog, approval gate, read-only agent tools | Done | P1 | 51/51 (100%) | [125-skills-over-mcp](./specs/125-skills-over-mcp/) |  |
 | Tray↔core decoupling: socket/REST API only, no config-file reads | Done | P2 | — |  |  |
 | Spec 107 server edition SSO front door hardened for real IdPs | Done | P2 | 126/126 (100%) | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) |  |
+| Specs 130 + 131 Skills review UX: review navigation and a simpler review card | Done | P2 | 9/9 (100%) | [130-skills-review-ux](./specs/130-skills-review-ux/) | #1987 #1988 |
 
 ## Shipped (archived)
 
