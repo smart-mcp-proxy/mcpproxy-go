@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -480,5 +481,48 @@ func TestNewFileSink_TornWriteThatTriggersRotation(t *testing.T) {
 	cur, _ := os.ReadFile(path)
 	if !strings.HasPrefix(string(cur), `{"seq":1,"cross`+"\n") {
 		t.Fatalf("the torn fragment and its repair are in the new file: %q", cur)
+	}
+}
+
+// Round 25: a file replaced between the tail check and the writer's open is
+// checked again, so the first record never glues onto a restored fragment.
+func TestNewFileSink_ReplacedBeforeTheWriterOpensIsRechecked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not rename a file another handle holds open")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	if err := os.WriteFile(path, []byte("{\"seq\":0}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	once := false
+	afterTailCheck = func() {
+		if once {
+			return
+		}
+		once = true
+		if err := os.Rename(path, path+".old"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{"seq":"torn`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer func() { afterTailCheck = nil }()
+	s, err := NewFileSink(path, 10, 1, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.Write([]byte(`{"seq":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs := assertWellDelimited(t, raw)
+	if len(recs) != 1 || recs[0] != `{"seq":1}` {
+		t.Fatalf("want the record on its own line after the fragment, got %q", raw)
 	}
 }

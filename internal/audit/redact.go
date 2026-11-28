@@ -75,14 +75,72 @@ func maskMatch(s string) string {
 	return s[:4] + "***" + s[len(s)-2:]
 }
 
+// minTailBody is the shortest credential body whose last two bytes a mask
+// may keep.
+const minTailBody = 16
+
+// bearerPrefix finds a bearer scheme and the whitespace after it.
+var bearerPrefix = regexp.MustCompile(`Bearer\s+`)
+
 // maskSpan renders a merged span. It keeps the last two bytes only of a
 // span long enough that they cannot be the whole credential body: a short
-// match such as "Bearer AB" is replaced entirely.
+// match such as "Bearer AB" is replaced entirely. The bearer scheme and the
+// whitespace after it are not body (round 25): "Bearer" followed by padding
+// and "AB", alone or at the end of a merged span, keeps no tail.
 func maskSpan(s string) string {
-	if len(s) < 16 {
+	if len(s) < minTailBody {
 		return "***"
 	}
+	if locs := bearerPrefix.FindAllStringIndex(s, -1); len(locs) > 0 {
+		body := len(s) - locs[len(locs)-1][1]
+		if body < minTailBody {
+			if locs[0][0] == 0 && len(locs) == 1 {
+				return "***"
+			}
+			return s[:4] + "***"
+		}
+	}
 	return maskMatch(s)
+}
+
+// escapeEnd reports where the JSON escape that byte i falls inside ends, or i
+// when i is not inside one. A mask never starts inside an escape (round 25):
+// in a serialized line `\u000eyJ...` the `e` is the escape's last hex digit,
+// and masking from it would leave `\u000***`, which is not JSON. A backslash
+// counts only when an even number of backslashes precede it.
+func escapeEnd(s string, i int) int {
+	for j := i - 1; j >= 0 && j >= i-5; j-- {
+		if s[j] != '\\' {
+			continue
+		}
+		n := 0
+		for k := j - 1; k >= 0 && s[k] == '\\'; k-- {
+			n++
+		}
+		if n%2 == 1 {
+			return i // this backslash is itself escaped
+		}
+		if j == i-1 {
+			return i + 1 // a one-byte escape such as \n
+		}
+		if s[j+1] != 'u' {
+			return i
+		}
+		for k := j + 2; k < i; k++ {
+			if !isHex(s[k]) {
+				return i
+			}
+		}
+		if end := j + 6; end > i && end <= len(s) {
+			return end
+		}
+		return i
+	}
+	return i
+}
+
+func isHex(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
 }
 
 // applyMasking runs every fixed-prefix pattern over s in order and reports
@@ -183,6 +241,18 @@ func maskAllSpans(s string) (masked string, hit bool) {
 	}
 	if len(spans) == 0 {
 		return s, false
+	}
+	// A span that starts inside a JSON escape starts after it instead; one
+	// that the escape covers whole is dropped (it is still reported as a hit).
+	kept := spans[:0]
+	for _, sp := range spans {
+		if start := escapeEnd(s, sp[0]); start < sp[1] {
+			kept = append(kept, [2]int{start, sp[1]})
+		}
+	}
+	spans = kept
+	if len(spans) == 0 {
+		return s, true
 	}
 	sort.Slice(spans, func(i, j int) bool { return spans[i][0] < spans[j][0] })
 	merged := spans[:1]

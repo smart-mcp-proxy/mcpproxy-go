@@ -139,6 +139,13 @@ func TestAdminDoors_CLITokenCommandsHitTheirDoneRESTDoors(t *testing.T) {
 				require.Equal(t, "30d", body["expires_in"])
 				require.Equal(t, []interface{}{"*"}, body["allowed_servers"], "--servers is sent as the allow-list")
 				require.Equal(t, []interface{}{"read"}, body["permissions"], "--permissions read is sent as read")
+				// Nothing else: a recognised extra field (an unknown profile,
+				// say) can make the real door refuse the request (round 25).
+				keys := make([]string, 0, len(body))
+				for k := range body {
+					keys = append(keys, k)
+				}
+				require.ElementsMatch(t, []string{"name", "expires_in", "allowed_servers", "permissions"}, keys, "the create request carries only the fields the command was given")
 			}
 
 			cliActions := doneActions(tc.cli, "")

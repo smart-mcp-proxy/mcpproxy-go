@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"encoding/json"
 	"os"
 	"runtime"
 	"strings"
@@ -101,5 +102,51 @@ func TestMaskAllSpans_BearerAcrossANewlineAfterTheBound(t *testing.T) {
 	got, _ := maskAllSpans(s)
 	if strings.Contains(got, "secretBodyAfterNewline") {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// Round 25: the merged whole-line pass never starts a mask inside a JSON
+// escape, so a legacy line that selected it stays valid JSON.
+func TestSanitizeLine_MergedPassKeepsJSONEscapesWhole(t *testing.T) {
+	raw := []byte(`{"event":"authz","transport_request_id":"mcp_agt_0123456789abcdefABCD","tool":"\u000eyJa.eyJb.c"}`)
+	got, hit := SanitizeLine(raw)
+	if !hit {
+		t.Fatal("the proxy token is masked")
+	}
+	var v map[string]interface{}
+	if err := json.Unmarshal(got, &v); err != nil {
+		t.Fatalf("masked line is not JSON: %v: %s", err, got)
+	}
+	if strings.Contains(string(got), "eyJb") {
+		t.Fatalf("the JWT-shaped tail is masked: %s", got)
+	}
+}
+
+// Round 25: an escaped backslash ends the escape, so the next byte may start
+// a mask.
+func TestSanitizeLine_MergedPassMasksAfterAnEscapedBackslash(t *testing.T) {
+	raw := []byte(`{"transport_request_id":"mcp_agt_0123456789abcdefABCD","tool":"\\eyJhbGciOi.eyJzdWIiOiJ4In0.c2lnbmF0"}`)
+	got, _ := SanitizeLine(raw)
+	if strings.Contains(string(got), "eyJzdWIiOiJ4In0") {
+		t.Fatalf("JWT after an escaped backslash is masked: %s", got)
+	}
+	var v map[string]interface{}
+	if err := json.Unmarshal(got, &v); err != nil {
+		t.Fatalf("masked line is not JSON: %v: %s", err, got)
+	}
+}
+
+// Round 25: the tail is kept only when the bearer body itself is long enough;
+// padding whitespace does not count.
+func TestMaskSpan_BearerPaddingDoesNotCount(t *testing.T) {
+	for _, s := range []string{"Bearer        AB", "ghp_0123456789abcdefBearer AB"} {
+		got, _ := maskAllSpans(s)
+		if strings.HasSuffix(got, "AB") {
+			t.Fatalf("%q: a short bearer body keeps no tail: %q", s, got)
+		}
+	}
+	got, _ := maskAllSpans("Bearer 0123456789abcdefXY")
+	if !strings.HasSuffix(got, "XY") {
+		t.Fatalf("a long bearer body keeps its tail: %q", got)
 	}
 }

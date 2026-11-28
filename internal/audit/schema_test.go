@@ -303,6 +303,13 @@ func baseAdminFixture(overrides map[string]interface{}) map[string]interface{} {
 	return fx
 }
 
+// withPrefixEntry keeps the base fixture's required /token_prefix entry
+// beside the change under test, so a malformed-change fixture fails for its
+// own reason only (round 25).
+func withPrefixEntry(c map[string]interface{}) []interface{} {
+	return []interface{}{map[string]interface{}{"field": "/token_prefix", "before": "mcp_agt_ab12"}, c}
+}
+
 func TestAdminActionSchema_PositiveAndNegative(t *testing.T) {
 	sch := publishedSchema(t)
 	ok := []map[string]interface{}{
@@ -312,6 +319,11 @@ func TestAdminActionSchema_PositiveAndNegative(t *testing.T) {
 		baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "agent_token", "token_prefix": "mcp_agt_ab12", "token_name_withheld": true, "ref": "cli_abcdefgh"}}),
 		baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "session_user", "user_id": "u1", "role": "user", "provider": "oidc"}}),
 		baseAdminFixture(map[string]interface{}{"target": map[string]interface{}{"kind": "agent_token", "name_withheld": true, "ref": "tok_abcdefgh"}}),
+		baseAdminFixture(map[string]interface{}{"source": "mcp", "caller": map[string]interface{}{"kind": "stdio"}}),
+		// The corrected forms of the malformed-change fixtures below.
+		baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "/enabled", "before": true})}),
+		baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "/args", "withheld": "value"})}),
+		baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "/enabled", "withheld": "value"})}),
 	}
 	for i, fx := range ok {
 		if err := sch.Validate(roundTrip(t, fx)); err != nil {
@@ -341,9 +353,10 @@ func TestAdminActionSchema_PositiveAndNegative(t *testing.T) {
 		"session caller with profile_pin": baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "session_admin", "user_id": "u1", "role": "admin", "provider": "oidc", "profile_pin": "ro"}}),
 		"masked flag without id":          baseAdminFixture(map[string]interface{}{"request_id": nil, "request_id_masked": true, "caller": map[string]interface{}{"kind": "cli_offline"}}),
 		"changes_count alone":             baseAdminFixture(map[string]interface{}{"changes_count": 3}),
-		"change with value and withheld":  baseAdminFixture(map[string]interface{}{"changes": []interface{}{map[string]interface{}{"field": "/enabled", "before": true, "withheld": "value"}}}),
-		"change with object value":        baseAdminFixture(map[string]interface{}{"changes": []interface{}{map[string]interface{}{"field": "/args", "after": map[string]interface{}{"x": 1}}}}),
-		"change field not a pointer":      baseAdminFixture(map[string]interface{}{"changes": []interface{}{map[string]interface{}{"field": "enabled", "withheld": "value"}}}),
+		"change with value and withheld":  baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "/enabled", "before": true, "withheld": "value"})}),
+		"change with object value":        baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "/args", "after": map[string]interface{}{"x": 1}})}),
+		"change field not a pointer":      baseAdminFixture(map[string]interface{}{"changes": withPrefixEntry(map[string]interface{}{"field": "enabled", "withheld": "value"})}),
+		"stdio caller with source api":    baseAdminFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "stdio"}}),
 		"bad client surface":              baseAdminFixture(map[string]interface{}{"client": map[string]interface{}{"surface": "tray"}}),
 		"secret target with name":         baseAdminFixture(map[string]interface{}{"target": map[string]interface{}{"kind": "secret", "name": "GITHUB_TOKEN", "name_withheld": true, "ref": "sec_abcdefgh"}}),
 		"none on authz":                   baseAuthzFixture(map[string]interface{}{"caller": map[string]interface{}{"kind": "none"}}),

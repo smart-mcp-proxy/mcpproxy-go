@@ -290,10 +290,16 @@ func TestAdminActionDoors_MCPCredentialsTool(t *testing.T) {
 			return false
 		}
 		types := map[string]int{}
+		wrapper := 0
 		for _, r := range rows {
 			types[string(r.Type)]++
+			if r.Type == storage.ActivityTypeInternalToolCall && r.ToolName == "credentials" {
+				wrapper++
+			}
 		}
-		return types[string(storage.ActivityTypeProfileChange)] == 1 && len(rows) >= 2
+		// The second row is the credentials wrapper row itself, not any
+		// other row that happens to carry the id (round 25).
+		return types[string(storage.ActivityTypeProfileChange)] == 1 && wrapper == 1
 	}, 10*time.Second, 50*time.Millisecond, "wrapper row and profile_change row share the line's request id")
 
 	require.Equal(t, "worker", l["target"].(map[string]interface{})["name"])
@@ -340,10 +346,16 @@ func TestAdminActionDoors_MCPCredentialsTool(t *testing.T) {
 			return false
 		}
 		types := map[string]int{}
+		wrapper := 0
 		for _, r := range rows {
 			types[string(r.Type)]++
+			if r.Type == storage.ActivityTypeInternalToolCall && r.ToolName == "credentials" {
+				wrapper++
+			}
 		}
-		return types[string(storage.ActivityTypeProfileChange)] == 1 && len(rows) >= 2
+		// The second row is the credentials wrapper row itself, not any
+		// other row that happens to carry the id (round 25).
+		return types[string(storage.ActivityTypeProfileChange)] == 1 && wrapper == 1
 	}, 10*time.Second, 50*time.Millisecond, "the revoke line joins its wrapper and profile_change rows")
 
 	// A retried revoke of the already-revoked token writes nothing.
@@ -481,6 +493,8 @@ func TestAdminActionDoors_CLIOverTraySocket(t *testing.T) {
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
+	ingressID := resp.Header.Get("X-Request-Id")
+	require.NotEmpty(t, ingressID, "the rotation response names its ingress id")
 
 	lines := e.adminLines(&seen)
 	require.Len(t, lines, 2)
@@ -494,6 +508,7 @@ func TestAdminActionDoors_CLIOverTraySocket(t *testing.T) {
 	require.True(t, strings.HasPrefix(client["name"].(string), "cli/"), "the CLI's own X-MCPProxy-Client header")
 	rid, _ := rot["request_id"].(string)
 	require.NotEmpty(t, rid)
+	require.Equal(t, ingressID, rid, "the line carries the ingress id the response returned (round 25)")
 	require.Equal(t, 1, e.activityRequestIDs(rid))
 }
 

@@ -124,7 +124,8 @@ and is logged at most once per minute. There is no `audit_log.strict` mode.
 After a short write the sink resumes at a record boundary: before the next record
 it writes a lone newline, so a torn tail is never glued onto the next line; while
 that repair fails it appends nothing. On open it checks that the file ends in a
-newline and repairs it the same way, in that file, before anything can rotate it
+newline and repairs it the same way, in that file, before anything can rotate it,
+and checks again if the file was replaced before the writer opened it
 (a write-only file, which the daemon cannot read, gets one newline at open instead:
 an empty line on a clean file, which shippers skip). The stdout sink has no file to inspect: a
 process that exits mid-line leaves that line torn for the next reader, so stdout
@@ -309,6 +310,9 @@ tokens, GitHub `ghp_…` and `github_pat_…`, `sk-…`, `AKIA…`, JWTs, `Beare
 secret with no recognisable shape (a 64-hex API key pasted into a token name or an
 `X-Request-Id`) reaches the audit file, as it already reaches the activity log and
 `authz` lines. Per-field mask hits are counted and surfaced by `mcpproxy doctor`.
+A masked span keeps its first four and last two characters only when the
+credential body is at least 16 characters (a bearer scheme and the whitespace
+after it are not body); a shorter one is written as `***`.
 One narrow rewrite: a label holding a control character that JSON writes as a
 `\u00XX` escape keeps it, unless that escape would join the label into a
 credential shape when the line is read as text (`\u000e` followed by `yJ…` reads
@@ -419,7 +423,8 @@ applies to `authz`, `tool_call` and `auth_event` lines. A line that matched none
 patterns is byte-identical; a legacy `request_id` or `transport_request_id` that
 does match is now masked on the audit line while its activity row keeps the
 original, so that one join is lost (legacy kinds get no `request_id_masked`
-marker).
+marker). On such a line a mask never starts inside a JSON escape (`\u000e…`), so
+the line stays valid JSON.
 
 ### Change log
 

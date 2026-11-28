@@ -84,3 +84,32 @@ func TestAdminDoorRegistry_PendingOnlyShrinks(t *testing.T) {
 		}
 	}
 }
+
+// Round 25: a config apply that changes mcpServers starts a discovery sweep
+// (runtime applyConfigInTx → DiscoverAndIndexTools), whose approval
+// transitions belong to the door that committed the change.
+func TestAdminDoorRegistry_ConfigApplyDiscoveryPass(t *testing.T) {
+	for _, door := range []string{"REST POST /api/v1/config/apply", "REST PATCH /api/v1/config"} {
+		found := false
+		for _, d := range audit.AdminDoors {
+			if d.Door != door || d.Branch != "discovery pass" {
+				continue
+			}
+			found = true
+			want := map[string]bool{"tool.approve": false, "tool.hold": false, "server.baseline_set": false}
+			for _, a := range d.Actions {
+				if _, ok := want[a]; ok {
+					want[a] = true
+				}
+			}
+			for a, ok := range want {
+				if !ok {
+					t.Errorf("%s discovery pass lacks %s", door, a)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s has no discovery pass branch", door)
+		}
+	}
+}

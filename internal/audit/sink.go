@@ -240,12 +240,6 @@ func NewFileSink(path string, maxSizeMB, maxBackups, maxAgeDays int, compress bo
 	if err := probeWritable(path); err != nil {
 		return nil, err
 	}
-	// One handle checks the tail and repairs it, so an external rotator
-	// renaming the file in between cannot redirect the repair.
-	held, torn, err := openTail(path)
-	if err != nil {
-		return nil, err
-	}
 	lj := &lumberjack.Logger{
 		Filename:   path,
 		MaxSize:    maxSizeMB,
@@ -253,25 +247,77 @@ func NewFileSink(path string, maxSizeMB, maxBackups, maxAgeDays int, compress bo
 		MaxAge:     maxAgeDays,
 		Compress:   compress,
 	}
-	s := newWriterSink(lj, opts...)
-	s.torn = torn
-	if torn {
-		// Repair the tail of the file a previous process left mid-record
-		// now, through the handle that read it, before anything can rotate
-		// it. A failure keeps that handle: the first Write retries on the
-		// same file (even if renamed or removed), and appends nothing until
-		// the boundary is restored.
-		if werr := writeNewline(held); werr == nil {
-			_ = held.Close()
-			s.torn = false
-		} else {
-			s.openRepair = heldRepair(held)
-			s.closeRepair = held
+	// One handle checks the tail and repairs it, so an external rotator
+	// renaming the file in between cannot redirect the repair. The tail of a
+	// file a previous process left mid-record is repaired through that
+	// handle before the writer opens the path (the open may rotate a file at
+	// its size limit). The writer then opens its own handle (lumberjack opens
+	// on its first Write, so an empty one opens it now), and the check is
+	// kept only if the path still names the checked file (round 25): a file
+	// replaced in between, such as a restored torn copy, is checked again, so
+	// the first record never lands on an unchecked fragment.
+	var (
+		held     *os.File
+		torn     bool
+		repairOK bool
+	)
+	for attempt := 0; ; attempt++ {
+		var err error
+		held, torn, err = openTail(path)
+		if err != nil {
+			return nil, err
 		}
-	} else if held != nil {
+		repairOK = torn && writeNewline(held) == nil
+		if afterTailCheck != nil {
+			afterTailCheck()
+		}
+		if _, err := lj.Write(nil); err != nil {
+			_ = held.Close()
+			return nil, fmt.Errorf("audit: cannot open %s: %w", path, err)
+		}
+		// A failed repair keeps its handle for the first Write to retry on
+		// the file that was torn (even if renamed or removed).
+		if (torn && !repairOK) || sameFileAsPath(held, path) {
+			break
+		}
+		_ = held.Close()
+		_ = lj.Close()
+		if attempt >= maxOpenAttempts-1 {
+			return nil, fmt.Errorf("audit: %s kept changing while it was opened", path)
+		}
+	}
+	s := newWriterSink(lj, opts...)
+	if torn && !repairOK {
+		// The first Write retries the repair and appends nothing until the
+		// boundary is restored.
+		s.torn = true
+		s.openRepair = heldRepair(held)
+		s.closeRepair = held
+	} else {
 		_ = held.Close()
 	}
 	return s, nil
+}
+
+// maxOpenAttempts bounds how often NewFileSink re-checks a file that was
+// replaced while it was opened.
+const maxOpenAttempts = 3
+
+// afterTailCheck, when set by a test, runs between the tail check and the
+// writer's open.
+var afterTailCheck func()
+
+// sameFileAsPath reports whether f is still the file path names.
+func sameFileAsPath(f *os.File, path string) bool {
+	a, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	b, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(a, b)
 }
 
 // heldRepair is the retry NewFileSink installs when the repair at open fails:
