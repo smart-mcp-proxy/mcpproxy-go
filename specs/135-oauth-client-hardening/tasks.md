@@ -37,6 +37,18 @@ Format: `- [ ] T### [P?] [US?] description (file)`. `[P]` = can run in parallel 
 
 ---
 
+> **PR-2 is delivered in slices** (decision recorded 2026-11-28). PR-2a ships the
+> RFC 9207 `iss` decision (D2) together with the backend part of its opt-out,
+> because the plan requires the first enforcement to ship with the escape hatch:
+> T018–T021, T022 for `MCPX_OAUTH_ISSUER_MISMATCH` only, T031 config field (struct,
+> merge, projections, OAS, docs; the PATCH route and the two editors stay with
+> PR-3's editor work) and T032's callback branch. D2's expected issuer is taken
+> from the handler's metadata at authorization-URL time, as the plan's "Where the
+> snapshot comes from" allows, until the D0 resolver lands; `fallback` is not yet
+> told apart from `discovered` (same accept/refuse outcome, the difference is only
+> the not-persisted `protected` flag). Later PR-2 slices: D0 (T015–T017), D3
+> (T023–T024, resolver skip branch), D4 (T025–T030), the other two codes.
+
 ## Phase 4: Enforcement core (PR-2, plan D0)
 
 - [ ] T015 Test `TestResolver_ScopeAndLoginValidatorPathsTerminal`, `TestResolver_LibraryNeverRunsOwnCandidateLoop` (`internal/oauth/issuer_resolver_test.go`)
@@ -47,11 +59,11 @@ Format: `- [ ] T### [P?] [US?] description (file)`. `[P]` = can run in parallel 
 
 **Independent test**: a mix-up against the test server (honest H, hostile A) sends nothing to A's token endpoint.
 
-- [ ] T018 [US1] Test `TestDecideIssuer_Matrix` (`internal/oauth/issuer_test.go`)
-- [ ] T019 [US1] `IssuerSource`, `ExpectedIssuer`, `DecideAuthorizationResponseIssuer`, `IssuerMismatchError` (`internal/oauth/issuer.go`)
-- [ ] T020 [US1] Waiter carries `{exp, skip}`; decision in the callback handler before the page; `CallbackResult.Err` (`internal/oauth/config.go`, `internal/oauth/callback_parse.go`); test `TestCallback_DecisionBeforePage`
-- [ ] T021 [US1] `exchangeAuthorizationCode` repeats the decision and uses `ProcessAuthorizationCallback` for discovered/configured (`internal/upstream/core/connection_oauth.go`); tests `TestMixUp_HonestIssRefusedInHostileFlow`, `TestLogin_IssAbsentNotAdvertised_UnprotectedFlag`, `TestLogin_ErrorResponseWrongIss`, AST guard `TestOAuthIssuerChecks_AllExchangePaths`
-- [ ] T022 [US1] Codes `OAuthIssuerMismatch`, `OAuthIssuerChanged`, `OAuthMetadataIssuerMismatch` + catalog (`internal/diagnostics/codes.go`)
+- [x] T018 [US1] Test `TestDecideIssuer_Matrix` (`internal/oauth/issuer_test.go`)
+- [x] T019 [US1] `IssuerSource`, `ExpectedIssuer`, `DecideAuthorizationResponseIssuer`, `IssuerMismatchError` (`internal/oauth/issuer.go`)
+- [x] T020 [US1] Waiter carries `{exp, skip}`; decision in the callback handler before the page; `CallbackResult.Err` (`internal/oauth/config.go`, `internal/oauth/callback_parse.go`); test `TestCallback_DecisionBeforePage`
+- [x] T021 [US1] `exchangeAuthorizationCode` repeats the decision and uses `ProcessAuthorizationCallback` for discovered/configured (`internal/upstream/core/connection_oauth.go`); tests `TestMixUp_HonestIssRefusedInHostileFlow`, `TestLogin_IssAbsentNotAdvertised_UnprotectedFlag`, `TestLogin_ErrorResponseWrongIss`, AST guard `TestOAuthIssuerChecks_AllExchangePaths`
+- [ ] T022 [US1] Codes `OAuthIssuerMismatch` (done in PR-2a, with its `docs/errors` page), `OAuthIssuerChanged`, `OAuthMetadataIssuerMismatch` + catalog (`internal/diagnostics/codes.go`)
 
 ## Phase 6: User Story 4 — discovery issuer equality (PR-2, P2, FR-006–FR-008, plan D3)
 

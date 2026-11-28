@@ -629,6 +629,10 @@ func MergeOAuthConfig(base, patch *OAuthConfig, removeIfNil bool) *OAuthConfig {
 		enabled := *patch.RefreshReplayEnabled
 		result.RefreshReplayEnabled = &enabled
 	}
+	if patch.SkipIssuerValidation != nil {
+		skip := *patch.SkipIssuerValidation
+		result.SkipIssuerValidation = &skip
+	}
 
 	// Boolean - always take patch value
 	result.PKCEEnabled = patch.PKCEEnabled
@@ -837,6 +841,10 @@ func copyOAuthConfig(src *OAuthConfig) *OAuthConfig {
 	if src.RefreshReplayEnabled != nil {
 		enabled := *src.RefreshReplayEnabled
 		dst.RefreshReplayEnabled = &enabled
+	}
+	if src.SkipIssuerValidation != nil {
+		skip := *src.SkipIssuerValidation
+		dst.SkipIssuerValidation = &skip
 	}
 
 	if src.Scopes != nil {

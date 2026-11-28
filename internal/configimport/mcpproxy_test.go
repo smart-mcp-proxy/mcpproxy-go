@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // The native rule must not take over any other client's file.
@@ -116,5 +119,26 @@ func TestImportNativeFormatRefusesWhatAddJSONRefuses(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), `server "bad"`)
 		})
+	}
+}
+
+// Every snake_case JSON key of config.OAuthConfig marks a file as mcpproxy's
+// own, so a server whose oauth block holds only one of them (for example the
+// Spec 135 skip_issuer_validation opt-out) is not handed to another dialect's
+// parser, which would drop the block.
+func TestNativeOAuthKeys_CoverEveryOAuthConfigField(t *testing.T) {
+	known := map[string]bool{}
+	for _, k := range nativeOAuthKeys {
+		known[k] = true
+	}
+	typ := reflect.TypeOf(config.OAuthConfig{})
+	for i := 0; i < typ.NumField(); i++ {
+		name := strings.Split(typ.Field(i).Tag.Get("json"), ",")[0]
+		if name == "" || name == "-" || name == "scopes" { // scopes is shared with other dialects
+			continue
+		}
+		if !known[name] {
+			t.Errorf("oauth.%s is not in nativeOAuthKeys", name)
+		}
 	}
 }

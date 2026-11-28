@@ -260,6 +260,10 @@ func cloneServerConfig(cfg *config.ServerConfig) *config.ServerConfig {
 			enabled := *cfg.OAuth.RefreshReplayEnabled
 			o.RefreshReplayEnabled = &enabled
 		}
+		if cfg.OAuth.SkipIssuerValidation != nil {
+			skip := *cfg.OAuth.SkipIssuerValidation
+			o.SkipIssuerValidation = &skip
+		}
 		if cfg.OAuth.Scopes != nil {
 			o.Scopes = slices.Clone(cfg.OAuth.Scopes)
 		}

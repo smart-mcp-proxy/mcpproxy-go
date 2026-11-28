@@ -852,6 +852,14 @@ components:
             type: string
           type: array
           uniqueItems: false
+        skip_issuer_validation:
+          description: |-
+            SkipIssuerValidation (Spec 135 FR-014) accepts an authorization
+            response whose RFC 9207 iss is wrong or missing, with a WARN, for a
+            provider known to misreport it. Such a login is not mix-up protected.
+            The strict callback parse is never skipped. Request policy, not
+            credential identity: toggling it never clears a grant.
+          type: boolean
         token_endpoint:
           type: string
       type: object
@@ -2741,6 +2749,8 @@ components:
             type: string
           type: array
           uniqueItems: false
+        skip_issuer_validation:
+          type: boolean
         token_endpoint:
           type: string
         token_expires_at:

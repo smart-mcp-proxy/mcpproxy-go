@@ -1121,7 +1121,9 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	if !exists {
 		return fmt.Errorf("callback server not found for %s", c.config.Name)
 	}
-	callbackCh := callbackServer.RegisterState(state)
+	// The waiter itself is registered together with its issuer expectation,
+	// once the authorization URL exists (armIssuerCheck below): a waiter
+	// that exists unarmed could take a callback without the issuer check.
 	defer callbackServer.UnregisterState(state)
 
 	// Check if OAuth credentials are available (either from config or persisted DCR)
@@ -1256,6 +1258,13 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		})
 	}
 
+	// Spec 135 FR-002: record the expected issuer as soon as the URL exists,
+	// before it reaches anyone (the stale-client probe sends it too).
+	issuerCheck, callbackCh, err := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
+	if err != nil {
+		return err
+	}
+
 	// Append extra OAuth parameters (RFC 8707 resource, oauth.extra_params) - issue #271
 	authURL = c.applyExtraParamsToAuthURL(authURL, extraParams)
 
@@ -1338,6 +1347,11 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	// Wait for the authorization code on THIS flow's channel (registered above)
 	select {
 	case params := <-callbackCh:
+		if params.Err != nil {
+			// Connect path: the returned error is recorded by the managed
+			// client's state transition, so it is not recorded here too.
+			return fmt.Errorf("OAuth authorization response refused: %w", params.Err)
+		}
 		waitDuration := time.Since(waitStartTime)
 		c.logger.Info("🎯 OAuth callback received",
 			zap.String("server", c.config.Name),
@@ -1364,7 +1378,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 			zap.String("code", code[:10]+"..."))
 
 		var clientStored bool
-		clientStored, err = c.exchangeAuthorizationCode(ctx, oauthHandler, callbackServer, code, state, codeVerifier)
+		clientStored, err = c.exchangeAuthorizationCode(ctx, oauthHandler, callbackServer, params.Query, issuerCheck, codeVerifier)
 		if err != nil {
 			c.logger.Error("❌ Failed to process authorization response",
 				zap.String("server", c.config.Name),
@@ -1480,7 +1494,9 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 	if !exists {
 		return result, fmt.Errorf("callback server not found for %s", c.config.Name)
 	}
-	callbackCh := callbackServer.RegisterState(state)
+	// The waiter itself is registered together with its issuer expectation,
+	// once the authorization URL exists (armIssuerCheck below): a waiter
+	// that exists unarmed could take a callback without the issuer check.
 	defer callbackServer.UnregisterState(state)
 
 	// Check for existing credentials or attempt DCR
@@ -1566,6 +1582,13 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 		})
 	}
 
+	// Spec 135 FR-002: record the expected issuer as soon as the URL exists,
+	// before it reaches anyone (the stale-client probe sends it too).
+	issuerCheck, callbackCh, err := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
+	if err != nil {
+		return result, err
+	}
+
 	// Append extra OAuth parameters (RFC 8707 resource, oauth.extra_params) - issue #271
 	authURL = c.applyExtraParamsToAuthURL(authURL, extraParams)
 
@@ -1613,6 +1636,12 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 	// Wait for the callback on THIS flow's channel (registered above)
 	select {
 	case params := <-callbackCh:
+		if params.Err != nil {
+			// A forced login's caller only logs its error, so the refusal is
+			// recorded on the server status here.
+			c.reportOAuthFailure(fmt.Errorf("OAuth authorization for %s was refused: %w", c.config.Name, params.Err))
+			return result, fmt.Errorf("OAuth authorization response refused: %w", params.Err)
+		}
 		c.logger.Info("🎯 OAuth callback received",
 			zap.String("server", c.config.Name),
 			zap.String("correlation_id", result.CorrelationID))
@@ -1633,7 +1662,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 
 		// Exchange the authorization code for a token
 		var clientStored bool
-		clientStored, err = c.exchangeAuthorizationCode(ctx, oauthHandler, callbackServer, code, state, codeVerifier)
+		clientStored, err = c.exchangeAuthorizationCode(ctx, oauthHandler, callbackServer, params.Query, issuerCheck, codeVerifier)
 		if err != nil {
 			return result, fmt.Errorf("failed to process authorization response: %w", err)
 		}
@@ -1675,7 +1704,24 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 // It reports whether the client registration was stored with the token; the
 // caller passes that to finishOAuth so this login's completion does not write
 // the client again.
-func (c *Client) exchangeAuthorizationCode(ctx context.Context, h *uptransport.OAuthHandler, cb *oauth.CallbackServer, code, state, codeVerifier string) (clientStored bool, err error) {
+//
+// Spec 135 FR-003 (plan D2): the RFC 9207 issuer decision runs again here,
+// as defence in depth behind the callback handler's, before the code is sent.
+// A flow with no recorded expectation is refused. For a discovered or
+// configured issuer in strict mode the exchange goes through mcp-go's
+// ProcessAuthorizationCallback, so the library's own iss check also runs
+// against the transaction GetAuthorizationURL saved.
+func (c *Client) exchangeAuthorizationCode(ctx context.Context, h *uptransport.OAuthHandler, cb *oauth.CallbackServer, q url.Values, exp oauth.IssuerExpectation, codeVerifier string) (clientStored bool, err error) {
+	decision, err := oauth.DecideAuthorizationResponseIssuer(q, exp.Expected, exp.Skip)
+	if err != nil {
+		return false, err
+	}
+	c.logger.Info("OAuth authorization response issuer accepted",
+		zap.String("server", c.config.Name),
+		zap.String("issuer_source", string(exp.Expected.Source)),
+		zap.Bool("mix_up_protected", decision.Protected),
+		zap.String("waived", decision.Waived))
+	code, state := q.Get("code"), q.Get("state")
 	var login oauth.LoginClient
 	if !c.extraParamsClientID() {
 		login = oauth.LoginClient{ClientID: h.GetClientID(), ClientSecret: h.GetClientSecret()}
@@ -1685,10 +1731,55 @@ func (c *Client) exchangeAuthorizationCode(ctx context.Context, h *uptransport.O
 		}
 		ctx = oauth.WithLoginClient(ctx, login)
 	}
-	if err := c.annotateCodeExchangeError(h, h.ProcessAuthorizationResponse(ctx, code, state, codeVerifier)); err != nil {
+	var exchangeErr error
+	if !exp.Skip && (exp.Expected.Source == oauth.IssuerSourceDiscovered || exp.Expected.Source == oauth.IssuerSourceConfigured) {
+		exchangeErr = h.ProcessAuthorizationCallback(ctx, q, codeVerifier)
+		if errors.Is(exchangeErr, uptransport.ErrIssuerMismatch) {
+			return false, oauth.NewIssuerMismatchError(exp.Expected.Issuer, "the OAuth library refused the response's issuer")
+		}
+	} else {
+		exchangeErr = h.ProcessAuthorizationResponse(ctx, code, state, codeVerifier)
+	}
+	if err := c.annotateCodeExchangeError(h, exchangeErr); err != nil {
 		return false, err
 	}
 	return login.ClientID != "", nil
+}
+
+// armIssuerCheck records the flow's expected issuer (Spec 135 FR-002) from
+// the metadata the handler built the authorization URL with, and registers
+// the callback waiter for state on cb together with that check, atomically
+// (FR-003). Call it right after GetAuthorizationURL, before the URL is used.
+// It returns the expectation the code exchange checks again and the waiter
+// channel.
+func (c *Client) armIssuerCheck(ctx context.Context, h *uptransport.OAuthHandler, oauthConfig *client.OAuthConfig, cb *oauth.CallbackServer, state string) (oauth.IssuerExpectation, <-chan oauth.CallbackResult, error) {
+	meta, err := h.GetServerMetadata(ctx)
+	if err != nil {
+		return oauth.IssuerExpectation{}, nil, fmt.Errorf("authorization server metadata unavailable for the issuer check: %w", err)
+	}
+	source := oauth.IssuerSourceDiscovered
+	configuredURL := ""
+	switch {
+	case oauth.ServedSyntheticMetadata(oauthConfig):
+		source = oauth.IssuerSourceSynthetic
+	case c.config.OAuth != nil && c.config.OAuth.AuthServerMetadataURL != "":
+		source = oauth.IssuerSourceConfigured
+		configuredURL = c.config.OAuth.AuthServerMetadataURL
+	}
+	exp := oauth.IssuerExpectation{
+		Expected: oauth.ExpectedIssuerFromMetadata(source, meta.Issuer, meta.AuthorizationResponseIssParameterSupported,
+			configuredURL, meta.AuthorizationEndpoint, meta.TokenEndpoint, meta.RegistrationEndpoint),
+		Skip: c.config.OAuth != nil && c.config.OAuth.SkipIssuerValidation != nil && *c.config.OAuth.SkipIssuerValidation,
+	}
+	var ch <-chan oauth.CallbackResult
+	if cb != nil {
+		ch = cb.RegisterArmedState(state, exp)
+	}
+	if exp.Skip {
+		c.logger.Warn("OAuth issuer validation is relaxed for this server (oauth.skip_issuer_validation): a wrong or missing iss is accepted, and a login that relies on that is not mix-up protected",
+			zap.String("server", c.config.Name))
+	}
+	return exp, ch, nil
 }
 
 // isOAuthInProgress checks if OAuth is in progress
@@ -2261,12 +2352,33 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 		})
 	}
 
+	// Claim the state on the callback server and record the expected issuer
+	// (Spec 135 FR-002) as soon as the URL exists, before it reaches anyone
+	// — the stale-client probe below sends it, and the caller opens the
+	// browser next. The callback must be routed to this flow even if the user
+	// authorizes before waitForOAuthCallbackAsync is scheduled (issue #975);
+	// that goroutine is handed this same waiter. Every failure below drops
+	// the registration, so a failed flow leaves no dangling waiter behind.
+	// No listener: no callback can reach this flow, so no URL is handed out
+	// (as in the two blocking flows).
+	callbackServer, exists := oauth.GetCallbackServer(c.config.Name)
+	if !exists {
+		return "", nil, "", "", nil, fmt.Errorf("callback server not found for %s", c.config.Name)
+	}
+	issuerCheck, ch, armErr := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
+	if armErr != nil {
+		return "", nil, "", "", nil, armErr
+	}
+	waiter := &callbackWaiter{server: callbackServer, ch: ch, issuer: issuerCheck}
+	dropWaiter := func() { waiter.server.UnregisterState(state) }
+
 	// Append extra OAuth parameters (RFC 8707 resource, oauth.extra_params) - issue #271
 	authURL = c.applyExtraParamsToAuthURL(authURL, extraParams)
 
 	// Issue #975: never hand back an authorization URL without a client_id —
 	// the provider is guaranteed to reject it (GitHub 404s on client_id=).
 	if flowErr := c.emptyClientIDFlowError(authURL, correlationID, dcrErr); flowErr != nil {
+		dropWaiter()
 		return "", nil, "", "", nil, flowErr
 	}
 
@@ -2276,20 +2388,10 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 	if !hasStaticCredentials && hasPersistedCredentials {
 		recoveredURL, staleErr := c.recoverStaleDCRClient(ctx, oauthHandler, oauthConfig.ClientID, authURL, state, codeChallenge, extraParams, correlationID)
 		if staleErr != nil {
+			dropWaiter()
 			return "", nil, "", "", nil, staleErr
 		}
 		authURL = recoveredURL
-	}
-
-	// Claim the state on the callback server before handing the URL back — the
-	// caller opens the browser next, and the callback must be routed to this
-	// flow even if the user authorizes before waitForOAuthCallbackAsync is
-	// scheduled (issue #975). RegisterState is idempotent, so that goroutine
-	// obtains this same channel. Registering only on the success path keeps a
-	// failed flow from leaving a dangling waiter behind.
-	var waiter *callbackWaiter
-	if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
-		waiter = &callbackWaiter{server: callbackServer, ch: callbackServer.RegisterState(state)}
 	}
 
 	return authURL, oauthHandler, codeVerifier, state, waiter, nil
@@ -2377,13 +2479,16 @@ func (c *Client) clientIDRequiredSuggestion() string {
 type callbackWaiter struct {
 	server *oauth.CallbackServer
 	ch     <-chan oauth.CallbackResult
+	// issuer is the expectation armed for the flow's state (Spec 135
+	// FR-002); the code exchange checks the response against it again. A
+	// zero value (a waiter registered without arming) refuses the exchange.
+	issuer oauth.IssuerExpectation
 }
 
 // waitForOAuthCallbackAsync waits for OAuth callback and handles token exchange in background.
 //
-// waiter is the listener and channel registered when the authorization URL
-// was built; nil looks the listener up and registers here (tests, and a flow
-// built without a callback server).
+// waiter is the listener, channel and issuer check registered when the
+// authorization URL was built; with nil the sign-in is reported as failed.
 func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *uptransport.OAuthHandler, codeVerifier, state string, waiter *callbackWaiter, correlationID string) {
 	c.markOAuthInProgress()
 	defer func() {
@@ -2411,19 +2516,24 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 	// delivered (delivery removes the waiter, so a second RegisterState would
 	// park on a fresh channel), and looking the listener up by name again
 	// could find a replacement that never saw this state.
+	// Spec 135: the consumer never registers a waiter of its own, which
+	// would be one without an issuer check.
 	if waiter == nil {
-		callbackServer, exists := oauth.GetCallbackServer(c.config.Name)
-		if !exists {
-			c.reportOAuthFailure(fmt.Errorf("OAuth callback server not found for %s - the authorization code cannot be received", c.config.Name))
-			return
-		}
-		waiter = &callbackWaiter{server: callbackServer, ch: callbackServer.RegisterState(state)}
+		c.reportOAuthFailure(fmt.Errorf("OAuth sign-in for %s has no callback waiter - the authorization code cannot be received", c.config.Name))
+		return
 	}
 	callbackServer, callbackCh := waiter.server, waiter.ch
 	defer callbackServer.UnregisterState(state)
 
 	select {
 	case params := <-callbackCh:
+		if params.Err != nil {
+			c.logger.Error("❌ OAuth authorization response refused",
+				zap.String("server", c.config.Name),
+				logSafeErrorField(params.Err))
+			c.reportOAuthFailure(fmt.Errorf("OAuth authorization for %s was refused: %w", c.config.Name, params.Err))
+			return
+		}
 		c.logger.Info("🎯 OAuth callback received",
 			zap.String("server", c.config.Name),
 			zap.String("correlation_id", correlationID))
@@ -2455,7 +2565,7 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 		}
 
 		// Exchange the authorization code for a token
-		clientStored, err := c.exchangeAuthorizationCode(ctx, oauthHandler, callbackServer, code, state, codeVerifier)
+		clientStored, err := c.exchangeAuthorizationCode(ctx, oauthHandler, callbackServer, params.Query, waiter.issuer, codeVerifier)
 		if err != nil {
 			c.logger.Error("❌ Failed to exchange authorization code",
 				zap.String("server", c.config.Name),

@@ -190,6 +190,16 @@ func seedOAUTH() {
 		},
 		DocsURL: docsURL(OAuthTokenUndecryptable),
 	})
+	register(CatalogEntry{
+		Code:        OAuthIssuerMismatch,
+		Severity:    SeverityError,
+		UserMessage: "The sign-in response could not be confirmed as coming from the expected authorization server, so nothing was signed in. Start the sign-in again; if it keeps failing, the provider's issuer setup needs checking.",
+		FixSteps: []FixStep{
+			{Type: FixStepButton, Label: "Retry log in", FixerKey: "oauth_reauth", Destructive: true},
+			{Type: FixStepLink, Label: "Why a sign-in response is refused", URL: docsURL(OAuthIssuerMismatch)},
+		},
+		DocsURL: docsURL(OAuthIssuerMismatch),
+	})
 }
 
 // --- HTTP ----------------------------------------------------------------

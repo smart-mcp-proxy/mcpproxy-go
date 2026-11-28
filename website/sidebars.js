@@ -218,6 +218,7 @@ const sidebars = {
             'errors/MCPX_OAUTH_LOGIN_REQUIRED',
             'errors/MCPX_OAUTH_REAUTH_REQUIRED',
             'errors/MCPX_OAUTH_TOKEN_UNDECRYPTABLE',
+            'errors/MCPX_OAUTH_ISSUER_MISMATCH',
           ],
         },
         {

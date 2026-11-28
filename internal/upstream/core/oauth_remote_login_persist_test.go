@@ -33,7 +33,7 @@ func TestLoginCompletion_RemoteCallbackPersistsEffectiveRedirectURI(t *testing.T
 	require.NotEqual(t, want, cb.RedirectURI, "the loopback listener keeps its own URI")
 
 	h, code, state, verifier := loginPairHandler(t, f, oauth.NewPersistentTokenStore(f.name, f.srv.MCPURL, f.db))
-	stored, err := c.exchangeAuthorizationCode(context.Background(), h, cb, code, state, verifier)
+	stored, err := exchangeForTest(context.Background(), t, c, h, cb, code, state, verifier)
 	require.NoError(t, err)
 	require.True(t, stored)
 

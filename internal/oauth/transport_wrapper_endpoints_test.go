@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mark3labs/mcp-go/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -95,6 +96,9 @@ func TestWrapper_SynthesizesMetadataWhenUnreachable(t *testing.T) {
 	assert.Equal(t, ov.token, doc["token_endpoint"])
 	assert.Equal(t, ov.registration, doc["registration_endpoint"])
 	assert.Equal(t, []any{"code"}, doc["response_types_supported"])
+	// Spec 135 FR-004: the flow's issuer source follows what was served.
+	assert.True(t, ServedSyntheticMetadata(&client.OAuthConfig{HTTPClient: &http.Client{Transport: w}}))
+	assert.False(t, ServedSyntheticMetadata(&client.OAuthConfig{HTTPClient: &http.Client{}}), "no mcpproxy wrapper")
 
 	// Without both authz+token overrides nothing is synthesized: the 404 passes through.
 	w2 := newEndpointWrapper(t, http.DefaultTransport, nil, wrapperEndpoints{serverURL: "https://mcp.example.com/mcp", overrides: discoveryOverrides{token: ov.token}, metadataURL: metaURL})

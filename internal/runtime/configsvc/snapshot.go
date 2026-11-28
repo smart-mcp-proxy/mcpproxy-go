@@ -87,6 +87,10 @@ func (s *Snapshot) Clone() *config.Config {
 						enabled := *srv.OAuth.RefreshReplayEnabled
 						oauthClone.RefreshReplayEnabled = &enabled
 					}
+					if srv.OAuth.SkipIssuerValidation != nil {
+						skip := *srv.OAuth.SkipIssuerValidation
+						oauthClone.SkipIssuerValidation = &skip
+					}
 					if srv.OAuth.Scopes != nil {
 						oauthClone.Scopes = make([]string, len(srv.OAuth.Scopes))
 						copy(oauthClone.Scopes, srv.OAuth.Scopes)

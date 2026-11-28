@@ -50,6 +50,7 @@ OAuth authentication is used when connecting to MCP servers that require authori
 | `scopes` | array | Requested OAuth scopes |
 | `pkce_enabled` | boolean | PKCE is always enabled for security; this flag is currently ignored |
 | `extra_params` | object | Additional authorization parameters (e.g., RFC 8707 resource) |
+| `skip_issuer_validation` | boolean | Default `false`. Accepts a sign-in response whose RFC 9207 `iss` is wrong or missing, for a provider known to misreport it; such sign-ins are not protected against mix-up. See [Which authorization server answered](#which-authorization-server-answered-rfc-9207-iss) |
 
 **Note:** OAuth authorization and token endpoints are discovered by default from the server's OAuth metadata (RFC 8414 `.well-known/oauth-authorization-server`). They can be overridden explicitly with `authorization_endpoint` and `token_endpoint` (and `registration_endpoint`); if metadata discovery fails and both authorization and token overrides are set, MCPProxy builds the metadata from them.
 
@@ -105,8 +106,57 @@ completes. What the browser shows depends on the callback:
 - in the server edition, the brokered credential connect callback redirects
   to the Web UI with `connect_failed`.
 
-An `iss` parameter (RFC 9207) is passed on to the sign-in unchanged. Checking
-it against the authorization server the sign-in started with is planned
+#### Which authorization server answered (RFC 9207 `iss`)
+
+When MCPProxy builds the authorization URL it records the issuer of the
+authorization server metadata that URL came from, and whether that metadata
+says the server always sends `iss`
+(`authorization_response_iss_parameter_supported`). When the browser comes
+back, the callback compares the response's `iss` with that record before the
+page is chosen and before anything is exchanged. This covers the local and the
+remote (`oauth.callback_base_url`) callback; the server edition's brokered
+credential connect callback does not check `iss` yet:
+
+| Response | Result |
+|---|---|
+| `iss` equal to the recorded issuer (exact match) | accepted |
+| `iss` names another issuer, or is present and empty | refused |
+| no `iss`, and the metadata advertises it | refused |
+| no `iss`, and the metadata does not advertise it | accepted; this sign-in is not protected against mix-up |
+
+A refused response shows **Authorization Failed** ("The sign-in response could
+not be confirmed as coming from the expected authorization server"), names the
+expected server by its origin only, and is reported as
+[`MCPX_OAUTH_ISSUER_MISMATCH`](../errors/MCPX_OAUTH_ISSUER_MISMATCH.md). The
+authorization code is never sent to the token endpoint. An error response
+(`error=...`) gets the same check first, so a refused one is reported as the
+issuer mismatch, not as the provider's error. The value the response carried
+is never shown, only logged after scrubbing.
+
+The same rules apply when `oauth.auth_server_metadata_url` is configured: the
+recorded issuer is the `issuer` in that document. When endpoint overrides make
+MCPProxy serve metadata built from them (the real document could not be
+fetched), the overrides are the trust anchor and any `iss` is accepted, with a
+warning in the log when it differs.
+
+For a provider that is known to send a wrong `iss`, or to advertise `iss` and
+then omit it, the check can be turned off for that one server:
+
+```json
+{
+  "name": "legacy-provider",
+  "url": "https://mcp.legacy.example/mcp",
+  "oauth": { "skip_issuer_validation": true }
+}
+```
+
+With it on, a wrong `iss`, or a missing one the metadata advertises, is
+accepted with a warning, and the sign-in is not protected against mix-up. The strict parse above is still
+applied. Changing the setting does not sign the server out.
+
+The issuer of metadata that mcpproxy discovers is not yet checked against the
+address it was discovered from, and stored tokens are not yet bound to their
+issuer; both follow in later changes
 ([#2044](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/2044)).
 
 #### Client registration type
@@ -389,6 +439,16 @@ parentheses names the rule, for example `repeated iss parameter`. MCPProxy did
 not exchange anything. Start the login again; if the provider keeps sending
 such a response, report it to the provider, since a repeated or conflicting
 parameter is not a valid OAuth authorization response.
+
+### The browser says the sign-in response could not be confirmed
+
+The callback page reports **Authorization Failed** with "The sign-in response
+could not be confirmed as coming from the expected authorization server" when
+the response's `iss` did not match the authorization server the sign-in
+started with (see [Which authorization server answered](#which-authorization-server-answered-rfc-9207-iss)).
+Nothing was exchanged or stored. Start the sign-in again. If it fails every
+time, see
+[`MCPX_OAUTH_ISSUER_MISMATCH`](../errors/MCPX_OAUTH_ISSUER_MISMATCH.md).
 
 ### The browser says the sign-in was invalidated
 

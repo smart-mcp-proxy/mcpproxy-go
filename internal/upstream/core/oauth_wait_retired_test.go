@@ -36,12 +36,12 @@ func TestWaitForOAuthCallbackAsync_RetiredInstanceInvalidatesTheLogin(t *testing
 	c.SetGate(gate)
 
 	const state = "state-retired-mid-login"
-	cs.RegisterState(state)
+	waiterCh := cs.RegisterState(state)
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		c.waitForOAuthCallbackAsync(ctx, nil, "verifier", state, nil, "corr-retired")
+		c.waitForOAuthCallbackAsync(ctx, nil, "verifier", state, &callbackWaiter{server: cs, ch: waiterCh}, "corr-retired")
 	}()
 	require.Eventually(t, func() bool { return cs.HasState(state) }, 2*time.Second, 5*time.Millisecond)
 

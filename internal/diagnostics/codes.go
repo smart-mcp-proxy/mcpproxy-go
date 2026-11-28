@@ -41,6 +41,10 @@ const (
 	// envelope that fails authentication. Not a login state: a login cannot
 	// overwrite the row, so the fix is to restore the key or discard the row.
 	OAuthTokenUndecryptable Code = "MCPX_OAUTH_TOKEN_UNDECRYPTABLE"
+	// OAuthIssuerMismatch: an authorization response's iss did not confirm
+	// the flow's expected issuer (RFC 9207, Spec 135 FR-003). Nothing was
+	// exchanged; the fix is a fresh sign-in.
+	OAuthIssuerMismatch Code = "MCPX_OAUTH_ISSUER_MISMATCH"
 )
 
 // HTTP domain — HTTP/SSE transport failures.
