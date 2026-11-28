@@ -23,6 +23,8 @@ func TestFR015_SkipIssuerValidationIsNotIdentity(t *testing.T) {
 		"empty collections are no setting")
 
 	assert.True(t, OAuthConfigChanged(nil, &OAuthConfig{SkipIssuerValidation: &on, ClientID: "a"}), "a credential field is identity")
+	assert.True(t, OAuthConfigChanged(&OAuthConfig{}, nil), "removing an empty oauth block is still a change")
+	assert.True(t, OAuthConfigChanged(nil, &OAuthConfig{}), "adding an empty oauth block is still a change")
 	assert.True(t, OAuthConfigChanged(nil, &OAuthConfig{Scopes: []string{"read"}}), "a non-policy block is still a change")
 }
 

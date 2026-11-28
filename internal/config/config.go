@@ -3429,7 +3429,12 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 // oauthBlockIsPolicyOnly reports whether o sets nothing but request-policy
 // fields (RefreshReplayEnabled, SkipIssuerValidation): such a block names the
 // same credentials as no oauth block at all.
+// A block that sets no policy field either (`"oauth": {}`) is not policy-only:
+// adding or removing it stays an identity change, as before.
 func oauthBlockIsPolicyOnly(o *OAuthConfig) bool {
+	if o.RefreshReplayEnabled == nil && o.SkipIssuerValidation == nil {
+		return false
+	}
 	c := *o
 	c.RefreshReplayEnabled = nil
 	c.SkipIssuerValidation = nil
