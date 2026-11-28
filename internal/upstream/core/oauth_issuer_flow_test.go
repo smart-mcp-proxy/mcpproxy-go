@@ -137,7 +137,7 @@ func TestMixUp_HonestIssRefusedInHostileFlow(t *testing.T) {
 	meta, err := h.GetServerMetadata(context.Background())
 	require.NoError(t, err)
 	exp := oauth.IssuerExpectation{Expected: oauth.ExpectedIssuerFromMetadata(oauth.IssuerSourceDiscovered,
-		meta.Issuer, meta.AuthorizationResponseIssParameterSupported, meta.AuthorizationEndpoint, meta.TokenEndpoint, "")}
+		meta.Issuer, meta.AuthorizationResponseIssParameterSupported, "", meta.AuthorizationEndpoint, meta.TokenEndpoint)}
 	before := hostile.srv.Server.TokenRequestCount()
 
 	q := url.Values{"code": {code}, "state": {state}, "iss": {honest.IssuerURL}}
@@ -196,7 +196,8 @@ func TestOAuthIssuerChecks_AllExchangePaths(t *testing.T) {
 
 	f, err := parser.ParseFile(fset, "connection_oauth.go", nil, 0)
 	require.NoError(t, err)
-	armed := map[string]bool{}
+	// First position of each call of interest, per function.
+	first := map[string]map[string]token.Pos{}
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
@@ -204,15 +205,33 @@ func TestOAuthIssuerChecks_AllExchangePaths(t *testing.T) {
 		}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			if call, ok := n.(*ast.CallExpr); ok {
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "armIssuerCheck" {
-					armed[fn.Name.Name] = true
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					switch sel.Sel.Name {
+					case "armIssuerCheck", "applyExtraParamsToAuthURL", "recoverStaleDCRClient", "GetAuthorizationURL":
+						if first[fn.Name.Name] == nil {
+							first[fn.Name.Name] = map[string]token.Pos{}
+						}
+						if _, seen := first[fn.Name.Name][sel.Sel.Name]; !seen {
+							first[fn.Name.Name][sel.Sel.Name] = call.Pos()
+						}
+					}
 				}
 			}
 			return true
 		})
 	}
+	// Each flow arms the check right after GetAuthorizationURL and before the
+	// URL is used anywhere (the stale-client probe sends it to the provider).
 	for _, fn := range []string{"handleOAuthAuthorization", "handleOAuthAuthorizationWithResult", "getAuthorizationURLQuick"} {
-		assert.True(t, armed[fn], "%s must arm the issuer check", fn)
+		pos := first[fn]
+		arm, ok := pos["armIssuerCheck"]
+		require.True(t, ok, "%s must arm the issuer check", fn)
+		assert.Greater(t, arm, pos["GetAuthorizationURL"], "%s arms after building the URL", fn)
+		for _, use := range []string{"applyExtraParamsToAuthURL", "recoverStaleDCRClient"} {
+			if p, ok := pos[use]; ok {
+				assert.Less(t, arm, p, "%s must arm before %s", fn, use)
+			}
+		}
 	}
 }
 
@@ -224,6 +243,6 @@ func exchangeForTest(ctx context.Context, t *testing.T, c *Client, h *uptranspor
 	meta, err := h.GetServerMetadata(ctx)
 	require.NoError(t, err)
 	exp := oauth.IssuerExpectation{Expected: oauth.ExpectedIssuerFromMetadata(oauth.IssuerSourceDiscovered,
-		meta.Issuer, meta.AuthorizationResponseIssParameterSupported, meta.AuthorizationEndpoint, meta.TokenEndpoint, "")}
+		meta.Issuer, meta.AuthorizationResponseIssParameterSupported, "", meta.AuthorizationEndpoint, meta.TokenEndpoint)}
 	return c.exchangeAuthorizationCode(ctx, h, cb, url.Values{"code": {code}, "state": {state}}, exp, verifier)
 }

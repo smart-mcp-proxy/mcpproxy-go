@@ -19,6 +19,8 @@ func TestFR015_SkipIssuerValidationIsNotIdentity(t *testing.T) {
 	assert.False(t, OAuthConfigChanged(&OAuthConfig{SkipIssuerValidation: &on}, &OAuthConfig{SkipIssuerValidation: &off}))
 	assert.False(t, OAuthConfigChanged(&OAuthConfig{ClientID: "a"}, &OAuthConfig{ClientID: "a", SkipIssuerValidation: &on}))
 	assert.False(t, OAuthConfigChanged(nil, &OAuthConfig{SkipIssuerValidation: &on, RefreshReplayEnabled: &on}))
+	assert.False(t, OAuthConfigChanged(&OAuthConfig{SkipIssuerValidation: &on, Scopes: []string{}, ExtraParams: map[string]string{}}, nil),
+		"empty collections are no setting")
 
 	assert.True(t, OAuthConfigChanged(nil, &OAuthConfig{SkipIssuerValidation: &on, ClientID: "a"}), "a credential field is identity")
 	assert.True(t, OAuthConfigChanged(nil, &OAuthConfig{Scopes: []string{"read"}}), "a non-policy block is still a change")

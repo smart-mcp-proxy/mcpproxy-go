@@ -153,25 +153,29 @@ func TestIssuerMismatchError_TextIsOriginOnly(t *testing.T) {
 // ExpectedIssuerFromMetadata derives the flow's snapshot from the document
 // the handler holds (FR-002).
 func TestExpectedIssuerFromMetadata(t *testing.T) {
-	exp := ExpectedIssuerFromMetadata(IssuerSourceDiscovered, "https://as.example.com", true,
-		"https://as.example.com/authorize", "https://as.example.com/token", "")
+	exp := ExpectedIssuerFromMetadata(IssuerSourceDiscovered, "https://as.example.com", true, "",
+		"https://as.example.com/authorize", "https://as.example.com/token")
 	assert.Equal(t, ExpectedIssuer{Issuer: "https://as.example.com", Source: IssuerSourceDiscovered, IssSupported: true}, exp)
 
-	exp = ExpectedIssuerFromMetadata(IssuerSourceDiscovered, "https://as.example.com", false,
-		"http://as.example.com/authorize", "https://as.example.com/token", "")
+	exp = ExpectedIssuerFromMetadata(IssuerSourceDiscovered, "https://as.example.com", false, "",
+		"http://as.example.com/authorize", "https://as.example.com/token")
 	assert.True(t, exp.Insecure, "an http endpoint on a public host is insecure")
 
-	exp = ExpectedIssuerFromMetadata(IssuerSourceDiscovered, "http://127.0.0.1:9000", false,
-		"http://127.0.0.1:9000/authorize", "http://127.0.0.1:9000/token", "")
+	exp = ExpectedIssuerFromMetadata(IssuerSourceDiscovered, "https://as.example.com", false, "",
+		"https://as.example.com/authorize", "https://as.example.com/token", "http://as.example.com/register")
+	assert.True(t, exp.Insecure, "an http registration endpoint is insecure too")
+
+	exp = ExpectedIssuerFromMetadata(IssuerSourceDiscovered, "http://127.0.0.1:9000", false, "",
+		"http://127.0.0.1:9000/authorize", "http://127.0.0.1:9000/token")
 	assert.False(t, exp.Insecure, "loopback http is allowed")
 
 	exp = ExpectedIssuerFromMetadata(IssuerSourceConfigured, "https://as.example.com", false,
-		"https://as.example.com/authorize", "https://as.example.com/token",
-		"https://as.example.com/.well-known/oauth-authorization-server")
+		"https://as.example.com/.well-known/oauth-authorization-server",
+		"https://as.example.com/authorize", "https://as.example.com/token")
 	assert.True(t, exp.Verified, "configured URL is a candidate of the declared issuer")
 
 	exp = ExpectedIssuerFromMetadata(IssuerSourceConfigured, "https://as.example.com", false,
-		"https://as.example.com/authorize", "https://as.example.com/token",
-		"https://other.example.com/.well-known/oauth-authorization-server")
+		"https://other.example.com/.well-known/oauth-authorization-server",
+		"https://as.example.com/authorize", "https://as.example.com/token")
 	assert.False(t, exp.Verified, "configured URL on another origin is not verified")
 }

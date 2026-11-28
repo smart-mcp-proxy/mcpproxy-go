@@ -2141,12 +2141,19 @@ func (c *CallbackServer) handleParsedCallback(w http.ResponseWriter, query url.V
 					issuerOriginOrUnknown(issuerCheck.Expected.Issuer), c.ServerName)))
 			return
 		}
-		if decision.Waived != "" {
+		switch {
+		case decision.Waived != "":
 			c.logger.Warn("⚠️ OAuth callback issuer check waived; this login is not mix-up protected",
 				zap.String("reason", decision.Waived),
 				zap.String("state", StateFingerprint(state)),
 				zap.String("expected_issuer", logSafeURL(issuerCheck.Expected.Issuer)),
 				zap.Bool("iss_present", issPresent),
+				zap.String("iss", ScrubUpstreamText(params.Get("iss"))))
+		case issPresent && issuerCheck.Expected.Source == IssuerSourceSynthetic:
+			// FR-004: a present iss on a synthetic flow is logged, never kept.
+			c.logger.Info("OAuth callback carries an iss for an endpoint-override (synthetic) issuer; not used as provenance",
+				zap.String("state", StateFingerprint(state)),
+				zap.String("expected_issuer", logSafeURL(issuerCheck.Expected.Issuer)),
 				zap.String("iss", ScrubUpstreamText(params.Get("iss"))))
 		}
 	}

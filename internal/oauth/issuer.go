@@ -116,6 +116,7 @@ func DecideAuthorizationResponseIssuer(q url.Values, exp ExpectedIssuer, skip bo
 	}
 
 	if exp.Source == IssuerSourceSynthetic {
+		// FR-004: accepted; the caller logs a present iss (WARN when Waived).
 		if present && iss != exp.Issuer {
 			return IssuerDecision{Waived: "synthetic_issuer"}, nil
 		}
@@ -145,10 +146,12 @@ func DecideAuthorizationResponseIssuer(q url.Values, exp ExpectedIssuer, skip bo
 // ExpectedIssuerFromMetadata builds a flow's snapshot from the metadata
 // document its handler holds. configuredURL is the operator's metadata URL
 // (source configured only), checked against the declared issuer's own
-// candidates for Verified.
-func ExpectedIssuerFromMetadata(source IssuerSource, issuer string, issSupported bool, authorizationEndpoint, tokenEndpoint, configuredURL string) ExpectedIssuer {
+// candidates for Verified. endpoints are the document's endpoints
+// (authorization, token, registration); any http one on a non-loopback host
+// makes the snapshot Insecure.
+func ExpectedIssuerFromMetadata(source IssuerSource, issuer string, issSupported bool, configuredURL string, endpoints ...string) ExpectedIssuer {
 	exp := ExpectedIssuer{Issuer: issuer, Source: source, IssSupported: issSupported}
-	for _, u := range []string{issuer, authorizationEndpoint, tokenEndpoint} {
+	for _, u := range append([]string{issuer}, endpoints...) {
 		if insecureURL(u) {
 			exp.Insecure = true
 		}
@@ -196,8 +199,10 @@ func insecureURL(raw string) bool {
 	return !config.IsLoopbackHost(u.Hostname())
 }
 
-// IssuerOrigin is the user-facing form of an issuer: scheme://host[:port].
-func IssuerOrigin(issuer string) string { return issuerOrigin(issuer) }
+// NewIssuerMismatchError builds the refusal for a flow expecting issuer.
+func NewIssuerMismatchError(issuer, reason string) *IssuerMismatchError {
+	return &IssuerMismatchError{ExpectedOrigin: issuerOrigin(issuer), Reason: reason}
+}
 
 // issuerOriginOrUnknown is issuerOrigin for page text.
 func issuerOriginOrUnknown(issuer string) string {

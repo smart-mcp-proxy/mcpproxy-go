@@ -3433,6 +3433,13 @@ func oauthBlockIsPolicyOnly(o *OAuthConfig) bool {
 	c := *o
 	c.RefreshReplayEnabled = nil
 	c.SkipIssuerValidation = nil
+	// An empty list or map is no setting, as the field compare below treats it.
+	if len(c.Scopes) == 0 {
+		c.Scopes = nil
+	}
+	if len(c.ExtraParams) == 0 {
+		c.ExtraParams = nil
+	}
 	return reflect.ValueOf(c).IsZero()
 }
 

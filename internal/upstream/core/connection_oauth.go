@@ -1256,6 +1256,13 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		})
 	}
 
+	// Spec 135 FR-002: record the expected issuer as soon as the URL exists,
+	// before it reaches anyone (the stale-client probe sends it too).
+	issuerCheck, err := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
+	if err != nil {
+		return err
+	}
+
 	// Append extra OAuth parameters (RFC 8707 resource, oauth.extra_params) - issue #271
 	authURL = c.applyExtraParamsToAuthURL(authURL, extraParams)
 
@@ -1275,12 +1282,6 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 			return staleErr
 		}
 		authURL = recoveredURL
-	}
-
-	// Spec 135 FR-002: record the expected issuer before the URL leaves.
-	issuerCheck, err := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
-	if err != nil {
-		return err
 	}
 
 	// Always log the computed authorization URL so users can copy/paste if auto-launch fails.
@@ -1575,6 +1576,13 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 		})
 	}
 
+	// Spec 135 FR-002: record the expected issuer as soon as the URL exists,
+	// before it reaches anyone (the stale-client probe sends it too).
+	issuerCheck, err := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
+	if err != nil {
+		return result, err
+	}
+
 	// Append extra OAuth parameters (RFC 8707 resource, oauth.extra_params) - issue #271
 	authURL = c.applyExtraParamsToAuthURL(authURL, extraParams)
 
@@ -1592,12 +1600,6 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 			return result, staleErr
 		}
 		authURL = recoveredURL
-	}
-
-	// Spec 135 FR-002: record the expected issuer before the URL leaves.
-	issuerCheck, err := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
-	if err != nil {
-		return result, err
 	}
 
 	// Store the auth URL in the result
@@ -1724,8 +1726,7 @@ func (c *Client) exchangeAuthorizationCode(ctx context.Context, h *uptransport.O
 	if !exp.Skip && (exp.Expected.Source == oauth.IssuerSourceDiscovered || exp.Expected.Source == oauth.IssuerSourceConfigured) {
 		exchangeErr = h.ProcessAuthorizationCallback(ctx, q, codeVerifier)
 		if errors.Is(exchangeErr, uptransport.ErrIssuerMismatch) {
-			return false, &oauth.IssuerMismatchError{ExpectedOrigin: oauth.IssuerOrigin(exp.Expected.Issuer),
-				Reason: "the OAuth library refused the response's issuer"}
+			return false, oauth.NewIssuerMismatchError(exp.Expected.Issuer, "the OAuth library refused the response's issuer")
 		}
 	} else {
 		exchangeErr = h.ProcessAuthorizationResponse(ctx, code, state, codeVerifier)
@@ -1757,7 +1758,7 @@ func (c *Client) armIssuerCheck(ctx context.Context, h *uptransport.OAuthHandler
 	}
 	exp := oauth.IssuerExpectation{
 		Expected: oauth.ExpectedIssuerFromMetadata(source, meta.Issuer, meta.AuthorizationResponseIssParameterSupported,
-			meta.AuthorizationEndpoint, meta.TokenEndpoint, configuredURL),
+			configuredURL, meta.AuthorizationEndpoint, meta.TokenEndpoint, meta.RegistrationEndpoint),
 		Skip: c.config.OAuth != nil && c.config.OAuth.SkipIssuerValidation != nil && *c.config.OAuth.SkipIssuerValidation,
 	}
 	if cb != nil && !cb.ArmIssuerCheck(state, exp) {
@@ -2340,12 +2341,36 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 		})
 	}
 
+	// Claim the state on the callback server and record the expected issuer
+	// (Spec 135 FR-002) as soon as the URL exists, before it reaches anyone
+	// — the stale-client probe below sends it, and the caller opens the
+	// browser next. The callback must be routed to this flow even if the user
+	// authorizes before waitForOAuthCallbackAsync is scheduled (issue #975);
+	// that goroutine is handed this same waiter. Every failure below drops
+	// the registration, so a failed flow leaves no dangling waiter behind.
+	var waiter *callbackWaiter
+	if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
+		waiter = &callbackWaiter{server: callbackServer, ch: callbackServer.RegisterState(state)}
+		issuerCheck, armErr := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
+		if armErr != nil {
+			callbackServer.UnregisterState(state)
+			return "", nil, "", "", nil, armErr
+		}
+		waiter.issuer = issuerCheck
+	}
+	dropWaiter := func() {
+		if waiter != nil {
+			waiter.server.UnregisterState(state)
+		}
+	}
+
 	// Append extra OAuth parameters (RFC 8707 resource, oauth.extra_params) - issue #271
 	authURL = c.applyExtraParamsToAuthURL(authURL, extraParams)
 
 	// Issue #975: never hand back an authorization URL without a client_id —
 	// the provider is guaranteed to reject it (GitHub 404s on client_id=).
 	if flowErr := c.emptyClientIDFlowError(authURL, correlationID, dcrErr); flowErr != nil {
+		dropWaiter()
 		return "", nil, "", "", nil, flowErr
 	}
 
@@ -2355,27 +2380,10 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 	if !hasStaticCredentials && hasPersistedCredentials {
 		recoveredURL, staleErr := c.recoverStaleDCRClient(ctx, oauthHandler, oauthConfig.ClientID, authURL, state, codeChallenge, extraParams, correlationID)
 		if staleErr != nil {
+			dropWaiter()
 			return "", nil, "", "", nil, staleErr
 		}
 		authURL = recoveredURL
-	}
-
-	// Claim the state on the callback server before handing the URL back — the
-	// caller opens the browser next, and the callback must be routed to this
-	// flow even if the user authorizes before waitForOAuthCallbackAsync is
-	// scheduled (issue #975). RegisterState is idempotent, so that goroutine
-	// obtains this same channel. Registering only on the success path keeps a
-	// failed flow from leaving a dangling waiter behind.
-	var waiter *callbackWaiter
-	if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
-		waiter = &callbackWaiter{server: callbackServer, ch: callbackServer.RegisterState(state)}
-		// Spec 135 FR-002: record the expected issuer before the URL leaves.
-		issuerCheck, armErr := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
-		if armErr != nil {
-			callbackServer.UnregisterState(state)
-			return "", nil, "", "", nil, armErr
-		}
-		waiter.issuer = issuerCheck
 	}
 
 	return authURL, oauthHandler, codeVerifier, state, waiter, nil
