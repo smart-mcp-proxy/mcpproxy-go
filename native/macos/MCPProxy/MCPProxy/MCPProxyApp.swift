@@ -41,6 +41,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var updateService = UpdateService()
     var coreManager: CoreProcessManager?
 
+    /// The single-tray lock descriptor (`TrayInstanceLock`), held for the life
+    /// of the process and handed over on a relaunch into a replaced bundle.
+    private var trayLockDescriptor: Int32?
+
     private var statusItem: NSStatusItem?
     /// The corner severity dot overlaid on the status item button, when a
     /// server severity is being badged. Held so `updateStatusIcon()` can reuse
@@ -141,6 +145,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // One tray per instance root, checked before anything is set up or
+        // recorded. exit(), not terminate(): this process owns no core, and
+        // applicationWillTerminate would journal a termination for it.
+        switch TrayInstanceLock.acquire(at: InstancePaths.trayLockURL) {
+        case .acquired(let descriptor):
+            trayLockDescriptor = descriptor
+        case .heldByAnotherTray:
+            NSLog("[MCPProxy] Another MCPProxy tray is already running for %@ - exiting",
+                  InstancePaths.root.path)
+            exit(0)
+        case .unavailable(let reason):
+            NSLog("[MCPProxy] Cannot check for another running tray (%@) - starting anyway", reason)
+        }
+
         // Prevent focus steal on launch — no Dock icon, no Cmd+Tab entry
         NSApp.setActivationPolicy(.prohibited)
 
@@ -1841,12 +1859,35 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 launcher.executableURL = URL(fileURLWithPath: "/usr/bin/open")
                 launcher.arguments = ["-n", bundlePath]
                 do {
-                    try launcher.run()
+                    // The new tray checks the single-tray lock at launch, while
+                    // this one is still running: release it first, or the new
+                    // tray exits and none is left.
+                    if let descriptor = self.trayLockDescriptor {
+                        self.trayLockDescriptor = nil
+                        switch TrayInstanceLock.handOver(
+                            descriptor, at: InstancePaths.trayLockURL,
+                            launch: { try TrayInstanceLock.runSuccessorLauncher(launcher) }) {
+                        case .launched:
+                            break
+                        case .failed(_, .heldByAnotherTray):
+                            // Another tray started in the gap and owns the lock;
+                            // it is the one tray now, so this one steps aside.
+                            NSLog("[MCPProxy] Another MCPProxy tray took over during the relaunch - quitting")
+                            NSApp.terminate(nil)
+                            return
+                        case .failed(let error, let relock):
+                            if case .acquired(let again) = relock { self.trayLockDescriptor = again }
+                            throw error
+                        }
+                    } else {
+                        try TrayInstanceLock.runSuccessorLauncher(launcher)
+                    }
                 } catch {
                     NSLog("[MCPProxy] Could not launch %@: %@", bundlePath, error.localizedDescription)
                     self.presentAlert(
                         title: "Could not start the new version",
-                        message: "Open \(bundlePath) manually to finish the upgrade.\n\n"
+                        message: "Quit MCPProxy from its menu, then open \(bundlePath) to finish the upgrade. "
+                            + "While this copy runs, the new one stops at launch.\n\n"
                             + error.localizedDescription
                     )
                     return

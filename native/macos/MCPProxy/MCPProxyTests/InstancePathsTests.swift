@@ -29,6 +29,8 @@ final class InstancePathsTests: XCTestCase {
                        "/Users/tester/.mcpproxy/mcp_config.json")
         XCTAssertEqual(InstancePaths.dataLockURL(environment: env, home: home).path,
                        "/Users/tester/.mcpproxy/config.db")
+        XCTAssertEqual(InstancePaths.trayLockURL(environment: env, home: home).path,
+                       "/Users/tester/.mcpproxy/mcpproxy-tray.lock")
         XCTAssertFalse(InstancePaths.isOverridden(environment: env))
     }
 
@@ -59,6 +61,9 @@ final class InstancePathsTests: XCTestCase {
                        "/tmp/qa936/mcp_config.json")
         XCTAssertEqual(InstancePaths.dataLockURL(environment: env, home: home).path,
                        "/tmp/qa936/config.db")
+        XCTAssertEqual(InstancePaths.trayLockURL(environment: env, home: home).path,
+                       "/tmp/qa936/mcpproxy-tray.lock",
+                       "a QA tray with its own root must not be refused by the user's tray")
         XCTAssertTrue(InstancePaths.isOverridden(environment: env))
     }
 
