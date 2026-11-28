@@ -2,7 +2,7 @@
 
 **Feature Branch**: `098-tools-preflight`
 **Created**: 2026-08-15
-**Status**: Draft
+**Status**: Implemented in one PR (#996)
 **Input**: User description: "Required-tools preflight (issue #969 item 3): a deterministic, side-effect-free availability check for a caller-supplied list of tool IDs, answering per-ID with a machine-readable reason code. Locked decisions from the research report 'Required-Tools Preflight — Research & Alternatives (mcpproxy #969)' (decision log 2026-08-15) and reporter-confirmed shape (issue #969 comment, 2026-08-13)."
 
 **Related**: #969 (item 3). Item 1 (filter_diagnostics) shipped in spec 094 / v0.55.0. This spec is v1 (Phase 1) of the preflight roadmap: shared eligibility evaluator + REST + CLI. Non-goals list the deferred phases.

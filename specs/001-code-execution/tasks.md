@@ -101,7 +101,7 @@
 ### Implementation for User Story 2
 
 - [x] T035 [US2] Enhance call_tool() to return { ok: true, result } on success and { ok: false, error: { message, code } } on failure
-- [ ] T036 [US2] Map upstream errors to error codes (NOT_FOUND, UPSTREAM_ERROR, TIMEOUT, INVALID_ARGS, SERVER_NOT_ALLOWED)
+- [x] T036 [US2] Map upstream errors to error codes (NOT_FOUND, UPSTREAM_ERROR, TIMEOUT, INVALID_ARGS, SERVER_NOT_ALLOWED)
 - [x] T037 [US2] Enhance error extraction to include line numbers for syntax errors before execution
 - [x] T038 [US2] Add goja.Exception stack trace parsing - extract full call stack with line numbers
 - [x] T039 [US2] Update tool handler error response format to include detailed error.message, error.stack, error.code
@@ -206,8 +206,8 @@
 
 - [x] T075 [US5] Verify config defaults: EnableCodeExecution=false, CodeExecutionTimeoutMs=120000, CodeExecutionMaxToolCalls=0, CodeExecutionPoolSize=10
 - [x] T076 [US5] Add feature toggle check in listTools() - only include code_execution if EnableCodeExecution=true
-- [ ] T077 [US5] Add feature toggle check in tool handler - return error if disabled
-- [ ] T078 [US5] Test hot config reload - verify pool resize and timeout updates apply without restart
+- [x] T077 [US5] Add feature toggle check in tool handler - return error if disabled
+- [x] T078 [US5] Test hot config reload - verify pool resize and timeout updates apply without restart
 
 **Checkpoint**: Feature toggle working - safe default (disabled) with opt-in activation
 
@@ -320,11 +320,11 @@
 
 **Purpose**: Improvements that affect multiple user stories
 
-- [ ] T114 [P] Security hardening: Verify sandbox prevents all restricted APIs (require, fs, net, process, etc.)
+- [x] T114 [P] Security hardening: Verify sandbox prevents all restricted APIs (require, fs, net, process, etc.)
 - [ ] T115 [P] Security test: Attempt to access environment variables - verify blocked
 - [ ] T116 [P] Security test: Attempt to execute OS commands - verify blocked
-- [ ] T117 [P] Integration with quarantine: Verify call_tool() respects upstream server quarantine status
-- [ ] T118 [P] Integration with allow/deny lists: Verify allowed_servers option honored
+- [x] T117 [P] Integration with quarantine: Verify call_tool() respects upstream server quarantine status
+- [x] T118 [P] Integration with allow/deny lists: Verify allowed_servers option honored
 - [ ] T119 Code cleanup: Remove debug logging, ensure all error paths covered
 - [ ] T120 Code cleanup: Run golangci-lint and fix all warnings
 - [ ] T121 Performance testing: Verify SC-001 (<30s latency for 3+ tool composition excluding upstream)

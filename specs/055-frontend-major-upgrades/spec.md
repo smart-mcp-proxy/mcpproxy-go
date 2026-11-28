@@ -2,7 +2,7 @@
 
 **Feature Branch**: `055-frontend-major-upgrades`
 **Created**: 2026-05-25
-**Status**: Draft
+**Status**: Implemented (dependency upgrades merged; docs task T024 still open)
 **Input**: Migrate the Vue 3 web UI under `frontend/` across four bundled major upgrades that Dependabot grouped into the now-closed PR #498: `tailwindcss` 3.4→4.3, `daisyui` 4.12→5.5, `vite` 5.4→8.0, `typescript` 5.9→6.0 (plus `vue-tsc` 2→3 and `@vitejs/plugin-vue` as needed).
 
 ## Background

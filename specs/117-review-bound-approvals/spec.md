@@ -2,7 +2,7 @@
 
 **Feature Branch**: `117-review-bound-approvals`
 **Created**: 2026-10-11
-**Status**: Draft (design only; implementation is split into three PRs, see plan.md)
+**Status**: Implemented in three PRs (#1567, #1566, #1565), see plan.md
 **Input**: GitHub issues [#1566](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1566) (approvals not bound to the reviewed definitions), [#1567](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1567) (tool baseline not durable) and [#1565](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1565) (out-of-order inventory passes). The OpenCode Sol 6.1 cross-model review of the split UX-02 work (#1555) found all three. They were deliberately left out of the minimal core fix #1571 (`9d0d3c2ca`, the per-server tool-approval lock).
 
 **Related**: Spec 032 (tool-level quarantine, rug-pull hashes), MCP-2931 (trust baseline), Spec 086 (trust modes, scan gate), Spec 105 (raw-name approval keying), Spec 109 (review queue and review screens), PR #1572 (the macOS tray half, #1569). PR #1572 already sends `expected_hashes` and reads `current_hash`; both are inert on today's core. #1568 (Web review-session hygiene) is not in scope.

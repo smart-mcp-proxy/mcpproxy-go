@@ -131,7 +131,7 @@
 
 ### Tests for User Story 4
 
-- [ ] T030 [P] [US4] Add E2E test: `--request-id` flag filters activity logs in `internal/server/e2e_test.go`
+- [x] T030 [P] [US4] Add E2E test: `--request-id` flag filters activity logs in `internal/server/e2e_test.go`
 - [x] T031 [P] [US4] Add E2E test: API query param `request_id` filters logs in `internal/server/e2e_test.go`
 
 ### Implementation for User Story 4
@@ -151,7 +151,7 @@
 **Purpose**: Documentation, validation, and cleanup
 
 - [ ] T037 [P] Update OpenAPI spec (`oas/swagger.yaml`) with X-Request-Id header and error response schema
-- [ ] T038 [P] Update CLAUDE.md error handling documentation
+- [x] T038 [P] Update CLAUDE.md error handling documentation
 - [ ] T039 Run `./scripts/test-api-e2e.sh` to verify all E2E tests pass
 - [ ] T040 Run `./scripts/verify-oas-coverage.sh` to ensure OpenAPI coverage
 - [ ] T041 Run quickstart.md validation - test all documented commands work

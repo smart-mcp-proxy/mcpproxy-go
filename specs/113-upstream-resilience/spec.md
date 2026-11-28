@@ -2,7 +2,7 @@
 
 **Feature Branch**: `113-upstream-resilience`
 **Created**: 2026-10-05
-**Status**: Draft
+**Status**: Implemented in six PRs (113-a to 113-f: #1498, #1499, #1502, #1504, #1501, #1510). G4 and G10 are design only.
 **Input**: Maintainer instruction: "work autonomously / create specs/PRs with fixes / review using opencode Sol 6.1". Source material: the 2026-10-01 read-only audit of mcpproxy against the talk "How Anthropic uses MCP for its own product" (https://www.youtube.com/watch?v=e8DMLtP5ibk), gaps G1–G10, each re-verified against `origin/main` @ `8442428d1` in [research.md](research.md).
 
 **Related**: Spec 023 (OAuth refresh manager, `RefreshState`), Spec 022 (redirect-URI port persistence, DCR clearing), Spec 058 (MCP 2026 upgrade: FR-019 cache hints, T063/T064), Spec 085 (pre-dispatch argument validation), Spec 105 (connection-generation pinning, `CallToolOnEpoch`), Spec 107 (audit line `error_class`, FR-034 frozen credential broker), Spec 112 (client header forwarding: `internal/transport/http.go` header func).

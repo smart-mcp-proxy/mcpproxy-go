@@ -2,7 +2,7 @@
 
 **Feature Branch**: `001-code-execution`
 **Created**: 2025-11-15
-**Status**: Draft
+**Status**: Implemented
 **Input**: User description: "Specification for adding a code_execution MCP tool to mcpproxy using dop251/goja. The tool lets LLMs send JS, access json_args as input, call upstream tools via call_tool, and return a structured result or error. Focus is on ergonomics, debuggability, and safe defaults."
 
 ## User Scenarios & Testing *(mandatory)*

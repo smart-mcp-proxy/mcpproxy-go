@@ -1074,7 +1074,7 @@ epics:
     priority: P1
     spec: specs/124-session-failure-timeline
     depends_on: []
-    note: "PR-1 shipped 2026-11-19; PR-2 CLI and PR-3 Web UI remain. tasks.md boxes (0/74) are not yet synced."
+    note: "PR-1 shipped 2026-11-19, PR-2 CLI shipped as #2074; PR-3 Web UI is open as #2073."
     tasks:
       - id: session-failure-timeline-record
         title: "PR-1: record and keep (work sessions, attempt roles, upstream_event rows, session-aware retention, REST doors)"
@@ -1084,21 +1084,23 @@ epics:
         depends_on: []
       - id: session-failure-timeline-cli
         title: "PR-2: CLI commands for work sessions and the timeline (cliclient methods, docs/cli/activity-commands.md)"
-        status: todo
+        status: done
         priority: P1
+        pr: "#2074"
         depends_on: []
       - id: session-failure-timeline-web
         title: "PR-3: Web UI session panel and timeline (unit tests, Playwright sweep, docs/web-ui/)"
-        status: todo
+        status: in_review
         priority: P2
+        pr: "#2073"
         depends_on: [session-failure-timeline-cli]
   - id: skills-over-mcp
     title: "Spec 125 Skills over MCP: catalog, approval gate, read-only agent tools"
-    status: in_progress
+    status: done
     priority: P1
     spec: specs/125-skills-over-mcp
     depends_on: [scan-structural-gate]
-    note: "The catalog, approval gate and agent tools have shipped. Native discovery, the Web Skills tab and held-skill review are in review."
+    note: "Shipped 2026-11: catalog, approval gate, agent tools, native discovery on single-server endpoints, Web Skills tab and held-skill review. Follow-up UX passes are the skills-review-ux epic (Specs 130, 131)."
     tasks:
       - id: skills-over-mcp-spec
         title: "Spec 125 Skills over MCP"
@@ -1126,19 +1128,19 @@ epics:
         depends_on: [skills-over-mcp-gate]
       - id: skills-over-mcp-web
         title: "Web Skills tab for reviewing and browsing skills"
-        status: in_review
+        status: done
         priority: P1
         pr: "#1950"
         depends_on: [skills-over-mcp-agent-tools]
       - id: skills-over-mcp-native
         title: "Native Skills discovery and reads on single-server endpoints"
-        status: in_review
+        status: done
         priority: P1
         pr: "#1949"
         depends_on: [skills-over-mcp-agent-tools]
       - id: skills-over-mcp-review-queue
         title: "Review held skills from Home, the review queue and the macOS tray"
-        status: in_review
+        status: done
         priority: P1
         pr: "#1951"
         depends_on: [skills-over-mcp-web]
@@ -1183,4 +1185,128 @@ epics:
         status: done
         priority: P1
         pr: "#1945"
+        depends_on: []
+  - id: skills-review-ux
+    title: "Specs 130 + 131 Skills review UX: review navigation and a simpler review card"
+    status: done
+    priority: P2
+    spec: specs/130-skills-review-ux
+    pr: ["#1987", "#1988"]
+    depends_on: [skills-over-mcp]
+    note: "Spec 130 (review navigation) shipped as #1987, Spec 131 (specs/131-skills-card-ux, review card) as #1988; each PR carried its own spec folder."
+  - id: client-oauth-login
+    title: "Spec 132 browser login for MCP clients: MCPProxy as an OAuth 2.1 authorization server"
+    status: in_progress
+    priority: P1
+    spec: specs/132-client-oauth-login
+    depends_on: []
+    note: "Opt-in (mcp_oauth_enabled), personal edition only. Backend, consent, management surfaces and the Connect choice have shipped; only claude-code is a verified browser-login client (verification/real-clients.md)."
+    tasks:
+      - id: client-oauth-login-spec
+        title: "Agree on the specification (spec, consent contract after review)"
+        status: done
+        priority: P1
+        pr: ["#1996", "#2011"]
+        depends_on: []
+      - id: client-oauth-login-backend
+        title: "PR-1a..1f: opt-in switch, protocol logic, storage, runtime service, HTTP endpoints, e2e script and docs"
+        status: done
+        priority: P1
+        pr: ["#1997", "#2010", "#2012", "#2013", "#2017", "#2019"]
+        depends_on: [client-oauth-login-spec]
+      - id: client-oauth-login-consent
+        title: "PR-2a..2c: consent page with client name suggestion, logins in Clients hub / CLI / MCP, sign-in requests in the macOS tray"
+        status: done
+        priority: P1
+        pr: ["#2020", "#2021", "#2022"]
+        depends_on: [client-oauth-login-backend]
+      - id: client-oauth-login-connect
+        title: "PR-3: browser-login choice in Connect, sweep and real-client record"
+        status: done
+        priority: P1
+        pr: ["#2025", "#2039"]
+        depends_on: [client-oauth-login-consent]
+  - id: admin-action-audit
+    title: "Spec 133 admin_action audit events: who changed the rules, on the JSONL audit line"
+    status: in_progress
+    priority: P1
+    spec: specs/133-admin-action-audit
+    depends_on: []
+    note: "Spec merged as #2033. Implementation is sliced; PR-1a is open as #2064."
+    tasks:
+      - id: admin-action-audit-spec
+        title: "Agree on the specification"
+        status: done
+        priority: P1
+        pr: "#2033"
+        depends_on: []
+      - id: admin-action-audit-pr1a
+        title: "PR-1a: admin_action event kind and agent-token lines"
+        status: in_review
+        priority: P1
+        pr: "#2064"
+        depends_on: [admin-action-audit-spec]
+  - id: webui-simplify
+    title: "Spec 134 Web UI simplification: problems first, no function lost"
+    status: in_progress
+    priority: P1
+    spec: specs/134-webui-simplify
+    depends_on: [ux-navigation-consistency]
+    note: "PR 1-8 merged 2026-11 (tokens and shell, Servers table, server detail/review/skills, Home, Activity calls view, Tools, Clients/tokens/usage, settings/profile editor/wizard). No tasks.md; completeness is tracked against specs/134-webui-simplify/function-inventory.md."
+    tasks:
+      - id: webui-simplify-spec
+        title: "Agree on the specification and function inventory"
+        status: done
+        priority: P1
+        pr: "#2046"
+        depends_on: []
+      - id: webui-simplify-impl
+        title: "PR 1-8: redesigned shell, Servers, server detail, Home, Activity, Tools, Clients, Settings"
+        status: done
+        priority: P1
+        pr: ["#2049", "#2052", "#2051", "#2053", "#2054", "#2056", "#2057", "#2058"]
+        depends_on: [webui-simplify-spec]
+  - id: oauth-client-hardening
+    title: "Spec 135 OAuth client hardening: issuer checks on upstream sign-in (mix-up defence)"
+    status: in_progress
+    priority: P1
+    spec: specs/135-oauth-client-hardening
+    depends_on: [oauth-token-encryption]
+    note: "PR-1 shipped; PR-2 (enforcement with the per-server opt-out) and PR-3 (surfaces, broker iss, docs, e2e) remain."
+    tasks:
+      - id: oauth-client-hardening-spec
+        title: "Agree on the specification"
+        status: done
+        priority: P1
+        pr: "#2050"
+        depends_on: []
+      - id: oauth-client-hardening-pr1
+        title: "PR-1: mcp-go v1.6, strict callback parse and DCR application_type"
+        status: done
+        priority: P1
+        pr: "#2070"
+        depends_on: [oauth-client-hardening-spec]
+      - id: oauth-client-hardening-enforce
+        title: "PR-2: wrong-AS refusal, discovery issuer equality, issuer-bound rows, per-server opt-out"
+        status: todo
+        priority: P1
+        depends_on: [oauth-client-hardening-pr1]
+      - id: oauth-client-hardening-surfaces
+        title: "PR-3: broker iss, surfaces and goldens, editor fields, docs, e2e"
+        status: todo
+        priority: P2
+        depends_on: [oauth-client-hardening-enforce]
+  - id: tool-listing-fields
+    title: "Spec 137 preserve the new tool listing fields (titles, icons, output schema) with review and withholding"
+    status: todo
+    priority: P2
+    spec: specs/137-tool-listing-fields
+    depends_on: [scan-structural-gate]
+    note: "Spec-only PR."
+    tasks:
+      - id: tool-listing-fields-spec
+        title: "Agree on the specification"
+        status: done
+        priority: P2
+        pr: "#2062"
         depends_on: []
