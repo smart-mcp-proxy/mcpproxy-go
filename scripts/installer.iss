@@ -180,19 +180,28 @@ begin
   end;
 end;
 
-// Number of running mcpproxy-tray.exe processes; 0 when WMI cannot be asked, in
-// which case Restart Manager (CloseApplications) still handles whatever is open.
-function RunningTrayCount(): Integer;
+// The mcpproxy-tray.exe processes started from this install directory, so a
+// portable or development tray elsewhere is left alone. False when WMI cannot be
+// asked; Restart Manager (CloseApplications) still handles whatever is open then.
+function QueryInstalledTrays(var Trays: Variant; var Count: Integer): Boolean;
 var
   Locator, Service: Variant;
+  Path: String;
 begin
+  // WQL string literal: backslashes and quotes are escaped.
+  Path := ExpandConstant('{app}\mcpproxy-tray.exe');
+  StringChangeEx(Path, '\', '\\', True);
+  StringChangeEx(Path, '''', '\''', True);
   try
     Locator := CreateOleObject('WbemScripting.SWbemLocator');
     Service := Locator.ConnectServer('.', 'root\CIMV2');
-    Result := Service.ExecQuery('SELECT ProcessId FROM Win32_Process WHERE Name = ''mcpproxy-tray.exe''').Count;
+    Trays := Service.ExecQuery('SELECT ProcessId FROM Win32_Process WHERE Name = ''mcpproxy-tray.exe'' AND ExecutablePath = ''' + Path + '''');
+    Count := Trays.Count;
+    Result := True;
   except
     Log('Cannot list running trays: ' + GetExceptionMessage);
-    Result := 0;
+    Count := 0;
+    Result := False;
   end;
 end;
 
@@ -201,23 +210,41 @@ end;
 // WM_CLOSE. Restart Manager alone would end the tray but not the windowless core.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
-  ResultCode, Waited: Integer;
+  Trays: Variant;
+  Count, I, Pid, ResultCode, Waited: Integer;
+  Args: String;
+  Listed: Boolean;
 begin
   Result := '';
-  if RunningTrayCount() = 0 then
+  Listed := QueryInstalledTrays(Trays, Count);
+  if (not Listed) or (Count = 0) then
     exit;
-  Log('Asking running MCPProxy trays to quit');
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM mcpproxy-tray.exe', '', SW_HIDE,
+  Args := '';
+  for I := 0 to Count - 1 do
+  begin
+    Pid := Trays.ItemIndex(I).ProcessId;
+    Args := Args + Format(' /PID %d', [Pid]);
+  end;
+  Log('Asking running MCPProxy trays to quit:' + Args);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), Trim(Args), '', SW_HIDE,
     ewWaitUntilTerminated, ResultCode);
   // A tray waits for its core to stop, which can take up to the core's 60s
-  // shutdown limit; a tray that will not go is left to CloseApplications.
+  // shutdown limit; a tray that will not go is left to CloseApplications. A
+  // failed poll counts as still running, so Restart Manager is not let loose on
+  // a core that is still cleaning up.
   Waited := 0;
-  while (RunningTrayCount() > 0) and (Waited < 75000) do
+  while Waited < 75000 do
   begin
+    Listed := QueryInstalledTrays(Trays, Count);
+    if Listed and (Count = 0) then
+      break;
     Sleep(500);
     Waited := Waited + 500;
   end;
-  Log(Format('Trays still running after %d ms: %d', [Waited, RunningTrayCount()]));
+  if Listed then
+    Log(Format('Trays still running after %d ms: %d', [Waited, Count]))
+  else
+    Log(Format('Trays could not be listed after %d ms', [Waited]));
 end;
 
 // Custom uninstall preservation of user data
