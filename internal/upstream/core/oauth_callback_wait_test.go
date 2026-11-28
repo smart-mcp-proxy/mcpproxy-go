@@ -56,7 +56,7 @@ func TestOAuthCallbackWaitContext_FallsBackWhenCallerHasNoDeadline(t *testing.T)
 func TestWaitForOAuthCallbackAsync_ExpiryIsReported(t *testing.T) {
 	serverName := "wait-expiry-server"
 	manager := oauth.GetGlobalCallbackManager()
-	_, err := manager.StartCallbackServer(serverName, 0)
+	cs, err := manager.StartCallbackServer(serverName, 0)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = manager.StopCallbackServer(serverName) })
 
@@ -78,7 +78,8 @@ func TestWaitForOAuthCallbackAsync_ExpiryIsReported(t *testing.T) {
 	start := time.Now()
 	go func() {
 		defer close(done)
-		c.waitForOAuthCallbackAsync(ctx, nil, "verifier", "state-nobody-answers", nil, "corr-expiry")
+		c.waitForOAuthCallbackAsync(ctx, nil, "verifier", "state-nobody-answers",
+			&callbackWaiter{server: cs, ch: cs.RegisterState("state-nobody-answers")}, "corr-expiry")
 	}()
 
 	select {

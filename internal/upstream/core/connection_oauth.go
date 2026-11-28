@@ -2359,19 +2359,18 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 	// authorizes before waitForOAuthCallbackAsync is scheduled (issue #975);
 	// that goroutine is handed this same waiter. Every failure below drops
 	// the registration, so a failed flow leaves no dangling waiter behind.
-	var waiter *callbackWaiter
-	if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
-		issuerCheck, ch, armErr := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
-		if armErr != nil {
-			return "", nil, "", "", nil, armErr
-		}
-		waiter = &callbackWaiter{server: callbackServer, ch: ch, issuer: issuerCheck}
+	// No listener: no callback can reach this flow, so no URL is handed out
+	// (as in the two blocking flows).
+	callbackServer, exists := oauth.GetCallbackServer(c.config.Name)
+	if !exists {
+		return "", nil, "", "", nil, fmt.Errorf("callback server not found for %s", c.config.Name)
 	}
-	dropWaiter := func() {
-		if waiter != nil {
-			waiter.server.UnregisterState(state)
-		}
+	issuerCheck, ch, armErr := c.armIssuerCheck(ctx, oauthHandler, oauthConfig, callbackServer, state)
+	if armErr != nil {
+		return "", nil, "", "", nil, armErr
 	}
+	waiter := &callbackWaiter{server: callbackServer, ch: ch, issuer: issuerCheck}
+	dropWaiter := func() { waiter.server.UnregisterState(state) }
 
 	// Append extra OAuth parameters (RFC 8707 resource, oauth.extra_params) - issue #271
 	authURL = c.applyExtraParamsToAuthURL(authURL, extraParams)
@@ -2488,9 +2487,8 @@ type callbackWaiter struct {
 
 // waitForOAuthCallbackAsync waits for OAuth callback and handles token exchange in background.
 //
-// waiter is the listener and channel registered when the authorization URL
-// was built; nil looks the listener up and registers here (tests, and a flow
-// built without a callback server).
+// waiter is the listener, channel and issuer check registered when the
+// authorization URL was built; with nil the sign-in is reported as failed.
 func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *uptransport.OAuthHandler, codeVerifier, state string, waiter *callbackWaiter, correlationID string) {
 	c.markOAuthInProgress()
 	defer func() {
@@ -2518,13 +2516,11 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 	// delivered (delivery removes the waiter, so a second RegisterState would
 	// park on a fresh channel), and looking the listener up by name again
 	// could find a replacement that never saw this state.
+	// Spec 135: the consumer never registers a waiter of its own, which
+	// would be one without an issuer check.
 	if waiter == nil {
-		callbackServer, exists := oauth.GetCallbackServer(c.config.Name)
-		if !exists {
-			c.reportOAuthFailure(fmt.Errorf("OAuth callback server not found for %s - the authorization code cannot be received", c.config.Name))
-			return
-		}
-		waiter = &callbackWaiter{server: callbackServer, ch: callbackServer.RegisterState(state)}
+		c.reportOAuthFailure(fmt.Errorf("OAuth sign-in for %s has no callback waiter - the authorization code cannot be received", c.config.Name))
+		return
 	}
 	callbackServer, callbackCh := waiter.server, waiter.ch
 	defer callbackServer.UnregisterState(state)

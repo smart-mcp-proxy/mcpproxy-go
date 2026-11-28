@@ -254,3 +254,24 @@ func exchangeForTest(ctx context.Context, t *testing.T, c *Client, h *uptranspor
 		meta.Issuer, meta.AuthorizationResponseIssParameterSupported, "", meta.AuthorizationEndpoint, meta.TokenEndpoint)}
 	return c.exchangeAuthorizationCode(ctx, h, cb, url.Values{"code": {code}, "state": {state}}, exp, verifier)
 }
+
+// The background consumer never registers a waiter of its own (it would carry
+// no issuer check): with no waiter it reports the sign-in as failed.
+func TestWaitForOAuthCallbackAsync_NilWaiterRegistersNothing(t *testing.T) {
+	serverName := "wait-nil-waiter"
+	manager := oauth.GetGlobalCallbackManager()
+	cs, err := manager.StartCallbackServer(serverName, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.StopCallbackServer(serverName) })
+	failures := watchOAuthFailures(t, serverName)
+
+	c := newOAuthWaitTestClient(serverName)
+	c.waitForOAuthCallbackAsync(context.Background(), nil, "verifier", "state-nil", nil, "corr-nil")
+	assert.False(t, cs.HasState("state-nil"), "no unarmed waiter registered")
+	select {
+	case f := <-failures:
+		assert.Contains(t, f.Error(), "no callback waiter")
+	case <-time.After(2 * time.Second):
+		t.Fatal("not reported")
+	}
+}
