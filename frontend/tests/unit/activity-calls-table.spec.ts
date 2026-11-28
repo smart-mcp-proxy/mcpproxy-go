@@ -50,6 +50,8 @@ vi.mock('@/services/api', () => {
       getActivitySummary: vi.fn(() =>
         ok({ period: '24h', total_count: 9, call_count: 8, success_count: 6, error_count: 1, blocked_count: 1, rejected_count: 0 })),
       getSessions: vi.fn(() => ok({ sessions: [] })),
+      // Spec 124: the Sessions view lists work sessions from its own door.
+      getWorkSessions: vi.fn(() => Promise.resolve({ sessions: [], total: 0, limit: 25, offset: 0 })),
       getActivityExportUrl: vi.fn(() => 'http://localhost/export'),
     },
   }

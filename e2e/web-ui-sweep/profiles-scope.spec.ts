@@ -191,6 +191,9 @@ test('3. /sessions?client= redirects to the Activity Sessions view with client a
   await open(page, `/sessions?client=${SCOPE_CLIENT}`)
   await expect(page).toHaveURL(new RegExp(`/ui/activity\\?.*view=sessions`))
   await expect(page).toHaveURL(new RegExp(`client=${SCOPE_CLIENT}`))
+  // Spec 124: the view lists work sessions; the connections table (client and
+  // profile columns, "Tools it sees") is one level down, in its own section.
+  await page.locator('[data-test="sessions-connections"] summary').click()
   const row = page.locator('[data-test="sessions-row"]').first()
   await expect(row.locator('[data-test="sessions-client"]')).toContainText('E2E Scope')
   await expect(row.locator('[data-test="sessions-profile"]')).toContainText('E2E Scope RO · locked by credential')

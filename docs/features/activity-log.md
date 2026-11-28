@@ -606,6 +606,8 @@ A row carries the server, the kind, the diagnostic code (`MCPX_*`) and its fixed
 
 **From the terminal.** `mcpproxy activity sessions --failed` lists the sessions that failed, and `mcpproxy activity session <id>` prints one session's timeline at its first failure that is still stored (at its first row when none is); `--failures` prints every stored failure with the rows before it. See [Activity commands](../cli/activity-commands.md#activity-sessions).
 
+**In the Web UI.** Activity → Sessions lists work sessions with a "Failed only" filter, and a row's Timeline button opens the session at its first failure, with upstream events shown as their own rows. When retention has removed the start of a session or some of its failures, the timeline says so at the top and keeps the lifetime counts. The note about a removed start is shown to administrators: an agent token or a signed-in user who is not one is not told that the first rows of a session are gone. See [Sessions and the failure timeline](../web-ui/activity-log.md#sessions-and-the-failure-timeline).
+
 Sessions do not continue across a restart of MCPProxy: a long run that spans one shows as two sessions.
 
 ## Tool-call history

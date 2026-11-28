@@ -60,7 +60,9 @@
       <ScopeChips page="activity" :scope-query="scopeQuery" :unavailable="scopeUnavailableNames" />
     </div>
 
-    <SessionsPanel v-if="activeView === 'sessions'" :sessions="sessionsRaw" />
+    <!-- Spec 124: the work-session list, or one session's failure timeline
+         when the address names one (`ws`, `at`). -->
+    <SessionsPanel v-if="activeView === 'sessions'" :sessions="sessionsRaw" :auto-refresh="autoRefresh" @open-calls="resetUnaddressedCallFilters" />
 
     <!-- Rule 5 (zcode review round 1, F4): from/to/server/tool/status/type/
          auth_type are "not applicable here" in Sessions — shown as disabled
@@ -90,7 +92,9 @@
       toggle. Active filters stay visible as dismissable chips even collapsed,
       so the list is never silently narrowed.
     -->
-    <div ref="filterStripEl" class="card bg-base-100 shadow-sm relative" data-test="activity-filter-strip">
+    <!-- Spec 124: nothing on the strip narrows one session's timeline, so it
+         is put away while one is open; the Sessions list has it. -->
+    <div v-show="!timelineOpen" ref="filterStripEl" class="card bg-base-100 shadow-sm relative" data-test="activity-filter-strip">
       <div class="card-body py-3 gap-1">
         <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
           <!-- Counts: total muted; only non-zero error/blocked/rejected speak up. -->
@@ -1166,6 +1170,19 @@
                   </router-link>
                 </div>
               </div>
+              <!-- Spec 124: this row in its session's timeline, with the rows
+                   and upstream events around it. -->
+              <div v-if="selectedActivity.work_session_id" class="flex gap-2 items-start">
+                <span class="text-sm text-base-content/60 w-24 shrink-0">Timeline:</span>
+                <router-link
+                  data-test="activity-open-timeline"
+                  class="btn btn-xs max-sm:min-h-11 btn-outline"
+                  :to="timelineLinkFor(selectedActivity)"
+                  @click="onOpenTimelineClick"
+                >
+                  Open in session timeline
+                </router-link>
+              </div>
               <div v-if="selectedActivity.source" class="flex gap-2">
                 <span class="text-sm text-base-content/60 w-24 shrink-0">Source:</span>
                 <span class="badge badge-sm badge-outline">{{ selectedActivity.source }}</span>
@@ -1719,7 +1736,9 @@ function setView(id: ActivityViewId): void {
   // `type` mapping to override in the first place. Only calls/system/all
   // clear it, where an explicit override left behind really would make the
   // tab a no-op.
-  const patch: Record<string, string | undefined> = { view: id === 'calls' ? undefined : id }
+  // Spec 124: a tab click also leaves an open session timeline (`ws`, `at`),
+  // so "Sessions" always answers with the list.
+  const patch: Record<string, string | undefined> = { view: id === 'calls' ? undefined : id, ws: undefined, at: undefined }
   if (id !== 'sessions') {
     selectedTypes.value = []
     patch.type = undefined
@@ -1817,9 +1836,12 @@ function dateTimeLocalToISO(value: string): string | undefined {
 // converge rather than loop: re-applying the query re-sets refs to the
 // values they already have as soon as a round trip settles, which triggers
 // nothing further.
+/** The session the calls views showed last (the Sessions view has its own address). */
+let lastCallsSession = ''
 function applyRouteFilters(): void {
   const q = route.query
   const str = (v: unknown): string => (typeof v === 'string' ? v : '')
+  if (str(q.view) !== 'sessions') lastCallsSession = str(q.session)
 
   filterSession.value = str(q.session)
   filterStatus.value = str(q.status)
@@ -1879,7 +1901,19 @@ applyRouteFilters()
 // already ran once during setup (immediately above), so the initial values
 // it just set never trigger this watch — only a later, genuine URL change
 // does.
-watch(() => route.query, () => applyRouteFilters(), { deep: true })
+watch(() => route.query, () => {
+  applyRouteFilters()
+  // Spec 124: a session's Tool calls link was followed. Its address can differ
+  // from the one before in nothing the refetch below watches (two sessions'
+  // links carry the same `type`; after a reload only `view` changes), so the
+  // calls are read here unless that watch has already started a request.
+  if (callsLinkLoadSeq === null) return
+  const before = callsLinkLoadSeq
+  callsLinkLoadSeq = null
+  void nextTick(() => { if (activitiesLoadSeq === before && activeView.value !== 'sessions') void loadActivities() })
+}, { deep: true })
+/** The request counter when a session's Tool calls link was clicked; null otherwise. */
+let callsLinkLoadSeq: number | null = null
 
 // Activity types configuration. Derived from the single label map in
 // utils/activity so the filter dropdown cannot drift from the Type column
@@ -2171,8 +2205,39 @@ const getSessionLabel = (sessionId: string): string => {
   return session?.label || `...${sessionId.slice(-5)}`
 }
 
+/** Spec 124: the Sessions list's own filter. It is in the address, so the
+ * Filters count and "Clear Filters" account for it in that view. */
+/**
+ * Spec 124: a session's "Tool calls" link was followed from the Sessions view.
+ * "Sensitive data" (with its severity) and "View sub-calls" are not in the
+ * address and have no chip in Sessions, so one left from earlier would narrow
+ * that session's calls unseen. Only the link does this, and only for a session
+ * other than the one the calls view already shows: the tabs, Back, a bookmark
+ * and the way back to the same session leave the filters as the user set them.
+ * The click also arms the read of that session's calls (see the route watch).
+ * "The same session" is the one the calls views showed last: a timeline opened
+ * from a call's details has no `session` in its address.
+ */
+/** The details close when the timeline replaces this view, not when it opens in another tab. */
+function onOpenTimelineClick(event: MouseEvent): void {
+  if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) closeDetailDrawer()
+}
+
+function resetUnaddressedCallFilters(session: string): void {
+  callsLinkLoadSeq = activitiesLoadSeq
+  if (session === lastCallsSession) return
+  filterParentId.value = ''
+  filterSensitiveData.value = ''
+  filterSeverity.value = ''
+}
+
+// Read as the panel reads them: the first value of a repeated parameter.
+const sessionsFailedOnly = computed(() => activeView.value === 'sessions' && scopeQuery.state.failed === 'true')
+// One session's timeline is open (the Sessions view with `ws` in the address).
+const timelineOpen = computed(() => activeView.value === 'sessions' && !!scopeQuery.state.ws)
+
 const hasActiveFilters = computed(() => {
-  return selectedTypes.value.length > 0 || filterServer.value || filterTool.value || filterSession.value || filterStatus.value || filterSensitiveData.value || filterSeverity.value || filterAuthType.value || filterAgentName.value || filterStartDate.value || filterEndDate.value || filterParentId.value
+  return sessionsFailedOnly.value || selectedTypes.value.length > 0 || filterServer.value || filterTool.value || filterSession.value || filterStatus.value || filterSensitiveData.value || filterSeverity.value || filterAuthType.value || filterAgentName.value || filterStartDate.value || filterEndDate.value || filterParentId.value
 })
 
 // --- compact header ---------------------------------------------------------
@@ -2642,7 +2707,8 @@ const scopeChipsVisible = computed(() =>
   scopeUnavailableNames.value.length > 0
 )
 const filterBadgeCount = computed(() =>
-  activeChips.value.length + scopeQuery.chips.value.filter(chip => (SCOPE_URL_NAMES as readonly string[]).includes(chip.name)).length
+  activeChips.value.length + scopeQuery.chips.value.filter(chip => (SCOPE_URL_NAMES as readonly string[]).includes(chip.name)).length +
+  (sessionsFailedOnly.value ? 1 : 0)
 )
 
 // Rule-1 ready gate (F2.1/F3.1/F4.1): every loader waits for the startup
@@ -2866,7 +2932,11 @@ const clearFilters = () => {
   // `type` is its own explicit override (see toggleTypeFilter) and is cleared
   // here too so "Clear Filters" removes it from the URL as well as the table —
   // `view` is left alone, since clearing filters should not also leave the tab.
-  scopeQuery.set({ type: undefined })
+  // Spec 124: in the Sessions view the list's "Failed only" (with its
+  // "Include blocked") is a filter too. The order (`sort`) is not one.
+  scopeQuery.set(activeView.value === 'sessions'
+    ? { type: undefined, failed: undefined, include_blocked: undefined }
+    : { type: undefined })
 
   // The parent filter is the only one narrowed on the SERVER too, so leaving it
   // needs a refetch — the loaded rows are just this run's sub-calls.
@@ -3036,6 +3106,20 @@ const closeDetailDrawer = () => {
  * text and offered nothing (F25, #1046). Prefer the work session (Spec 082) and
  * fall back to the transport id, exactly as the filter itself accepts both.
  */
+// Spec 124: a session timeline opened from inside the page (a call's detail,
+// a list row) replaces what had the focus. Focus follows, to its heading. Not
+// on a page load: `ws` already in the address is not a change.
+watch(() => route.query.ws, async (id, before) => {
+  if (!id || before) return
+  await nextTick()
+  await nextTick()
+  document.querySelector<HTMLElement>('[data-test="timeline-heading"]')?.focus()
+})
+
+/** Spec 124: the row's work session, opened at this row. */
+const timelineLinkFor = (activity: ActivityRecord) =>
+  scopeQuery.linkTo('activity', { view: 'sessions', ws: activity.work_session_id ?? '', at: `row:${activity.id}` })
+
 const filterBySession = (activity: ActivityRecord) => {
   const sessionId = activity.work_session_id || activity.session_id
   if (!sessionId) return

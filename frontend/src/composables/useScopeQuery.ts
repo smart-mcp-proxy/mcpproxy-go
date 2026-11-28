@@ -285,6 +285,16 @@ function registerDefaultScopeParams(): void {
   })
   registerScopeParam({ name: 'view', pages: ['activity'], restPages: [] })
   registerScopeParam({ name: 'type', pages: ['activity'] })
+  // Spec 124 FR-063: the Sessions view. `ws` and `at` are the address of one
+  // session's timeline (/activity?view=sessions&ws=<id>&at=<position>);
+  // `failed`, `include_blocked` and `sort` are the list's filter and order.
+  // They are read by the Sessions view alone and go to the work-session doors,
+  // never to GET /activity, and no link carries them to another page.
+  registerScopeParam({ name: 'ws', pages: ['activity'], restPages: [], sticky: false })
+  registerScopeParam({ name: 'at', pages: ['activity'], restPages: [], sticky: false })
+  registerScopeParam({ name: 'failed', pages: ['activity'], restPages: [], sticky: false })
+  registerScopeParam({ name: 'include_blocked', pages: ['activity'], restPages: [], sticky: false })
+  registerScopeParam({ name: 'sort', pages: ['activity'], restPages: [], sticky: false })
   registerScopeParam({ name: 'tab', pages: ['server-detail', 'settings', 'clients', 'add-server'], restPages: [] })
   registerScopeParam({ name: 'q', pages: ['tools', 'servers', 'catalog'], restPages: ['catalog'] })
   // Spec 134 FR-023: the Servers chip (not-online | all | online | disabled), client-side only.
@@ -407,6 +417,9 @@ export interface UseScopeQueryResult {
   chips: ComputedRef<ScopeChip[]>
 }
 
+/** The query a `set()` is navigating to, per router, until that navigation settles. */
+const pendingQueries = new WeakMap<object, Record<string, string | string[] | null>>()
+
 export function useScopeQuery(page: PageId): UseScopeQueryResult {
   const route = useRoute()
   const router = useRouter()
@@ -433,8 +446,15 @@ export function useScopeQuery(page: PageId): UseScopeQueryResult {
     // zcode round 1 (F3): a valueless query param ("?foo", parsed by
     // vue-router as null) was dropped by every set()/clear() call, however
     // unrelated — unknown parameters must be "preserved untouched" (rule 6).
+    //
+    // Two writes in one tick (a "Clear filters" handler, then the page's own
+    // write-back watcher) both start from `route.query`, which does not change
+    // until the first navigation has finished. The second would then be built
+    // from the old address and put back what the first removed. So a write
+    // builds on the address the write before it is still navigating to.
+    const base = pendingQueries.get(router) ?? route.query
     const query: Record<string, string | string[] | null> = {}
-    for (const [k, v] of Object.entries(route.query)) {
+    for (const [k, v] of Object.entries(base)) {
       if (v === undefined) continue
       query[k] = v as string | string[] | null
     }
@@ -442,7 +462,11 @@ export function useScopeQuery(page: PageId): UseScopeQueryResult {
       if (v === undefined || v === '') delete query[k]
       else query[k] = v
     }
-    router.replace({ query })
+    pendingQueries.set(router, query)
+    const settled = (): void => {
+      if (pendingQueries.get(router) === query) pendingQueries.delete(router)
+    }
+    Promise.resolve(router.replace({ query })).then(settled, settled)
   }
 
   function clear(names?: string[]): void {

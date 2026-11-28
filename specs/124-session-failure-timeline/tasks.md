@@ -153,16 +153,16 @@
 
 ### Tests first
 
-- [ ] T110 [P] [US1] `frontend/tests/unit/sessions-panel.spec.ts`: one row per work session with agent token, client, project, started, duration, calls, failures, last failure, reason; "Failed only" with the "include blocked" switch; the truncated-start note; the existing link to Tool calls filtered by the session (FR-065)
-- [ ] T111 [P] [US1] `frontend/tests/unit/session-timeline.spec.ts`: opens at the position in the address; the failed row highlighted; upstream and session rows styled apart from calls; millisecond times; previous and next failure; bodies expand on request; "copy as CLI command" gives the `mcpproxy activity session` command for the current view (FR-064); the lifetime-count notice when earlier failures are gone
-- [ ] T112 [P] [US1] `frontend/tests/unit/use-scope-query-sessions.spec.ts`: `/activity?view=sessions&ws=<id>&at=<position>` survives reload and scope changes (FR-063)
+- [x] T110 [P] [US1] `frontend/tests/unit/sessions-panel.spec.ts`: one row per work session with agent token, client, project, started, duration, calls, failures, last failure, reason; "Failed only" with the "include blocked" switch; the truncated-start note; the existing link to Tool calls filtered by the session (FR-065)
+- [x] T111 [P] [US1] `frontend/tests/unit/session-timeline.spec.ts`: opens at the position in the address; the failed row highlighted; upstream and session rows styled apart from calls; millisecond times; previous and next failure; bodies expand on request; "copy as CLI command" gives the `mcpproxy activity session` command for the current view (FR-064); the lifetime-count notice when earlier failures are gone
+- [x] T112 [P] [US1] `frontend/tests/unit/use-scope-query-sessions.spec.ts`: `/activity?view=sessions&ws=<id>&at=<position>` survives reload and scope changes (FR-063)
 
 ### Implementation
 
-- [ ] T113 [US1] `frontend/src/types/api.ts`, `frontend/src/services/api.ts`: types and calls for the three doors
-- [ ] T114 [US1] `frontend/src/components/activity/SessionsPanel.vue`: read the new list door (makes T110 pass)
-- [ ] T115 [US1] `frontend/src/components/activity/SessionTimeline.vue` (new), `frontend/src/views/Activity.vue`, `frontend/src/composables/useScopeQuery.ts` (makes T111, T112 pass)
-- [ ] T116 [US1] Playwright sweep with screenshots of both screens and its HTML report; `docs/web-ui/` and `docs/features/activity-log.md` (FR-066)
+- [x] T113 [US1] `frontend/src/types/api.ts`, `frontend/src/services/api.ts`: types and calls for the three doors
+- [x] T114 [US1] `frontend/src/components/activity/SessionsPanel.vue`: read the new list door (makes T110 pass)
+- [x] T115 [US1] `frontend/src/components/activity/SessionTimeline.vue` (new), `frontend/src/views/Activity.vue`, `frontend/src/composables/useScopeQuery.ts` (makes T111, T112 pass)
+- [x] T116 [US1] Playwright sweep with screenshots of both screens and its HTML report; `docs/web-ui/` and `docs/features/activity-log.md` (FR-066)
 
 ---
 

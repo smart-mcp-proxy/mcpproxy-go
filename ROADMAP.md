@@ -1416,7 +1416,7 @@ Spec: [130-skills-review-ux](./specs/130-skills-review-ux/) · PR: #1987 #1988
 | MCP protocol upgrade to 2026-07-28 revision | In progress | P1 | 41/81 (51%) | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Spec 108 profiles v3: scoped profiles, client binding, scope-aware observability | In progress | P1 | 194/195 (99%) | [108-profiles-v3](./specs/108-profiles-v3/) |  |
 | Spec 109 navigation, scope filters and cross-surface UX consistency | In progress | P1 | 257/258 (100%) | [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/) |  |
-| Spec 124 work sessions and the failure timeline | In progress | P1 | 57/74 (77%) | [124-session-failure-timeline](./specs/124-session-failure-timeline/) |  |
+| Spec 124 work sessions and the failure timeline | In progress | P1 | 64/74 (86%) | [124-session-failure-timeline](./specs/124-session-failure-timeline/) |  |
 | Spec 132 browser login for MCP clients: MCPProxy as an OAuth 2.1 authorization server | In progress | P1 | 65/72 (90%) | [132-client-oauth-login](./specs/132-client-oauth-login/) |  |
 | Spec 133 admin_action audit events: who changed the rules, on the JSONL audit line | In progress | P1 | — | [133-admin-action-audit](./specs/133-admin-action-audit/) |  |
 | Spec 134 Web UI simplification: problems first, no function lost | In progress | P1 | — | [134-webui-simplify](./specs/134-webui-simplify/) |  |
@@ -1599,7 +1599,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [120-scan-structural-gate](./specs/120-scan-structural-gate/) | — | — |
 | [122-scanner-skillspector-checks](./specs/122-scanner-skillspector-checks/) | `shipped` | 31/31 (100%) |
 | [123-oauth-token-encryption](./specs/123-oauth-token-encryption/) | `in-flight` | 49/56 (88%) |
-| [124-session-failure-timeline](./specs/124-session-failure-timeline/) | `in-flight` | 57/74 (77%) |
+| [124-session-failure-timeline](./specs/124-session-failure-timeline/) | `in-flight` | 64/74 (86%) |
 | [125-skills-over-mcp](./specs/125-skills-over-mcp/) | `shipped` | 51/51 (100%) |
 | [127-profile-argument-rules](./specs/127-profile-argument-rules/) | — | — |
 | [128-server-list-outcomes](./specs/128-server-list-outcomes/) | — | — |

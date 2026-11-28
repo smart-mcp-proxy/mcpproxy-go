@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
-import SessionsPanel from '@/components/activity/SessionsPanel.vue'
+import SessionConnections from '@/components/activity/SessionConnections.vue'
 import { setAvailableFeatures } from '@/composables/useScopeQuery'
 import { useClientsStore } from '@/stores/clients'
 import { useProfilesStore } from '@/stores/profiles'
@@ -44,7 +44,7 @@ async function mountPanel(sessions: unknown[], path = '/activity?view=sessions')
   await router.isReady()
   useProfilesStore().profiles = [makeProfile('work-readonly', { title: 'Work' })] as any
   useClientsStore().clients = [makeClient('cursor')] as any
-  const wrapper = mount(SessionsPanel, { props: { sessions: sessions as any }, global: { plugins: [router] } })
+  const wrapper = mount(SessionConnections, { props: { sessions: sessions as any }, global: { plugins: [router] } })
   await flushPromises()
   return { wrapper, router }
 }

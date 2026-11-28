@@ -13,6 +13,7 @@ import { WORK_RO, makeClient } from './fixtures/profiles108i'
 const getActivitiesMock = vi.hoisted(() => vi.fn())
 const getSummaryMock = vi.hoisted(() => vi.fn())
 const getSessionsMock = vi.hoisted(() => vi.fn())
+const getWorkSessionsMock = vi.hoisted(() => vi.fn())
 const getExportUrlMock = vi.hoisted(() => vi.fn())
 const getStatusMock = vi.hoisted(() => vi.fn())
 const listTokensMock = vi.hoisted(() => vi.fn())
@@ -22,6 +23,7 @@ vi.mock('@/services/api', () => ({
     getActivities: getActivitiesMock,
     getActivitySummary: getSummaryMock,
     getSessions: getSessionsMock,
+    getWorkSessions: getWorkSessionsMock,
     getActivityExportUrl: getExportUrlMock,
     getStatus: getStatusMock,
     listAgentTokens: listTokensMock,
@@ -68,6 +70,7 @@ describe('Activity scope params (Spec 108-j)', () => {
     getActivitiesMock.mockImplementation(emptyList)
     getSummaryMock.mockImplementation(() => ok({ period: '24h', total_count: 0, success_count: 0, error_count: 0, blocked_count: 0, rejected_count: 0 }))
     getSessionsMock.mockImplementation(() => ok({ sessions: [] }))
+    getWorkSessionsMock.mockImplementation(() => Promise.resolve({ sessions: [], total: 0, limit: 25, offset: 0 }))
     getExportUrlMock.mockReturnValue('http://localhost/api/v1/activity/export?format=json')
     getStatusMock.mockResolvedValue({ success: true, data: { features: { scope_filters: ['profile', 'client', 'token'] } } })
     listTokensMock.mockResolvedValue({ success: true, data: { tokens: [{ name: 'ro-bot', kind: 'agent' }, { name: 'client-cursor', kind: 'client' }] } })
@@ -219,6 +222,9 @@ describe('Activity scope params (Spec 108-j)', () => {
     await mountActivityAt('/activity?view=sessions&client=cursor')
     expect(getActivitiesMock).not.toHaveBeenCalled()
     expect(getSessionsMock.mock.calls.some(call => call[2]?.client === 'cursor')).toBe(true)
+    // Spec 124: the work-session list is narrowed by the same scope.
+    expect(getWorkSessionsMock).toHaveBeenCalledTimes(1)
+    expect(getWorkSessionsMock.mock.calls[0][0]).toMatchObject({ client: 'cursor' })
   })
 
   it('the chips render on the Sessions view too', async () => {

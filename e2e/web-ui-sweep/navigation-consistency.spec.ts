@@ -399,6 +399,8 @@ test('Activity sessions rows open their calls (SC-009)', async ({ page }) => {
   await page.waitForTimeout(500)
   const row = page.locator('[data-test="sessions-row"]').first()
   test.skip((await row.count()) === 0, 'no MCP sessions recorded on this instance')
+  // Spec 124: the connections table sits in a collapsed section of the view.
+  await page.locator('[data-test="sessions-connections"] summary').click()
 
   // The row's "View Activity" link must land on the calls view scoped to that
   // session, and the page's own REST request must carry the session filter.
