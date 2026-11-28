@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -461,10 +462,13 @@ func runUpstreamList(_ *cobra.Command, _ []string) error {
 		return outputError(err, output.ErrCodeOperationFailed)
 	}
 
-	// Check if daemon is running (socket first, then TCP fallback)
-	if client, ok := newDaemonClient(globalConfig, logger.Sugar()); ok {
+	// Check if daemon is running (socket first, then TCP fallback). The key
+	// the client will send decides whether the list is the whole install:
+	// none (the socket) or the admin key is, an agent token's is not.
+	if endpoint, apiKey, ok := daemonEndpoint(globalConfig); ok {
 		logger.Info("Detected running daemon, using client mode")
-		return runUpstreamListClientMode(ctx, client, logger)
+		client := cliclient.NewClientWithAPIKey(endpoint, apiKey, logger.Sugar())
+		return runUpstreamListClientMode(ctx, client, apiKey, logger)
 	}
 	if upstreamListProfile != "" {
 		return outputError(output.NewStructuredError(output.ErrCodeConnectionFailed,
@@ -491,7 +495,7 @@ func upstreamListQuery() url.Values {
 	return q
 }
 
-func runUpstreamListClientMode(ctx context.Context, client *cliclient.Client, _ *zap.Logger) error {
+func runUpstreamListClientMode(ctx context.Context, client *cliclient.Client, apiKey string, _ *zap.Logger) error {
 	// Call GET /api/v1/servers
 	servers, err := client.GetServersWithQuery(ctx, upstreamListQuery())
 	if err != nil {
@@ -500,6 +504,10 @@ func runUpstreamListClientMode(ctx context.Context, client *cliclient.Client, _ 
 			WithRecoveryCommand("mcpproxy serve"), output.ErrCodeConnectionFailed)
 	}
 
+	upstreamListSource = listOriginDaemonAdmin
+	if strings.HasPrefix(apiKey, auth.TokenPrefixStr) {
+		upstreamListSource = listOriginDaemonScoped
+	}
 	return outputServers(servers)
 }
 
@@ -589,10 +597,18 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 		}
 	}
 
+	upstreamListSource = listOriginConfig
 	return outputServers(servers)
 }
 
 func outputServers(servers []map[string]interface{}) error {
+	// An install with no servers at all gets a next step after the empty
+	// table, in table output only. A --profile list holds only that profile's
+	// servers, so an empty one says nothing about the install. (A --status
+	// filter is applied below, after this check.)
+	noServersConfigured := len(servers) == 0 && upstreamListProfile == "" &&
+		upstreamListSource != listOriginDaemonScoped
+
 	// FR-015: --status <value> is repeatable, and a comma-separated value is
 	// equivalent to repeating the flag; several values select the UNION of
 	// their statuses. Applies to every output format (table, json, yaml).
@@ -633,6 +649,9 @@ func outputServers(servers []map[string]interface{}) error {
 		return fmt.Errorf("failed to format table: %w", err)
 	}
 	fmt.Print(result)
+	if noServersConfigured {
+		fmt.Print(firstServerHint(exec.LookPath, upstreamListSource != listOriginConfig))
+	}
 	return nil
 }
 
@@ -3002,3 +3021,51 @@ func viewOr(view map[string]interface{}, key, fallback string) string {
 	}
 	return fallback
 }
+
+// firstServerHint is the empty-state next step for `mcpproxy upstream list`
+// on an install with no servers (Spec 126 US2, CLI surface). It suggests one
+// credential-free reference server through the catalog door, in the Spec 126
+// FR-002 starter order (time, then sequentialthinking), choosing the first
+// whose launcher this machine has. The catalog door applies quarantine, trust
+// mode and the admission scan exactly as for any catalog add; the hint itself
+// adds, runs and approves nothing. lookPath is exec.LookPath in production.
+func firstServerHint(lookPath func(string) (string, error), daemonRunning bool) string {
+	var b strings.Builder
+	b.WriteString("\nNo upstream servers yet. Next steps:\n")
+	if !daemonRunning {
+		b.WriteString("  mcpproxy serve                                      # start the core first (catalog add and review need it)\n")
+	}
+	has := func(name string) bool { _, err := lookPath(name); return err == nil }
+	switch {
+	case has("uvx"):
+		b.WriteString("  mcpproxy catalog add reference/time                 # reference server, no credentials (runs: uvx mcp-server-time)\n")
+	case has("npx"):
+		b.WriteString("  mcpproxy catalog add reference/sequentialthinking   # reference server, no credentials (runs: npx -y @modelcontextprotocol/server-sequential-thinking)\n")
+	default:
+		b.WriteString("  (local reference servers need uv (uvx) or Node.js (npx); neither is on PATH)\n")
+	}
+	b.WriteString("  mcpproxy upstream add <name> <url>                  # any remote MCP server\n")
+	b.WriteString("  mcpproxy catalog search <query>                     # browse the catalog\n")
+	b.WriteString("New servers are quarantined and scanned; inspect one with 'mcpproxy review show <name>' and admit it with 'mcpproxy review approve <name> --yes'.\n")
+	return b.String()
+}
+
+// upstreamListOrigin says where `upstream list` got its servers, which
+// decides whether an empty list means an empty install (first-server hint).
+type upstreamListOrigin int
+
+const (
+	// listOriginDaemonAdmin: the daemon, as an administrator (socket or the
+	// instance API key). An empty list is an empty install.
+	listOriginDaemonAdmin upstreamListOrigin = iota
+	// listOriginConfig: no daemon; the config file. An empty list is an empty
+	// install, but the core must be started before catalog add / review.
+	listOriginConfig
+	// listOriginDaemonScoped: the daemon, as an agent token. The list holds
+	// only the servers the token may see, so an empty one says nothing about
+	// the install, and adding servers is not the token's operation.
+	listOriginDaemonScoped
+)
+
+// upstreamListSource is set by the two list paths before outputServers.
+var upstreamListSource = listOriginDaemonAdmin

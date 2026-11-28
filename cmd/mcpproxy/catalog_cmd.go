@@ -69,7 +69,8 @@ the curated official/popular sections with no query.
   mcpproxy catalog search                                          # browse official + popular
   mcpproxy catalog show official/io.github.github/github-mcp-server
   mcpproxy catalog add official/io.github.github/github-mcp-server
-  mcpproxy upstream approve <name>                                 # approve once trusted
+  mcpproxy review show <name>                                      # inspect the captured tools
+  mcpproxy review approve <name> --yes                             # approve once trusted
 
 'catalog search'/'catalog add' supersede 'registry search'/'registry add'.
 'registry list'/'add-source'/'edit'/'remove' still manage catalog SOURCES.`,
@@ -182,8 +183,10 @@ func newCatalogAddCmd() *cobra.Command {
 		Use:   "add <source>/<id>",
 		Short: "Add a catalog entry as a (quarantined) upstream server",
 		Long: `Add a server found via 'catalog search'/'catalog show' as an upstream server.
-The server is added quarantined by default; approve it once you trust it:
-  mcpproxy upstream approve <name>
+The server is added quarantined by default; inspect it, then approve it once
+you trust it:
+  mcpproxy review show <name>
+  mcpproxy review approve <name> --yes
 
 This is the same keystone add operation as 'registry add <source> <id>' (Spec
 070) — it just takes the combined "<source>/<id>" ref catalog results print.`,

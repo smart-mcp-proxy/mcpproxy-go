@@ -263,7 +263,7 @@ func FindServerByID(ctx context.Context, registryID, serverID string, guesser *e
 // regardless of its position in the listing.
 func findServerByIDFetch(ctx context.Context, reg *RegistryEntry, serverID string) (*ServerEntry, error) {
 	if servers, err := fetchServers(ctx, reg, nil, serverID, 0); err == nil {
-		if match, err := findServerByIDIn(servers, serverID); err == nil {
+		if match, err := findServerByIDInSource(servers, reg.ID, serverID); err == nil {
 			return match, nil
 		}
 	}
@@ -271,7 +271,7 @@ func findServerByIDFetch(ctx context.Context, reg *RegistryEntry, serverID strin
 	if err != nil {
 		return nil, err
 	}
-	return findServerByIDIn(servers, serverID)
+	return findServerByIDInSource(servers, reg.ID, serverID)
 }
 
 // findServerByIDIn returns the first server whose ID exactly matches serverID.
@@ -769,4 +769,22 @@ func derivePulseServerDetailsWithoutGuesser(itemMap map[string]interface{}) (ins
 	}
 
 	return installCmd, connectURL
+}
+
+// findServerByIDInSource resolves serverID within one source's listing. An
+// exact id always wins. Failing that, it accepts the id with the source
+// prefix added: the compiled-in reference catalog gives every entry an id
+// that already starts with its source ("reference/time"), and `catalog
+// search` prints that id, so a user who copies it into `catalog add
+// reference/time` passes source "reference" and id "time". The alias is
+// looked up in the same listing, so it never costs a second fetch, and it
+// cannot match an entry of another source.
+func findServerByIDInSource(servers []ServerEntry, sourceID, serverID string) (*ServerEntry, error) {
+	if match, err := findServerByIDIn(servers, serverID); err == nil {
+		return match, nil
+	}
+	if sourceID == "" || strings.HasPrefix(serverID, sourceID+"/") {
+		return nil, ErrServerNotFound
+	}
+	return findServerByIDIn(servers, sourceID+"/"+serverID)
 }
