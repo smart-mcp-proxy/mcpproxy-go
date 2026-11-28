@@ -6,7 +6,7 @@
     <div class="card-body p-4 gap-2">
       <div class="flex items-center justify-between gap-3">
         <h2 id="home-recent-activity-title" class="font-bold">Recent activity</h2>
-        <router-link to="/activity" class="btn btn-sm btn-outline max-sm:min-h-11" data-test="recent-activity-view-all">View all activity</router-link>
+        <router-link :to="{ path: '/activity', query: { view: 'all' } }" class="btn btn-sm btn-outline max-sm:min-h-11" data-test="recent-activity-view-all">View all activity</router-link>
       </div>
       <p v-if="loading" class="text-sm text-base-content/70" role="status">Loading…</p>
       <p v-else-if="error" class="text-sm" style="color: var(--status-error)" role="alert" data-test="recent-activity-error">{{ error }}</p>

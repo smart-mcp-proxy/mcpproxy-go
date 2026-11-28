@@ -31,7 +31,7 @@
       data-test="usage-strip-errors"
     >
       <div class="card-body py-2 px-4 gap-0">
-        <div class="text-xl font-bold leading-none">{{ loaded ? summary.call_error_count : '—' }}</div>
+        <div class="text-xl font-bold leading-none">{{ loaded ? callErrors : '—' }}</div>
         <div class="text-xs text-base-content/70 mt-1">errors</div>
       </div>
     </router-link>
@@ -56,10 +56,11 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useScopeQuery } from '@/composables/useScopeQuery'
 import api from '@/services/api'
+import { activityViewTypes } from '@/utils/activity'
 
 const authStore = useAuthStore()
 // Spec 109 FR-058: links go through linkTo so sticky scope (from/to and, once
@@ -67,6 +68,14 @@ const authStore = useAuthStore()
 const scope = useScopeQuery('home')
 const loaded = ref(false)
 const summary = reactive({ call_count: 0, blocked_count: 0, call_error_count: 0 })
+// "errors" is the number of rows its link lists: Tool calls with status error in the last 24 hours, asked from
+// the same list door with the same filters (exactErrors). The summary has no field for it: call_error_count
+// also counts blocked calls, which have their own tile here, blocked_count also counts blocked rows that are
+// not calls, and error_count also counts rows that are not calls (a failed security scan). Until the list
+// answers, or if it fails, the tile shows the closest the summary gives.
+const exactErrors = ref<number | null>(null)
+const callErrors = computed(() => exactErrors.value ?? Math.max(0, summary.call_error_count - summary.blocked_count))
+const DAY_MS = 24 * 60 * 60 * 1000
 
 const load = async () => {
   // Spec 107 FR-041: /activity/summary is an admin-only core door — a
@@ -79,6 +88,8 @@ const load = async () => {
       summary.blocked_count = response.data.blocked_count ?? 0
       summary.call_error_count = response.data.call_error_count ?? 0
       loaded.value = true
+      const errors = await api.getActivities({ type: activityViewTypes('calls')?.join(','), status: 'error', start_time: new Date(Date.now() - DAY_MS).toISOString(), limit: 1 })
+      exactErrors.value = errors.success && typeof errors.data?.total === 'number' ? errors.data.total : null
     }
   } catch {
     // Silently fail — the strip renders its placeholder dashes.

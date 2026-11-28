@@ -264,3 +264,41 @@ describe('Activity Log — row treatment', () => {
   })
 
 })
+
+// Home lists approvals and system events; the default Tool calls view hides
+// them. The view says so and offers the way to every event (rc.1 feedback).
+describe('Activity Log — events that are not tool calls stay reachable', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    window.localStorage.clear()
+  })
+
+  it('the Tool calls view offers "Show all events"; it opens the All view, asks for every type and moves focus to the tab', async () => {
+    const api = (await import('@/services/api')).default as any
+    const Activity = (await import('@/views/Activity.vue')).default
+    const router = createRouter({ history: createWebHistory(), routes: [{ path: '/activity', component: { template: '<div/>' } }, { path: '/servers/:serverName', component: { template: '<div/>' } }] })
+    await router.push('/activity'); await router.isReady()
+    const wrapper = mount(Activity, { attachTo: document.body, global: { plugins: [createPinia(), router] } })
+    await flushPromises()
+    const callsRequest = api.getActivities.mock.calls.at(-1)[0]
+    expect(callsRequest.type).toBeTruthy() // the Tool calls view asks for call types only
+    const link = wrapper.get('[data-test="activity-show-all-events"]')
+    expect(link.text()).toBe('Show all events')
+    expect(link.attributes('title')).toContain('approvals')
+    await link.trigger('click')
+    await flushPromises()
+    expect(wrapper.vm.$route.query.view).toBe('all')
+    expect(api.getActivities.mock.calls.at(-1)[0].type).toBeFalsy() // no type filter: every event
+    expect(wrapper.find('[data-test="activity-show-all-events"]').exists()).toBe(false)
+    expect(document.activeElement).toBe(wrapper.get('[data-test="activity-view-tab-all"]').element)
+    wrapper.unmount()
+  })
+
+  it('is not offered while a status filter is on: the All view would still hide those events', async () => {
+    const wrapper = await mountActivity()
+    await wrapper.find('[data-test="activity-compact-error"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="activity-show-all-events"]').exists()).toBe(false)
+  })
+})

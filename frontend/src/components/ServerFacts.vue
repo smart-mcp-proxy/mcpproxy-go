@@ -21,7 +21,7 @@
         <dt class="text-base-content/70">Tools</dt>
         <dd data-test="server-tools-count"><span>{{ toolCount }} available</span><span v-if="(disabledTools ?? 0) > 0" class="text-error">, {{ disabledTools }} disabled</span></dd>
       </div>
-      <div class="flex items-center gap-1.5" data-test="fact-trust">
+      <div class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 col-span-full" data-test="fact-trust">
         <dt class="text-base-content/70">Trust mode</dt>
         <dd class="flex items-center gap-1" :title="trust.title">
           <span role="img" :class="['tooltip tooltip-bottom', trust.tone]" :data-tip="trust.title" :title="trust.title" :aria-label="trust.title" data-test="server-trust-mode" :data-trust-invalid="trust.invalid ? 'true' : undefined"><UiIcon name="shield" class="w-4 h-4" /></span>
@@ -43,7 +43,7 @@
         <dt class="sr-only">Activity</dt>
         <dd><router-link :to="activityLink" class="link link-hover" data-test="fact-activity-link">{{ activityText }}</router-link></dd>
       </div>
-      <div class="flex items-center">
+      <div v-if="hasDiagnostic" class="flex items-center">
         <button type="button" class="btn btn-sm btn-outline min-h-11" data-test="open-diagnostic" aria-haspopup="dialog" @click="openDiagnostic">Full diagnostic</button>
       </div>
     </dl>
@@ -103,6 +103,9 @@ const security = computed(() => securityLine(props.server))
 const securityToneClass = computed(() => securityTone(props.server))
 const held = computed(() => heldCounts(props.server))
 const sections = computed(() => diagnosticSections(props.server))
+// The dialog is worth opening only when it holds more than the one-line summary the page header already shows
+// (a healthy server's whole diagnostic is "Connected (15 tools)").
+const hasDiagnostic = computed(() => sections.value.some(section => section.label !== 'Summary'))
 const lines = computed(() => attentionLines(props.server, { primaryAction: props.primaryAction, primaryLabel: props.primaryLabel }))
 const connectionText = computed(() => {
   const s = props.server

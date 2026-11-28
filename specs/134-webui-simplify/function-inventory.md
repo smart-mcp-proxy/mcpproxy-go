@@ -356,6 +356,8 @@ Files: `components/ReviewScreen.vue`, `ReviewQueueList.vue`, `views/Review.vue`,
 | P3-40 | Fleet scan history with batch start and cancel | :144 | Same, inside part 1 | review-signature-bundle.spec.ts |
 | P3-41 | Blind-approval dialog, force dialog, requarantine dialog | :147-149 | Blind dialog names the server in its text and confirm button; the others unchanged | review-screen-blind-copy.spec.ts, review-screen-fetch-primary.spec.ts |
 | P3-42 | `/review` queue rows, filters, skill rows and the second link on mixed rows | Review.vue, ReviewQueueList.vue | Unchanged in PR 3 | review-queue.spec.ts, review-queue-skills.spec.ts |
+| P3-43 | Tool list order (added after v0.76.0-rc.1): changed tools first, then pending, the rest in server order; a Sort select (`review-sort`: Needs review first, Name A to Z, Server order). Sorting is not a filter | ReviewScreen.vue, reviewPresentation.ts `sortReviewTools` | New; nothing removed | rc1-findings.spec.ts |
+| P3-44 | Approval refused because no scan exists: the review stays on screen with `review-approve-notice` beside the approve button (was the error panel with Retry) | ReviewScreen.vue `approve` | Same information, kept beside the controls | rc1-findings.spec.ts |
 
 ## Skills over MCP (PR 3, complete)
 

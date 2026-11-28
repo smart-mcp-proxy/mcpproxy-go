@@ -126,6 +126,16 @@
                 {{ part.label }}
               </span>
             </template>
+            <!-- The Tool calls view leaves out approvals, scans and system events. Say so, one click from all of them. -->
+            <button
+              v-if="hiddenEventCount > 0"
+              type="button"
+              class="link link-hover text-sm max-sm:min-h-11 max-sm:inline-flex max-sm:items-center"
+              style="color: var(--ds-brand-text)"
+              data-test="activity-show-all-events"
+              title="This view lists tool calls. Tool approvals, security scans and system events from the same period are in the All view."
+              @click="showAllEvents"
+            >Show all events</button>
           </div>
 
           <div class="flex-1"></div>
@@ -1730,6 +1740,16 @@ function setView(id: ActivityViewId): void {
 // State
 const activities = ref<ActivityRecord[]>([])
 const summary = ref<ActivitySummaryResponse | null>(null)
+// Whether the summary window holds events that are not calls (approvals, scans, system events). A hint, not a row count.
+// Offered only when no filter is on: the summary is not narrowed by the table's filters, and a filter that
+// stays on in the All view (status, server, tool, ...) could still hide what the link promises.
+const hiddenEventCount = computed(() => (activeView.value === 'calls' && !hasActiveFilters.value && summary.value ? Math.max(0, (summary.value.total_count ?? 0) - (summary.value.call_count ?? 0)) : 0))
+// The link removes itself when the view changes, so focus moves to the tab it selected.
+async function showAllEvents(): Promise<void> {
+  setView('all')
+  await nextTick()
+  document.querySelector<HTMLElement>('[data-test="activity-view-tab-all"]')?.focus()
+}
 const loading = ref(false)
 const error = ref<string | null>(null)
 const selectedActivity = ref<ActivityRecord | null>(null)
