@@ -2,7 +2,7 @@
 
 **Feature Branch**: `099-describe-check-mode`
 **Created**: 2026-08-16
-**Status**: Draft
+**Status**: Implemented in one PR (#998)
 **Input**: User description: "Phase-2 in-band preflight surface for issue #969 item 3: an optional `check` mode on the existing `describe_tool` built-in that returns verdict-only availability results from the spec-098 evaluator, so an agent can gate its own workflow without leaving the MCP session. Reporter-endorsed shape (issue #969 comment, 2026-08-13): 'a check mode on an existing built-in rather than a new top-level MCP tool', same evaluator, same reason codes."
 
 **Related**: #969 (item 3, Phase 2). Item 1 (`filter_diagnostics`) shipped in spec 094 / v0.55.0. Phase 1 (shared evaluator + `POST /api/v1/preflight` + `mcpproxy tools preflight`) is spec 098. This spec adds the in-band MCP surface listed as the first non-goal of 098, and closes one pre-existing describe_tool differential the 098 evaluator exposed.

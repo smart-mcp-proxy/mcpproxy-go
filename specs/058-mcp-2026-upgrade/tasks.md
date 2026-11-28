@@ -158,7 +158,7 @@ Single Go project. Backend paths are repo-relative: `internal/`, `cmd/`, `bench/
 - [ ] T065 [P] [US5] Write a failing test that repeated `tools/list` calls are byte-identical under unchanged state, in `internal/server/stateless_list_test.go`
 - [ ] T066 [US5] Make tool ordering deterministic wherever map iteration currently leaks in, in `internal/server/mcp_routing.go`
 - [ ] T067 [P] [US5] Write a failing test that external `$ref`s are not dereferenced and that schemas validate as JSON Schema 2020-12, in `internal/server/mcp_input_validation_test.go`
-- [ ] T068 [US5] Install a rejecting loader so no external `$ref` is fetched, and confirm the dialect default, in `internal/server/mcp_input_validation.go`
+- [x] T068 [US5] Install a rejecting loader so no external `$ref` is fetched, and confirm the dialect default, in `internal/server/mcp_input_validation.go`
 - [ ] T069 [P] [US5] Write a failing test that `traceparent`/`tracestate`/`baggage` from request `_meta` reach the activity record, in `internal/runtime/trace_context_test.go`
 - [ ] T070 [US5] Capture trace context into activity records via a single composite meta propagator, in `internal/server/mcp.go` and `internal/runtime/activity_service.go`
 - [ ] T071 [P] [US5] Confirm sensitive-data detection does not scan persisted trace metadata, in `internal/runtime/activity_service.go`
